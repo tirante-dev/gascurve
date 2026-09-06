@@ -1,6 +1,6 @@
 // Pure helpers that turn api shapes into what the charts draw.
 
-import type { BatchPoint, ConstraintSet, ConstraintSetEntry, Series, SeriesPoint } from "@/types";
+import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesPoint } from "@/types";
 import { formatDuration, formatGas, weiToEthNumber, weiToGweiNumber } from "./format";
 
 export const MAX_SERIES = 6;
@@ -58,8 +58,9 @@ export function sharesOf(bips: readonly number[]): number[] {
 /**
  * One drawable series: constraint `index` of constraint set `setId`. Series
  * are keyed by set and index so a replaced constraint never joins its
- * successor across an owner action. Legacy networks get a single pseudo
- * segment with set id 0 and no constraint definition.
+ * successor across an owner action. Legacy networks (by the network's
+ * `model`, never inferred from an empty set list) get a single pseudo segment
+ * with set id 0 and no constraint definition.
  */
 export type Segment = {
   key: `c${number}_${number}`;
@@ -72,7 +73,17 @@ export type Segment = {
 };
 
 export const UNKNOWN_KEY = "cUnknown";
-export const UNKNOWN_LABEL = "unknown split (total x, set not in range)";
+export const UNKNOWN_LABEL = "unknown split (total x, constraint set unknown)";
+
+/** Backlog of slot `index` for points whose constraint set is unknown, keyed buI. */
+export function unknownBacklogKey(index: number): `bu${number}` {
+  return `bu${index}`;
+}
+
+/** Label of backlog panel `index` when no definition for it is known. */
+export function unknownSlotLabel(index: number): string {
+  return `C${index + 1} · definition unknown`;
+}
 
 export function contributionKey(setId: number, index: number): `c${number}_${number}` {
   return `c${setId}_${index}`;
@@ -105,12 +116,22 @@ export function latestSet(series: Pick<Series, "constraintSets">): ConstraintSet
   return sortedSets(series).pop();
 }
 
-/** Segments for every set in the range, oldest set first; a single legacy segment when there are no sets. */
-export function segmentsFor(series: Pick<Series, "constraintSets" | "points">): Segment[] {
+/** True when a point carries per-constraint data at all. */
+function hasConstraintData(p: Pick<SeriesPoint, "constraintBips" | "backlogs">): boolean {
+  return p.constraintBips.length > 0 || p.backlogs.length > 0;
+}
+
+/**
+ * Segments for every set in the range, oldest set first. A legacy network
+ * gets a single pseudo segment. With no sets and a constraints (or unknown)
+ * model there is nothing to label: every point is drawn as the unknown split
+ * and its backlogs under unknown-slot keys.
+ */
+export function segmentsFor(series: Pick<Series, "constraintSets" | "points">, model: PricerModel): Segment[] {
   const sets = sortedSets(series);
   if (sets.length === 0) {
-    const hasPoints = series.points.some((p) => p.constraintBips.length > 0 || p.backlogs.length > 0);
-    return hasPoints ? [{ key: contributionKey(0, 0), backlogKey: backlogKey(0, 0), setId: 0, index: 0, label: "legacy backlog", color: seriesColor(0), constraint: null }] : [];
+    if (model !== "legacy" || !series.points.some(hasConstraintData)) return [];
+    return [{ key: contributionKey(0, 0), backlogKey: backlogKey(0, 0), setId: 0, index: 0, label: "legacy backlog", color: seriesColor(0), constraint: null }];
   }
   // A set is only usable for a point when its constraint count matches the
   // point's data; the collector can tag blocks with the latest *known* set
@@ -133,14 +154,31 @@ export function shapeMatches(set: Pick<ConstraintSet, "constraints">, p: Pick<Se
   return n === 0 || set.constraints.length === n;
 }
 
-/** True when some point references a constraint set the series does not carry, or one whose shape does not match. */
-export function hasUnknownSets(series: Pick<Series, "constraintSets" | "points">): boolean {
-  if (series.constraintSets.length === 0) return false; // legacy model: one implicit segment
-  const byId = new Map(series.constraintSets.map((s) => [s.id, s]));
-  return series.points.some((p) => {
-    const set = byId.get(p.constraintSetId);
-    return !set || !shapeMatches(set, p);
-  });
+/** The segments that describe a point: those of its set when the shape agrees, otherwise none (unknown split). */
+function ownSegments(bySet: Map<number, Segment[]>, p: Pick<SeriesPoint, "constraintSetId" | "constraintBips" | "backlogs">): Segment[] | undefined {
+  const candidate = bySet.get(p.constraintSetId);
+  const n = p.constraintBips.length > 0 ? p.constraintBips.length : p.backlogs.length;
+  return candidate && (n === 0 || candidate.length === Math.min(n, MAX_SERIES)) ? candidate : undefined;
+}
+
+function groupBySet(segments: readonly Segment[]): Map<number, Segment[]> {
+  const bySet = new Map<number, Segment[]>();
+  for (const s of segments) {
+    const list = bySet.get(s.setId) ?? [];
+    list.push(s);
+    bySet.set(s.setId, list);
+  }
+  return bySet;
+}
+
+/**
+ * True when some point has no segments to draw under: its set is not in the
+ * series, its shape does not match, or the model gives no sets at all. An
+ * empty set list is never taken as legacy on its own.
+ */
+export function hasUnknownSets(series: Pick<Series, "constraintSets" | "points">, model: PricerModel): boolean {
+  const bySet = groupBySet(segmentsFor(series, model));
+  return series.points.some((p) => ownSegments(bySet, p) === undefined);
 }
 
 /** How many constraint slots the charts should draw: from the sets, or from the data for legacy networks. */
@@ -151,10 +189,10 @@ export function seriesCount(series: Pick<Series, "constraintSets" | "points">): 
   return Math.min(MAX_SERIES, fromPoints);
 }
 
-/** Label for backlog panel `index`: every definition that slot had in the range, oldest first. */
-export function slotLabel(series: Pick<Series, "constraintSets" | "points">, index: number): string {
-  const segments = segmentsFor(series).filter((s) => s.index === index);
-  if (segments.length === 0) return `C${index + 1}`;
+/** Label for backlog panel `index`: every definition that slot had in the range, oldest first; unlabelled when none is known. */
+export function slotLabel(series: Pick<Series, "constraintSets" | "points">, index: number, model: PricerModel): string {
+  const segments = segmentsFor(series, model).filter((s) => s.index === index);
+  if (segments.length === 0) return unknownSlotLabel(index);
   if (segments.length === 1 && segments[0].constraint === null) return segments[0].label;
   const parts = segments.map((s) => (s.constraint ? `${shortConstraintLabel(s.constraint)} (set ${s.setId})` : `set ${s.setId}`));
   return `C${index + 1} · ${parts.join(" then ")}`;
@@ -177,12 +215,16 @@ export type ChartPoint = {
   constraintSetId: number;
   /** False when the point's set is not in the series; then only `cUnknown` carries x. */
   setKnown: boolean;
-  /** Total x for points whose set is unknown, otherwise absent. */
-  cUnknown?: number;
-  /** Contribution of constraint i of set s to x, keyed cS_I; 0 while another set is in force. */
-  [key: `c${number}_${number}`]: number;
-  /** Backlog of constraint i of set s in gas, keyed bS_I; absent while another set is in force. */
-  [key: `b${number}_${number}`]: number | undefined;
+  /** Total x for points whose set is unknown, null otherwise. */
+  cUnknown: number | null;
+  /** True for the duplicated row that closes a set at the boundary where its successor starts. */
+  boundary?: boolean;
+  /** Contribution of constraint i of set s to x, keyed cS_I; null while another set is in force (a gap, never a taper to zero). */
+  [key: `c${number}_${number}`]: number | null;
+  /** Backlog of constraint i of set s in gas, keyed bS_I; null while another set is in force. */
+  [key: `b${number}_${number}`]: number | null;
+  /** Backlog of slot i for points whose set is unknown, keyed buI; null otherwise. */
+  [key: `bu${number}`]: number | null;
   /** Target of constraint slot i under the point's set, keyed tgtI; absent when unknown. */
   [key: `tgt${number}`]: number | undefined;
 };
@@ -191,19 +233,14 @@ export type ChartPoint = {
  * Flattens a Series into chart rows with numbers the axes can scale.
  * Contributions come from the api's start-of-block `constraintBips`, never
  * from end-of-block backlogs, and are divided by 10,000 only for display.
+ * One row per bucket; `withSetBoundaries` adds the rows the stacked charts need.
  */
-export function buildChartPoints(series: Series): ChartPoint[] {
-  const segments = segmentsFor(series);
-  const bySet = new Map<number, Segment[]>();
-  for (const s of segments) {
-    const list = bySet.get(s.setId) ?? [];
-    list.push(s);
-    bySet.set(s.setId, list);
-  }
+export function buildChartPoints(series: Series, model: PricerModel): ChartPoint[] {
+  const segments = segmentsFor(series, model);
+  const bySet = groupBySet(segments);
+  const slots = seriesCount(series);
   return series.points.map((p) => {
-    const candidate = bySet.get(p.constraintSetId);
-    const n = p.constraintBips.length > 0 ? p.constraintBips.length : p.backlogs.length;
-    const own = candidate && (n === 0 || candidate.length === Math.min(n, MAX_SERIES)) ? candidate : undefined;
+    const own = ownSegments(bySet, p);
     const row: ChartPoint = {
       t: p.t,
       feeAvg: weiToGweiNumber(p.baseFeeAvg),
@@ -219,19 +256,128 @@ export function buildChartPoints(series: Series): ChartPoint[] {
       replayErrorBips: p.replayErrorBips,
       constraintSetId: p.constraintSetId,
       setKnown: own !== undefined,
+      cUnknown: null,
     };
-    for (const s of segments) row[s.key] = 0;
+    for (const s of segments) {
+      row[s.key] = null;
+      row[s.backlogKey] = null;
+    }
+    for (let i = 0; i < slots; i++) row[unknownBacklogKey(i)] = null;
     if (own) {
       for (const s of own) {
         row[s.key] = bipsToXValue(p.constraintBips[s.index] ?? 0);
-        row[s.backlogKey] = p.backlogs[s.index];
+        row[s.backlogKey] = p.backlogs[s.index] ?? null;
         if (s.constraint) row[targetKey(s.index)] = s.constraint.target;
       }
     } else {
       row.cUnknown = bipsToXValue(p.exponentBips);
+      for (let i = 0; i < slots; i++) row[unknownBacklogKey(i)] = p.backlogs[i] ?? null;
     }
     return row;
   });
+}
+
+/** Which drawn series a row belongs to: its set when known, otherwise the unknown split. */
+function drawnSetOf(row: ChartPoint): number | null {
+  return row.setKnown ? row.constraintSetId : null;
+}
+
+/**
+ * Rows for the stacked and per-set charts: wherever the set in force changes,
+ * a duplicate of the boundary bucket is inserted first, carrying the previous
+ * set's contributions, backlogs and targets at the new bucket's time. The
+ * outgoing series therefore ends with a vertical edge exactly where the
+ * incoming one starts, an instantaneous replacement rather than a taper across
+ * the bucket. Everything else on the duplicate (fee, gas, x) is the new
+ * bucket's, so the shared lines gain a zero-length segment and nothing more.
+ */
+export function withSetBoundaries(rows: readonly ChartPoint[]): ChartPoint[] {
+  const out: ChartPoint[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const prev = i > 0 ? rows[i - 1] : undefined;
+    if (prev && drawnSetOf(prev) !== drawnSetOf(row)) {
+      const edge: ChartPoint = { ...row, boundary: true, constraintSetId: prev.constraintSetId, setKnown: prev.setKnown, cUnknown: prev.cUnknown };
+      for (const key of Object.keys(prev)) {
+        if (/^(c\d+_\d+|b\d+_\d+|bu\d+|tgt\d+)$/.test(key)) {
+          const k = key as `c${number}_${number}`;
+          edge[k] = prev[k];
+        }
+      }
+      for (const key of Object.keys(row)) {
+        if (/^tgt\d+$/.test(key) && !(key in prev)) delete edge[key as `tgt${number}`];
+      }
+      out.push(edge);
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+/** The most tick marks a gauge draws, whatever its scale; a billion windows must not become a billion elements. */
+export const MAX_GAUGE_MARKS = 24;
+
+/** `numerator / denominator` as a finite, non-negative fraction; zero for a zero or non-finite denominator. */
+export function safeFraction(numerator: number, denominator: number): number {
+  if (!(denominator > 0) || !Number.isFinite(denominator) || !Number.isFinite(numerator)) return 0;
+  const f = numerator / denominator;
+  return Number.isFinite(f) && f > 0 ? f : 0;
+}
+
+/**
+ * Positions (0 to 1) of the window boundaries on a gauge that spans `scale`
+ * windows: every boundary when there are few, every k-th otherwise, so at
+ * most MAX_GAUGE_MARKS are drawn however large the scale.
+ */
+export function gaugeMarks(scale: number, max = MAX_GAUGE_MARKS): number[] {
+  if (!Number.isFinite(scale) || scale <= 1) return [];
+  const every = Math.ceil(scale / (max + 1));
+  const out: number[] = [];
+  for (let m = every; m < scale; m += every) out.push(m / scale);
+  return out;
+}
+
+/** What a constraint's backlog gauge spans: `scale` windows of target, marks at each window boundary. */
+export function constraintGauge(c: { target: number; window: number }, backlog: number): { scale: number; fraction: number; marks: number[]; denominator: number } {
+  const denominator = c.target * c.window;
+  const x = safeFraction(backlog, denominator);
+  const scale = Math.max(1, Math.ceil(x));
+  return { scale, fraction: x / scale, marks: gaugeMarks(scale), denominator };
+}
+
+export type LegacyGauge = {
+  /** Gas that is free before the pricer reacts: tolerance times the speed limit. */
+  free: number;
+  /** Gas per whole unit of x: inertia times the speed limit. */
+  unit: number;
+  /** Right edge of the gauge in gas; zero when nothing can be drawn. */
+  span: number;
+  fraction: number;
+  marks: number[];
+};
+
+/**
+ * The legacy gauge. With a tolerance the span is a whole number of tolerance
+ * thresholds (at least two, so the threshold sits inside the bar) and the
+ * single mark is the threshold. With zero tolerance there is no free region:
+ * the span is whole units of x (inertia times speed limit) with a mark at
+ * each, like a constraint gauge. Zero inertia or speed limit gives an empty
+ * gauge rather than NaN.
+ */
+export function legacyGauge(legacy: { speedLimit: number; inertia: number; tolerance: number }, backlog: number): LegacyGauge {
+  const free = legacy.tolerance * legacy.speedLimit;
+  const unit = legacy.inertia * legacy.speedLimit;
+  if (free > 0 && Number.isFinite(free)) {
+    const scale = Math.max(2, Math.ceil(safeFraction(backlog, free)) + 1);
+    const span = free * scale;
+    return { free, unit, span, fraction: safeFraction(backlog, span), marks: [1 / scale] };
+  }
+  if (unit > 0 && Number.isFinite(unit)) {
+    const scale = Math.max(1, Math.ceil(safeFraction(backlog, unit)));
+    const span = unit * scale;
+    return { free: 0, unit, span, fraction: safeFraction(backlog, span), marks: gaugeMarks(scale) };
+  }
+  return { free: 0, unit: 0, span: 0, fraction: 0, marks: [] };
 }
 
 /** Sum of a wei-string field over points, as ETH. */

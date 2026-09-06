@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { LiveSnapshot, Series } from "@/types";
+import type { LiveSnapshot, PricerModel, Series } from "@/types";
 import { buildChartPoints, spanSeconds, sumWeiEth } from "@/utils/chart";
 import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, shortAddress } from "@/utils/format";
 import { ChartTooltip } from "./ChartTooltip";
@@ -38,8 +38,8 @@ export function feeTotals(series: Pick<Series, "points">): { total: number; floo
 }
 
 /** Fee account balances as sampled counters, and fees per bucket from the history split by the floor in force at each block. */
-export function FeeFlows({ snapshot, series, explorerUrl }: { snapshot: LiveSnapshot | null; series: Series | null; explorerUrl?: string }) {
-  const points = useMemo(() => (series ? buildChartPoints(series) : []), [series]);
+export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown" }: { snapshot: LiveSnapshot | null; series: Series | null; explorerUrl?: string; model?: PricerModel }) {
+  const points = useMemo(() => (series ? buildChartPoints(series, model) : []), [series, model]);
   const totals = useMemo(() => (series ? feeTotals(series) : null), [series]);
   const [tableOpen, setTableOpen] = useState(false);
   const span = spanSeconds(points);

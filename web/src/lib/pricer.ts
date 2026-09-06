@@ -169,12 +169,20 @@ export function toLegacyState(legacy: Pick<LegacyParams, "speedLimit" | "inertia
   };
 }
 
-/** Legacy exponent: bips(backlog - tolerance*speedLimit) / (inertia*speedLimit) when above tolerance. */
+/**
+ * Legacy exponent: bips(backlog - tolerance*speedLimit) / (inertia*speedLimit)
+ * when above tolerance. Mirrors nitro's updatePricingModelLegacy and the Go
+ * pricer exactly: the tolerance threshold is a plain uint64 multiply that
+ * wraps on overflow, the excess is cast to bips saturating, and the inertia
+ * denominator is a saturating multiply cast to bips saturating. A zero
+ * denominator (nitro would panic) yields no exponent.
+ */
 export function legacyExponentBips(s: LegacyState): bigint {
-  const threshold = saturatingUMul(s.tolerance, s.speedLimit);
-  const inertia = saturatingUMul(s.inertia, s.speedLimit);
-  if (s.backlog <= threshold || inertia === 0n) return 0n;
-  return naturalToBips(s.backlog - threshold) / saturatingCastToBips(inertia);
+  const threshold = BigInt.asUintN(64, s.tolerance * s.speedLimit);
+  if (s.backlog <= threshold) return 0n;
+  const inertia = saturatingCastToBips(saturatingUMul(s.inertia, s.speedLimit));
+  if (inertia <= 0n) return 0n;
+  return naturalToBips(s.backlog - threshold) / inertia;
 }
 
 /** Legacy Step: drain by dt * speedLimit, then price. Mutates `s`. */

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getLive } from "@/lib/api/live";
-import { LiveClient, resolveSocketFactory, resolveWsUrl } from "@/lib/api/ws";
+import { keyMatches, LiveClient, resolveSocketFactory, resolveWsUrl, type NetworkKey } from "@/lib/api/ws";
 import type { BlockPoint, LiveSnapshot, LiveStatus, Network, OwnerAction } from "@/types";
 import { useDocumentVisible } from "./useDocumentVisible";
 
@@ -19,16 +19,32 @@ export type LiveState = {
   error: string | null;
 };
 
+/**
+ * The feed is keyed by the network the server confirmed (name and chain id),
+ * so a route that switches from `/4663` to `/robinhood` keeps showing it. A
+ * feed filled by polling knows the chain id from the snapshot and the name
+ * only as the route parameter it was polled under.
+ */
 type Feed = {
-  network: string;
+  key: NetworkKey | null;
   snapshot: LiveSnapshot | null;
   recentBlocks: BlockPoint[];
   networkInfo: Network | null;
   ownerActions: OwnerAction[];
 };
 
-function emptyFeed(network: string): Feed {
-  return { network, snapshot: null, recentBlocks: [], networkInfo: null, ownerActions: [] };
+function emptyFeed(key: NetworkKey | null): Feed {
+  return { key, snapshot: null, recentBlocks: [], networkInfo: null, ownerActions: [] };
+}
+
+/** True when the feed belongs to the keyed network: chain ids are the identity, names are aliases. */
+function feedIs(feed: Feed, key: NetworkKey): boolean {
+  return feed.key !== null && feed.key.chainId === key.chainId;
+}
+
+/** True when the feed is the one a route parameter (name or chain id) refers to. */
+export function feedMatches(feed: Pick<Feed, "key">, network: string): boolean {
+  return feed.key !== null && keyMatches(feed.key, network);
 }
 
 /** Appends `incoming` to `ring`, dropping duplicates and keeping the newest `size`. */
@@ -58,12 +74,13 @@ export function isNewerSnapshot(prev: LiveSnapshot | null, next: LiveSnapshot): 
  * Live data for one network: the latest snapshot, a ring of recent blocks and
  * the connection status. Uses the WebSocket, polls /live every 2 s while the
  * socket is down, and stops everything while the tab is hidden. State is keyed
- * by the network the server confirmed with a hello, so switching shows an
- * empty feed until the new hello arrives and a late message for the previous
- * network is never shown under the new one.
+ * by the network the server confirmed with a hello (name and chain id), so
+ * switching shows an empty feed until the new hello arrives, a late message for
+ * the previous network is never shown under the new one, and moving between a
+ * chain-id route and its name keeps the feed.
  */
 export function useLive(network: string): LiveState {
-  const [feed, setFeed] = useState<Feed>(() => emptyFeed(network));
+  const [feed, setFeed] = useState<Feed>(() => emptyFeed(null));
   const [status, setStatus] = useState<LiveStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
   const visible = useDocumentVisible();
@@ -84,27 +101,28 @@ export function useLive(network: string): LiveState {
         url: resolveWsUrl(),
         network: wantedNetwork.current,
         socketFactory,
-        onHello: (hello, confirmed) => {
-          setFeed({ network: confirmed, snapshot: hello.snapshot, recentBlocks: appendBlocks([], hello.recentBlocks), networkInfo: hello.network, ownerActions: [] });
+        onHello: (hello, key) => {
+          setFeed({ key, snapshot: hello.snapshot, recentBlocks: appendBlocks([], hello.recentBlocks), networkInfo: hello.network, ownerActions: [] });
           setError(null);
         },
-        onTick: (tick, confirmed) => {
-          setFeed((prev) => ({ ...(prev.network === confirmed ? prev : emptyFeed(confirmed)), snapshot: tick }));
+        onTick: (tick, key) => {
+          setFeed((prev) => ({ ...(feedIs(prev, key) ? prev : emptyFeed(key)), key, snapshot: tick }));
           setError(null);
         },
-        onBlocks: (blocks, confirmed) => {
+        onBlocks: (blocks, key) => {
           setFeed((prev) => {
-            const base = prev.network === confirmed ? prev : emptyFeed(confirmed);
-            return { ...base, recentBlocks: appendBlocks(base.recentBlocks, blocks) };
+            const base = feedIs(prev, key) ? prev : emptyFeed(key);
+            return { ...base, key, recentBlocks: appendBlocks(base.recentBlocks, blocks) };
           });
         },
-        onOwnerAction: (action, confirmed) => {
+        onOwnerAction: (action, key) => {
           setFeed((prev) => {
-            const base = prev.network === confirmed ? prev : emptyFeed(confirmed);
-            return { ...base, ownerActions: [action, ...base.ownerActions] };
+            const base = feedIs(prev, key) ? prev : emptyFeed(key);
+            return { ...base, key, ownerActions: [action, ...base.ownerActions] };
           });
         },
         onStatus: setStatus,
+        onError: setError,
       });
       client = created;
       clientRef.current = created;
@@ -146,8 +164,10 @@ export function useLive(network: string): LiveState {
         const next = await getLive(network, { signal: controller.signal, retries: 0 });
         if (!active) return;
         setFeed((prev) => {
-          const base = prev.network === network ? prev : emptyFeed(network);
-          return isNewerSnapshot(base.snapshot, next) ? { ...base, snapshot: next } : base;
+          // The route parameter stands in for the name until a hello supplies the canonical one.
+          const key: NetworkKey = { name: prev.key && feedMatches(prev, network) ? prev.key.name : network, chainId: next.chainId };
+          const base = feedMatches(prev, network) ? prev : emptyFeed(key);
+          return isNewerSnapshot(base.snapshot, next) ? { ...base, key, snapshot: next } : base;
         });
         setError(null);
       } catch (err: unknown) {
@@ -165,7 +185,7 @@ export function useLive(network: string): LiveState {
   }, [polling, network]);
 
   return useMemo(() => {
-    const current = feed.network === network ? feed : emptyFeed(network);
+    const current = feedMatches(feed, network) ? feed : emptyFeed(null);
     return { snapshot: current.snapshot, recentBlocks: current.recentBlocks, status, networkInfo: current.networkInfo, ownerActions: current.ownerActions, error };
   }, [feed, network, status, error]);
 }

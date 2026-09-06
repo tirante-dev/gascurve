@@ -79,10 +79,10 @@ const snapshot: LiveSnapshot = {
 
 describe("SeriesCharts", () => {
   it("draws one series per constraint set with set-aware legends and an explicit unknown-split series", () => {
-    render(<SeriesCharts series={series} loading={false} />);
+    render(<SeriesCharts series={series} loading={false} model="constraints" />);
     expect(screen.getAllByText("C2 · 30M/s · 24 h · set 5 (from block 10)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("C2 · 40M/s · 24 h · set 6 (from block 20)").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("unknown split (total x, set not in range)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("unknown split (total x, constraint set unknown)").length).toBeGreaterThan(0);
     expect(screen.getByText("floor in force (stepped)")).toBeInTheDocument();
     expect(screen.getByText("target C2 (stepped, per set)")).toBeInTheDocument();
     expect(screen.getByText("C2 · 30M/s · 24 h (set 5) then 40M/s · 24 h (set 6)")).toBeInTheDocument();
@@ -91,18 +91,22 @@ describe("SeriesCharts", () => {
   });
 
   it("exposes every bucket in a table and lets the keyboard inspect any point", () => {
-    render(<SeriesCharts series={series} loading={false} />);
+    render(<SeriesCharts series={series} loading={false} model="constraints" />);
     const summary = screen.getByText(/Data table \(3 buckets/);
     const details = summary.closest("details") as HTMLDetailsElement;
     expect(within(details).queryByRole("table")).toBeNull();
     details.open = true;
     fireEvent(details, new Event("toggle"));
     const table = within(details).getByRole("table");
+    // One row per bucket: the boundary duplicates the charts draw are not listed.
     expect(within(table).getAllByRole("row")).toHaveLength(4);
     expect(within(table).getByText("C1 0.0034 · C2 3.2391 (set 6)")).toBeInTheDocument();
-    expect(within(table).getByText("unknown split (total x, set not in range): 0.5000 (unknown set)")).toBeInTheDocument();
+    const unknownCell = within(table).getByText("unknown split (total x, constraint set unknown): 0.5000 (unknown set)");
     expect(within(table).getByText("11.2T")).toBeInTheDocument();
-    expect(within(table).getAllByText("n/a").length).toBeGreaterThan(0);
+    // The unknown set's backlogs are still listed, under the unlabelled slots.
+    const cells = Array.from((unknownCell.closest("tr") as HTMLTableRowElement).querySelectorAll("td")).map((td) => td.textContent);
+    expect(cells.slice(7, 9)).toEqual(["1", "1"]);
+    expect(within(table).queryByText("n/a")).toBeNull();
 
     const slider = screen.getByRole("slider", { name: /Select a bucket/ });
     expect(slider).toHaveValue("2");
@@ -117,19 +121,44 @@ describe("SeriesCharts", () => {
   });
 
   it("handles empty, loading and legacy series", () => {
-    const { rerender } = render(<SeriesCharts series={null} loading />);
+    const { rerender } = render(<SeriesCharts series={null} loading model="constraints" />);
     expect(screen.getByText("Loading history.")).toBeInTheDocument();
-    rerender(<SeriesCharts series={{ ...series, points: [] }} loading={false} />);
+    rerender(<SeriesCharts series={{ ...series, points: [] }} loading={false} model="constraints" />);
     expect(screen.getByText("No buckets in this range yet.")).toBeInTheDocument();
-    rerender(<SeriesCharts series={{ ...series, constraintSets: [], ownerActions: [], points: [point({ t: 1, exponentBips: 1260, constraintBips: [1260], backlogs: [7], backlogsMax: [7] })] }} loading={false} />);
+    rerender(<SeriesCharts series={{ ...series, constraintSets: [], ownerActions: [], points: [point({ t: 1, exponentBips: 1260, constraintBips: [1260], backlogs: [7], backlogsMax: [7] })] }} loading={false} model="legacy" />);
+    expect(screen.getAllByText("legacy backlog").length).toBeGreaterThan(0);
+  });
+
+  it("labels history by the network's model, never by an empty set list", () => {
+    // Early history: a constrained chain before any set is known. Two backlogs, two contributions, no sets.
+    const early: Series = { ...series, constraintSets: [], ownerActions: [], points: [point({ t: 1, constraintSetId: 0, exponentBips: 32_425, constraintBips: [34, 32_391], backlogs: [3_111_506, 11_194_391_810_886], backlogsMax: [3_111_506, 11_194_391_810_886] })] };
+    const { rerender } = render(<SeriesCharts series={early} loading={false} model="constraints" />);
+    expect(screen.queryByText("legacy backlog")).toBeNull();
+    expect(screen.getByText("C1 · definition unknown")).toBeInTheDocument();
+    expect(screen.getByText("C2 · definition unknown")).toBeInTheDocument();
+    expect(screen.getAllByText("unknown split (total x, constraint set unknown)").length).toBeGreaterThan(0);
+    // The point inspector reads the whole x out under the unknown split, and the table describes it the same way.
+    expect(screen.getAllByText("3.2425").length).toBeGreaterThanOrEqual(2);
+    const details = screen.getByText(/Data table \(1 buckets/).closest("details") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    expect(within(details).getByText("unknown split (total x, constraint set unknown): 3.2425 (unknown set)")).toBeInTheDocument();
+    expect(within(details).queryByText("n/a")).toBeNull();
+    // Both backlog panels carry data: the second is not left empty.
+    expect(screen.getByText("11.2T gas")).toBeInTheDocument();
+    expect(screen.getByText("3.11M gas")).toBeInTheDocument();
+    rerender(<SeriesCharts series={early} loading={false} model="unknown" />);
+    expect(screen.queryByText("legacy backlog")).toBeNull();
+    expect(screen.getByText("C1 · definition unknown")).toBeInTheDocument();
+    rerender(<SeriesCharts series={early} loading={false} model="legacy" />);
     expect(screen.getAllByText("legacy backlog").length).toBeGreaterThan(0);
   });
 
   it("describes a point's split under its own set", () => {
-    const rows = buildChartPoints(series);
-    const segments = segmentsFor(series);
+    const rows = buildChartPoints(series, "constraints");
+    const segments = segmentsFor(series, "constraints");
     expect(describeSplit(rows[0], segments)).toBe("C1 0.4000 · C2 0.6000");
-    expect(describeSplit(rows[2], segments)).toBe("unknown split (total x, set not in range): 0.5000");
+    expect(describeSplit(rows[2], segments)).toBe("unknown split (total x, constraint set unknown): 0.5000");
   });
 });
 
@@ -166,7 +195,7 @@ describe("FeeFlows", () => {
     expect(totals.total).toBeCloseTo(5);
     expect(totals.floorEth).toBeCloseTo(2.2);
     expect(totals.surplusEth).toBeCloseTo(2.8);
-    render(<FeeFlows snapshot={snapshot} series={series} />);
+    render(<FeeFlows snapshot={snapshot} series={series} model="constraints" />);
     expect(screen.getByText("2.2")).toBeInTheDocument();
     expect(screen.getByText("2.8")).toBeInTheDocument();
     const summary = screen.getByText(/Data table \(3 buckets\)/);
@@ -220,6 +249,34 @@ describe("ConstraintCards", () => {
     expect(same.bips).toEqual([333, 32_391]);
     expect(same.projected).toBe(false);
     expect(cardValues(snapshot.constraints, []).projected).toBe(false);
+  });
+
+  it("draws a bounded number of gauge marks however large the backlog", () => {
+    // Target 1, window 1, backlog a billion: a billion windows of target.
+    const huge = { ...snapshot, constraints: [{ target: 1, window: 1, backlog: 1_000_000_000, exponentBips: 0 }] };
+    render(<ConstraintCards snapshot={huge} />);
+    const meter = screen.getByRole("meter");
+    expect(meter.querySelectorAll("span").length).toBeLessThanOrEqual(24);
+    expect(meter).toHaveAttribute("aria-valuenow", "100");
+    expect(screen.getByText("1,000,000,000 × 1 gas")).toBeInTheDocument();
+    expect(screen.getByRole("meter", { name: /1,000,000,000 windows/ })).toBeInTheDocument();
+  });
+
+  it("defines the legacy gauge for zero tolerance and for a zero denominator", () => {
+    const { rerender } = render(<ConstraintCards snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 0, backlog: 1_000_000_000 } }} />);
+    expect(screen.getByText("no free gas: every unit prices")).toBeInTheDocument();
+    expect(screen.getByText("x = 1 at 714M")).toBeInTheDocument();
+    expect(screen.getByText("1.43G")).toBeInTheDocument();
+    const meter = screen.getByRole("meter", { name: /units of inertia/ });
+    expect(meter).toHaveAttribute("aria-valuenow", "70");
+    expect(meter.querySelectorAll("span")).toHaveLength(1);
+    // (1B * 10000) / 714M = 14005 bips.
+    expect(screen.getByText(/x = 1.4005/)).toBeInTheDocument();
+    rerender(<ConstraintCards snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 0, tolerance: 0, backlog: 5 } }} />);
+    expect(screen.getByText("no scale (zero inertia or speed limit)")).toBeInTheDocument();
+    expect(screen.getByText("n/a")).toBeInTheDocument();
+    expect(screen.getByRole("meter")).toHaveAttribute("aria-valuenow", "0");
+    expect(screen.getByText(/x = 0.0000/)).toBeInTheDocument();
   });
 
   it("recomputes the legacy exponent from the projected backlog", () => {

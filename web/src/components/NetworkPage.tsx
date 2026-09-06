@@ -45,6 +45,9 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
   const actions = useMemo(() => mergeActions(ownerActions.data, live.ownerActions), [ownerActions.data, live.ownerActions]);
   const info = live.networkInfo ?? (networks.data ? findNetwork(networks.data, name) : undefined) ?? null;
   const unknown = isUnknownNetwork(networks.data, name);
+  // Which pricer the history belongs to. The series carries no model of its
+  // own; an empty constraint-set list must not be read as legacy.
+  const model = info?.model ?? live.snapshot?.model ?? "unknown";
 
   // A chain-id route (/4663) is valid; once the server confirms the network, move to its name.
   const canonical = canonicalNetworkName(name, live.networkInfo);
@@ -97,11 +100,11 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
           aside={<HistoryTabs range={range} onChange={setRange} loading={series.loading} />}
         >
           {series.error ? <p className="mb-3 text-sm text-critical">Could not load history: {series.error}</p> : null}
-          <SeriesCharts series={series.data} loading={series.loading} />
+          <SeriesCharts series={series.data} loading={series.loading} model={model} />
         </Section>
 
         <Section id="fees" title="Fee flows" lede="The floor in force at each block goes to the infra account, everything above it to the network account.">
-          <FeeFlows snapshot={live.snapshot} series={series.data} explorerUrl={info?.explorerUrl} />
+          <FeeFlows snapshot={live.snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} />
         </Section>
 
         <Section id="l1" title="L1" lede="What the chain pays Ethereum, and the pricer that recovers it.">

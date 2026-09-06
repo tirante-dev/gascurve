@@ -66,7 +66,7 @@ vi.mock("@/lib/api/series", async (importOriginal) => {
   return { ...original, getSeries: (...args: unknown[]) => getSeriesMock(...args) };
 });
 
-import { appendBlocks, isNewerSnapshot, useLive } from "./useLive";
+import { appendBlocks, feedMatches, isNewerSnapshot, useLive } from "./useLive";
 import { useApi } from "./useApi";
 import { refetchIntervalFor, useSeries } from "./useSeries";
 import { DEFAULT_NETWORK, isValidNetworkName, NETWORK_STORAGE_KEY, readStoredNetwork, storeNetwork, useNetwork } from "./useNetwork";
@@ -151,8 +151,10 @@ describe("useLive", () => {
     const socket = latest();
     expect(socket.url).toBe("ws://localhost:8080/api/v1/ws?network=robinhood");
     act(() => socket.serverOpen());
-    expect(result.current.status).toBe("open");
+    // A TCP open is not live yet; the hello is.
+    expect(result.current.status).toBe("connecting");
     act(() => socket.serverHello("robinhood", 4663, 10, [block(9), block(10)]));
+    expect(result.current.status).toBe("open");
     expect(result.current.snapshot?.block.number).toBe(10);
     expect(result.current.recentBlocks.map((b) => b.number)).toEqual([9, 10]);
     expect(result.current.networkInfo?.name).toBe("robinhood");
@@ -184,19 +186,26 @@ describe("useLive", () => {
     expect(getLiveMock).toHaveBeenCalledTimes(2);
     expect(result.current.error).toBe("api down");
 
-    // Reopen: polling stops.
+    // Reopen: polling carries on until the hello confirms the subscription, then stops.
+    getLiveMock.mockResolvedValue(snapshot(20));
     act(() => latest().serverOpen());
+    expect(result.current.status).toBe("reconnecting");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(getLiveMock).toHaveBeenCalledTimes(3);
+    act(() => latest().serverHello("robinhood", 4663, 21));
     expect(result.current.status).toBe("open");
+    expect(result.current.snapshot?.block.number).toBe(21);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
-    expect(getLiveMock).toHaveBeenCalledTimes(2);
-    act(() => latest().serverHello("robinhood", 4663, 21));
-    expect(result.current.snapshot?.block.number).toBe(21);
+    expect(getLiveMock).toHaveBeenCalledTimes(3);
 
-    // Switching network subscribes on the same socket and clears state.
+    // Switching network subscribes on the same socket, clears state and is pending until the hello.
     rerender({ network: "arbitrum-one" });
     expect(latest().sent).toContain(JSON.stringify({ type: "subscribe", network: "arbitrum-one" }));
+    expect(result.current.status).toBe("connecting");
     expect(result.current.snapshot).toBeNull();
     expect(result.current.recentBlocks).toEqual([]);
     // Robinhood messages queued behind the subscribe never show up as Arbitrum One.
@@ -207,6 +216,7 @@ describe("useLive", () => {
     expect(result.current.recentBlocks).toEqual([]);
     expect(result.current.ownerActions).toEqual([]);
     act(() => latest().serverHello("arbitrum-one", 42161, 500, [block(500)]));
+    expect(result.current.status).toBe("open");
     expect(result.current.snapshot?.chainId).toBe(42161);
     expect(result.current.networkInfo?.name).toBe("arbitrum-one");
     act(() => latest().serverMessage({ type: "tick", data: snapshot(23, 4663) }));
@@ -228,6 +238,67 @@ describe("useLive", () => {
 
     unmount();
     expect(latest().readyState).toBe(3);
+  });
+
+  it("keeps the feed when the route moves between a chain id and the network's name", async () => {
+    const { result, rerender } = renderHook(({ network }) => useLive(network), { initialProps: { network: "4663" } });
+    await flush();
+    const socket = latest();
+    expect(socket.url).toContain("network=4663");
+    act(() => socket.serverOpen());
+    act(() => socket.serverHello("robinhood", 4663, 10, [block(10)]));
+    expect(result.current.snapshot?.block.number).toBe(10);
+    expect(result.current.networkInfo?.name).toBe("robinhood");
+    // The page canonicalises the route. Nothing is sent, nothing is dropped, nothing waits for a hello.
+    rerender({ network: "robinhood" });
+    expect(socket.sent).toEqual([]);
+    expect(result.current.status).toBe("open");
+    expect(result.current.snapshot?.block.number).toBe(10);
+    expect(result.current.recentBlocks.map((b) => b.number)).toEqual([10]);
+    expect(result.current.networkInfo?.chainId).toBe(4663);
+    act(() => socket.serverMessage({ type: "tick", data: snapshot(11) }));
+    act(() => socket.serverMessage({ type: "blocks", data: [block(11)] }));
+    expect(result.current.snapshot?.block.number).toBe(11);
+    expect(result.current.recentBlocks.map((b) => b.number)).toEqual([10, 11]);
+    // And the other way round.
+    rerender({ network: "4663" });
+    expect(socket.sent).toEqual([]);
+    expect(result.current.snapshot?.block.number).toBe(11);
+    // A genuinely different network still clears the feed.
+    rerender({ network: "arbitrum-one" });
+    expect(socket.sent).toEqual([JSON.stringify({ type: "subscribe", network: "arbitrum-one" })]);
+    expect(result.current.snapshot).toBeNull();
+  });
+
+  it("surfaces a subscription error, falls back to polling, and lets the hello replace a polled feed", async () => {
+    getLiveMock.mockResolvedValue(snapshot(30));
+    const { result } = renderHook(() => useLive("4663"));
+    await flush();
+    const first = latest();
+    act(() => first.serverOpen());
+    act(() => first.serverMessage({ type: "error", error: { code: "unavailable", message: "database is warming up" } }));
+    expect(result.current.error).toBe("database is warming up");
+    expect(first.readyState).toBe(3);
+    expect(result.current.status).toBe("reconnecting");
+    await flush();
+    // The polled snapshot is shown under the chain-id route.
+    expect(getLiveMock).toHaveBeenCalledWith("4663", expect.anything());
+    expect(result.current.snapshot?.block.number).toBe(30);
+    expect(result.current.error).toBeNull();
+    await flush(1000);
+    const second = latest();
+    act(() => second.serverOpen());
+    act(() => second.serverHello("robinhood", 4663, 31));
+    expect(result.current.status).toBe("open");
+    expect(result.current.snapshot?.block.number).toBe(31);
+    expect(result.current.networkInfo?.name).toBe("robinhood");
+  });
+
+  it("matches a feed by name or chain id", () => {
+    expect(feedMatches({ key: null }, "robinhood")).toBe(false);
+    expect(feedMatches({ key: { name: "robinhood", chainId: 4663 } }, "4663")).toBe(true);
+    expect(feedMatches({ key: { name: "robinhood", chainId: 4663 } }, "robinhood")).toBe(true);
+    expect(feedMatches({ key: { name: "robinhood", chainId: 4663 } }, "arbitrum-one")).toBe(false);
   });
 
   it("polls one request at a time and never lets a stale response overwrite a newer one", async () => {

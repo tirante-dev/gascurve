@@ -4,13 +4,13 @@ import { useMemo } from "react";
 import { useAnimatedBacklogs } from "@/hooks/useAnimatedBacklogs";
 import { contributionsBips, legacyExponentBips, toLegacyState } from "@/lib/pricer";
 import type { Constraint, LegacyParams, LiveSnapshot } from "@/types";
-import { contributionRampStep, seriesColor, sharesOf } from "@/utils/chart";
-import { formatDuration, formatGas, formatPercent, formatSecondsOfTarget } from "@/utils/format";
+import { constraintGauge, contributionRampStep, legacyGauge, seriesColor, sharesOf } from "@/utils/chart";
+import { formatDuration, formatGas, formatInteger, formatPercent, formatSecondsOfTarget } from "@/utils/format";
 import { Card, Label, Swatch } from "./primitives";
 
 /** A meter whose fill carries magnitude on the sequential ramp; the track is the lightest step. */
 export function Gauge({ fraction, step, label, marks = [] }: { fraction: number; step: number; label: string; marks?: number[] }) {
-  const pct = Math.max(0, Math.min(1, fraction)) * 100;
+  const pct = (Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : 0) * 100;
   return (
     <div className="relative h-2.5 w-full rounded-sm" style={{ background: "var(--seq-1)" }} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label={label}>
       <div className="h-full rounded-sm" style={{ width: `${pct}%`, background: `var(--seq-${step})` }} />
@@ -34,10 +34,10 @@ export function cardValues(constraints: readonly Constraint[], backlogs: readonl
 }
 
 function ConstraintCard({ c, index, backlog, bips, share, projected }: { c: Constraint; index: number; backlog: number; bips: number; share: number; projected: boolean }) {
-  const denominator = c.target * c.window;
-  const x = denominator > 0 ? backlog / denominator : 0;
-  const scale = Math.max(1, Math.ceil(x));
-  const marks = Array.from({ length: scale - 1 }, (_, i) => (i + 1) / scale);
+  // The gauge spans whole windows of target; marks are capped so a huge
+  // backlog over a tiny window cannot ask for a billion elements.
+  const gauge = constraintGauge(c, backlog);
+  const { scale, denominator } = gauge;
   return (
     <Card>
       <div className="flex items-center justify-between gap-2">
@@ -73,11 +73,11 @@ function ConstraintCard({ c, index, backlog, bips, share, projected }: { c: Cons
         </div>
       </dl>
       <div className="mt-4">
-        <Gauge fraction={x / scale} step={contributionRampStep(bips)} label={`Constraint ${index + 1} backlog as a fraction of ${scale} window${scale > 1 ? "s" : ""} of target`} marks={marks} />
+        <Gauge fraction={gauge.fraction} step={contributionRampStep(bips)} label={`Constraint ${index + 1} backlog as a fraction of ${formatInteger(scale)} window${scale > 1 ? "s" : ""} of target`} marks={gauge.marks} />
         <div className="num mt-1 flex justify-between text-[11px] text-ink-3">
           <span>0</span>
           <span>
-            {scale} × {formatGas(denominator)} gas
+            {formatInteger(scale)} × {formatGas(denominator)} gas
           </span>
         </div>
       </div>
@@ -86,11 +86,9 @@ function ConstraintCard({ c, index, backlog, bips, share, projected }: { c: Cons
 }
 
 function LegacyCard({ legacy, backlog, projected }: { legacy: LegacyParams; backlog: number; projected: boolean }) {
-  const tolerance = legacy.tolerance * legacy.speedLimit;
-  const inertia = legacy.inertia * legacy.speedLimit;
+  const gauge = legacyGauge(legacy, backlog);
   const bips = Number(legacyExponentBips(toLegacyState({ ...legacy, backlog })));
-  const x = inertia > 0 ? bips / 10_000 : 0;
-  const scale = Math.max(2, Math.ceil(backlog / tolerance) + 1);
+  const x = bips / 10_000;
   return (
     <Card>
       <div className="flex items-center gap-2">
@@ -111,7 +109,7 @@ function LegacyCard({ legacy, backlog, projected }: { legacy: LegacyParams; back
         <div>
           <Label>Tolerance</Label>
           <dd className="num mt-0.5 text-ink">{legacy.tolerance}</dd>
-          <dd className="num text-xs text-ink-3">{formatGas(tolerance)} gas free</dd>
+          <dd className="num text-xs text-ink-3">{gauge.free > 0 ? `${formatGas(gauge.free)} gas free` : "no free gas: every unit prices"}</dd>
         </div>
         <div>
           <Label>Backlog{projected ? " (projected)" : ""}</Label>
@@ -120,11 +118,11 @@ function LegacyCard({ legacy, backlog, projected }: { legacy: LegacyParams; back
         </div>
       </dl>
       <div className="mt-4">
-        <Gauge fraction={backlog / (tolerance * scale)} step={contributionRampStep(bips)} label="Legacy backlog against the tolerance threshold" marks={[1 / scale]} />
+        <Gauge fraction={gauge.fraction} step={contributionRampStep(bips)} label={gauge.free > 0 ? "Legacy backlog against the tolerance threshold" : "Legacy backlog in units of inertia times speed limit"} marks={gauge.marks} />
         <div className="num mt-1 flex justify-between text-[11px] text-ink-3">
           <span>0</span>
-          <span>tolerance at {formatGas(tolerance)}</span>
-          <span>{formatGas(tolerance * scale)}</span>
+          <span>{gauge.free > 0 ? `tolerance at ${formatGas(gauge.free)}` : gauge.unit > 0 ? `x = 1 at ${formatGas(gauge.unit)}` : "no scale (zero inertia or speed limit)"}</span>
+          <span>{gauge.span > 0 ? formatGas(gauge.span) : "n/a"}</span>
         </div>
       </div>
     </Card>

@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HelloData, LiveStatus } from "@/types";
-import { helloMatches, LiveClient, resolveSocketFactory, resolveWsUrl, SOCKET_OPEN, WATCHDOG_MS, type SocketLike } from "./ws";
+import { ACK_WATCHDOG_MS, helloMatches, keyMatches, LiveClient, resolveSocketFactory, resolveWsUrl, SOCKET_OPEN, WATCHDOG_MS, type SocketLike } from "./ws";
+
+const ROBINHOOD = { name: "robinhood", chainId: 4663 };
+const TESTNET = { name: "robinhood-testnet", chainId: 46630 };
 
 class FakeSocket implements SocketLike {
   static instances: FakeSocket[] = [];
@@ -105,6 +108,16 @@ describe("helloMatches", () => {
     expect(helloMatches(hello, "arbitrum-one")).toBe(false);
     expect(helloMatches({ network: null } as unknown as HelloData, "robinhood")).toBe(false);
     expect(helloMatches({} as HelloData, "robinhood")).toBe(false);
+    expect(helloMatches({ network: { name: 7, chainId: "4663" } } as unknown as HelloData, "4663")).toBe(false);
+  });
+});
+
+describe("keyMatches", () => {
+  it("treats a name and its decimal chain id as the same network", () => {
+    expect(keyMatches(ROBINHOOD, "robinhood")).toBe(true);
+    expect(keyMatches(ROBINHOOD, "4663")).toBe(true);
+    expect(keyMatches(ROBINHOOD, "arbitrum-one")).toBe(false);
+    expect(keyMatches(ROBINHOOD, "466")).toBe(false);
   });
 });
 
@@ -147,21 +160,27 @@ describe("LiveClient", () => {
     const socket = latest();
     expect(socket.url).toBe("ws://api/ws?network=robinhood");
     socket.serverOpen();
-    expect(statuses).toEqual(["open"]);
+    // A TCP open is not live: the status waits for the hello.
+    expect(statuses).toEqual([]);
+    expect(client.status).toBe("connecting");
 
     socket.serverHello("robinhood", 4663);
-    expect(onHello).toHaveBeenCalledWith(expect.objectContaining({ recentBlocks: [] }), "robinhood");
-    expect(client.confirmedNetwork).toBe("robinhood");
+    expect(statuses).toEqual(["open"]);
+    expect(onHello).toHaveBeenCalledWith(expect.objectContaining({ recentBlocks: [] }), ROBINHOOD);
+    expect(client.confirmedNetwork).toEqual(ROBINHOOD);
     socket.serverMessage({ type: "tick", data: { chainId: 4663, block: { number: 2 } } });
-    expect(onTick).toHaveBeenCalledWith({ chainId: 4663, block: { number: 2 } }, "robinhood");
+    expect(onTick).toHaveBeenCalledWith({ chainId: 4663, block: { number: 2 } }, ROBINHOOD);
     socket.serverMessage({ type: "blocks", data: [{ number: 2 }] });
-    expect(onBlocks).toHaveBeenCalledWith([{ number: 2 }], "robinhood");
+    expect(onBlocks).toHaveBeenCalledWith([{ number: 2 }], ROBINHOOD);
     socket.serverMessage({ type: "owner_action", data: { method: "setGasPricingConstraints" } });
-    expect(onOwnerAction).toHaveBeenCalledWith({ method: "setGasPricingConstraints" }, "robinhood");
+    expect(onOwnerAction).toHaveBeenCalledWith({ method: "setGasPricingConstraints" }, ROBINHOOD);
     socket.serverMessage({ type: "ping" });
     expect(socket.sent).toEqual([JSON.stringify({ type: "pong" })]);
-    socket.serverMessage({ type: "error", error: { code: "unknown_network", message: "no such network" } });
-    expect(onError).toHaveBeenCalledWith("no such network");
+    // An error on a confirmed subscription is reported and the socket stays.
+    socket.serverMessage({ type: "error", error: { code: "internal", message: "hiccup" } });
+    expect(onError).toHaveBeenCalledWith("hiccup");
+    expect(socket.closed).toBe(false);
+    expect(client.status).toBe("open");
 
     socket.serverMessage("not json");
     socket.serverMessage({ type: "unknown" });
@@ -224,12 +243,169 @@ describe("LiveClient", () => {
     socket.serverMessage({ type: "tick", data: { chainId: 42161 } });
     expect(onTick).not.toHaveBeenCalled();
     socket.serverHello("robinhood-testnet", 46630);
-    expect(onHello).toHaveBeenLastCalledWith(expect.anything(), "robinhood-testnet");
-    expect(client.confirmedNetwork).toBe("robinhood-testnet");
+    expect(onHello).toHaveBeenLastCalledWith(expect.anything(), TESTNET);
+    expect(client.confirmedNetwork).toEqual(TESTNET);
     socket.serverMessage({ type: "tick", data: { chainId: 46630 } });
-    expect(onTick).toHaveBeenCalledWith({ chainId: 46630 }, "robinhood-testnet");
+    expect(onTick).toHaveBeenCalledWith({ chainId: 46630 }, TESTNET);
     socket.serverMessage({ type: "blocks", data: [{ number: 6 }] });
-    expect(onBlocks).toHaveBeenCalledWith([{ number: 6 }], "robinhood-testnet");
+    expect(onBlocks).toHaveBeenCalledWith([{ number: 6 }], TESTNET);
+    client.close();
+  });
+
+  it("treats a subscribe to an alias of the confirmed network as the same subscription: no message, no hello awaited, feed kept", () => {
+    const { client, onHello, onTick, onBlocks, statuses } = makeClient({ network: "4663" });
+    client.connect();
+    const socket = latest();
+    expect(socket.url).toBe("ws://api/ws?network=4663");
+    socket.serverOpen();
+    socket.serverHello("robinhood", 4663);
+    expect(statuses).toEqual(["open"]);
+    // The page canonicalises /4663 to /robinhood: the server would ignore a
+    // subscribe for the chain it already serves, so none is sent.
+    client.subscribe("robinhood");
+    expect(socket.sent).toEqual([]);
+    expect(client.activeNetwork).toBe("robinhood");
+    expect(client.confirmedNetwork).toEqual(ROBINHOOD);
+    expect(client.status).toBe("open");
+    socket.serverMessage({ type: "tick", data: { chainId: 4663 } });
+    expect(onTick).toHaveBeenCalledWith({ chainId: 4663 }, ROBINHOOD);
+    socket.serverMessage({ type: "blocks", data: [{ number: 3 }] });
+    expect(onBlocks).toHaveBeenCalledWith([{ number: 3 }], ROBINHOOD);
+    // No acknowledgement is awaited: pings alone carry the socket past the window.
+    vi.advanceTimersByTime(ACK_WATCHDOG_MS);
+    socket.serverMessage({ type: "ping" });
+    vi.advanceTimersByTime(ACK_WATCHDOG_MS);
+    expect(socket.closed).toBe(false);
+    expect(statuses).toEqual(["open"]);
+    // Back to the chain id: still the same subscription.
+    client.subscribe("4663");
+    expect(socket.sent).toEqual([JSON.stringify({ type: "pong" })]);
+    expect(onHello).toHaveBeenCalledTimes(1);
+    // A different network is a real switch and the status is pending again.
+    client.subscribe("arbitrum-one");
+    expect(socket.sent).toContain(JSON.stringify({ type: "subscribe", network: "arbitrum-one" }));
+    expect(client.confirmedNetwork).toBeNull();
+    expect(client.status).toBe("connecting");
+    socket.serverMessage({ type: "tick", data: { chainId: 4663 } });
+    expect(onTick).toHaveBeenCalledTimes(1);
+    // After a drop, the reconnect URL carries whatever reference was requested last.
+    socket.serverDrop();
+    client.subscribe("42161");
+    vi.advanceTimersByTime(1000);
+    expect(latest().url).toBe("ws://api/ws?network=42161");
+    client.close();
+  });
+
+  it("revokes the confirmation on a mismatching hello, so a stale hello for the final target cannot admit another network's frames", () => {
+    // Rapid A -> C -> B -> C: the hello answering the first C matches the
+    // final target and confirms it; B's hello must undo that, and B's blocks
+    // (which carry no chain id) must be dropped until the final C hello.
+    const { client, onBlocks, onOwnerAction, onTick, statuses } = makeClient();
+    client.connect();
+    const socket = latest();
+    socket.serverOpen();
+    socket.serverHello("robinhood", 4663);
+    client.subscribe("robinhood-testnet");
+    client.subscribe("arbitrum-one");
+    client.subscribe("robinhood-testnet");
+    socket.serverHello("robinhood-testnet", 46630);
+    expect(client.confirmedNetwork).toEqual(TESTNET);
+    expect(client.status).toBe("open");
+    socket.serverHello("arbitrum-one", 42161);
+    expect(client.confirmedNetwork).toBeNull();
+    expect(client.status).toBe("connecting");
+    socket.serverMessage({ type: "blocks", data: [{ number: 9 }] });
+    socket.serverMessage({ type: "owner_action", data: { method: "x" } });
+    socket.serverMessage({ type: "tick", data: { chainId: 42161 } });
+    socket.serverMessage({ type: "tick", data: { chainId: 46630 } });
+    expect(onBlocks).not.toHaveBeenCalled();
+    expect(onOwnerAction).not.toHaveBeenCalled();
+    expect(onTick).not.toHaveBeenCalled();
+    socket.serverHello("robinhood-testnet", 46630);
+    expect(client.status).toBe("open");
+    socket.serverMessage({ type: "blocks", data: [{ number: 10 }] });
+    expect(onBlocks).toHaveBeenCalledWith([{ number: 10 }], TESTNET);
+    expect(statuses).toEqual(["open", "connecting", "open", "connecting", "open"]);
+    client.close();
+  });
+
+  it("drops a socket whose subscription the server rejects, and reconnects into polling", () => {
+    const { client, onError } = makeClient();
+    client.connect();
+    const first = latest();
+    first.serverOpen();
+    first.serverMessage({ type: "error", error: { code: "unknown_network", message: "no such network" } });
+    expect(onError).toHaveBeenCalledWith("no such network");
+    expect(first.closed).toBe(true);
+    expect(first.closeCode).toBe(4001);
+    expect(client.status).toBe("reconnecting");
+    vi.advanceTimersByTime(1000);
+    const second = latest();
+    second.serverOpen();
+    second.serverMessage({ type: "error", error: { code: "unknown_network", message: "still no such network" } });
+    expect(client.status).toBe("polling");
+    vi.advanceTimersByTime(2000);
+    const third = latest();
+    third.serverOpen();
+    third.serverHello("robinhood", 4663);
+    expect(client.status).toBe("open");
+    // An error answering a subscribe on a confirmed socket means no hello follows: drop it too.
+    client.subscribe("arbitrum-one");
+    third.serverMessage({ type: "error", error: { code: "unknown_network", message: "no arbitrum" } });
+    expect(third.closed).toBe(true);
+    expect(client.status).toBe("reconnecting");
+    vi.advanceTimersByTime(1000);
+    expect(latest().url).toBe("ws://api/ws?network=arbitrum-one");
+    client.close();
+  });
+
+  it("abandons a subscription that is never acknowledged; pings do not count, the matching hello does", () => {
+    const { client, statuses } = makeClient();
+    client.connect();
+    const socket = latest();
+    socket.serverOpen();
+    for (let i = 0; i < 3; i++) {
+      vi.advanceTimersByTime(3000);
+      socket.serverMessage({ type: "ping" });
+    }
+    expect(socket.closed).toBe(false);
+    vi.advanceTimersByTime(ACK_WATCHDOG_MS - 9000 - 1);
+    expect(socket.closed).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(socket.closed).toBe(true);
+    expect(socket.closeCode).toBe(4002);
+    expect(client.status).toBe("reconnecting");
+    expect(statuses).toEqual(["reconnecting"]);
+    vi.advanceTimersByTime(1000);
+    const second = latest();
+    second.serverOpen();
+    vi.advanceTimersByTime(ACK_WATCHDOG_MS - 1);
+    second.serverHello("robinhood", 4663);
+    vi.advanceTimersByTime(ACK_WATCHDOG_MS * 2);
+    expect(second.closed).toBe(false);
+    // A subscribe re-arms it and its hello clears it.
+    client.subscribe("arbitrum-one");
+    vi.advanceTimersByTime(ACK_WATCHDOG_MS - 1);
+    second.serverHello("arbitrum-one", 42161);
+    vi.advanceTimersByTime(ACK_WATCHDOG_MS * 2);
+    expect(second.closed).toBe(false);
+    // A hello for the wrong network re-arms it as well.
+    client.subscribe("robinhood-testnet");
+    second.serverHello("arbitrum-one", 42161);
+    vi.advanceTimersByTime(ACK_WATCHDOG_MS - 1);
+    expect(second.closed).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(second.closed).toBe(true);
+    client.close();
+  });
+
+  it("honours a custom acknowledgement window", () => {
+    const { client } = makeClient({ ackWatchdogMs: 50 });
+    client.connect();
+    const socket = latest();
+    socket.serverOpen();
+    vi.advanceTimersByTime(50);
+    expect(socket.closed).toBe(true);
     client.close();
   });
 
@@ -239,7 +415,8 @@ describe("LiveClient", () => {
     const socket = latest();
     socket.serverOpen();
     socket.serverHello("robinhood", 4663);
-    expect(onHello).toHaveBeenCalledWith(expect.anything(), "4663");
+    expect(onHello).toHaveBeenCalledWith(expect.anything(), ROBINHOOD);
+    expect(client.confirmedNetwork).toEqual(ROBINHOOD);
     socket.serverMessage({ type: "tick", data: { chainId: 4663 } });
     expect(onTick).toHaveBeenCalledTimes(1);
     client.close();
@@ -275,13 +452,15 @@ describe("LiveClient", () => {
 
     vi.advanceTimersByTime(30_000);
     latest().serverOpen();
-    expect(client.status).toBe("open");
-    // Opening the TCP socket does not reset the backoff; the hello does.
+    // Opening the TCP socket resets neither the status nor the backoff; the hello does both.
+    expect(client.status).toBe("polling");
     expect(client.backoffMs()).toBe(30_000);
     latest().serverHello("robinhood", 4663);
+    expect(client.status).toBe("open");
     expect(client.backoffMs()).toBe(1000);
-    expect(statuses[0]).toBe("open");
+    expect(statuses[0]).toBe("reconnecting");
     expect(statuses).toContain("polling");
+    expect(statuses[statuses.length - 1]).toBe("open");
     client.close();
   });
 
@@ -423,7 +602,8 @@ describe("LiveClient", () => {
     expect(FakeSocket.instances).toHaveLength(1);
     client.resume();
     expect(FakeSocket.instances).toHaveLength(2);
-    expect(statuses).toEqual(["open", "connecting"]);
+    expect(statuses).toEqual([]);
+    expect(client.status).toBe("connecting");
     client.resume();
     expect(FakeSocket.instances).toHaveLength(2);
     client.close();

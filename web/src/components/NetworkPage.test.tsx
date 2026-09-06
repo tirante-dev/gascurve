@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Network } from "@/types";
+import type { Network, Series } from "@/types";
 
 vi.mock("recharts", async (importOriginal) => {
   const original = await importOriginal<typeof import("recharts")>();
@@ -24,7 +24,8 @@ const emptyApi = { data: null, error: null, loading: false, updatedAt: null, ref
 vi.mock("@/hooks/useApi", () => ({
   useApi: (key: string | null) => (key === "networks" ? { ...emptyApi, data: networks } : emptyApi),
 }));
-vi.mock("@/hooks/useSeries", () => ({ useSeries: () => emptyApi }));
+let seriesData: Series | null = null;
+vi.mock("@/hooks/useSeries", () => ({ useSeries: () => ({ ...emptyApi, data: seriesData }) }));
 
 let liveInfo: Network | null = null;
 vi.mock("@/hooks/useLive", () => ({
@@ -40,6 +41,7 @@ describe("NetworkPage with a chain-id route", () => {
     pushMock.mockReset();
     routeParams = { network: "4663" };
     liveInfo = null;
+    seriesData = null;
   });
 
   it("treats /4663 as Robinhood and redirects to the canonical name after hello", () => {
@@ -52,6 +54,26 @@ describe("NetworkPage with a chain-id route", () => {
     rerender(<NetworkPage network="4663" />);
     expect(replaceMock).toHaveBeenCalledWith("/robinhood");
     expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("passes the network's pricer model to the history, so an empty set list is not read as legacy", () => {
+    routeParams = { network: "robinhood" };
+    seriesData = {
+      range: "24h",
+      resolution: "1m",
+      constraintSets: [],
+      ownerActions: [],
+      points: [{ t: 1, blocks: 1, gasUsed: 1, gasPerSecond: 1, feesWei: "0", baseFeeMin: "1", baseFeeAvg: "1", baseFeeMax: "1", exponentBips: 34, constraintBips: [34, 0], backlogs: [3_111_506, 0], backlogsMax: [3_111_506, 0], minBaseFee: "1", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 }],
+    };
+    // The model comes from the api's network list before any hello.
+    const { rerender } = render(<NetworkPage network="robinhood" />);
+    expect(screen.queryByText("legacy backlog")).toBeNull();
+    expect(screen.getByText("C1 · definition unknown")).toBeInTheDocument();
+    // A hello for a legacy network switches the labelling.
+    liveInfo = { ...networks[0], model: "legacy" };
+    rerender(<NetworkPage network="robinhood" />);
+    expect(screen.getAllByText("legacy backlog").length).toBeGreaterThan(0);
+    expect(replaceMock).not.toHaveBeenCalled();
   });
 
   it("still flags a name the api does not know", () => {

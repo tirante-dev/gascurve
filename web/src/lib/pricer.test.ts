@@ -210,6 +210,30 @@ describe("comparison helpers", () => {
   });
 });
 
+describe("legacy overflow conformance (internal/pricer TestLegacyOverflowConformance)", () => {
+  it("wraps the tolerance threshold like Go's uint64 multiply and saturates the excess and the denominator", () => {
+    // speedLimit 2^63, tolerance 2, backlog MaxUint64: the threshold 2 * 2^63
+    // wraps to 0 (a saturating threshold would swallow the whole backlog and
+    // price nothing), the excess MaxUint64 saturates to MaxInt64 bips and the
+    // inertia denominator 2^63 saturates to MaxInt64, so the exponent is exactly 1 bip.
+    const s = toLegacyState({ speedLimit: 2 ** 63, inertia: 1, tolerance: 2, backlog: 0 });
+    s.backlog = MAX_UINT64;
+    expect(s.speedLimit).toBe(1n << 63n);
+    expect(BigInt.asUintN(64, s.tolerance * s.speedLimit)).toBe(0n);
+    expect(saturatingUMul(s.tolerance, s.speedLimit)).toBe(MAX_UINT64);
+    expect(legacyExponentBips(s)).toBe(1n);
+    const r = legacyStep(s, 0n, 10_000n);
+    expect(r.exponent).toBe(1n);
+    expect(r.baseFee).toBe(10_001n);
+    // A saturating denominator with a huge excess yields MaxInt64 / MaxInt64.
+    expect(legacyExponentBips({ speedLimit: MAX_UINT64, inertia: 2n, tolerance: 0n, backlog: MAX_UINT64 })).toBe(1n);
+    // The wrapped threshold can also land above the backlog: 3 * 2^63 wraps to 2^63.
+    expect(legacyExponentBips({ speedLimit: 1n << 63n, inertia: 1n, tolerance: 3n, backlog: (1n << 63n) - 1n })).toBe(0n);
+    expect(legacyExponentBips({ speedLimit: 1n << 63n, inertia: 1n, tolerance: 3n, backlog: (1n << 63n) + 1n })).toBe(0n);
+    expect(legacyExponentBips({ speedLimit: 1n << 63n, inertia: 1n, tolerance: 3n, backlog: (1n << 63n) + 922_337_203_685_478n })).toBe(1n);
+  });
+});
+
 describe("legacy model (internal/pricer TestLegacyModel)", () => {
   it("is at the floor until backlog exceeds tolerance * speedLimit", () => {
     const s = toLegacyState({ speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 60_000_000 });
