@@ -69,13 +69,6 @@ export function Explainer({ snapshot }: { snapshot: LiveSnapshot | null }) {
         <code>P4</code> is the degree-4 Taylor expansion <code>1 + x + x²/2 + x³/6 + x⁴/24</code>, evaluated in integer basis points. Near zero it tracks e<sup>x</sup>; above x ≈ 2 it falls
         behind and grows like x⁴/24. A backlog that would mean a 25× fee under a true exponential gives about 20× here.
       </p>
-
-      <h3><code>getGasBacklog()</code> is a decoy</h3>
-      <p>
-        The precompile getter returns the backlog of the legacy single-target model, which is dormant on chains that use constraints and reads zero. The real backlogs are the third element of
-        each triple from <code>getGasPricingConstraints()</code>, and that is what this page shows. Multi-gas constraints (per resource: compute, storage, history) exist in the precompile but
-        are not configured.
-      </p>
     </Prose>
   );
 }
