@@ -151,7 +151,7 @@ function constraintAction(set: MockConstraintSet, seed: number): OwnerAction {
     txHash: txHash(seed),
     method: "setGasPricingConstraints",
     selector: "0xcc0d556a",
-    args: { constraints: set.constraints.map((c) => [c.target, c.window, c.startingBacklog]) },
+    args: { constraints: set.constraints.map((c) => ({ gasTargetPerSecond: c.target, adjustmentWindowSeconds: c.window, startingBacklog: c.startingBacklog })) },
   };
 }
 

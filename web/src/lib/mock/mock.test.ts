@@ -182,7 +182,7 @@ describe("mock world", () => {
     const actions = world.ownerActions();
     expect(actions[0].block).toBe(53_578_754);
     expect(actions[actions.length - 1].method).toBe("setMinimumL2BaseFee");
-    expect(actions[0].args).toEqual({ constraints: [[60_000_000, 15, 0], [40_000_000, 86_400, 9_989_000_000_000]] });
+    expect(actions[0].args).toEqual({ constraints: [{ gasTargetPerSecond: 60_000_000, adjustmentWindowSeconds: 15, startingBacklog: 0 }, { gasTargetPerSecond: 40_000_000, adjustmentWindowSeconds: 86_400, startingBacklog: 9_989_000_000_000 }] });
     expect(actions[0].txHash).toMatch(/^0x[0-9a-f]{64}$/);
 
     const batches = world.batches("24h", now);

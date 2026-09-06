@@ -112,7 +112,7 @@ describe("NetworkSwitcher", () => {
 
 describe("OwnerActionTimeline", () => {
   const actions: OwnerAction[] = [
-    { block: 53_578_754, at: "2026-09-03T17:08:00Z", txHash: "0x" + "ab".repeat(32), method: "setGasPricingConstraints", selector: "0xcc0d556a", args: { constraints: [[60_000_000, 15, 0], [40_000_000, 86_400, 9_989_000_000_000]] } },
+    { block: 53_578_754, at: "2026-09-03T17:08:00Z", txHash: "0x" + "ab".repeat(32), method: "setGasPricingConstraints", selector: "0xcc0d556a", args: { constraints: [{ gasTargetPerSecond: 60_000_000, adjustmentWindowSeconds: 15, startingBacklog: 0 }, [40_000_000, 86_400, 9_989_000_000_000]] } },
     { block: 174_150, at: "2026-06-24T20:28:00Z", txHash: "0x" + "cd".repeat(32), method: "setMinimumL2BaseFee", selector: "0xa0188cdb", args: { priceInWei: "20000000" } },
     { block: 1, at: "2026-06-01T00:00:00Z", txHash: "0x" + "ef".repeat(32), method: "unknown", selector: "0x00000000", args: { raw: "0x" + "12".repeat(40), n: 3 } },
     { block: 2, at: "2026-06-02T00:00:00Z", txHash: "0x" + "01".repeat(32), method: "setGasPricingConstraints", selector: "0xcc0d556a", args: { constraints: ["oops"] } },

@@ -224,7 +224,7 @@ type SeriesPoint = {
 
 type OwnerAction = {
   block: number; at: string; txHash: string; method: string; selector: string;
-  args: Record<string, unknown>;           // decoded when the selector is known, else { raw: '0x…' }
+  args: Record<string, unknown>;           // decoded when the selector is known, else { raw: '0x…' }. setGasPricingConstraints: { constraints: [{ gasTargetPerSecond, adjustmentWindowSeconds, startingBacklog }] }; setMinimumL2BaseFee: { priceInWei: string }
 }
 
 type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; /* 'batch' = exactly one point per report, never grouped, used for 1h */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
