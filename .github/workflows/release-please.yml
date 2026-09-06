@@ -23,6 +23,10 @@ jobs:
     # and Pull requests: read/write and nothing else. Do not use a classic PAT.
     env:
       HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' }}
+    # Root package outputs (path ".") are exposed without a path prefix.
+    outputs:
+      app_release_created: ${{ steps.release.outputs.release_created }}
+      app_version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         id: app
@@ -39,3 +43,67 @@ jobs:
           token: ${{ steps.app.outputs.token || secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # Keeps charts/gascurve/Chart.yaml appVersion in step with the application
+  # release so a source-tree install of the chart resolves to a published
+  # image tag. Opens a PR (never pushes to main) with auto-merge enabled; the
+  # merged fix commit under charts/gascurve makes release-please open the
+  # next chart release PR. Uses the same token as release-please so the PR
+  # gets CI runs and the merge triggers workflows.
+  sync-chart-app-version:
+    name: Sync Chart App Version
+    needs: release-please
+    if: needs.release-please.outputs.app_release_created == 'true'
+    runs-on: ubuntu-latest
+    env:
+      HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' }}
+    steps:
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        id: app
+        if: env.HAS_RELEASE_APP == 'true'
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          token: ${{ steps.app.outputs.token || secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Open chart appVersion PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.RELEASE_PLEASE_TOKEN }}
+          VERSION: ${{ needs.release-please.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Release version '${VERSION}' is not a plain semantic version"
+            exit 1
+          fi
+          branch="chart-app-version/${VERSION}"
+          title="fix(helm): update chart app version to ${VERSION}"
+
+          sed -i "s/^appVersion: .*/appVersion: \"${VERSION}\"/" charts/gascurve/Chart.yaml
+          if git diff --quiet -- charts/gascurve/Chart.yaml; then
+            echo "Chart appVersion is already ${VERSION}; nothing to do"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git commit -m "${title}" -- charts/gascurve/Chart.yaml
+          git push --force origin "HEAD:refs/heads/${branch}"
+
+          number="$(gh pr list --head "${branch}" --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -z "${number}" ]; then
+            number="$(gh pr create --base main --head "${branch}" --title "${title}" \
+              --body "Sets charts/gascurve/Chart.yaml appVersion to ${VERSION}, the application release just published, so the chart defaults to a published image tag. Opened by the release-please workflow." \
+              | sed -n 's#.*/pull/\([0-9][0-9]*\)$#\1#p')"
+            echo "Opened PR #${number}"
+          else
+            echo "PR #${number} already open for ${branch}; branch updated"
+          fi
+          gh pr merge "${number}" --auto --squash

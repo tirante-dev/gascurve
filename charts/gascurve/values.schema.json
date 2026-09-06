@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "gascurve values",
+  "description": "Validated by helm install, upgrade, template and lint. A database is mandatory whenever the collector or the api is enabled: set exactly one of database.url (rendered into a Secret) and database.existingSecret.",
+  "type": "object",
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": {
+      "type": "object",
+      "properties": {
+        "registry": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "tag": { "type": "string" },
+        "pullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "name": { "type": "string", "minLength": 1 } },
+            "required": ["name"]
+          }
+        }
+      },
+      "required": ["registry", "pullPolicy"]
+    },
+    "collector": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/componentImage" },
+        "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
+        "resources": { "type": "object" }
+      },
+      "required": ["enabled", "image"]
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "image": { "$ref": "#/definitions/componentImage" },
+        "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
+        "service": { "$ref": "#/definitions/service" },
+        "resources": { "type": "object" }
+      },
+      "required": ["enabled", "image", "service"]
+    },
+    "web": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "image": { "$ref": "#/definitions/componentImage" },
+        "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
+        "service": { "$ref": "#/definitions/service" },
+        "resources": { "type": "object" }
+      },
+      "required": ["enabled", "image", "service"]
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "host": { "type": "string" },
+        "tls": { "type": "array" }
+      },
+      "required": ["enabled"],
+      "if": { "properties": { "enabled": { "const": true } } },
+      "then": { "properties": { "host": { "type": "string", "minLength": 1 } }, "required": ["host"] }
+    },
+    "database": {
+      "type": "object",
+      "description": "Exactly one of url and existingSecret must be non-empty when collector.enabled or api.enabled.",
+      "properties": {
+        "url": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string", "minLength": 1 }
+      },
+      "required": ["url", "existingSecret", "existingSecretKey"]
+    },
+    "migrations": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
+        "resources": { "type": "object" }
+      },
+      "required": ["enabled"]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "object",
+          "properties": {
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "cors_origins": { "type": "array", "items": { "type": "string" } },
+            "dev_mode": { "type": "boolean" }
+          },
+          "required": ["port"]
+        },
+        "database": { "type": "object" },
+        "collector": { "type": "object" },
+        "networks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "chain_id": { "type": "integer", "minimum": 1 },
+              "rpc_url": { "type": "string", "minLength": 1 },
+              "enabled": { "type": "boolean" }
+            },
+            "required": ["name", "chain_id", "rpc_url"]
+          }
+        }
+      },
+      "required": ["server", "networks"]
+    },
+    "extraEnv": { "type": "array", "items": { "type": "object" } },
+    "logLevel": { "type": "string", "pattern": "^(?i)(debug|info|warn|error)$" },
+    "podSecurityContext": { "type": "object" },
+    "containerSecurityContext": { "type": "object" },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "automountServiceAccountToken": { "type": "boolean" }
+      },
+      "required": ["create"]
+    },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" }
+  },
+  "required": ["image", "collector", "api", "web", "ingress", "database", "migrations", "config", "serviceAccount"],
+  "if": {
+    "anyOf": [
+      { "properties": { "collector": { "properties": { "enabled": { "const": true } } } } },
+      { "properties": { "api": { "properties": { "enabled": { "const": true } } } } }
+    ]
+  },
+  "then": {
+    "properties": {
+      "database": {
+        "oneOf": [
+          {
+            "title": "database.url set, database.existingSecret empty",
+            "properties": {
+              "url": { "type": "string", "minLength": 1 },
+              "existingSecret": { "type": "string", "maxLength": 0 }
+            }
+          },
+          {
+            "title": "database.existingSecret set, database.url empty",
+            "properties": {
+              "url": { "type": "string", "maxLength": 0 },
+              "existingSecret": { "type": "string", "minLength": 1 }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "componentImage": {
+      "type": "object",
+      "properties": { "repository": { "type": "string", "minLength": 1 } },
+      "required": ["repository"]
+    },
+    "componentSecurityContext": {
+      "type": "object",
+      "properties": {
+        "runAsUser": { "type": "integer", "minimum": 1 },
+        "runAsGroup": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      },
+      "required": ["type", "port"]
+    }
+  }
+}

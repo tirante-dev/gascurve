@@ -6,9 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version to publish, without the v prefix
+        description: Application version to publish, without the v prefix. The tag v<version> must exist.
         required: true
         type: string
+      overwrite:
+        description: Repair mode. Push even if this version already exists in the registry.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,15 +37,16 @@ jobs:
           - image: gascurve-web
             dockerfile: Dockerfile.web
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # Resolve and validate the version before touching the registry so a
-      # malformed tag or input can never publish or overwrite anything.
+      # Resolve and validate the version before checking anything out so a
+      # malformed tag or input can never publish or overwrite anything. The
+      # build always comes from the release tag itself, never from whatever
+      # branch the dispatch was started on.
       - name: Resolve version
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
@@ -52,13 +58,47 @@ jobs:
             echo "::error::Refusing to publish: '${version}' is not a plain semantic version (expected MAJOR.MINOR.PATCH)"
             exit 1
           fi
+          tag="v${version}"
+          if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" > /dev/null; then
+            echo "::error::Refusing to publish: tag ${tag} does not exist in ${GITHUB_REPOSITORY}. Publish the release first (release-please), then dispatch this workflow with its version."
+            exit 1
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.version.outputs.tag }}
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      # A version tag is immutable once published. Re-publishing it (and the
+      # minor and latest tags with it) is only allowed in repair mode.
+      - name: Refuse to overwrite a published version
+        env:
+          IMAGE: ${{ matrix.image }}
+          VERSION: ${{ steps.version.outputs.version }}
+          OVERWRITE: ${{ inputs.overwrite }}
+        run: |
+          set -euo pipefail
+          ref="${REGISTRY}/${REGISTRY_PROJECT}/${IMAGE}:${VERSION}"
+          if out="$(docker manifest inspect "${ref}" 2>&1)"; then
+            if [ "${OVERWRITE}" = "true" ]; then
+              echo "::warning::${ref} already exists and overwrite=true was given: it will be replaced"
+            else
+              echo "::error::${ref} already exists in the registry. Published versions are immutable; dispatch again with overwrite=true only to repair a broken image."
+              exit 1
+            fi
+          elif printf '%s\n' "${out}" | grep -Eiq 'no such manifest|manifest unknown|not found'; then
+            echo "ok: ${ref} is not published yet"
+          else
+            echo "::error::Could not check whether ${ref} exists: ${out}"
+            exit 1
+          fi
 
       - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         id: meta
@@ -69,7 +109,11 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
             type=raw,value=latest
 
+      # The binfmt image is pinned by digest (tonistiigi/binfmt:qemu-v10.2.3)
+      # so the emulator used for the arm64 build cannot change under a rerun.
       - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        with:
+          image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0

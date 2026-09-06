@@ -23,17 +23,62 @@ jobs:
           fetch-depth: 0
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-      - name: helm lint
-        run: helm lint charts/gascurve --strict
+        with:
+          version: v3.21.4
 
-      - name: helm template (defaults, ingress, existing secret)
+      # values.schema.json requires a database whenever the collector or api
+      # is enabled, so the defaults alone are not a valid install. Lint with
+      # each documented configuration under charts/gascurve/ci (the same
+      # files ct lint uses).
+      - name: helm lint
         run: |
           set -euo pipefail
-          helm template gascurve charts/gascurve --set database.url=postgres://x:y@db/gascurve > /tmp/default.yaml
-          helm template gascurve charts/gascurve --set database.existingSecret=my-db --set ingress.enabled=true --set ingress.host=gascurve.com > /tmp/ingress.yaml
+          for values in charts/gascurve/ci/*-values.yaml; do
+            echo "== helm lint --strict --values ${values}"
+            helm lint charts/gascurve --strict --values "${values}"
+          done
+
+      - name: helm template (schema rejections, url, existing secret, ingress, web only)
+        run: |
+          set -euo pipefail
+          chart=charts/gascurve
+
+          # Defaults: no database configured, the schema must reject the render.
+          if helm template gascurve "${chart}" > /tmp/default.yaml 2> /tmp/default.err; then
+            echo "::error::helm template with default values succeeded, but no database is configured"
+            exit 1
+          fi
+          grep -q 'database' /tmp/default.err
+          echo "ok: defaults rejected by values.schema.json"
+
+          # Both database sources set: also rejected.
+          if helm template gascurve "${chart}" --set database.url=postgres://x:y@db/gascurve --set database.existingSecret=my-db > /dev/null 2> /tmp/both.err; then
+            echo "::error::helm template succeeded with both database.url and database.existingSecret set"
+            exit 1
+          fi
+          grep -q 'database' /tmp/both.err
+          echo "ok: url plus existingSecret rejected by values.schema.json"
+
+          # database.url renders the chart-managed Secret.
+          helm template gascurve "${chart}" --values "${chart}/ci/database-url-values.yaml" > /tmp/url.yaml
+          grep -q 'kind: Secret' /tmp/url.yaml
+          grep -q 'checksum/db-secret' /tmp/url.yaml
+
+          # existingSecret renders no Secret.
+          helm template gascurve "${chart}" --values "${chart}/ci/existing-secret-values.yaml" > /tmp/existing.yaml
+          ! grep -q 'kind: Secret' /tmp/existing.yaml
+          grep -q 'name: my-db' /tmp/existing.yaml
+
+          # Ingress with an existing Secret.
+          helm template gascurve "${chart}" --values "${chart}/ci/ingress-values.yaml" > /tmp/ingress.yaml
           grep -q 'kind: Ingress' /tmp/ingress.yaml
           ! grep -q 'kind: Secret' /tmp/ingress.yaml
-          grep -q 'kind: Secret' /tmp/default.yaml
+
+          # Web only: no database needed, no Go deployments rendered.
+          helm template gascurve "${chart}" --values "${chart}/ci/web-only-values.yaml" > /tmp/web.yaml
+          grep -q 'app.kubernetes.io/component: web' /tmp/web.yaml
+          ! grep -q 'DB_URL' /tmp/web.yaml
+          echo "ok: chart templates"
 
       - uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
       - name: ct lint

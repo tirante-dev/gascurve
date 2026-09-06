@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
 
 # Base images are pinned by digest; Dependabot (docker ecosystem) bumps them.
 
@@ -33,7 +33,12 @@ ENV NODE_ENV=production \
     NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
     HOSTNAME=0.0.0.0 \
     PORT=3000
-RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
+# Patch the base's OS packages and drop the bundled npm and corepack: the
+# standalone server only needs node, and npm's own dependency tree is where
+# most of the image's CVEs live.
+RUN apk upgrade --no-cache \
+ && rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+ && addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static

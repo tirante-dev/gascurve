@@ -158,12 +158,13 @@ jobs:
           go-version-file: go.mod
       - name: Verify and tidy
         run: |
+          set -euo pipefail
           go mod download
           go mod verify
-          go mod tidy
-          if [ -n "$(git diff -- go.mod go.sum)" ]; then
+          # -diff prints the changes tidy would make and exits non-zero
+          # without writing go.mod or go.sum. Same check as `make mod-verify`.
+          if ! go mod tidy -diff; then
             echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit the changes."
-            git diff -- go.mod go.sum
             exit 1
           fi
 

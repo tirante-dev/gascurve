@@ -1,4 +1,4 @@
-.PHONY: all build build-collector build-api build-migrate run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
+.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
 
 GOCMD=go
 GOBUILD=$(GOCMD) build
@@ -12,6 +12,9 @@ COVERAGE_PACKAGES ?= ./internal/...
 COVERAGE_DIR=coverage
 COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
 COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
+# Cross-build matrix, same as the go-build job in .github/workflows/ci.yml.
+BUILD_PLATFORMS ?= linux/amd64 linux/arm64 darwin/arm64
+DIST_DIR=dist
 NPM=npm --prefix web
 DB_URL ?= postgres://postgres:postgres@127.0.0.1:5432/gascurve?sslmode=disable
 
@@ -29,6 +32,16 @@ build-api:
 
 build-migrate:
 	$(GOBUILD) -o $(MIGRATE_BINARY) ./cmd/migrate
+
+# Static cross-builds for every platform CI builds, into $(DIST_DIR)/.
+build-matrix:
+	@set -e; for platform in $(BUILD_PLATFORMS); do \
+		goos=$${platform%/*}; goarch=$${platform#*/}; \
+		echo "build $$goos/$$goarch"; \
+		for cmd in collector api migrate; do \
+			GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 $(GOBUILD) -o $(DIST_DIR)/gascurve-$$cmd-$$goos-$$goarch ./cmd/$$cmd; \
+		done; \
+	done
 
 run-collector: build-collector
 	./$(COLLECTOR_BINARY)
@@ -90,14 +103,15 @@ staticcheck:
 govulncheck:
 	govulncheck ./...
 
+# `go mod tidy -diff` prints what tidy would change and exits non-zero; it
+# never writes go.mod or go.sum.
 mod-verify:
 	$(GOCMD) mod verify
-	$(GOCMD) mod tidy
-	@if [ -n "$$(git diff -- go.mod go.sum)" ]; then echo "FAIL: go.mod/go.sum not tidy"; git diff -- go.mod go.sum; exit 1; fi
+	@if ! $(GOCMD) mod tidy -diff; then echo "FAIL: go.mod/go.sum not tidy, run 'go mod tidy'"; exit 1; fi
 
 clean:
 	rm -f $(COLLECTOR_BINARY) $(API_BINARY) $(MIGRATE_BINARY)
-	rm -rf $(COVERAGE_DIR) web/.next web/coverage
+	rm -rf $(DIST_DIR) $(COVERAGE_DIR) web/.next web/coverage
 
 # ---------------------------------------------------------------- Database
 
@@ -128,17 +142,29 @@ docker-scan:
 
 # ---------------------------------------------------------------- Chart
 
+CHART=charts/gascurve
+
+# values.schema.json requires a database whenever the collector or api is
+# enabled, so lint runs once per documented configuration in $(CHART)/ci
+# (the same files ct lint uses). Same as .github/workflows/chart-test.yml.
 chart-lint:
-	helm lint charts/gascurve --strict
+	@set -e; for values in $(CHART)/ci/*-values.yaml; do \
+		echo "== helm lint --strict --values $$values"; \
+		helm lint $(CHART) --strict --values "$$values"; \
+	done
 
 # Same render checks as .github/workflows/chart-test.yml.
 chart-template:
 	@set -e; \
-	helm template gascurve charts/gascurve --set database.url=postgres://x:y@db/gascurve > /dev/null; \
-	helm template gascurve charts/gascurve --set database.url=postgres://x:y@db/gascurve | grep -q 'kind: Secret'; \
-	helm template gascurve charts/gascurve --set database.existingSecret=my-db --set ingress.enabled=true --set ingress.host=gascurve.com > /dev/null; \
-	helm template gascurve charts/gascurve --set database.existingSecret=my-db --set ingress.enabled=true --set ingress.host=gascurve.com | grep -q 'kind: Ingress'; \
-	! helm template gascurve charts/gascurve --set database.existingSecret=my-db --set ingress.enabled=true --set ingress.host=gascurve.com | grep -q 'kind: Secret'; \
+	err=$$(mktemp); \
+	if helm template gascurve $(CHART) > /dev/null 2> "$$err"; then echo "FAIL: default render succeeded without a database"; exit 1; fi; \
+	grep -q database "$$err"; rm -f "$$err"; \
+	! helm template gascurve $(CHART) --set database.url=postgres://x:y@db/gascurve --set database.existingSecret=my-db > /dev/null 2>&1; \
+	helm template gascurve $(CHART) --values $(CHART)/ci/database-url-values.yaml | grep -q 'kind: Secret'; \
+	! helm template gascurve $(CHART) --values $(CHART)/ci/existing-secret-values.yaml | grep -q 'kind: Secret'; \
+	helm template gascurve $(CHART) --values $(CHART)/ci/ingress-values.yaml | grep -q 'kind: Ingress'; \
+	! helm template gascurve $(CHART) --values $(CHART)/ci/ingress-values.yaml | grep -q 'kind: Secret'; \
+	! helm template gascurve $(CHART) --values $(CHART)/ci/web-only-values.yaml | grep -q 'DB_URL'; \
 	echo "OK: chart templates"
 
 # ---------------------------------------------------------------- Web
@@ -176,14 +202,16 @@ web-ci: web-lint web-typecheck web-test-coverage web-build
 # ---------------------------------------------------------------- CI
 
 # `make ci` is the CI workflow (.github/workflows/ci.yml) minus the jobs that
-# need external services or tools: it never writes files (fmt-check, not fmt)
-# and is self-contained on a fresh clone (web-install). The remaining CI jobs
+# need external services or tools: it never writes tracked files (fmt-check,
+# not fmt; go mod tidy -diff, not tidy), cross-builds the same platform matrix
+# as the go-build job (build-matrix) and is self-contained on a fresh clone
+# (web-install). The remaining CI jobs
 # have their own targets so they can be run when the prerequisites exist:
 #   ci-integration  Postgres in TEST_DB_URL (go-integration job)
 #   ci-docker       docker + trivy (docker job)
 #   ci-chart        helm, optionally ct (chart-test.yml)
 # Secret scanning (secrets-scan.yml, gitleaks) has no local target.
-ci: fmt-check vet lint staticcheck govulncheck test-coverage test-race build mod-verify web-install web-ci
+ci: fmt-check vet lint staticcheck govulncheck test-coverage test-race build-matrix mod-verify web-install web-ci
 	@echo "All CI checks passed."
 
 ci-integration: test-integration

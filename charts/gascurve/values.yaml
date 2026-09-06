@@ -81,8 +81,9 @@ ingress:
   #   hosts: [gascurve.com]
 
 database:
-  # Provide the URL directly (rendered into a Secret) or point at an existing
-  # Secret. existingSecret wins when set.
+  # Required whenever the collector or the api is enabled: set exactly one of
+  # url (rendered into a chart-managed Secret) and existingSecret.
+  # values.schema.json rejects an install that sets neither or both.
   url: ""
   existingSecret: ""
   existingSecretKey: DB_URL
