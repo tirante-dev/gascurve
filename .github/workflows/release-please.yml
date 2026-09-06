@@ -16,18 +16,24 @@ jobs:
     # PR gets CI runs and the published release triggers the publish
     # workflows. Preferred: an org-owned GitHub App (RELEASE_APP_ID +
     # RELEASE_APP_PRIVATE_KEY, Contents and Pull requests read/write, installed
-    # on this repo only). Fallback: a classic PAT in RELEASE_PLEASE_TOKEN.
+    # on this repo only); the token request below is narrowed to exactly those
+    # two permissions regardless of what the App installation grants.
+    # Fallback: RELEASE_PLEASE_TOKEN, which must be a fine-grained personal
+    # access token scoped to this repository only, with Contents: read/write
+    # and Pull requests: read/write and nothing else. Do not use a classic PAT.
     env:
       HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' }}
     steps:
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         id: app
         if: env.HAS_RELEASE_APP == 'true'
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
 
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           token: ${{ steps.app.outputs.token || secrets.RELEASE_PLEASE_TOKEN }}

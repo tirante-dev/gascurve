@@ -13,14 +13,17 @@ gascurve shows live and historical gas pricing for Arbitrum Nitro chains (Robinh
 ## Commands
 
 ```bash
-make ci                 # everything CI runs: fmt, vet, lint, staticcheck, test-coverage, build, mod-verify, web-ci
+make ci                 # the CI workflow locally: fmt-check, vet, lint, staticcheck, govulncheck, test-coverage, test-race, build, mod-verify, web-install, web-ci
+make ci-integration     # go-integration job, needs TEST_DB_URL (Postgres)
+make ci-docker          # docker job: build the three images and Trivy-scan them (needs docker, trivy)
+make ci-chart           # chart-test workflow: helm lint --strict, template checks, ct lint if installed
 make build              # gascurve-collector, gascurve-api, gascurve-migrate
 make test               # go test ./...
 make test-coverage      # 90% line coverage gate over ./internal/...
 make test-race          # go test -race
 make test-integration   # needs TEST_DB_URL (Postgres); tagged `integration`
 make lint / lint-fix    # golangci-lint (.golangci.yml)
-make fmt                # gofmt -s + goimports -local github.com/tirante-dev/gascurve
+make fmt / fmt-check    # gofmt -s + goimports -local github.com/tirante-dev/gascurve (fmt-check never writes)
 make db-up / db-migrate / db-rollback
 make web-dev / web-lint / web-typecheck / web-test / web-test-coverage / web-build
 ```

@@ -18,7 +18,7 @@ spec:
         {{- include "gascurve.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: api
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- include "gascurve.goPodAnnotations" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "gascurve.serviceAccountName" . }}
       {{- with .Values.image.pullSecrets }}
@@ -29,14 +29,16 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.migrations.enabled }}
+      initContainers:
+        {{- include "gascurve.migrateInitContainer" (list . .Values.api.image) | nindent 8 }}
+      {{- end }}
       containers:
         - name: api
           image: {{ include "gascurve.image" (list . .Values.api.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- with .Values.containerSecurityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- include "gascurve.containerSecurityContext" (list . .Values.api.securityContext) | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.config.server.port }}

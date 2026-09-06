@@ -19,6 +19,18 @@ Ingress is disabled. Port-forward to try it:
   kubectl port-forward svc/{{ include "gascurve.fullname" . }}-web 3000:{{ .Values.web.service.port }}
   kubectl port-forward svc/{{ include "gascurve.fullname" . }}-api 8080:{{ .Values.api.service.port }}
 {{- end }}
+{{- if .Values.migrations.enabled }}
+
+Migrations run as an init container (gascurve-migrate up) on the collector
+and api pods before the main container starts. Watch them with:
+  kubectl logs deploy/{{ include "gascurve.fullname" . }}-api -c migrate
+{{- end }}
+{{- if .Values.database.existingSecret }}
+
+Database credentials come from Secret {{ .Values.database.existingSecret }}.
+Pods do not restart on their own when that Secret changes; after rotating it run:
+  kubectl rollout restart deploy/{{ include "gascurve.fullname" . }}-collector deploy/{{ include "gascurve.fullname" . }}-api
+{{- end }}
 {{- if and (not .Values.database.url) (not .Values.database.existingSecret) }}
 
 WARNING: no database configured. Set database.url or database.existingSecret.

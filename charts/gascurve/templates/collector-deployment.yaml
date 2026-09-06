@@ -21,7 +21,7 @@ spec:
         {{- include "gascurve.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: collector
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- include "gascurve.goPodAnnotations" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "gascurve.serviceAccountName" . }}
       {{- with .Values.image.pullSecrets }}
@@ -32,14 +32,16 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.migrations.enabled }}
+      initContainers:
+        {{- include "gascurve.migrateInitContainer" (list . .Values.collector.image) | nindent 8 }}
+      {{- end }}
       containers:
         - name: collector
           image: {{ include "gascurve.image" (list . .Values.collector.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- with .Values.containerSecurityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- include "gascurve.containerSecurityContext" (list . .Values.collector.securityContext) | nindent 12 }}
           env:
             {{- include "gascurve.goEnv" . | nindent 12 }}
           volumeMounts:

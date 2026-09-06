@@ -18,12 +18,11 @@ jobs:
     name: Chart Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: azure/setup-helm@v5
-
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: helm lint
         run: helm lint charts/gascurve --strict
 
@@ -36,7 +35,6 @@ jobs:
           ! grep -q 'kind: Secret' /tmp/ingress.yaml
           grep -q 'kind: Secret' /tmp/default.yaml
 
-      - uses: helm/chart-testing-action@v2
-
+      - uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
       - name: ct lint
         run: ct lint --config charts/ct.yaml --all

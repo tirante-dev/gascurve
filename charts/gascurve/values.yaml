@@ -16,6 +16,10 @@ collector:
   enabled: true
   image:
     repository: gascurve-collector
+  # Must match the image's numeric USER (distroless nonroot).
+  securityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
   resources:
     requests:
       cpu: 100m
@@ -29,6 +33,10 @@ api:
   replicaCount: 2
   image:
     repository: gascurve-api
+  # Must match the image's numeric USER (distroless nonroot).
+  securityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
   service:
     type: ClusterIP
     port: 8080
@@ -45,6 +53,10 @@ web:
   replicaCount: 2
   image:
     repository: gascurve-web
+  # Must match the image's numeric USER (nextjs, uid 1001).
+  securityContext:
+    runAsUser: 1001
+    runAsGroup: 1001
   service:
     type: ClusterIP
     port: 3000
@@ -75,9 +87,23 @@ database:
   existingSecret: ""
   existingSecretKey: DB_URL
 
+# Schema migrations run as an init container on the collector and api pods,
+# from the same image as the pod's main container, so the schema always
+# matches the binary. golang-migrate holds a Postgres advisory lock while it
+# runs, so concurrent pods serialize instead of racing. Disable only if you
+# apply migrations some other way (for example `gascurve-migrate up` in CD).
 migrations:
-  # Runs cmd/migrate as a pre-install/pre-upgrade hook using the API image.
   enabled: true
+  securityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
 
 # Rendered into config.yaml and mounted into the collector and api pods.
 # Environment overrides still apply (NETWORK_<NAME>_RPC_URL etc). For dedicated
@@ -141,6 +167,8 @@ podSecurityContext:
   seccompProfile:
     type: RuntimeDefault
 
+# Shared by every container. Per-component runAsUser/runAsGroup live under
+# collector/api/web/migrations.securityContext and are merged on top.
 containerSecurityContext:
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: true

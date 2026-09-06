@@ -22,34 +22,78 @@ jobs:
       REGISTRY: ${{ secrets.REGISTRY_HOST || 'registry.ahkc.win' }}
       REGISTRY_PROJECT: gascurve
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Resolve chart version
+      - name: Resolve chart and app versions
         id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            chart_version="${INPUT_VERSION}"
           else
-            echo "version=${GITHUB_REF_NAME#gascurve-chart-v}" >> "$GITHUB_OUTPUT"
+            chart_version="${RELEASE_TAG#gascurve-chart-v}"
+          fi
+          if ! printf '%s\n' "${chart_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Refusing to publish: chart version '${chart_version}' is not a plain semantic version"
+            exit 1
+          fi
+          app_version="$(jq -r '."."' .release-please-manifest.json)"
+          if ! printf '%s\n' "${app_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::.release-please-manifest.json root version '${app_version}' is not a plain semantic version"
+            exit 1
+          fi
+          echo "chart=${chart_version}" >> "$GITHUB_OUTPUT"
+          echo "app=${app_version}" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      # The chart's appVersion is whatever the root release-please manifest
+      # says. Chart and app releases are separate PRs, so make sure every
+      # image for that app version has actually been published before the
+      # chart that references it can exist.
+      - name: Verify application images exist
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app }}
+          CHART_VERSION: ${{ steps.version.outputs.chart }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for image in gascurve-collector gascurve-api gascurve-web; do
+            ref="${REGISTRY}/${REGISTRY_PROJECT}/${image}:${APP_VERSION}"
+            if docker manifest inspect "${ref}" > /dev/null 2>&1; then
+              echo "ok: ${ref}"
+            else
+              echo "::error::Image ${ref} does not exist in the registry"
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::Refusing to publish chart ${CHART_VERSION} with appVersion ${APP_VERSION}: publish the application release v${APP_VERSION} first (Docker Publish workflow), then re-run this workflow."
+            exit 1
           fi
 
-      - uses: azure/setup-helm@v5
-
-      - name: Registry login
+      - name: Helm registry login
         env:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: echo "${REGISTRY_PASSWORD}" | helm registry login "${REGISTRY}" -u "${REGISTRY_USERNAME}" --password-stdin
 
       - name: Package chart
-        run: |
-          set -euo pipefail
-          app_version="$(jq -r '."."' .release-please-manifest.json)"
-          if [ -z "$app_version" ] || [ "$app_version" = "null" ]; then
-            echo "::error::.release-please-manifest.json is missing the root app version"
-            exit 1
-          fi
-          helm package charts/gascurve --version "${{ steps.version.outputs.version }}" --app-version "${app_version}"
+        env:
+          CHART_VERSION: ${{ steps.version.outputs.chart }}
+          APP_VERSION: ${{ steps.version.outputs.app }}
+        run: helm package charts/gascurve --version "${CHART_VERSION}" --app-version "${APP_VERSION}"
 
       - name: Push chart
-        run: helm push gascurve-${{ steps.version.outputs.version }}.tgz oci://${REGISTRY}/${REGISTRY_PROJECT}/charts
+        env:
+          CHART_VERSION: ${{ steps.version.outputs.chart }}
+        run: helm push "gascurve-${CHART_VERSION}.tgz" "oci://${REGISTRY}/${REGISTRY_PROJECT}/charts"

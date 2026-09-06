@@ -95,3 +95,55 @@ Environment shared by the Go binaries.
 {{ toYaml . }}
 {{- end }}
 {{- end }}
+
+{{/*
+Container securityContext for a component: the shared containerSecurityContext
+merged with the component's own block (numeric runAsUser/runAsGroup, which
+must match the image's USER so runAsNonRoot can be verified by the kubelet).
+Usage: include "gascurve.containerSecurityContext" (list . .Values.api.securityContext)
+*/}}
+{{- define "gascurve.containerSecurityContext" -}}
+{{- $root := index . 0 -}}
+{{- $component := index . 1 -}}
+{{- toYaml (mergeOverwrite (deepCopy $root.Values.containerSecurityContext) (default (dict) $component)) -}}
+{{- end }}
+
+{{/*
+Annotations that roll the Go pods when chart-managed inputs change. The
+database Secret checksum is only emitted when the chart renders that Secret;
+an external Secret (database.existingSecret) is not tracked, see README.
+*/}}
+{{- define "gascurve.goPodAnnotations" -}}
+checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
+{{- if and (not .Values.database.existingSecret) .Values.database.url }}
+checksum/db-secret: {{ include (print .Template.BasePath "/secret.yaml") . | sha256sum }}
+{{- end }}
+{{- end }}
+
+{{/*
+Migration init container. Runs the migrations embedded in the same image as
+the main container, so the schema is never newer or older than the binary
+that follows it. golang-migrate takes a Postgres advisory lock, so the
+collector and api pods can start at the same time without racing.
+Usage: include "gascurve.migrateInitContainer" (list . .Values.api.image)
+*/}}
+{{- define "gascurve.migrateInitContainer" -}}
+{{- $root := index . 0 -}}
+{{- $image := index . 1 -}}
+- name: migrate
+  image: {{ include "gascurve.image" (list $root $image) | quote }}
+  imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+  command: ["/app/gascurve-migrate", "up"]
+  securityContext:
+    {{- include "gascurve.containerSecurityContext" (list $root $root.Values.migrations.securityContext) | nindent 4 }}
+  env:
+    {{- include "gascurve.goEnv" $root | nindent 4 }}
+  volumeMounts:
+    - name: config
+      mountPath: /etc/gascurve
+      readOnly: true
+  {{- with $root.Values.migrations.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

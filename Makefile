@@ -1,4 +1,4 @@
-.PHONY: all build build-collector build-api build-migrate run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt staticcheck govulncheck mod-verify ci clean db-up db-down db-migrate db-rollback docker-build web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
+.PHONY: all build build-collector build-api build-migrate run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
 
 GOCMD=go
 GOBUILD=$(GOCMD) build
@@ -72,6 +72,18 @@ fmt:
 	gofmt -s -w .
 	goimports -w -local $(MODULE) .
 
+# Same check CI runs; never writes files.
+fmt-check:
+	@GOFMT_FILES="$$(gofmt -l -s .)"; \
+	GOIMPORTS_FILES="$$(goimports -l -local $(MODULE) .)"; \
+	if [ -n "$$GOFMT_FILES" ] || [ -n "$$GOIMPORTS_FILES" ]; then \
+		echo "FAIL: formatting issues, run 'make fmt'"; \
+		echo "gofmt:"; echo "$$GOFMT_FILES"; \
+		echo "goimports:"; echo "$$GOIMPORTS_FILES"; \
+		exit 1; \
+	fi; \
+	echo "OK: formatting"
+
 staticcheck:
 	staticcheck ./...
 
@@ -108,6 +120,27 @@ docker-build:
 	docker build -f Dockerfile.api -t $(API_BINARY) .
 	docker build -f Dockerfile.web -t gascurve-web .
 
+# Same policy as the CI Trivy step.
+docker-scan:
+	trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed $(COLLECTOR_BINARY)
+	trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed $(API_BINARY)
+	trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed gascurve-web
+
+# ---------------------------------------------------------------- Chart
+
+chart-lint:
+	helm lint charts/gascurve --strict
+
+# Same render checks as .github/workflows/chart-test.yml.
+chart-template:
+	@set -e; \
+	helm template gascurve charts/gascurve --set database.url=postgres://x:y@db/gascurve > /dev/null; \
+	helm template gascurve charts/gascurve --set database.url=postgres://x:y@db/gascurve | grep -q 'kind: Secret'; \
+	helm template gascurve charts/gascurve --set database.existingSecret=my-db --set ingress.enabled=true --set ingress.host=gascurve.com > /dev/null; \
+	helm template gascurve charts/gascurve --set database.existingSecret=my-db --set ingress.enabled=true --set ingress.host=gascurve.com | grep -q 'kind: Ingress'; \
+	! helm template gascurve charts/gascurve --set database.existingSecret=my-db --set ingress.enabled=true --set ingress.host=gascurve.com | grep -q 'kind: Secret'; \
+	echo "OK: chart templates"
+
 # ---------------------------------------------------------------- Web
 
 web-install:
@@ -142,6 +175,20 @@ web-ci: web-lint web-typecheck web-test-coverage web-build
 
 # ---------------------------------------------------------------- CI
 
-# Everything GitHub Actions runs, in order. Catch problems here first.
-ci: fmt vet lint staticcheck test-coverage build mod-verify web-ci
+# `make ci` is the CI workflow (.github/workflows/ci.yml) minus the jobs that
+# need external services or tools: it never writes files (fmt-check, not fmt)
+# and is self-contained on a fresh clone (web-install). The remaining CI jobs
+# have their own targets so they can be run when the prerequisites exist:
+#   ci-integration  Postgres in TEST_DB_URL (go-integration job)
+#   ci-docker       docker + trivy (docker job)
+#   ci-chart        helm, optionally ct (chart-test.yml)
+# Secret scanning (secrets-scan.yml, gitleaks) has no local target.
+ci: fmt-check vet lint staticcheck govulncheck test-coverage test-race build mod-verify web-install web-ci
 	@echo "All CI checks passed."
+
+ci-integration: test-integration
+
+ci-docker: docker-build docker-scan
+
+ci-chart: chart-lint chart-template
+	@if command -v ct > /dev/null 2>&1; then ct lint --config charts/ct.yaml --all; else echo "ct not installed, skipping ct lint"; fi
