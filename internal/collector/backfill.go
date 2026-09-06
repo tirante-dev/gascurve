@@ -74,8 +74,9 @@ func (f *Follower) saveCursor(ctx context.Context, s db.Store, c *backfillCursor
 	return s.SetState(ctx, f.chainID, db.StateBackfillCursor, string(b))
 }
 
-// BackfillStep advances the backfill by at most one header batch. It only
-// spends RPC budget the fast loop is not using. On archive networks the
+// BackfillStep advances the backfill by at most one header batch, sized
+// to the RPC budget the other loops leave spare (at least
+// minBackfillBatch, queued for its turn). On archive networks the
 // replay is pinned to the real state every backfill_anchor_interval
 // blocks; otherwise it is a pure replay from the segment's starting
 // backlogs. Buckets in the hour of the first live block are rebuilt from
@@ -107,12 +108,14 @@ func (f *Follower) BackfillStep(ctx context.Context) (BackfillStatus, error) {
 		return BackfillIdle, nil
 	}
 	remaining := c.End - c.Next
+	// The batch is sized to what the bucket holds spare, so the backfill
+	// never holds the pacer's turnstile through a long sleep and the
+	// other loops' turns come soon, but never below the smallest batch:
+	// for that it queues first come, first served with the other bulk
+	// work. The fast tick keeps its reserve either way.
 	n := min(uint64(f.cfg.HeaderBatchSize), remaining)
 	if avail := uint64(max(f.rpc.Available(), 0)); avail < n {
-		n = avail
-	}
-	if n < min(minBackfillBatch, remaining) {
-		return BackfillIdle, nil
+		n = max(avail, min(minBackfillBatch, remaining))
 	}
 	numbers := make([]uint64, 0, n)
 	for i := uint64(0); i < n; i++ {

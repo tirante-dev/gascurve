@@ -99,10 +99,15 @@ func TestBackfillSegments(t *testing.T) {
 		t.Fatalf("catching up: %v %v", st, err)
 	}
 	f.catchingUp.Store(false)
-	// Nor without spare budget.
+	// Without spare budget the smallest batch still goes, queued for its
+	// turn at the pacer, so a demanding fast tick slows the backfill down
+	// rather than stopping it.
 	rpc.available = 0
-	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
-		t.Fatalf("no budget: %v %v", st, err)
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("no spare budget: %v %v", st, err)
+	}
+	if calls := rpc.headerCalls; len(calls) == 0 || len(calls[len(calls)-1]) != minBackfillBatch {
+		t.Fatalf("the smallest batch goes without spare budget: %v", calls)
 	}
 	rpc.available = 1000
 

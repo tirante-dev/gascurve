@@ -42,6 +42,7 @@ networks:
     ws_url: wss://node.example/ws
     calls_per_second: 0
     archive: true
+    tick_interval: 250ms
     enabled: true
     fallbacks:
       - rpc_url: https://spare.example
@@ -86,11 +87,11 @@ func TestLoadWith(t *testing.T) {
 		t.Fatalf("enabled networks: %+v", cfg.EnabledNetworks())
 	}
 	rh := cfg.Networks[0]
-	if rh.WSURL != "" || rh.Archive || rh.Unlimited() {
+	if rh.WSURL != "" || rh.Archive || rh.Unlimited() || rh.TickInterval != 0 || rh.EffectiveTickInterval(cfg.Collector) != 2*time.Second {
 		t.Fatalf("optional fields should default off: %+v", rh)
 	}
 	ded := cfg.Networks[2]
-	if ded.WSURL != "wss://node.example/ws" || !ded.Archive || !ded.Unlimited() {
+	if ded.WSURL != "wss://node.example/ws" || !ded.Archive || !ded.Unlimited() || ded.TickInterval != 250*time.Millisecond || ded.EffectiveTickInterval(cfg.Collector) != 250*time.Millisecond {
 		t.Fatalf("dedicated network: %+v", ded)
 	}
 	if len(rh.Endpoints()) != 1 || rh.Endpoints()[0] != rh.Primary() || rh.Primary().RPCURL != "https://rpc.example" {
@@ -171,7 +172,9 @@ func TestEnvOverrides(t *testing.T) {
 		"NETWORK_ARBITRUM_ONE_CALLS_PER_SECOND": "7.5",
 		"NETWORK_ARBITRUM_ONE_WS_URL":           "wss://arb.example/ws",
 		"NETWORK_ARBITRUM_ONE_ARCHIVE":          "true",
+		"NETWORK_ARBITRUM_ONE_TICK_INTERVAL":    "500ms",
 		"NETWORK_DEDICATED_ARCHIVE":             "false",
+		"NETWORK_DEDICATED_TICK_INTERVAL":       "1s",
 	})
 	cfg, err := LoadWith(Options{Path: p, RequireRPC: true, Getenv: env})
 	if err != nil {
@@ -181,11 +184,11 @@ func TestEnvOverrides(t *testing.T) {
 		t.Fatalf("env overrides not applied: %+v", cfg)
 	}
 	arb := cfg.Networks[1]
-	if arb.RPCURL != "https://arb.example" || !arb.Enabled || arb.CallsPerSecond != 7.5 || arb.WSURL != "wss://arb.example/ws" || !arb.Archive {
+	if arb.RPCURL != "https://arb.example" || !arb.Enabled || arb.CallsPerSecond != 7.5 || arb.WSURL != "wss://arb.example/ws" || !arb.Archive || arb.TickInterval != 500*time.Millisecond {
 		t.Fatalf("network overrides not applied: %+v", arb)
 	}
-	if cfg.Networks[2].Archive {
-		t.Fatal("NETWORK_DEDICATED_ARCHIVE=false not applied")
+	if cfg.Networks[2].Archive || cfg.Networks[2].TickInterval != time.Second {
+		t.Fatalf("NETWORK_DEDICATED_ARCHIVE=false and NETWORK_DEDICATED_TICK_INTERVAL=1s not applied: %+v", cfg.Networks[2])
 	}
 	if arb.EnvKey() != "NETWORK_ARBITRUM_ONE" {
 		t.Fatalf("EnvKey = %q", arb.EnvKey())
@@ -206,6 +209,8 @@ func TestEnvErrors(t *testing.T) {
 		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "+Inf"},
 		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "Infinity"},
 		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "10001"},
+		{"NETWORK_ROBINHOOD_TICK_INTERVAL": "soon"},
+		{"NETWORK_ROBINHOOD_TICK_INTERVAL": "-1s"},
 	} {
 		if _, err := LoadWith(Options{Path: p, Getenv: envOf(m)}); err == nil {
 			t.Fatalf("expected error for %v", m)
@@ -300,6 +305,7 @@ func TestValidate(t *testing.T) {
 		"fallback huge":   func(c *Config) { c.Networks[0].Fallbacks[0].CallsPerSecond = MaxCallsPerSecond + 1 },
 		"fallback ws":     func(c *Config) { c.Networks[0].Fallbacks[0].WSURL = "http://y" },
 		"fallback rpc":    func(c *Config) { c.Networks[0].Fallbacks[0].RPCURL = "" },
+		"network tick":    func(c *Config) { c.Networks[0].TickInterval = -time.Second },
 	}
 	for name, mutate := range cases {
 		c := base()

@@ -1,10 +1,11 @@
 // Package config loads gascurve configuration from a YAML file (config.yaml
 // or CONFIG_PATH) and applies environment overrides: DB_URL, PORT, LOG_LEVEL,
 // DEV_MODE and per-network NETWORK_<NAME>_RPC_URL, NETWORK_<NAME>_WS_URL,
-// NETWORK_<NAME>_ENABLED, NETWORK_<NAME>_CALLS_PER_SECOND and
-// NETWORK_<NAME>_ARCHIVE, where NAME is the network name upper-cased with
-// dashes replaced by underscores. Fallback endpoints come from the
-// positional, comma-separated NETWORK_<NAME>_FALLBACK_RPC_URLS,
+// NETWORK_<NAME>_ENABLED, NETWORK_<NAME>_CALLS_PER_SECOND,
+// NETWORK_<NAME>_ARCHIVE and NETWORK_<NAME>_TICK_INTERVAL, where NAME is
+// the network name upper-cased with dashes replaced by underscores.
+// Fallback endpoints come from the positional, comma-separated
+// NETWORK_<NAME>_FALLBACK_RPC_URLS,
 // NETWORK_<NAME>_FALLBACK_WS_URLS, NETWORK_<NAME>_FALLBACK_ARCHIVE and
 // NETWORK_<NAME>_FALLBACK_CALLS_PER_SECOND.
 package config
@@ -91,7 +92,8 @@ type DatabaseConfig struct {
 type CollectorConfig struct {
 	// TickInterval is the fast loop cadence when polling. With a ws_url the
 	// fast loop runs on every newHeads event instead and the timer only
-	// fires while the subscription is down.
+	// fires while the subscription is down. A network's own tick_interval
+	// overrides it for that network.
 	TickInterval time.Duration `mapstructure:"tick_interval"`
 	// SlowInterval is the cadence of the L1, balances, owner action and
 	// batch report loop.
@@ -153,7 +155,14 @@ type NetworkConfig struct {
 	// then anchors its replay to the real backlogs every
 	// collector.backfill_anchor_interval blocks.
 	Archive bool `mapstructure:"archive"`
-	Enabled bool `mapstructure:"enabled"`
+	// TickInterval overrides collector.tick_interval for this network: the
+	// fast loop's polling cadence and, with a ws_url, the safety timer
+	// that polls while the subscription is down. Zero means the
+	// collector-wide value. A dedicated endpoint can run at 250ms; a
+	// public one should stay at 1s, since every tick costs about five
+	// calls against its budget.
+	TickInterval time.Duration `mapstructure:"tick_interval"`
+	Enabled      bool          `mapstructure:"enabled"`
 	// Fallbacks are further endpoints for the same chain, tried in order
 	// when the active endpoint fails (see collector.failover_cooldown).
 	// Capabilities are routed independently of the order: the first
@@ -170,6 +179,15 @@ const MaxCallsPerSecond = 10_000
 
 // Unlimited reports whether the network has no call budget.
 func (n NetworkConfig) Unlimited() bool { return n.CallsPerSecond <= 0 }
+
+// EffectiveTickInterval returns the network's tick_interval when set,
+// otherwise the collector-wide one.
+func (n NetworkConfig) EffectiveTickInterval(c CollectorConfig) time.Duration {
+	if n.TickInterval > 0 {
+		return n.TickInterval
+	}
+	return c.TickInterval
+}
 
 // Primary returns the network's primary endpoint.
 func (n NetworkConfig) Primary() EndpointConfig {
@@ -324,6 +342,13 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 			}
 			n.CallsPerSecond = f
 		}
+		if s, ok := getenv(key + "_TICK_INTERVAL"); ok && s != "" {
+			d, err := time.ParseDuration(s)
+			if err != nil {
+				return fmt.Errorf("%s_TICK_INTERVAL: %w", key, err)
+			}
+			n.TickInterval = d
+		}
 		if err := applyFallbackEnv(n, getenv); err != nil {
 			return err
 		}
@@ -385,9 +410,10 @@ func envList(getenv func(string) (string, bool), name string) []string {
 }
 
 // Validate checks invariants: unique names and chain IDs, positive
-// intervals, sane batch sizes, non-negative call budgets, ws:// or wss://
-// ws_url values and, when requireRPC is set, an RPC URL for every enabled
-// network.
+// intervals (a network's tick_interval may also be zero, meaning the
+// collector-wide one), sane batch sizes, non-negative call budgets, ws://
+// or wss:// ws_url values and, when requireRPC is set, an RPC URL for
+// every enabled network.
 func (c *Config) Validate(requireRPC bool) error {
 	var errs []error
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
@@ -445,6 +471,9 @@ func (c *Config) Validate(requireRPC bool) error {
 		}
 		ids[n.ChainID] = true
 		errs = append(errs, validateEndpoint("network "+n.Name, n.Primary())...)
+		if n.TickInterval < 0 {
+			errs = append(errs, fmt.Errorf("network %s: tick_interval %v must be positive (omit it for collector.tick_interval)", n.Name, n.TickInterval))
+		}
 		if requireRPC && n.Enabled && n.RPCURL == "" {
 			errs = append(errs, fmt.Errorf("network %s: rpc_url is required (set %s_RPC_URL)", n.Name, n.EnvKey()))
 		}

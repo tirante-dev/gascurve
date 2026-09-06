@@ -71,7 +71,9 @@ func (f *Follower) refuse(ctx context.Context, err error) error {
 }
 
 // runFast drives the fast loop: on the timer when polling, on newHeads
-// events when a head source is configured.
+// events when a head source is configured. The timer runs at the
+// network's effective tick interval (its own tick_interval, else
+// collector.tick_interval).
 func (f *Follower) runFast(ctx context.Context) {
 	if f.heads == nil {
 		f.runPolling(ctx)
@@ -86,9 +88,9 @@ func (f *Follower) runPolling(ctx context.Context) {
 		if err := f.Tick(ctx); err != nil && ctx.Err() == nil {
 			f.log.Debug("tick error", "err", err.Error())
 		}
-		wait := f.cfg.TickInterval - f.now().Sub(start)
-		if wait < f.cfg.TickInterval/10 {
-			wait = f.cfg.TickInterval / 10
+		wait := f.tickInterval - f.now().Sub(start)
+		if wait < f.tickInterval/10 {
+			wait = f.tickInterval / 10
 		}
 		if err := f.sleep(ctx, wait); err != nil {
 			return
@@ -99,8 +101,8 @@ func (f *Follower) runPolling(ctx context.Context) {
 // runOnHeads ticks at every head the subscription delivers, sampling state
 // at that block number. Heads that arrive while a tick is running collapse
 // into one tick at the newest of them (the catch-up fetches the rest). The
-// timer keeps firing at tick_interval but only ticks while the
-// subscription is down, so the follower degrades to polling and picks the
+// timer keeps firing at the effective tick interval but only ticks while
+// the subscription is down, so the follower degrades to polling and picks the
 // subscription back up on its own; the first timer beat after the
 // subscription comes up runs one explicit tick, so a quiet chain is
 // sampled as soon as the subscription is acknowledged rather than at its
@@ -120,7 +122,7 @@ func (f *Follower) runOnHeads(ctx context.Context) {
 		default:
 		}
 	})
-	ticker := time.NewTicker(f.cfg.TickInterval)
+	ticker := time.NewTicker(f.tickInterval)
 	defer ticker.Stop()
 	polling, retry := true, false
 	for {

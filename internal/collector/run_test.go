@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -157,6 +158,73 @@ func TestRunManager(t *testing.T) {
 	}
 	if clockNow == nil {
 		t.Fatal("clock")
+	}
+}
+
+// TestFollowerTickInterval: a network's tick_interval overrides the
+// collector-wide one for the polling timer and for the safety timer of a
+// head-following follower; without one the collector-wide value applies.
+func TestFollowerTickInterval(t *testing.T) {
+	cfg := fastConfig()
+	cfg.TickInterval = time.Hour
+	if f := NewFollower(Options{Network: config.NetworkConfig{ChainID: 1}, Collector: cfg, RPC: newFakeRPC(1), Store: dbtest.New()}); f.TickInterval() != time.Hour {
+		t.Fatalf("collector-wide tick interval: %v", f.TickInterval())
+	}
+	rpc := newFakeRPC(1000)
+	heads := newFakeHeads()
+	f := NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, Enabled: true, TickInterval: 5 * time.Millisecond},
+		Collector: cfg,
+		RPC:       rpc,
+		Store:     dbtest.New(),
+		Log:       logger.Nop(),
+		Now:       func() time.Time { return baseTime.Add(100 * time.Second) },
+		Heads:     heads,
+	})
+	if f.TickInterval() != 5*time.Millisecond {
+		t.Fatalf("network tick interval: %v", f.TickInterval())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = f.Run(ctx)
+		close(done)
+	}()
+	// The subscription is down, so the safety timer polls: at the
+	// collector-wide hour it would never fire during the test.
+	waitFor(t, "timer polling at the network's interval", func() bool { return rpc.calledTimes("FastSample") >= 3 })
+	cancel()
+	<-done
+	// The polling follower (no head source) sleeps the network's interval
+	// between ticks.
+	var slept []time.Duration
+	var mu sync.Mutex
+	polling := NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, Enabled: true, TickInterval: 250 * time.Millisecond},
+		Collector: cfg,
+		RPC:       newFakeRPC(1000),
+		Store:     dbtest.New(),
+		Log:       logger.Nop(),
+		Now:       func() time.Time { return baseTime.Add(100 * time.Second) },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			mu.Lock()
+			slept = append(slept, d)
+			mu.Unlock()
+			return quickSleep(ctx, d)
+		},
+	})
+	ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = polling.Run(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, d := range slept {
+		found = found || d == 250*time.Millisecond
+	}
+	if !found {
+		t.Fatalf("the polling loop must sleep the network's tick interval: %v", slept)
 	}
 }
 

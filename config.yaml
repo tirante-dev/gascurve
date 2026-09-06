@@ -32,15 +32,24 @@ collector:
 # Every network is an Arbitrum Nitro chain. calls_per_second is the budget for
 # a public endpoint and counts JSON-RPC calls, including items inside a batch
 # request, because that is how the Robinhood public RPC meters. Set it to 0 for
-# a dedicated node (unlimited). A quarter of the budget (at least one call) is
-# reserved for the head sample, so bulk work (catch-up headers, log scans, the
-# backfill) never delays it. A QuickNode endpoint enforces 50 requests per
-# second, counting every item inside a batch, and reports the excess as a
-# JSON-RPC error (-32007 "50/second request limit reached") rather than an
-# HTTP 429; give it calls_per_second: 40 so the burst stays under its limit.
+# a dedicated node (unlimited). A quarter of the budget (at least one call per
+# second) is reserved for the head sample, so bulk work (catch-up headers, log
+# scans, the backfill) never delays that share; what a tick wants beyond it
+# queues first come, first served with the bulk work, so a demanding tick
+# slows the backfill down rather than stopping it. A QuickNode endpoint
+# enforces 50 requests per second, counting every item inside a batch, and
+# reports the excess as a JSON-RPC error (-32007 "50/second request limit
+# reached") rather than an HTTP 429; give it calls_per_second: 40 so the
+# burst stays under its limit.
 # Optional per network:
+#   tick_interval: overrides collector.tick_interval for this network (the
+#            polling cadence, and the safety timer while a newHeads
+#            subscription is down). A dedicated endpoint can run at 250ms;
+#            a public one should stay at 1s, since every tick costs about
+#            five calls and a 250ms tick would want most of a 4/s budget.
+#            Environment: NETWORK_<NAME>_TICK_INTERVAL.
 #   ws_url:  wss endpoint; the collector subscribes to newHeads and samples
-#            state at each head instead of polling every second.
+#            state at each head instead of polling every tick_interval.
 #   archive: true when the node serves historical state; the backfill then
 #            anchors the replay to real backlogs every backfill_anchor_interval
 #            blocks instead of relying on replay alone.

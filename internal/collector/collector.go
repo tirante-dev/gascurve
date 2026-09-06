@@ -95,7 +95,9 @@ const (
 	// batchFetchChunk is the full-transaction batch size (weighted heavier
 	// by public endpoints).
 	batchFetchChunk = 20
-	// minBackfillBatch is the smallest header batch the backfill sends.
+	// minBackfillBatch is the smallest header batch the backfill sends:
+	// with less spare budget than this it queues for it at the pacer
+	// rather than shrinking the batch further or idling.
 	minBackfillBatch = 5
 	// backfillIdle is the pause when the backfill has nothing to do.
 	backfillIdle = time.Second
@@ -152,6 +154,9 @@ type Follower struct {
 	sleep   func(context.Context, time.Duration) error
 	heads   HeadSource
 	chainID uint64
+	// tickInterval is the fast loop's cadence: the network's tick_interval
+	// when set, else collector.tick_interval.
+	tickInterval time.Duration
 
 	catchingUp atomic.Bool
 
@@ -289,8 +294,12 @@ func NewFollower(o Options) *Follower {
 	if f.cfg.BackfillAnchorInterval <= 0 {
 		f.cfg.BackfillAnchorInterval = defaultAnchorInterval
 	}
+	f.tickInterval = o.Network.EffectiveTickInterval(f.cfg)
 	return f
 }
+
+// TickInterval returns the fast loop's cadence for this network.
+func (f *Follower) TickInterval() time.Duration { return f.tickInterval }
 
 // unlimited reports whether the network has no call budget, which turns
 // off gap skipping and the two-transaction batch report prefilter.

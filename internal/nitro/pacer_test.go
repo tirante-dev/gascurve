@@ -3,18 +3,25 @@ package nitro
 import (
 	"context"
 	"errors"
+	"math"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func fastCtx(ctx context.Context) context.Context { return WithClass(ctx, Fast) }
 
+// third is the sleep for one token above the reserve while the reserve
+// refills on a 4/s pacer: three tokens per second, rounded up.
+var third = seconds(1.0 / 3)
+
 func TestPacer(t *testing.T) {
 	clock := newFakeClock()
 	p := NewPacer(4).withClock(clock.Now, clock.Sleep)
-	// Burst 8, one token of it reserved for the fast lane: a bulk caller
-	// sees 7 and may not batch more than that.
+	// Burst 8, one token of it the fast reserve: a bulk caller sees 7 and
+	// may not batch more than that.
 	if p.Rate() != 4 || p.Reserve() != 1 || p.Available() != 7 || p.MaxBatch() != 7 {
 		t.Fatalf("rate %v reserve %v available %d maxBatch %d", p.Rate(), p.Reserve(), p.Available(), p.MaxBatch())
 	}
@@ -25,7 +32,8 @@ func TestPacer(t *testing.T) {
 	if p.Available() != 0 {
 		t.Fatalf("available after burst = %d", p.Available())
 	}
-	// Four more fast tokens cost one second at 4/s.
+	// Four more fast tokens cost one second at 4/s: the reserve's token
+	// arrives with three shared ones.
 	if err := p.Wait(fastCtx(ctx), 4); err != nil {
 		t.Fatal(err)
 	}
@@ -45,46 +53,74 @@ func TestPacer(t *testing.T) {
 	if err := p.Wait(canceled, 100); err == nil {
 		t.Fatal("expected context error")
 	}
-	if small := NewPacer(0.25); small.burst != 1 || small.Reserve() != 1 || small.MaxBatch() != 1 || NewPacer(1000).MaxBatch() != MaxBatch {
-		t.Fatal("small rates keep a burst of one; a batch never exceeds the burst minus the reserve")
+	if small := NewPacer(0.25); small.burst != 1 || small.Reserve() != 1 || small.reserveRate != 0.25 || small.MaxBatch() != 1 || NewPacer(1000).MaxBatch() != MaxBatch {
+		t.Fatal("small rates keep a burst of one and refill the reserve at the rate; a batch never exceeds the burst minus the reserve")
+	}
+	// A rate below one call per second holds nothing above its reserve:
+	// a fast call takes the reserve; a bulk call can hold nothing, so it
+	// goes when the bucket is not in debt and overdraws it, and the next
+	// one waits the four seconds that pay the debt back first.
+	slow := NewPacer(0.25).withClock(clock.Now, clock.Sleep)
+	before := len(clock.Sleeps())
+	if err := slow.Wait(fastCtx(ctx), 1); err != nil || slow.tokens != 0 || len(clock.Sleeps()) != before {
+		t.Fatalf("slow fast call: %v tokens %v", err, slow.tokens)
+	}
+	clock.Advance(4 * time.Second)
+	for _, want := range []float64{0, -1} {
+		if err := slow.Wait(ctx, 1); err != nil || slow.tokens != want || len(clock.Sleeps()) != before {
+			t.Fatalf("slow bulk call: %v tokens %v (want %v) sleeps %v", err, slow.tokens, want, clock.Sleeps()[before:])
+		}
+	}
+	if err := slow.Wait(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if s := clock.Sleeps()[before:]; len(s) != 1 || s[0] != 4*time.Second || slow.tokens != -1 {
+		t.Fatalf("slow payback: sleeps %v tokens %v", s, slow.tokens)
 	}
 	// A bulk caller never draws the bucket below the reserve: the whole
 	// bulk share goes without sleeping and leaves the reserve for a fast
-	// call; the next bulk token then waits for the reserve to refill too.
-	before := len(clock.Sleeps())
-	if err := p.Wait(ctx, 7); err != nil || len(clock.Sleeps()) != before || p.Available() != 0 || p.tokens != 1 {
-		t.Fatalf("bulk share: %v sleeps %v available %d tokens %v", err, clock.Sleeps()[before:], p.Available(), p.tokens)
+	// call, which the reserve serves at once; the next bulk token then
+	// arrives at the rate minus the reserve rate while the reserve
+	// refills alongside.
+	before = len(clock.Sleeps())
+	if err := p.Wait(ctx, 7); err != nil || len(clock.Sleeps()) != before || p.Available() != 0 || p.tokens != 1 || p.fastTokens != 1 {
+		t.Fatalf("bulk share: %v sleeps %v available %d tokens %v reserve %v", err, clock.Sleeps()[before:], p.Available(), p.tokens, p.fastTokens)
 	}
-	if err := p.Wait(fastCtx(ctx), 1); err != nil || len(clock.Sleeps()) != before || p.tokens != 0 {
-		t.Fatalf("the reserve serves a fast call at once: %v sleeps %v tokens %v", err, clock.Sleeps()[before:], p.tokens)
+	if err := p.Wait(fastCtx(ctx), 1); err != nil || len(clock.Sleeps()) != before || p.tokens != 0 || p.fastTokens != 0 {
+		t.Fatalf("the reserve serves a fast call at once: %v sleeps %v tokens %v reserve %v", err, clock.Sleeps()[before:], p.tokens, p.fastTokens)
 	}
 	if err := p.Wait(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
-	if s := clock.Sleeps()[before:]; len(s) != 1 || s[0] != 500*time.Millisecond {
-		t.Fatalf("a bulk token waits for itself and the reserve: %v", s)
+	if s := clock.Sleeps()[before:]; len(s) != 1 || s[0] != third {
+		t.Fatalf("a bulk token waits for itself beside the refilling reserve: %v", s)
 	}
-	// Tokens are never borrowed: a request for the whole burst waits until
-	// the bucket is full again, and one above the burst waits for a full
-	// bucket and overdraws by the excess alone.
+	// Tokens are never borrowed: a fast request for the whole burst
+	// waits for a full bucket, taking the reserve's token as it arrives,
+	// and one above the burst waits for a full bucket and overdraws by
+	// the excess alone.
 	clock.Advance(time.Hour)
-	if err := p.Wait(fastCtx(ctx), 5); err != nil {
-		t.Fatal(err)
+	if err := p.Wait(fastCtx(ctx), 5); err != nil || p.tokens != 3 || p.fastTokens != 0 {
+		t.Fatalf("fast 5: %v tokens %v reserve %v", err, p.tokens, p.fastTokens)
 	}
 	before = len(clock.Sleeps())
 	if err := p.Wait(fastCtx(ctx), 8); err != nil {
 		t.Fatal(err)
 	}
-	if s := clock.Sleeps()[before:]; len(s) != 1 || s[0] != 1250*time.Millisecond {
-		t.Fatalf("full-burst wait = %v", s)
+	if s := clock.Sleeps()[before:]; len(s) != 2 || s[0] != time.Second || s[1] != third {
+		t.Fatalf("full-burst wait = %v, want the reserve's token after one second and the last shared token a third later", s)
+	}
+	if !near(p.tokens, 1.0/3) || !near(p.fastTokens, 1.0/3) {
+		t.Fatalf("after the full burst: tokens %v reserve %v", p.tokens, p.fastTokens)
 	}
 	clock.Advance(time.Hour)
-	if err := p.Wait(fastCtx(ctx), 10); err != nil || p.Available() != 0 {
-		t.Fatalf("overdraw: %v available %d", err, p.Available())
+	if err := p.Wait(fastCtx(ctx), 10); err != nil || p.Available() != 0 || p.tokens != -2 {
+		t.Fatalf("overdraw: %v available %d tokens %v", err, p.Available(), p.tokens)
 	}
+	// The excess is paid back first, then the reserve accrues again.
 	clock.Advance(750 * time.Millisecond)
-	if p.Available() != 0 || p.tokens != 1 {
-		t.Fatalf("the excess and then the reserve are paid back first: %d (%v tokens)", p.Available(), p.tokens)
+	if p.Available() != 0 || p.tokens != 1 || p.fastTokens != 0.25 {
+		t.Fatalf("payback: available %d tokens %v reserve %v", p.Available(), p.tokens, p.fastTokens)
 	}
 	clock.Advance(250 * time.Millisecond)
 	if p.Available() != 1 {
@@ -96,6 +132,53 @@ func TestPacer(t *testing.T) {
 	if err := p.Wait(ctx, 9); err != nil || len(clock.Sleeps()) != before || p.tokens != -1 {
 		t.Fatalf("bulk overdraw: %v sleeps %v tokens %v", err, clock.Sleeps()[before:], p.tokens)
 	}
+	// Paying it back: one bulk token needs the excess, then itself beside
+	// the refilling reserve.
+	if err := p.Wait(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if s := clock.Sleeps()[before:]; len(s) != 1 || s[0] != 250*time.Millisecond+third {
+		t.Fatalf("payback sleep = %v", s)
+	}
+}
+
+// TestPacerFastBeyondReserveSharesFCFS: a fast tick that wants more than
+// the reserve (five calls per tick, back to back, on a 4/s pacer) is
+// served the reserve first and shares the rest with bulk work first come,
+// first served, so a bulk caller still gets its batches through at
+// roughly the rate minus the reserve, where strict priority would have
+// starved it. The window budget holds throughout.
+func TestPacerFastBeyondReserveSharesFCFS(t *testing.T) {
+	clock := newFakeClock()
+	p := NewPacer(4).withClock(clock.Now, clock.Sleep)
+	ctx := context.Background()
+	start := clock.Now()
+	var fast, bulk int
+	for clock.Now().Sub(start) < 30*time.Second {
+		for _, n := range []int{1, 4} { // the tick: eth_blockNumber, then the state batch
+			if err := p.Wait(fastCtx(ctx), n); err != nil {
+				t.Fatal(err)
+			}
+			fast += n
+		}
+		if err := p.Wait(ctx, p.MaxBatch()); err != nil {
+			t.Fatal(err)
+		}
+		bulk += p.MaxBatch()
+	}
+	elapsed := clock.Now().Sub(start).Seconds()
+	if float64(fast+bulk) > 8+4*elapsed {
+		t.Fatalf("%d calls in %.2fs exceed the budget", fast+bulk, elapsed)
+	}
+	bulkRate, fastRate := float64(bulk)/elapsed, float64(fast)/elapsed
+	// Every round is one tick (five tokens, one of them the reserve's)
+	// and one seven-token batch: about three seconds, so bulk work runs
+	// at about 2.3/s against a rate minus reserve of 3/s, and the tick
+	// gets more than the reserve alone would give it.
+	if bulkRate < 2.2 || bulkRate > 3 || fastRate < 1.5 {
+		t.Fatalf("bulk %.2f/s fast %.2f/s over %.2fs: want bulk near the rate minus the reserve and fast above the reserve", bulkRate, fastRate, elapsed)
+	}
+	t.Logf("bulk %.2f/s, fast %.2f/s over %.2fs", bulkRate, fastRate, elapsed)
 }
 
 func TestClass(t *testing.T) {
@@ -121,10 +204,17 @@ func (p *Pacer) hold() func() {
 	}
 }
 
-// TestPacerQueueOrder: a fast caller is served before every queued bulk
-// caller, and bulk callers take tokens in arrival order, so a large batch
-// queued behind the head of the line goes out before a small call that
-// arrived after it, instead of being starved by it.
+func (p *Pacer) queued() (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.queue), p.held
+}
+
+// TestPacerQueueOrder: a fast caller the reserve covers never queues,
+// even while another caller holds the turnstile, and bulk callers take
+// tokens in arrival order, so a large batch queued behind the head of the
+// line goes out before a small call that arrived after it, instead of
+// being starved by it.
 func TestPacerQueueOrder(t *testing.T) {
 	p := NewPacer(1000)
 	ctx := context.Background()
@@ -152,30 +242,37 @@ func TestPacerQueueOrder(t *testing.T) {
 		}()
 		time.Sleep(20 * time.Millisecond) // the big bulk one is first in line
 	}
+	// The reserve (250/s) has covered the fast caller before the
+	// turnstile opens.
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	served := append([]int(nil), order...)
+	mu.Unlock()
+	if len(served) != 1 || served[0] != 2 {
+		t.Fatalf("served while held = %v, want the fast caller from the reserve", served)
+	}
 	release()
 	wg.Wait()
 	if len(order) != 3 || order[0] != 2 || order[1] != 0 || order[2] != 1 {
 		t.Fatalf("order = %v, want the fast caller first, then the bulk callers as they arrived", order)
 	}
 	// Queued callers of either class honor cancellation and leave the
-	// queue.
+	// queue; a fast caller wanting more than the reserve queues for the
+	// rest.
 	release = p.hold()
 	qctx, qcancel := context.WithCancel(ctx)
 	errs := make(chan error, 2)
 	go func() { errs <- p.Wait(qctx, 1) }()
-	go func() { errs <- p.Wait(WithClass(qctx, Fast), 1) }()
-	time.Sleep(20 * time.Millisecond)
+	go func() { errs <- p.Wait(WithClass(qctx, Fast), 2000) }()
+	waitFor(t, "two queued callers", func() bool { n, _ := p.queued(); return n == 2 })
 	qcancel()
 	for range 2 {
 		if err := <-errs; !errors.Is(err, context.Canceled) {
 			t.Fatalf("a queued caller honors cancellation: %v", err)
 		}
 	}
-	p.mu.Lock()
-	queued := len(p.fast) + len(p.bulk)
-	p.mu.Unlock()
-	if queued != 0 {
-		t.Fatalf("%d callers left in the queue", queued)
+	if n, _ := p.queued(); n != 0 {
+		t.Fatalf("%d callers left in the queue", n)
 	}
 	release()
 	// A caller canceled just as it was handed the turnstile passes it on.
@@ -185,100 +282,238 @@ func TestPacerQueueOrder(t *testing.T) {
 	}
 }
 
-// TestPacerFastPreemptsSleepingBulk: a bulk caller sleeping for tokens
-// steps aside the moment a fast caller arrives, serves it, and resumes at
-// the head of the bulk queue.
-func TestPacerFastPreemptsSleepingBulk(t *testing.T) {
-	clock := newFakeClock()
-	slept := make(chan time.Duration, 8)
-	unblock := make(chan struct{})
-	// A sleeper that blocks until the test lets it go (advancing the clock
-	// then) or the pacer interrupts it.
-	sleep := func(ctx context.Context, d time.Duration) error {
-		slept <- d
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-unblock:
-			clock.Advance(d)
-			return nil
+// near compares token levels, allowing for the nanosecond every sleep
+// is rounded up by.
+func near(a, b float64) bool { return math.Abs(a-b) < 1e-6 }
+
+// levels returns the bucket and reserve levels under the lock.
+func (p *Pacer) levels() (tokens, reserve float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.tokens, p.fastTokens
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// manualClock is a fake clock whose sleeps block until the test fires
+// them, so concurrent callers can be driven one wake-up at a time.
+type manualClock struct {
+	mu      sync.Mutex
+	now     time.Time
+	pending []*manualSleep
+}
+
+type manualSleep struct {
+	d     time.Duration
+	until time.Time
+	fired chan struct{}
+}
+
+func newManualClock() *manualClock {
+	return &manualClock{now: time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)}
+}
+
+func (c *manualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *manualClock) Sleep(ctx context.Context, d time.Duration) error {
+	c.mu.Lock()
+	s := &manualSleep{d: d, until: c.now.Add(d), fired: make(chan struct{})}
+	c.pending = append(c.pending, s)
+	c.mu.Unlock()
+	select {
+	case <-s.fired:
+		return nil
+	case <-ctx.Done():
+		c.mu.Lock()
+		c.remove(s)
+		c.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (c *manualClock) remove(s *manualSleep) {
+	for i, x := range c.pending {
+		if x == s {
+			c.pending = append(c.pending[:i], c.pending[i+1:]...)
+			return
 		}
 	}
-	p := NewPacer(4).withClock(clock.Now, sleep)
+}
+
+// sleeps returns the pending sleep durations, shortest first.
+func (c *manualClock) sleeps() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]time.Duration, 0, len(c.pending))
+	for _, s := range c.pending {
+		out = append(out, s.d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// expect waits until exactly these sleeps are pending, shortest first.
+func (c *manualClock) expect(t *testing.T, want ...time.Duration) {
+	t.Helper()
+	var got []time.Duration
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got = c.sleeps()
+		if len(got) == len(want) {
+			same := true
+			for i := range got {
+				// Within the nanosecond a sleep is rounded up by.
+				same = same && got[i]-want[i] <= time.Nanosecond && want[i]-got[i] <= time.Nanosecond
+			}
+			if same {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pending sleeps = %v, want %v", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// fire advances the clock to the earliest pending sleep and wakes every
+// sleeper due by then.
+func (c *manualClock) fire(t *testing.T) {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pending) == 0 {
+		t.Fatal("nothing to fire")
+	}
+	earliest := c.pending[0].until
+	for _, s := range c.pending[1:] {
+		if s.until.Before(earliest) {
+			earliest = s.until
+		}
+	}
+	c.now = earliest
+	kept := c.pending[:0]
+	for _, s := range c.pending {
+		if s.until.After(earliest) {
+			kept = append(kept, s)
+			continue
+		}
+		close(s.fired)
+	}
+	c.pending = kept
+}
+
+// TestPacerQueuedFastDrawsReserve: a fast caller queued behind a sleeping
+// bulk caller keeps drawing the reserve as it refills, then takes its turn
+// for the rest first come, first served; the bulk caller's own sleep is
+// never cut short by it. Every wake-up is driven by hand on a 4/s pacer
+// (reserve one token per second).
+func TestPacerQueuedFastDrawsReserve(t *testing.T) {
+	clock := newManualClock()
+	p := NewPacer(4).withClock(clock.Now, clock.Sleep)
 	ctx := context.Background()
-	if err := p.Wait(fastCtx(ctx), 8); err != nil { // drain the bucket
+	if err := p.Wait(fastCtx(ctx), 8); err != nil { // drain bucket and reserve
 		t.Fatal(err)
 	}
 	bulkDone := make(chan error, 1)
-	go func() { bulkDone <- p.Wait(ctx, 7) }()
-	// The bulk caller needs its seven plus the reserve: two seconds.
-	if d := <-slept; d != 2*time.Second {
-		t.Fatalf("bulk sleep = %v", d)
-	}
+	go func() { bulkDone <- p.Wait(ctx, 5) }()
+	// Five shared tokens: three arrive in the first second beside the
+	// refilling reserve, two more at the full rate after it.
+	clock.expect(t, 1500*time.Millisecond)
 	fastDone := make(chan error, 1)
-	go func() { fastDone <- p.Wait(fastCtx(ctx), 1) }()
-	// The fast arrival interrupts the bulk sleep; the fast caller then
-	// waits for its own token only.
-	if d := <-slept; d != 250*time.Millisecond {
-		t.Fatalf("fast sleep = %v", d)
+	go func() { fastDone <- p.Wait(fastCtx(ctx), 3) }()
+	// The fast caller queues and waits for the reserve's next token.
+	clock.expect(t, time.Second, 1500*time.Millisecond)
+	clock.fire(t) // t = 1 s: the reserve token goes to the queued fast caller
+	clock.expect(t, time.Second, 1500*time.Millisecond)
+	if tokens, reserve := p.levels(); tokens != 3 || reserve != 0 {
+		t.Fatalf("after the reserve draw: tokens %v reserve %v", tokens, reserve)
 	}
-	unblock <- struct{}{}
+	clock.fire(t) // t = 1.5 s: the bulk caller is half a token short, the draw kept the reserve refilling
+	clock.expect(t, seconds(0.5/3), time.Second)
+	clock.fire(t) // t = 1.67 s: the bulk caller is served and hands the turnstile on
+	if err := <-bulkDone; err != nil {
+		t.Fatal(err)
+	}
+	// The fast caller now holds the turnstile with two tokens to go and
+	// sleeps for whichever comes first: the reserve's next token.
+	clock.expect(t, third)
+	select {
+	case err := <-fastDone:
+		t.Fatalf("the fast caller must still be waiting: %v", err)
+	default:
+	}
+	clock.fire(t) // t = 2 s: one from the reserve, one shared
 	if err := <-fastDone; err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-bulkDone:
-		t.Fatalf("the bulk caller must still be waiting: %v", err)
-	default:
+	if tokens, reserve := p.levels(); !near(tokens, 0) || !near(reserve, 0) {
+		t.Fatalf("eight tokens in two seconds: tokens %v reserve %v", tokens, reserve)
 	}
-	// The bulk caller resumes and sleeps for the full bucket again.
-	if d := <-slept; d != 2*time.Second {
-		t.Fatalf("resumed bulk sleep = %v", d)
+	if n, held := p.queued(); n != 0 || held {
+		t.Fatalf("queue %d held %v", n, held)
 	}
-	unblock <- struct{}{}
-	if err := <-bulkDone; err != nil || p.tokens != 1 {
-		t.Fatalf("bulk: %v tokens %v", err, p.tokens)
-	}
-	// A bulk caller whose context ends while it sleeps releases the
+	// A fast caller canceled while it waits on the reserve leaves the
+	// queue; a bulk caller canceled while it sleeps releases the
 	// turnstile.
-	bctx, cancel := context.WithCancel(ctx)
+	bctx, bcancel := context.WithCancel(ctx)
 	go func() { bulkDone <- p.Wait(bctx, 7) }()
-	<-slept
-	cancel()
+	clock.expect(t, 2*time.Second)
+	fctx, fcancel := context.WithCancel(ctx)
+	go func() { fastDone <- p.Wait(fastCtx(fctx), 2) }()
+	clock.expect(t, time.Second, 2*time.Second)
+	fcancel()
+	if err := <-fastDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled queued fast caller: %v", err)
+	}
+	clock.expect(t, 2*time.Second)
+	if n, _ := p.queued(); n != 0 {
+		t.Fatalf("%d callers left in the queue", n)
+	}
+	bcancel()
 	if err := <-bulkDone; !errors.Is(err, context.Canceled) || p.held {
 		t.Fatalf("canceled bulk sleep: %v held %v", err, p.held)
 	}
-	// A bulk caller that yields to a fast caller and is canceled while it
-	// waits to come back leaves the queue.
-	bctx, cancel = context.WithCancel(ctx)
-	go func() { bulkDone <- p.Wait(bctx, 7) }()
-	<-slept
-	go func() { fastDone <- p.Wait(fastCtx(ctx), 2) }()
-	<-slept // the fast caller sleeps for its second token, the bulk one is parked
-	cancel()
-	if err := <-bulkDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled parked bulk: %v", err)
+	// A fast caller holding the turnstile and canceled while it sleeps
+	// releases it too.
+	fctx, fcancel = context.WithCancel(ctx)
+	go func() { fastDone <- p.Wait(fastCtx(fctx), 3) }()
+	clock.expect(t, time.Second)
+	fcancel()
+	if err := <-fastDone; !errors.Is(err, context.Canceled) || p.held {
+		t.Fatalf("canceled fast sleep: %v held %v", err, p.held)
 	}
-	unblock <- struct{}{}
-	if err := <-fastDone; err != nil {
-		t.Fatal(err)
-	}
-	p.mu.Lock()
-	queued, held := len(p.fast)+len(p.bulk), p.held
-	p.mu.Unlock()
-	if queued != 0 || held {
-		t.Fatalf("queue %d held %v", queued, held)
+	// A caller that leaves the queue just as it was handed the turnstile
+	// passes it on.
+	p.hold()
+	p.leave(&waiter{ready: make(chan struct{})})
+	if p.held {
+		t.Fatal("leave after a handoff must open the turnstile")
 	}
 }
 
 // TestPacerFastLatency: on a 4/s endpoint a bulk caller paying for a
 // 100-item reservation, in the chunks an endpoint sends, never delays a
-// fast call beyond one token interval, where first come first served
-// would have parked it behind a two second sleep.
+// fast call: the first is served from the reserve at once, the next one
+// within the reserve's refill, where first come first served alone would
+// have parked it behind a two second sleep.
 func TestPacerFastLatency(t *testing.T) {
 	p := NewPacer(4)
 	ctx := context.Background()
-	if err := p.Wait(fastCtx(ctx), 8); err != nil { // drain the bucket
+	if err := p.Wait(ctx, 7); err != nil { // drain the bulk share, the reserve stays
 		t.Fatal(err)
 	}
 	bctx, cancel := context.WithCancel(ctx)
@@ -300,13 +535,63 @@ func TestPacerFastLatency(t *testing.T) {
 	if err := p.Wait(fastCtx(ctx), 1); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("fast call waited %v behind a bulk reservation", elapsed)
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("fast call waited %v for the reserve it should have found", elapsed)
+	}
+	start = time.Now()
+	if err := p.Wait(fastCtx(ctx), 1); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("second fast call waited %v, want the reserve's refill", elapsed)
 	}
 	cancel()
 	if err := <-bulkDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("bulk caller: %v", err)
 	}
+}
+
+// TestPacerBulkProgressUnderFastLoad: with a fast caller asking for
+// tokens back to back, far above the reserve, bulk batches still go
+// through on a real clock, and the two together never exceed the budget.
+func TestPacerBulkProgressUnderFastLoad(t *testing.T) {
+	const rate = 20
+	p := NewPacer(rate)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := p.Wait(fastCtx(ctx), 2*rate); err != nil { // drain bucket and reserve
+		t.Fatal(err)
+	}
+	start := time.Now()
+	var fast, bulk atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for p.Wait(fastCtx(ctx), 1) == nil {
+			fast.Add(1)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for p.Wait(ctx, 5) == nil {
+			bulk.Add(5)
+		}
+	}()
+	time.Sleep(time.Second)
+	cancel()
+	wg.Wait()
+	elapsed := time.Since(start).Seconds()
+	f, b := fast.Load(), bulk.Load()
+	if float64(f+b) > 2*rate+rate*elapsed+1 {
+		t.Fatalf("%d fast + %d bulk in %.2fs exceed the budget", f, b, elapsed)
+	}
+	// The reserve alone gives the fast caller five a second; a bulk batch
+	// of five needs a third of a second of shared tokens.
+	if b < 5 || f < 4 {
+		t.Fatalf("fast %d bulk %d in %.2fs: bulk work must progress under sustained fast demand", f, b, elapsed)
+	}
+	t.Logf("fast %d, bulk %d in %.2fs", f, b, elapsed)
 }
 
 // TestPacerWindowedBudget: whatever the callers do, no window of ten

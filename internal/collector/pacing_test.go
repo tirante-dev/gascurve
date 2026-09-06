@@ -31,6 +31,7 @@ type chainServer struct {
 	items    int
 	requests int
 	maxItems int
+	samples  int // state samples answered (getGasPricingConstraints)
 }
 
 func word(v uint64) []byte {
@@ -126,6 +127,11 @@ func (c *chainServer) answer(method string, params []json.RawMessage) any {
 		if len(arg.Data) < 10 {
 			return &nitro.RPCError{Code: -32602, Message: "bad call"}
 		}
+		if arg.Data[:10] == nitro.SelectorHex(nitro.SigGetGasPricingConstraints) {
+			c.mu.Lock()
+			c.samples++
+			c.mu.Unlock()
+		}
 		return nitro.EncodeHex(c.callResult(arg.Data[:10]))
 	}
 	return &nitro.RPCError{Code: -32601, Message: "method not found: " + method}
@@ -188,14 +194,23 @@ func (c *chainServer) counts() (items, requests, maxItems int) {
 	return c.items, c.requests, c.maxItems
 }
 
+// sampled returns how many state samples the fast tick has taken.
+func (c *chainServer) sampled() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.samples
+}
+
 // TestLoopsRespectEndpointBudget: the fast loop, the slow loop and the
 // backfill running together against a real endpoint pool never put more
 // calls on the wire than the endpoint's bucket allows (burst plus rate
 // times the elapsed time, whatever window is taken) and never send a batch
 // the bucket cannot hold at once, while every loop still makes progress.
-// The fast loop's demand (five calls per tick, two ticks a second) stays
-// inside the budget: the fast lane is served first, so a fast loop that
-// wanted more than the whole rate would leave nothing for bulk work.
+// The network's own 250 ms tick makes the fast loop demanding: five calls
+// per tick, four ticks a second, the whole 20/s budget, which under strict
+// fast priority would have starved the slow loop and the backfill. The
+// fast lane has the reserve (5/s) to itself and queues for the rest first
+// come, first served, so the bulk loops still get through.
 func TestLoopsRespectEndpointBudget(t *testing.T) {
 	chain := newChainServer(t)
 	const rate = 20.0
@@ -208,9 +223,9 @@ func TestLoopsRespectEndpointBudget(t *testing.T) {
 	}, nitro.WithPoolClientOptions(nitro.WithHTTPClient(chain.srv.Client())))
 	store := dbtest.New()
 	f := NewFollower(Options{
-		Network: config.NetworkConfig{Name: "robinhood", ChainID: 4663, Enabled: true, CallsPerSecond: rate},
+		Network: config.NetworkConfig{Name: "robinhood", ChainID: 4663, Enabled: true, CallsPerSecond: rate, TickInterval: 250 * time.Millisecond},
 		Collector: config.CollectorConfig{
-			TickInterval: 500 * time.Millisecond, SlowInterval: 500 * time.Millisecond, HeaderBatchSize: 100,
+			TickInterval: time.Second, SlowInterval: 500 * time.Millisecond, HeaderBatchSize: 100,
 			BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: 30 * time.Second,
 		},
 		RPC:   pool,
@@ -218,6 +233,9 @@ func TestLoopsRespectEndpointBudget(t *testing.T) {
 		Log:   logger.Nop(),
 		Sleep: quickSleep,
 	})
+	if f.TickInterval() != 250*time.Millisecond {
+		t.Fatalf("the network's tick_interval must win: %v", f.TickInterval())
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	// A jump of 45 blocks makes the catch-up ask for more headers than the
@@ -232,14 +250,17 @@ func TestLoopsRespectEndpointBudget(t *testing.T) {
 	}()
 	time.Sleep(300 * time.Millisecond)
 	chain.jump(45)
-	// The run ends once the follower has caught up past the jump and the
-	// backfill, queued behind that catch-up, has taken its first step.
-	started := func() bool {
+	// The run ends once the follower has caught up past the jump, the
+	// backfill, sharing the budget with the demanding tick, has folded at
+	// least one batch (its cursor moved past the segment start, or a
+	// segment is finished), and the tick has kept sampling beside it.
+	progressed := func() bool {
 		c, err := f.loadCursor(ctx)
-		return err == nil && (c.Active || c.Done)
+		return err == nil && (c.Done || c.Next > c.SegStart || (c.Top > 0 && c.End < c.Top))
 	}
+	const minSamples = 6
 	deadline := time.Now().Add(20 * time.Second)
-	for (f.Head() < 1045 || !started()) && time.Now().Before(deadline) {
+	for (f.Head() < 1045 || !progressed() || chain.sampled() < minSamples) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
@@ -271,8 +292,14 @@ func TestLoopsRespectEndpointBudget(t *testing.T) {
 		t.Fatal("owner scan did not complete a pass")
 	}
 	c, err := f.loadCursor(context.Background())
-	if err != nil || (!c.Active && !c.Done) {
-		t.Fatalf("backfill did not start: %+v %v", c, err)
+	if err != nil || !progressed() {
+		t.Fatalf("backfill made no progress beside the demanding tick: %+v %v", c, err)
 	}
-	t.Logf("%d calls in %d requests over %s (budget %d, largest batch %d, head %d, backfill next %d)", items, requests, elapsed, budget, maxItems, f.Head(), c.Next)
+	// The tick kept sampling while the bulk loops ran, at least once a
+	// second from the reserve alone.
+	samples := chain.sampled()
+	if samples < minSamples || float64(samples) < elapsed.Seconds()/2 {
+		t.Fatalf("the fast loop stalled behind bulk work: %d samples in %s", samples, elapsed)
+	}
+	t.Logf("%d calls in %d requests over %s (budget %d, largest batch %d, head %d, %d samples, backfill next %d of %d..%d)", items, requests, elapsed, budget, maxItems, f.Head(), samples, c.Next, c.SegStart, c.End)
 }
