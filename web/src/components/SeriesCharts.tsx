@@ -7,8 +7,10 @@ import {
   buildChartPoints,
   FLOOR_COLOR,
   hasUnknownSets,
+  hasUnrecordedSplit,
   logDomain,
   MARKER_COLOR,
+  NULL_SPLIT_LABEL,
   segmentsFor,
   seriesColor,
   seriesCount,
@@ -60,11 +62,17 @@ function inForce(s: Segment): (row: Record<string, unknown>) => boolean {
   return (row) => Number(row.constraintSetId) === s.setId;
 }
 
-/** "C1 0.0034 · C2 3.2391" for the set in force at the point, or the unknown-split note. */
+/** "C1 0.0034 · C2 3.2391" for the set in force at the point, or the unknown-split note (set unknown, or split not recorded). */
 export function describeSplit(row: ChartPoint, segments: readonly Segment[]): string {
   if (!row.setKnown) return `${UNKNOWN_LABEL}: ${row.x.toFixed(4)}`;
+  if (!row.splitKnown) return `${NULL_SPLIT_LABEL}: ${row.x.toFixed(4)}`;
   const own = segments.filter((s) => s.setId === row.constraintSetId);
   return own.map((s) => `C${s.index + 1} ${(row[s.key] ?? 0).toFixed(4)}`).join(" · ");
+}
+
+/** "0.1234" for a known fee part, "n/a" for one that predates the fee split. */
+function formatFeePart(eth: number | null): string {
+  return eth === null ? "n/a" : formatSignificant(eth, 4);
 }
 
 function ChartBlock({ title, legend, children, height, label }: { title: string; legend?: { label: string; color: string; kind?: "rect" | "line" }[]; children: React.ReactNode; height: number; label: string }) {
@@ -125,7 +133,12 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
   const drawn = useMemo(() => withSetBoundaries(points), [points]);
   const markers = useMemo(() => (series ? markersFor(series) : []), [series]);
   const segments = useMemo(() => (series ? segmentsFor(series, model) : []), [series, model]);
+  // Two ways a point ends up in the unknown-split series: its set is not
+  // known (backlogs then go under the unlabelled slots too), or its set is
+  // known but its per-constraint split was never recorded.
   const unknown = series ? hasUnknownSets(series, model) : false;
+  const unrecorded = series ? hasUnrecordedSplit(series) : false;
+  const unknownSplit = unknown || unrecorded;
   const count = series ? seriesCount(series) : 0;
   const span = spanSeconds(points);
   const bucketSeconds = points.length > 1 ? points[1].t - points[0].t : 60;
@@ -165,6 +178,7 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
     when: inForce(s),
   }));
   if (unknown) contributionRows.push({ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => Number(r[UNKNOWN_KEY] ?? 0).toFixed(4), when: (r) => r.setKnown === false });
+  if (unrecorded) contributionRows.push({ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => Number(r[UNKNOWN_KEY] ?? 0).toFixed(4), when: (r) => r.setKnown === true && r.splitKnown === false });
   contributionRows.push({ label: "x total", value: (r) => Number(r.x).toFixed(4) });
   const gasRows: TooltipRow[] = [{ label: "gas per second", color: "var(--series-1)", value: (r) => `${formatGas(Number(r.gps))} gas/s` }];
   indices.forEach((i) => gasRows.push({ label: `target C${i + 1} in force`, color: seriesColor(i), value: (r) => `${formatGas(Number(r[targetKey(i)]))} gas/s`, when: (r) => typeof r[targetKey(i)] === "number" }));
@@ -173,7 +187,11 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
     ...(unknown ? [{ label: `backlog C${i + 1} (set unknown)`, color: UNKNOWN_COLOR, value: (r: Record<string, unknown>) => `${formatGas(Number(r[unknownBacklogKey(i)] ?? 0))} gas`, when: (r: Record<string, unknown>) => r.setKnown === false && typeof r[unknownBacklogKey(i)] === "number" }] : []),
   ];
   const backlogRows: TooltipRow[] = indices.flatMap(backlogRowsFor);
-  const contributionLegend = [...segments.map((s) => ({ label: s.label, color: s.color })), ...(unknown ? [{ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR }] : [])];
+  const contributionLegend = [
+    ...segments.map((s) => ({ label: s.label, color: s.color })),
+    ...(unknown ? [{ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR }] : []),
+    ...(unrecorded ? [{ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR }] : []),
+  ];
   const hasTargets = segments.some((s) => s.constraint !== null);
   const gasLegend = [{ label: "gas/s", color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
   // Markers carry their chronological number; the list under the charts decodes them.
@@ -211,7 +229,7 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
             {segments.map((s) => (
               <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
             ))}
-            {unknown ? <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} /> : null}
+            {unknownSplit ? <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} /> : null}
             {markerLines}
           </AreaChart>
         </ResponsiveContainer>
@@ -335,8 +353,8 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
                       );
                     })}
                     <td className="py-1 pr-3">{formatSignificant(p.feesEth, 4)}</td>
-                    <td className="py-1 pr-3">{formatSignificant(p.floorFeesEth, 4)}</td>
-                    <td className="py-1 pr-3">{formatSignificant(p.surplusFeesEth, 4)}</td>
+                    <td className="py-1 pr-3">{formatFeePart(p.floorFeesEth)}</td>
+                    <td className="py-1 pr-3">{formatFeePart(p.surplusFeesEth)}</td>
                     <td className="py-1 pr-3">{formatInteger(p.blocks)}</td>
                   </tr>
                 ))}

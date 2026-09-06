@@ -17,7 +17,7 @@ import { ChartTooltip } from "./ChartTooltip";
 import { targetValues } from "@/lib/smoothing";
 import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
-import { FeeFlows, feeTotals } from "./FeeFlows";
+import { FeeFlows, feeTotals, unsplitNote } from "./FeeFlows";
 import { L1Section } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
 import { describeSplit, SeriesCharts } from "./SeriesCharts";
@@ -160,6 +160,33 @@ describe("SeriesCharts", () => {
     const segments = segmentsFor(series, "constraints");
     expect(describeSplit(rows[0], segments)).toBe("C1 0.4000 · C2 0.6000");
     expect(describeSplit(rows[2], segments)).toBe("unknown split (total x, constraint set unknown): 0.5000");
+    const [unrecorded] = buildChartPoints({ ...series, points: [{ ...series.points[0], constraintBips: null }] }, "constraints");
+    expect(describeSplit(unrecorded, segments)).toBe("unknown split (total x, split not recorded): 1.0000");
+  });
+
+  it("shows history from before the split migration as the unrecorded split, with n/a for the fee parts", () => {
+    const early = point({ t: 1788679140, gasUsed: 100, feesWei: "2000000000000000000", floorFeesWei: null, surplusFeesWei: null, baseFeeMin: "100000000", baseFeeAvg: "300000000", baseFeeMax: "400000000", minBaseFee: "100000000", exponentBips: 10_000, constraintBips: null, backlogs: [1, 2], backlogsMax: [1, 2], constraintSetId: 5 });
+    render(<SeriesCharts series={{ ...series, points: [early, ...series.points] }} loading={false} model="constraints" />);
+    // Both unknown-split reasons are in the legend, since the range has both.
+    expect(screen.getAllByText("unknown split (total x, split not recorded)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("unknown split (total x, constraint set unknown)").length).toBeGreaterThan(0);
+    const details = screen.getByText(/Data table \(4 buckets/).closest("details") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    const table = within(details).getByRole("table");
+    const cell = within(table).getByText("unknown split (total x, split not recorded): 1.0000 (set 5)");
+    const cells = Array.from((cell.closest("tr") as HTMLTableRowElement).querySelectorAll("td")).map((td) => td.textContent);
+    // The backlogs are still listed under the set; the fee parts are not known, the total is.
+    expect(cells.slice(7, 9)).toEqual(["1", "2"]);
+    expect(cells.slice(9, 12)).toEqual(["2", "n/a", "n/a"]);
+    expect(within(table).getAllByText("n/a")).toHaveLength(2);
+    // The inspector reads the whole x out under the unrecorded split for that bucket, and under the set for a recorded one.
+    const slider = screen.getByRole("slider", { name: /Select a bucket/ });
+    fireEvent.change(slider, { target: { value: "0" } });
+    expect(screen.getByText("unknown split (total x, split not recorded)", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.queryByText("unknown split (total x, constraint set unknown)", { selector: "dt" })).toBeNull();
+    fireEvent.change(slider, { target: { value: "1" } });
+    expect(screen.queryByText("unknown split (total x, split not recorded)", { selector: "dt" })).toBeNull();
   });
 });
 
@@ -210,6 +237,41 @@ describe("FeeFlows", () => {
     render(<FeeFlows snapshot={null} series={null} />);
     expect(screen.getByText("No history loaded.")).toBeInTheDocument();
     expect(screen.getByText(/none yet/)).toBeInTheDocument();
+    expect(screen.queryByText(/predate the fee split/)).toBeNull();
+  });
+  it("treats buckets that predate the fee split as unknown: hatched rather than zero, left out of the totals, footnoted", () => {
+    const early = [
+      point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }),
+      point({ t: 1788679140, feesWei: "2000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }),
+    ];
+    const mixed: Series = { ...series, points: [...early, ...series.points] };
+    const totals = feeTotals(mixed);
+    expect(totals.total).toBeCloseTo(11);
+    expect(totals.floorEth).toBeCloseTo(2.2);
+    expect(totals.surplusEth).toBeCloseTo(2.8);
+    expect(totals.unsplit).toBe(2);
+    expect(feeTotals(series).unsplit).toBe(0);
+    expect(unsplitNote(1)).toBe("1 bucket predates the fee split");
+    expect(unsplitNote(1200)).toBe("1,200 buckets predate the fee split");
+    render(<FeeFlows snapshot={snapshot} series={mixed} model="constraints" />);
+    expect(screen.getByText(/^2 buckets predate the fee split/)).toBeInTheDocument();
+    expect(screen.getByText("unknown split (predates the fee split)")).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /hatched where the split predates the record/ })).toBeInTheDocument();
+    const details = screen.getByText(/Data table \(5 buckets\)/).closest("details") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    const rows = within(details).getAllByRole("row");
+    expect(rows).toHaveLength(6);
+    expect(within(rows[1]).getAllByText("n/a")).toHaveLength(2);
+    expect(within(rows[1]).getByText("4")).toBeInTheDocument();
+    expect(within(rows[3]).queryByText("n/a")).toBeNull();
+    expect(within(details).getAllByText("n/a")).toHaveLength(4);
+  });
+  it("shows no unknown-split legend or footnote when every bucket carries the split", () => {
+    render(<FeeFlows snapshot={snapshot} series={series} model="constraints" />);
+    expect(screen.queryByText(/predate the fee split/)).toBeNull();
+    expect(screen.queryByText("unknown split (predates the fee split)")).toBeNull();
+    expect(screen.getByText("congestion to network", { selector: "li span" })).toBeInTheDocument();
   });
 });
 

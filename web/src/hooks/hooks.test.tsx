@@ -66,7 +66,7 @@ vi.mock("@/lib/api/series", async (importOriginal) => {
   return { ...original, getSeries: (...args: unknown[]) => getSeriesMock(...args) };
 });
 
-import { appendBlocks, feedMatches, isNewerSnapshot, useLive } from "./useLive";
+import { appendBlocks, applyReorg, feedMatches, isNewerSnapshot, useLive } from "./useLive";
 import { useApi } from "./useApi";
 import { refetchIntervalFor, useSeries } from "./useSeries";
 import { DEFAULT_NETWORK, isValidNetworkName, NETWORK_STORAGE_KEY, readStoredNetwork, storeNetwork, useNetwork } from "./useNetwork";
@@ -114,6 +114,26 @@ describe("appendBlocks", () => {
     expect(ring.map((b) => b.number)).toEqual([2, 3]);
     expect(appendBlocks(ring, [block(2), block(3)])).toBe(ring);
     expect(appendBlocks(ring, [block(4)], 2).map((b) => b.number)).toEqual([3, 4]);
+  });
+});
+
+describe("applyReorg", () => {
+  it("drops the blocks above the ancestor and appends the canonical ones, within the ring size", () => {
+    const ring = [block(9), block(10), block(11), block(12)];
+    const canonical = [{ ...block(11), baseFee: "2" }, { ...block(12), baseFee: "2" }, block(13)];
+    const next = applyReorg(ring, 10, canonical, 3);
+    expect(next.map((b) => [b.number, b.baseFee])).toEqual([
+      [11, "2"],
+      [12, "2"],
+      [13, "1"],
+    ]);
+    expect(applyReorg(ring, 10, canonical).map((b) => b.number)).toEqual([9, 10, 11, 12, 13]);
+    // Nothing above the ancestor and nothing new: the ring is kept as it is.
+    expect(applyReorg(ring, 12, [])).toBe(ring);
+    expect(applyReorg(ring, 12, [block(12)])).toBe(ring);
+    // A fork deeper than the ring empties it before the canonical blocks land.
+    expect(applyReorg(ring, 5, [block(6)]).map((b) => b.number)).toEqual([6]);
+    expect(applyReorg([], 5, [block(6)]).map((b) => b.number)).toEqual([6]);
   });
 });
 
@@ -237,6 +257,40 @@ describe("useLive", () => {
 
     unmount();
     expect(latest().readyState).toBe(3);
+  });
+
+  it("replaces the ring's tail on a reorg and counts it, and ignores another chain's", async () => {
+    const { result } = renderHook(() => useLive("robinhood"));
+    await flush();
+    const socket = latest();
+    act(() => socket.serverOpen());
+    act(() => socket.serverHello("robinhood", 4663, 12, [block(9), block(10), block(11), block(12)]));
+    expect(result.current.reorgs).toBe(0);
+    const canonical = [
+      { ...block(11), baseFee: "7" },
+      { ...block(12), baseFee: "7" },
+    ];
+    act(() => socket.serverMessage({ type: "reorg", data: { chainId: 4663, ancestor: 10, blocks: canonical } }));
+    expect(result.current.recentBlocks.map((b) => [b.number, b.baseFee])).toEqual([
+      [9, "1"],
+      [10, "1"],
+      [11, "7"],
+      [12, "7"],
+    ]);
+    expect(result.current.reorgs).toBe(1);
+    // The snapshot is untouched until the tick that follows; new blocks build on the canonical tail.
+    expect(result.current.snapshot?.block.number).toBe(12);
+    act(() => socket.serverMessage({ type: "tick", data: snapshot(13) }));
+    act(() => socket.serverMessage({ type: "blocks", data: [block(13)] }));
+    expect(result.current.snapshot?.block.number).toBe(13);
+    expect(result.current.recentBlocks.map((b) => b.number)).toEqual([9, 10, 11, 12, 13]);
+    // Another chain's reorg is not this feed's.
+    act(() => socket.serverMessage({ type: "reorg", data: { chainId: 42161, ancestor: 1, blocks: [] } }));
+    expect(result.current.reorgs).toBe(1);
+    expect(result.current.recentBlocks).toHaveLength(5);
+    // A new hello starts the count over.
+    act(() => socket.serverHello("robinhood", 4663, 20, [block(20)]));
+    expect(result.current.reorgs).toBe(0);
   });
 
   it("keeps the feed when the route moves between a chain id and the network's name", async () => {

@@ -84,6 +84,10 @@ export type Segment = {
 
 export const UNKNOWN_KEY = "cUnknown";
 export const UNKNOWN_LABEL = "unknown split (total x, constraint set unknown)";
+/** The same series for points whose set is known but whose per-constraint split predates the record (a null `constraintBips`). */
+export const NULL_SPLIT_LABEL = "unknown split (total x, split not recorded)";
+/** Legend and tooltip label of the fee destination series for buckets whose floor and surplus predate the record. */
+export const UNSPLIT_FEES_LABEL = "unknown split (predates the fee split)";
 
 /** Backlog of slot `index` for points whose constraint set is unknown, keyed buI. */
 export function unknownBacklogKey(index: number): `bu${number}` {
@@ -126,9 +130,15 @@ export function latestSet(series: Pick<Series, "constraintSets">): ConstraintSet
   return sortedSets(series).pop();
 }
 
+/** How many constraint slots a point's data has: from its split when recorded, else from its backlogs. */
+function slotCount(p: Pick<SeriesPoint, "constraintBips" | "backlogs">): number {
+  const bips = p.constraintBips;
+  return bips !== null && bips.length > 0 ? bips.length : p.backlogs.length;
+}
+
 /** True when a point carries per-constraint data at all. */
 function hasConstraintData(p: Pick<SeriesPoint, "constraintBips" | "backlogs">): boolean {
-  return p.constraintBips.length > 0 || p.backlogs.length > 0;
+  return slotCount(p) > 0;
 }
 
 /**
@@ -160,14 +170,14 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">, m
 
 /** True when the set's constraint count matches the point's per-constraint data. */
 export function shapeMatches(set: Pick<ConstraintSet, "constraints">, p: Pick<SeriesPoint, "constraintBips" | "backlogs">): boolean {
-  const n = p.constraintBips.length > 0 ? p.constraintBips.length : p.backlogs.length;
+  const n = slotCount(p);
   return n === 0 || set.constraints.length === n;
 }
 
 /** The segments that describe a point: those of its set when the shape agrees, otherwise none (unknown split). */
 function ownSegments(bySet: Map<number, Segment[]>, p: Pick<SeriesPoint, "constraintSetId" | "constraintBips" | "backlogs">): Segment[] | undefined {
   const candidate = bySet.get(p.constraintSetId);
-  const n = p.constraintBips.length > 0 ? p.constraintBips.length : p.backlogs.length;
+  const n = slotCount(p);
   return candidate && (n === 0 || candidate.length === Math.min(n, MAX_SERIES)) ? candidate : undefined;
 }
 
@@ -191,11 +201,21 @@ export function hasUnknownSets(series: Pick<Series, "constraintSets" | "points">
   return series.points.some((p) => ownSegments(bySet, p) === undefined);
 }
 
+/** True when some point's per-constraint split was never recorded (history from before migration 000006). */
+export function hasUnrecordedSplit(series: Pick<Series, "points">): boolean {
+  return series.points.some((p) => p.constraintBips === null);
+}
+
+/** True when some point is drawn as the unknown split: its set is unknown, or its split was not recorded. */
+export function hasUnknownSplit(series: Pick<Series, "constraintSets" | "points">, model: PricerModel): boolean {
+  return hasUnrecordedSplit(series) || hasUnknownSets(series, model);
+}
+
 /** How many constraint slots the charts should draw: from the sets, or from the data for legacy networks. */
 export function seriesCount(series: Pick<Series, "constraintSets" | "points">): number {
   const fromSets = Math.max(0, ...series.constraintSets.map((s) => s.constraints.length));
   if (fromSets > 0) return Math.min(MAX_SERIES, fromSets);
-  const fromPoints = Math.max(0, ...series.points.map((p) => Math.max(p.backlogs.length, p.constraintBips.length)));
+  const fromPoints = Math.max(0, ...series.points.map((p) => Math.max(p.backlogs.length, p.constraintBips?.length ?? 0)));
   return Math.min(MAX_SERIES, fromPoints);
 }
 
@@ -218,14 +238,19 @@ export type ChartPoint = {
   x: number;
   gps: number;
   feesEth: number;
-  floorFeesEth: number;
-  surplusFeesEth: number;
+  /** The floor and congestion parts of `feesEth`; null for buckets that predate the fee split, when `unsplitFeesEth` carries the whole. */
+  floorFeesEth: number | null;
+  surplusFeesEth: number | null;
+  /** `feesEth` for buckets whose destination split is unknown, null otherwise. */
+  unsplitFeesEth: number | null;
   blocks: number;
   replayErrorBips: number;
   constraintSetId: number;
-  /** False when the point's set is not in the series; then only `cUnknown` carries x. */
+  /** False when the point's set is not in the series; then its backlogs sit under the `buI` keys. */
   setKnown: boolean;
-  /** Total x for points whose set is unknown, null otherwise. */
+  /** False when the point's per-constraint split is not drawn under its set (set unknown, or split not recorded); then only `cUnknown` carries x. */
+  splitKnown: boolean;
+  /** Total x for points whose split is unknown, null otherwise. */
   cUnknown: number | null;
   /** True for the duplicated row that closes a set at the boundary where its successor starts. */
   boundary?: boolean;
@@ -242,8 +267,12 @@ export type ChartPoint = {
 /**
  * Flattens a Series into chart rows with numbers the axes can scale.
  * Contributions come from the api's start-of-block `constraintBips`, never
- * from end-of-block backlogs, and are divided by 10,000 only for display.
- * One row per bucket; `withSetBoundaries` adds the rows the stacked charts need.
+ * from end-of-block backlogs, and are divided by 10,000 only for display. A
+ * point with a null split (history from before migration 000006) keeps its
+ * set for backlogs and targets but puts its whole x under `cUnknown`; null
+ * floor and surplus fees leave both null and put the bucket's fees under
+ * `unsplitFeesEth`, never zero. One row per bucket; `withSetBoundaries` adds
+ * the rows the stacked charts need.
  */
 export function buildChartPoints(series: Series, model: PricerModel): ChartPoint[] {
   const segments = segmentsFor(series, model);
@@ -251,6 +280,11 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
   const slots = seriesCount(series);
   return series.points.map((p) => {
     const own = ownSegments(bySet, p);
+    const split = p.constraintBips;
+    const feesEth = weiToEthNumber(p.feesWei);
+    const floorWei = p.floorFeesWei;
+    const surplusWei = p.surplusFeesWei;
+    const feeSplitKnown = floorWei !== null && surplusWei !== null;
     const row: ChartPoint = {
       t: p.t,
       feeAvg: weiToGweiNumber(p.baseFeeAvg),
@@ -259,13 +293,15 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
       floor: weiToGweiNumber(p.minBaseFee),
       x: bipsToXValue(p.exponentBips),
       gps: p.gasPerSecond,
-      feesEth: weiToEthNumber(p.feesWei),
-      floorFeesEth: weiToEthNumber(p.floorFeesWei),
-      surplusFeesEth: weiToEthNumber(p.surplusFeesWei),
+      feesEth,
+      floorFeesEth: feeSplitKnown ? weiToEthNumber(floorWei) : null,
+      surplusFeesEth: feeSplitKnown ? weiToEthNumber(surplusWei) : null,
+      unsplitFeesEth: feeSplitKnown ? null : feesEth,
       blocks: p.blocks,
       replayErrorBips: p.replayErrorBips,
       constraintSetId: p.constraintSetId,
       setKnown: own !== undefined,
+      splitKnown: own !== undefined && split !== null,
       cUnknown: null,
     };
     for (const s of segments) {
@@ -275,21 +311,21 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
     for (let i = 0; i < slots; i++) row[unknownBacklogKey(i)] = null;
     if (own) {
       for (const s of own) {
-        row[s.key] = bipsToXValue(p.constraintBips[s.index] ?? 0);
+        row[s.key] = split ? bipsToXValue(split[s.index] ?? 0) : null;
         row[s.backlogKey] = p.backlogs[s.index] ?? null;
         if (s.constraint) row[targetKey(s.index)] = s.constraint.target;
       }
     } else {
-      row.cUnknown = bipsToXValue(p.exponentBips);
       for (let i = 0; i < slots; i++) row[unknownBacklogKey(i)] = p.backlogs[i] ?? null;
     }
+    if (!row.splitKnown) row.cUnknown = bipsToXValue(p.exponentBips);
     return row;
   });
 }
 
-/** Which drawn series a row belongs to: its set when known, otherwise the unknown split. */
-function drawnSetOf(row: ChartPoint): number | null {
-  return row.setKnown ? row.constraintSetId : null;
+/** Which drawn series a row belongs to: its set when known (with or without a recorded split), otherwise the unknown split. */
+function drawnSeriesOf(row: ChartPoint): string {
+  return `${row.setKnown ? row.constraintSetId : "unknown"}:${row.splitKnown ? "split" : "unsplit"}`;
 }
 
 /**
@@ -306,8 +342,8 @@ export function withSetBoundaries(rows: readonly ChartPoint[]): ChartPoint[] {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const prev = i > 0 ? rows[i - 1] : undefined;
-    if (prev && drawnSetOf(prev) !== drawnSetOf(row)) {
-      const edge: ChartPoint = { ...row, boundary: true, constraintSetId: prev.constraintSetId, setKnown: prev.setKnown, cUnknown: prev.cUnknown };
+    if (prev && drawnSeriesOf(prev) !== drawnSeriesOf(row)) {
+      const edge: ChartPoint = { ...row, boundary: true, constraintSetId: prev.constraintSetId, setKnown: prev.setKnown, splitKnown: prev.splitKnown, cUnknown: prev.cUnknown };
       for (const key of Object.keys(prev)) {
         if (/^(c\d+_\d+|b\d+_\d+|bu\d+|tgt\d+)$/.test(key)) {
           const k = key as `c${number}_${number}`;
@@ -402,6 +438,18 @@ export function sumWeiEth<K extends string>(points: readonly Record<K, string>[]
   let total = 0n;
   for (const p of points) total += BigInt(p[key]);
   return weiToEthNumber(total);
+}
+
+/** Sum of a nullable wei-string field over the points that carry it, as ETH, and how many points were left out for lacking it. */
+export function sumKnownWeiEth<K extends string>(points: readonly Record<K, string | null>[], key: K): { eth: number; unknown: number } {
+  let total = 0n;
+  let unknown = 0;
+  for (const p of points) {
+    const value = p[key];
+    if (value === null) unknown += 1;
+    else total += BigInt(value);
+  }
+  return { eth: weiToEthNumber(total), unknown };
 }
 
 /** Span in seconds covered by the points (first to last bucket start plus one bucket). */

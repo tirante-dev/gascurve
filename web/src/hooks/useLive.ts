@@ -20,6 +20,8 @@ export type LiveState = {
   networkInfo: Network | null;
   /** Owner actions seen over the socket since the page loaded, newest first. */
   ownerActions: OwnerAction[];
+  /** Reorgs applied to this feed since its hello; a change means the ring's tail was replaced. */
+  reorgs: number;
   error: string | null;
 };
 
@@ -35,10 +37,11 @@ type Feed = {
   recentBlocks: BlockPoint[];
   networkInfo: Network | null;
   ownerActions: OwnerAction[];
+  reorgs: number;
 };
 
 function emptyFeed(key: NetworkKey | null): Feed {
-  return { key, snapshot: null, recentBlocks: [], networkInfo: null, ownerActions: [] };
+  return { key, snapshot: null, recentBlocks: [], networkInfo: null, ownerActions: [], reorgs: 0 };
 }
 
 /** True when the feed belongs to the keyed network: chain ids are the identity, names are aliases. */
@@ -58,6 +61,16 @@ export function appendBlocks(ring: BlockPoint[], incoming: BlockPoint[], size = 
   if (fresh.length === 0) return ring;
   const merged = ring.concat(fresh);
   return merged.length > size ? merged.slice(merged.length - size) : merged;
+}
+
+/**
+ * Applies a reorg to `ring`: every block above `ancestor` is dropped and the
+ * canonical `blocks` (oldest first) take their place. Returns `ring` itself
+ * when nothing changes.
+ */
+export function applyReorg(ring: BlockPoint[], ancestor: number, blocks: BlockPoint[], size = RECENT_BLOCKS_RING): BlockPoint[] {
+  const kept = ring.filter((b) => b.number <= ancestor);
+  return appendBlocks(kept.length === ring.length ? ring : kept, blocks, size);
 }
 
 /**
@@ -106,8 +119,14 @@ export function useLive(network: string): LiveState {
         network: wantedNetwork.current,
         socketFactory,
         onHello: (hello, key) => {
-          setFeed({ key, snapshot: hello.snapshot, recentBlocks: appendBlocks([], hello.recentBlocks), networkInfo: hello.network, ownerActions: [] });
+          setFeed({ key, snapshot: hello.snapshot, recentBlocks: appendBlocks([], hello.recentBlocks), networkInfo: hello.network, ownerActions: [], reorgs: 0 });
           setError(null);
+        },
+        onReorg: (reorg, key) => {
+          setFeed((prev) => {
+            const base = feedIs(prev, key) ? prev : emptyFeed(key);
+            return { ...base, key, recentBlocks: applyReorg(base.recentBlocks, reorg.ancestor, reorg.blocks), reorgs: base.reorgs + 1 };
+          });
         },
         onTick: (tick, key) => {
           setFeed((prev) => ({ ...(feedIs(prev, key) ? prev : emptyFeed(key)), key, snapshot: tick }));
@@ -190,6 +209,6 @@ export function useLive(network: string): LiveState {
 
   return useMemo(() => {
     const current = feedMatches(feed, network) ? feed : emptyFeed(null);
-    return { snapshot: current.snapshot, recentBlocks: current.recentBlocks, status, networkInfo: current.networkInfo, ownerActions: current.ownerActions, error };
+    return { snapshot: current.snapshot, recentBlocks: current.recentBlocks, status, networkInfo: current.networkInfo, ownerActions: current.ownerActions, reorgs: current.reorgs, error };
   }, [feed, network, status, error]);
 }

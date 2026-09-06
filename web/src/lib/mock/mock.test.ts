@@ -1,13 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api/core";
-import { baseFeeFromExponent, constraintExponentBips, contributionsBips } from "@/lib/pricer";
-import type { BlockPoint, ConstraintsResponse, LiveSnapshot, Network, OwnerAction, Series, StatusResponse } from "@/types";
+import { baseFeeFromExponent, constraintExponentBips, contributionsBips, step, toState } from "@/lib/pricer";
+import type { BlockPoint, ConstraintsResponse, LiveSnapshot, Network, OwnerAction, Series, ServerMessage, StatusResponse } from "@/types";
 import { findMockDef, findMockWorld, MOCK_NETWORKS, MockWebSocket, mockNow, mockRequest, resetMockWorlds } from "./index";
 import { Demand, hash01, isoToUnix, MockWorld } from "./world";
 import { ROBINHOOD } from "./defs";
 
 // 2026-09-06T07:20:00Z, the SPEC Appendix B snapshot time.
 const NOW_MS = 1788679200 * 1000;
+
+/** Narrows an api field the mock records in full; history from before the split migration is checked separately. */
+function recorded<T>(value: T | null): T {
+  if (value === null) throw new Error("expected a recorded value");
+  return value;
+}
+
+/** Σ gasUsed × minBaseFee over blocks: what the infra account is credited for them. */
+function floorWei(blocks: readonly BlockPoint[]): bigint {
+  return blocks.reduce((sum, b) => sum + BigInt(b.gasUsed) * BigInt(b.minBaseFee), 0n);
+}
 
 describe("mock world", () => {
   beforeEach(() => {
@@ -69,7 +80,7 @@ describe("mock world", () => {
       const b = blocks[i];
       expect(b.minBaseFee).toBe("20000000");
       expect(b.constraintBips).toHaveLength(2);
-      expect(b.constraintBips.reduce((sum, x) => sum + x, 0)).toBe(b.exponentBips);
+      expect(recorded(b.constraintBips).reduce((sum, x) => sum + x, 0)).toBe(b.exponentBips);
       if (i > 0 && b.ts === blocks[i - 1].ts) {
         // Same second, dt = 0: the split is the pricer's view of the previous block's end backlogs, before this block's gas.
         const expected = set.map((c, j) => Number(constraintExponentBips({ target: BigInt(c.target), window: BigInt(c.window), backlog: BigInt(blocks[i - 1].backlogs[j]) })));
@@ -162,10 +173,10 @@ describe("mock world", () => {
     expect(last.constraintBips).toEqual(lastBlock.constraintBips);
     expect(last.minBaseFee).toBe("20000000");
     for (const p of hour.points) {
-      expect(p.constraintBips.reduce((sum, x) => sum + x, 0)).toBe(p.exponentBips);
-      expect(BigInt(p.floorFeesWei) + BigInt(p.surplusFeesWei)).toBe(BigInt(p.feesWei));
-      expect(BigInt(p.floorFeesWei)).toBe(BigInt(p.gasUsed) * BigInt(p.minBaseFee));
-      expect(BigInt(p.surplusFeesWei)).toBeGreaterThanOrEqual(0n);
+      expect(recorded(p.constraintBips).reduce((sum, x) => sum + x, 0)).toBe(p.exponentBips);
+      expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei))).toBe(BigInt(p.feesWei));
+      expect(BigInt(recorded(p.floorFeesWei))).toBe(BigInt(p.gasUsed) * BigInt(p.minBaseFee));
+      expect(BigInt(recorded(p.surplusFeesWei))).toBeGreaterThanOrEqual(0n);
     }
 
     const day = world.series("24h", now);
@@ -284,9 +295,9 @@ describe("mock world", () => {
     const after = all.points.find((p) => p.t >= change);
     expect(before?.minBaseFee).toBe("100000000");
     expect(after?.minBaseFee).toBe("10000000");
-    if (before) expect(BigInt(before.floorFeesWei)).toBe(BigInt(before.gasUsed) * 100_000_000n);
-    if (after) expect(BigInt(after.floorFeesWei)).toBe(BigInt(after.gasUsed) * 10_000_000n);
-    for (const p of all.points) expect(BigInt(p.floorFeesWei) + BigInt(p.surplusFeesWei)).toBe(BigInt(p.feesWei));
+    if (before) expect(BigInt(recorded(before.floorFeesWei))).toBe(BigInt(before.gasUsed) * 100_000_000n);
+    if (after) expect(BigInt(recorded(after.floorFeesWei))).toBe(BigInt(after.gasUsed) * 10_000_000n);
+    for (const p of all.points) expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei))).toBe(BigInt(p.feesWei));
     // Bursts push the backlog over tolerance and the fee off the floor at least once a day.
     expect(series.points.some((p) => BigInt(p.baseFeeMax) > 10_000_000n)).toBe(true);
     expect(series.points.some((p) => BigInt(p.baseFeeMin) === 10_000_000n)).toBe(true);
@@ -295,6 +306,104 @@ describe("mock world", () => {
     expect(c.history).toEqual([]);
     expect(world.ownerActions()).toHaveLength(1);
     expect(world.series("all", now).ownerActions).toHaveLength(1);
+  });
+
+  it("serves the oldest Robinhood history without a split or fee destinations, as the api does for rows written before the migration", () => {
+    const world = findMockWorld("robinhood");
+    if (!world) throw new Error("no world");
+    const now = mockNow();
+    const all = world.series("all", now);
+    const cutoff = isoToUnix("2026-07-02T12:00:00Z");
+    const early = all.points.filter((p) => p.t < cutoff);
+    expect(early).toHaveLength(36);
+    for (const p of early) {
+      expect(p.constraintBips).toBeNull();
+      expect(p.floorFeesWei).toBeNull();
+      expect(p.surplusFeesWei).toBeNull();
+      // Everything else about the bucket is known.
+      expect(p.backlogs).toHaveLength(6);
+      expect(p.constraintSetId).toBe(1);
+      expect(p.exponentBips).toBeGreaterThanOrEqual(0);
+      expect(BigInt(p.feesWei)).toBeGreaterThan(0n);
+    }
+    for (const p of all.points.filter((p) => p.t >= cutoff)) {
+      expect(p.constraintBips).not.toBeNull();
+      expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei))).toBe(BigInt(p.feesWei));
+    }
+    // The shorter ranges never reach back that far, and the other networks record everything.
+    for (const range of ["1h", "24h", "30d"] as const) {
+      for (const p of world.series(range, now).points) expect(p.constraintBips).not.toBeNull();
+    }
+    const arbitrum = findMockWorld("arbitrum-one");
+    if (!arbitrum) throw new Error("no world");
+    for (const p of arbitrum.series("all", now).points) expect(p.floorFeesWei).not.toBeNull();
+  });
+
+  it("forks the tail on a reorg and keeps the blocks, balances, series and live snapshot consistent with the new chain", () => {
+    const world = findMockWorld("robinhood");
+    if (!world) throw new Error("no world");
+    const now = mockNow();
+    const before = world.recentBlocks(20);
+    const head = before[before.length - 1].number;
+    const infraBefore = BigInt(world.snapshot(now).accounts?.infra.balance ?? "0");
+    const hourBefore = world.series("1h", now);
+    const fork = world.reorg(3);
+    expect(fork).not.toBeNull();
+    if (!fork) return;
+    expect(fork.ancestor).toBe(head - 3);
+    expect(fork.blocks.map((b) => b.number)).toEqual([head - 2, head - 1, head]);
+    expect(fork.blocks.map((b) => b.ts)).toEqual(before.slice(-3).map((b) => b.ts));
+    expect(fork.blocks.map((b) => b.anchored)).toEqual(before.slice(-3).map((b) => b.anchored));
+    // The canonical blocks differ from the orphaned ones; everything before the ancestor is untouched.
+    expect(fork.blocks.map((b) => b.gasUsed)).not.toEqual(before.slice(-3).map((b) => b.gasUsed));
+    expect(world.recentBlocks(20).slice(0, 17)).toEqual(before.slice(0, 17));
+    expect(world.blocksAfter(fork.ancestor)).toEqual(fork.blocks);
+    expect(world.headBlock).toBe(head);
+    // The fork is priced by the pricer from the ancestor's end-of-block state.
+    const ancestor = before[before.length - 4];
+    const set = ROBINHOOD.constraintSets[ROBINHOOD.constraintSets.length - 1].constraints;
+    const state = toState(set.map((c, j) => ({ target: c.target, window: c.window, backlog: ancestor.backlogs[j] })));
+    const priced = step(state, BigInt(fork.blocks[0].ts - ancestor.ts), 20_000_000n);
+    expect(fork.blocks[0].constraintBips).toEqual(priced.contributions.map((c) => Number(c)));
+    expect(fork.blocks[0].baseFee).toBe(priced.baseFee.toString());
+    for (const b of fork.blocks) expect(recorded(b.constraintBips).reduce((sum, x) => sum + x, 0)).toBe(b.exponentBips);
+    // The live snapshot is the state after the canonical head.
+    const live = world.snapshot(now);
+    const last = fork.blocks[2];
+    expect(live.block.number).toBe(head);
+    expect(live.baseFee).toBe(last.baseFee);
+    expect(live.constraints.map((c) => c.backlog)).toEqual(last.backlogs);
+    expect(world.snapshotForBlock(last, now * 1000)).toEqual({ ...live, sampledAt: new Date(now * 1000).toISOString() });
+    // The balances credit the canonical blocks, not the orphaned ones.
+    expect(BigInt(live.accounts?.infra.balance ?? "0")).toBe(infraBefore - floorWei(before.slice(-3)) + floorWei(fork.blocks));
+    // The buckets the fork touched are rebuilt from the ring; the rest are as they were.
+    const hour = world.series("1h", now);
+    expect(hour.points).toHaveLength(hourBefore.points.length);
+    expect(hour.points.slice(0, -2)).toEqual(hourBefore.points.slice(0, -2));
+    const lastPoint = hour.points[hour.points.length - 1];
+    const inBucket = world.recentBlocks(1000).filter((b) => b.ts >= lastPoint.t && b.ts < lastPoint.t + 5);
+    expect(inBucket[inBucket.length - 1]).toEqual(last);
+    expect(lastPoint.blocks).toBe(inBucket.length);
+    expect(lastPoint.gasUsed).toBe(inBucket.reduce((sum, b) => sum + b.gasUsed, 0));
+    expect(BigInt(lastPoint.feesWei)).toBe(inBucket.reduce((sum, b) => sum + BigInt(b.gasUsed) * BigInt(b.baseFee), 0n));
+    expect(BigInt(recorded(lastPoint.floorFeesWei))).toBe(floorWei(inBucket));
+    expect(lastPoint.constraintBips).toEqual(last.constraintBips);
+    expect(lastPoint.backlogs).toEqual(last.backlogs);
+    expect(lastPoint.backlogsMax[0]).toBeGreaterThanOrEqual(Math.max(...inBucket.map((b) => b.backlogs[0])));
+    // The world keeps going from the fork.
+    world.advanceTo(now + 1);
+    expect(world.blocksAfter(head)[0].number).toBe(head + 1);
+    // A fork the ring cannot hold, or a depth that is not a whole number of blocks, is refused.
+    expect(world.reorg(0)).toBeNull();
+    expect(world.reorg(1.5)).toBeNull();
+    expect(world.reorg(world.recentBlocks(5000).length)).toBeNull();
+    // The legacy world rewinds its single backlog the same way.
+    const testnet = findMockWorld("robinhood-testnet");
+    if (!testnet) throw new Error("no world");
+    const testnetHead = testnet.headBlock;
+    const testnetFork = testnet.reorg(2);
+    expect(testnetFork?.blocks.map((b) => b.number)).toEqual([testnetHead - 1, testnetHead]);
+    expect(testnet.snapshot(now).legacy?.backlog).toBe(testnetFork?.blocks[1].backlogs[0]);
   });
 
   it("finds worlds by name or chain id and rejects unknown ones", () => {
@@ -466,6 +575,53 @@ describe("MockWebSocket", () => {
     const before = messages.length;
     vi.advanceTimersByTime(5000);
     expect(messages.length).toBe(before);
+  });
+
+  it("drives a reorg with the scenario helper: queued blocks go out first, then the reorg, then ticks continue from the fork", () => {
+    const socket = new MockWebSocket("ws://localhost:8080/api/v1/ws?network=robinhood");
+    const messages: ServerMessage[] = [];
+    socket.onmessage = (ev) => messages.push(JSON.parse(String(ev.data)));
+    // Not open yet: nothing to fork.
+    expect(socket.reorg(3)).toBeNull();
+    vi.advanceTimersByTime(30);
+    vi.advanceTimersByTime(1000);
+    vi.advanceTimersByTime(300);
+    const blocksOf = (from: number) => messages.slice(from).filter((m): m is Extract<ServerMessage, { type: "blocks" }> => m.type === "blocks").flatMap((m) => m.data);
+    const publishedBefore = blocksOf(0).length;
+    const world = findMockWorld("robinhood");
+    if (!world) throw new Error("no world");
+    const head = world.headBlock;
+    expect(blocksOf(0)[publishedBefore - 1].number).toBeLessThan(head);
+    const data = socket.reorg(3);
+    expect(data).not.toBeNull();
+    if (!data) return;
+    expect(data.chainId).toBe(4663);
+    expect(data.ancestor).toBe(head - 3);
+    expect(data.blocks.map((b) => b.number)).toEqual([head - 2, head - 1, head]);
+    expect(data.blocks).toEqual(world.blocksAfter(data.ancestor));
+    // Every block still queued for the second went out before the reorg, so the client's chain reaches the head the fork replaces.
+    const last = messages[messages.length - 1];
+    expect(last.type).toBe("reorg");
+    if (last.type === "reorg") expect(last.data).toEqual(data);
+    const published = blocksOf(0);
+    expect(published.length).toBeGreaterThan(publishedBefore);
+    expect(published[published.length - 1].number).toBe(head);
+    // Nothing queued survives the flush, and the next second continues from the fork.
+    const seen = messages.length;
+    vi.advanceTimersByTime(699);
+    expect(messages).toHaveLength(seen);
+    vi.advanceTimersByTime(1);
+    expect(messages[messages.length - 2].type).toBe("tick");
+    const next = blocksOf(seen);
+    expect(next[0].number).toBe(head + 1);
+    // A fork the ring cannot hold sends no reorg (the queued blocks still go out first); a closed socket sends nothing at all.
+    const before = messages.length;
+    expect(socket.reorg(100_000)).toBeNull();
+    expect(messages.slice(before).every((m) => m.type === "tick" || m.type === "blocks")).toBe(true);
+    socket.close();
+    const closed = messages.length;
+    expect(socket.reorg(3)).toBeNull();
+    expect(messages).toHaveLength(closed);
   });
 
   it("closes on an unknown network and defaults to robinhood", () => {

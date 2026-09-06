@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { BlockPoint, LiveSnapshot, Network, OwnerAction } from "@/types";
 import { createFrameStore, targetValues } from "@/lib/smoothing";
+import { applyReorg } from "@/hooks/useLive";
 import { ConstraintCards, ConstraintCardsView, Sawtooth, sawtoothPoints } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
 import { COLLECTOR_LAG_S, FeeSplitBar, LiveStrip, LiveStripView, sampleAge } from "./LiveStrip";
@@ -86,6 +87,19 @@ describe("LiveStrip", () => {
   it("draws the block ring", () => {
     render(<LiveStripView snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByRole("img", { name: /Base fee over the last 20 blocks/ })).toBeInTheDocument();
+    expect(screen.getByText("last 20 blocks · floor 0.02 gwei")).toBeInTheDocument();
+  });
+  it("draws the canonical blocks after a reorg, not the orphaned ones", () => {
+    const ring = sawtoothBlocks(2, snapshot.block.ts);
+    const head = ring[ring.length - 1].number;
+    const canonical = ring.slice(-3).map((b) => ({ ...b, baseFee: "800000000" }));
+    const blocks = applyReorg(ring, head - 3, canonical);
+    expect(blocks).toHaveLength(20);
+    const { rerender } = render(<LiveStripView snapshot={snapshot} values={null} blocks={ring} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(screen.getByRole("img", { name: "Base fee over the last 20 blocks, from 0.3997 to 0.3997 gwei" })).toBeInTheDocument();
+    rerender(<LiveStripView snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(screen.getByRole("img", { name: "Base fee over the last 20 blocks, from 0.3997 to 0.8 gwei" })).toBeInTheDocument();
+    expect(screen.getByText(`Latest block ${head}`)).toBeInTheDocument();
     expect(screen.getByText("last 20 blocks · floor 0.02 gwei")).toBeInTheDocument();
   });
   it("waits for the first sample", () => {

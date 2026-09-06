@@ -9,11 +9,14 @@ import {
   contributionRampStep,
   gaugeMarks,
   hasUnknownSets,
+  hasUnknownSplit,
+  hasUnrecordedSplit,
   joinCosts,
   legacyGauge,
   MAX_GAUGE_MARKS,
   latestSet,
   logDomain,
+  NULL_SPLIT_LABEL,
   rampColor,
   rampInk,
   rampStep,
@@ -26,11 +29,13 @@ import {
   seriesColor,
   seriesCount,
   setLabel,
+  shapeMatches,
   sharesOf,
   shortConstraintLabel,
   slotLabel,
   spanSeconds,
   sumFeesEth,
+  sumKnownWeiEth,
   sumWeiEth,
   taylorCurve,
   targetKey,
@@ -341,10 +346,101 @@ describe("chart points", () => {
   });
   it("sums and spans", () => {
     expect(sumFeesEth(series.points)).toBeCloseTo(1.5);
-    expect(sumWeiEth(series.points, "floorFeesWei")).toBeCloseTo(0.004);
+    expect(sumWeiEth(series.points, "feesWei")).toBeCloseTo(1.5);
+    expect(sumKnownWeiEth(series.points, "floorFeesWei")).toEqual({ eth: expect.closeTo(0.004, 6), unknown: 0 });
     expect(spanSeconds(series.points)).toBe(15);
     expect(spanSeconds([{ t: 1 }])).toBe(1);
     expect(spanSeconds([])).toBe(0);
+  });
+});
+
+describe("history from before the split migration", () => {
+  // A bucket under set 6 whose per-constraint split and fee destinations were never recorded.
+  const unrecorded = point({
+    t: 95,
+    blocks: 40,
+    feesWei: "1000000000000000000",
+    baseFeeMin: "20000000",
+    baseFeeAvg: "395726000",
+    baseFeeMax: "400000000",
+    exponentBips: 32_425,
+    constraintBips: null,
+    backlogs: [3_111_506, 11_194_391_810_886],
+    backlogsMax: [3_111_506, 11_194_391_810_886],
+    minBaseFee: "20000000",
+    floorFeesWei: null,
+    surplusFeesWei: null,
+    constraintSetId: 6,
+  });
+  const mixed: Series = { ...series, points: [unrecorded, ...series.points] };
+
+  it("draws a null split as the unknown split under its own set, keeping the backlogs and the target", () => {
+    const [row, known] = buildChartPoints(mixed, "constraints");
+    expect(row.setKnown).toBe(true);
+    expect(row.splitKnown).toBe(false);
+    expect(row.cUnknown).toBeCloseTo(3.2425);
+    expect(row.c6_0).toBeNull();
+    expect(row.c6_1).toBeNull();
+    expect(row.b6_0).toBe(3_111_506);
+    expect(row.b6_1).toBe(11_194_391_810_886);
+    expect(row.bu0).toBeNull();
+    expect(row.bu1).toBeNull();
+    expect(row.tgt1).toBe(40_000_000);
+    // The recorded bucket next to it is unchanged.
+    expect(known.splitKnown).toBe(true);
+    expect(known.cUnknown).toBeNull();
+    expect(known.c6_1).toBe(3.2391);
+    expect(NULL_SPLIT_LABEL).not.toBe(UNKNOWN_KEY);
+  });
+
+  it("tells an unrecorded split from an unknown set", () => {
+    expect(hasUnrecordedSplit(mixed)).toBe(true);
+    expect(hasUnrecordedSplit(series)).toBe(false);
+    expect(hasUnknownSets(mixed, "constraints")).toBe(true);
+    expect(hasUnknownSets({ ...series, points: [unrecorded, series.points[0]] }, "constraints")).toBe(false);
+    expect(hasUnknownSplit({ ...series, points: [unrecorded, series.points[0]] }, "constraints")).toBe(true);
+    expect(hasUnknownSplit({ ...series, points: [series.points[0]] }, "constraints")).toBe(false);
+    expect(hasUnknownSplit({ ...series, points: [series.points[1]] }, "constraints")).toBe(true);
+    // Without a split the point is shaped by its backlogs.
+    expect(shapeMatches(series.constraintSets[0], unrecorded)).toBe(true);
+    expect(shapeMatches({ constraints: series.constraintSets[0].constraints.slice(0, 1) }, unrecorded)).toBe(false);
+    expect(seriesCount({ constraintSets: [], points: [unrecorded] })).toBe(2);
+    expect(seriesCount({ constraintSets: [], points: [point({ constraintBips: null })] })).toBe(0);
+    // A legacy network with an unrecorded split still has its one series from the backlog.
+    expect(segmentsFor({ constraintSets: [], points: [point({ constraintBips: null, backlogs: [7] })] }, "legacy")).toHaveLength(1);
+  });
+
+  it("keeps a null fee split null rather than zero, and moves the bucket's fees to the unsplit series", () => {
+    const [row, known] = buildChartPoints(mixed, "constraints");
+    expect(row.floorFeesEth).toBeNull();
+    expect(row.surplusFeesEth).toBeNull();
+    expect(row.unsplitFeesEth).toBeCloseTo(1);
+    expect(known.unsplitFeesEth).toBeNull();
+    expect(known.floorFeesEth).toBeCloseTo(0.004);
+    expect(known.surplusFeesEth).toBeCloseTo(0.996);
+    // One missing part is enough for the split to be unknown.
+    const [half] = buildChartPoints({ ...series, points: [point({ feesWei: "1000000000000000000", floorFeesWei: "1", surplusFeesWei: null })] }, "constraints");
+    expect(half.floorFeesEth).toBeNull();
+    expect(half.surplusFeesEth).toBeNull();
+    expect(half.unsplitFeesEth).toBeCloseTo(1);
+    expect(sumKnownWeiEth(mixed.points, "floorFeesWei")).toEqual({ eth: expect.closeTo(0.004, 6), unknown: 1 });
+    expect(sumKnownWeiEth(mixed.points, "surplusFeesWei")).toEqual({ eth: expect.closeTo(0.996, 6), unknown: 1 });
+    expect(sumKnownWeiEth([], "surplusFeesWei")).toEqual({ eth: 0, unknown: 0 });
+  });
+
+  it("closes the unrecorded split with a boundary edge where the recorded one starts", () => {
+    const drawn = withSetBoundaries(buildChartPoints(mixed, "constraints").slice(0, 2));
+    expect(drawn.map((r) => [r.t, r.boundary ?? false, r.setKnown, r.splitKnown])).toEqual([
+      [95, false, true, false],
+      [100, true, true, false],
+      [100, false, true, true],
+    ]);
+    // The edge carries the unrecorded split at the new bucket's time: the whole x under the unknown series, set 6's backlogs and target.
+    expect(drawn[1]).toMatchObject({ constraintSetId: 6, cUnknown: expect.closeTo(3.2425, 4), c6_0: null, c6_1: null, b6_1: 11_194_391_810_886, tgt1: 40_000_000, x: drawn[2].x });
+    expect(drawn[2].cUnknown).toBeNull();
+    expect(drawn[2].c6_1).toBe(3.2391);
+    // Two unrecorded buckets in a row draw as one series.
+    expect(withSetBoundaries(buildChartPoints({ ...series, points: [unrecorded, { ...unrecorded, t: 96 }] }, "constraints"))).toHaveLength(2);
   });
 });
 

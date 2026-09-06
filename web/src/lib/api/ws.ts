@@ -1,5 +1,5 @@
-// WebSocket client for docs/ARCHITECTURE.md section 7. It handles hello, tick,
-// blocks, owner_action and ping (replying pong), switches network with a
+// WebSocket client for docs/ARCHITECTURE.md section 7. It handles hello, reorg,
+// tick, blocks, owner_action and ping (replying pong), switches network with a
 // subscribe message on the same socket, and reconnects with exponential
 // backoff from 1 s to 30 s. The hook layer polls /live while the status is
 // anything other than open.
@@ -8,15 +8,15 @@
 // decimal chain id) and what the server last confirmed (`confirmed`: the
 // canonical name, the chain id and the subscription generation the hello
 // answered). Nothing is delivered until a hello matching the current request
-// arrives; ticks must carry the confirmed chain id; frames without a chain id
-// (blocks, owner_action) are accepted only while the confirmed generation is
-// the current one. A subscribe whose target is an alias of the confirmed
-// network (its name or its chain id) is a no-op: the server would not answer
-// it with a hello. The status is `open` only once the current generation has
-// been confirmed, and an acknowledgement watchdog that pings cannot satisfy
-// closes a socket whose hello never comes.
+// arrives; ticks and reorgs must carry the confirmed chain id; frames without
+// a chain id (blocks, owner_action) are accepted only while the confirmed
+// generation is the current one. A subscribe whose target is an alias of the
+// confirmed network (its name or its chain id) is a no-op: the server would
+// not answer it with a hello. The status is `open` only once the current
+// generation has been confirmed, and an acknowledgement watchdog that pings
+// cannot satisfy closes a socket whose hello never comes.
 
-import type { BlockPoint, ClientMessage, HelloData, LiveSnapshot, LiveStatus, OwnerAction, ServerMessage } from "@/types";
+import type { BlockPoint, ClientMessage, HelloData, LiveSnapshot, LiveStatus, OwnerAction, ReorgData, ServerMessage } from "@/types";
 import { API_BASE_URL } from "./core";
 
 /** The subset of the WebSocket interface the client uses, so tests and the mock can stand in. */
@@ -75,6 +75,8 @@ export function helloMatches(hello: HelloData, wanted: string): boolean {
 export type LiveClientHandlers = {
   onHello?: (data: HelloData, network: NetworkKey) => void;
   onTick?: (snapshot: LiveSnapshot, network: NetworkKey) => void;
+  /** A reorg, sent before the next tick: the ring above `ancestor` is stale and `blocks` replace it. */
+  onReorg?: (reorg: ReorgData, network: NetworkKey) => void;
   onBlocks?: (blocks: BlockPoint[], network: NetworkKey) => void;
   onOwnerAction?: (action: OwnerAction, network: NetworkKey) => void;
   onStatus?: (status: LiveStatus) => void;
@@ -105,6 +107,7 @@ function parseServerMessage(raw: unknown): ServerMessage | null {
   const type = (parsed as { type?: unknown }).type;
   switch (type) {
     case "hello":
+    case "reorg":
     case "tick":
     case "blocks":
     case "owner_action":
@@ -244,6 +247,12 @@ export class LiveClient {
         const c = this.confirmed;
         if (!c || c.generation !== this.generation || message.data.chainId !== c.chainId) return;
         this.options.onTick?.(message.data, { name: c.name, chainId: c.chainId });
+        break;
+      }
+      case "reorg": {
+        const c = this.confirmed;
+        if (!c || c.generation !== this.generation || message.data.chainId !== c.chainId) return;
+        this.options.onReorg?.(message.data, { name: c.name, chainId: c.chainId });
         break;
       }
       case "blocks": {

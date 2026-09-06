@@ -30,10 +30,12 @@ type Loop = {
   lastCommit: number | null;
   lastFrame: number | null;
   values: LiveValues | null;
+  /** True after a reorg: the next tick commits on the next frame and its values snap, as a first commit does. */
+  fresh: boolean;
 };
 
 function emptyLoop(): Loop {
-  return { snapshot: null, sampleAt: 0, pending: null, blocks: [], lastCommit: null, lastFrame: null, values: null };
+  return { snapshot: null, sampleAt: 0, pending: null, blocks: [], lastCommit: null, lastFrame: null, values: null, fresh: false };
 }
 
 /**
@@ -50,16 +52,27 @@ function emptyLoop(): Loop {
  *   drains at the constraint's rate since the sample, so nothing snaps;
  * - with prefers-reduced-motion the tween and the drain are off and only the
  *   cadence applies;
- * - a hidden tab stops the loop; the feed itself is suspended by useLive.
+ * - a hidden tab stops the loop; the feed itself is suspended by useLive;
+ * - a reorg (`reorgs` changed) orphans the sampled block, so nothing on
+ *   screen is a valid origin to ease from: the tick that follows is treated
+ *   as a fresh commit, shown on the next frame with its values snapped.
  *
  * A cleared feed (network switch) clears the display at once rather than at
  * the next cadence, so a stale network is never shown under a new one.
  */
-export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks">): SmoothedLive {
+export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks"> & Partial<Pick<LiveState, "reorgs">>): SmoothedLive {
   const [committed, setCommitted] = useState<LiveSnapshot | null>(null);
   const [frame] = useState(() => createFrameStore({ nowMs: Date.now() }));
   const visible = useDocumentVisible();
   const loop = useRef<Loop>(emptyLoop());
+  const reorgs = live.reorgs ?? 0;
+  const seenReorgs = useRef(reorgs);
+
+  useEffect(() => {
+    if (reorgs === seenReorgs.current) return;
+    seenReorgs.current = reorgs;
+    loop.current.fresh = true;
+  }, [reorgs]);
 
   useEffect(() => {
     const s = loop.current;
@@ -87,7 +100,7 @@ export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks
       const prev = frame.get();
       const dt = s.lastFrame === null ? 0 : t - s.lastFrame;
       s.lastFrame = t;
-      const cadence = s.lastCommit === null || t - s.lastCommit >= DISPLAY_INTERVAL_MS;
+      const cadence = s.lastCommit === null || t - s.lastCommit >= DISPLAY_INTERVAL_MS || (s.fresh && s.pending !== null);
       let snapshotChanged = false;
       if (cadence) {
         s.lastCommit = t;
@@ -96,6 +109,11 @@ export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks
           s.sampleAt = s.pending.at;
           s.pending = null;
           snapshotChanged = true;
+          if (s.fresh) {
+            // The first tick after a reorg: nothing to ease from.
+            s.fresh = false;
+            s.values = null;
+          }
           setCommitted(s.snapshot);
         }
       }

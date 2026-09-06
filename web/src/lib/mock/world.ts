@@ -364,6 +364,92 @@ export class MockWorld {
     this.time = t + dt;
   }
 
+  /** The replay error the collector reports for `number`, in bips, from the block number alone. */
+  private replayError(number: number): number {
+    return Math.floor(hash01(this.def.demand.seed + 5, number) * 6);
+  }
+
+  /** Prices and appends one block: an exact pricer step over `dt`, then its gas absorbed. */
+  private mintBlock(number: number, ts: number, dt: bigint, gas: number, anchored: boolean): BlockPoint {
+    const { fee, exponent, contributions } = this.blockStep(dt, BigInt(gas));
+    const err = this.replayError(number);
+    const predicted = (fee * (ONE_IN_BIPS - BigInt(err))) / ONE_IN_BIPS;
+    const block: BlockPoint = {
+      number,
+      ts,
+      gasUsed: gas,
+      baseFee: fee.toString(),
+      predictedBaseFee: predicted.toString(),
+      backlogs: this.currentBacklogs(),
+      constraintBips: contributions,
+      exponentBips: exponent,
+      minBaseFee: this.minFee.toString(),
+      anchored,
+    };
+    this.blocks.push(block);
+    this.lastFee = fee;
+    this.lastExponent = exponent;
+    this.lastContributions = contributions;
+    this.lastReplayError = err;
+    return block;
+  }
+
+  /** Adds (`sign` 1n) or removes (`sign` -1n) a block's fees from the sampled account balances. */
+  private credit(block: BlockPoint, sign: bigint): void {
+    const gas = BigInt(block.gasUsed);
+    const fee = BigInt(block.baseFee);
+    const minFee = BigInt(block.minBaseFee);
+    this.accumulatedInfra += sign * gas * minFee;
+    this.accumulatedNetwork += sign * gas * (fee > minFee ? fee - minFee : 0n);
+  }
+
+  /**
+   * The record of the wall-clock second `t`, from the ring's blocks with that
+   * timestamp: sums over the blocks, end-of-second state from the last one,
+   * the maximum backlog from `before` (the state the second opened with) and
+   * every block.
+   */
+  private recordFor(t: number, before: number[]): WorldRecord {
+    const blocks = this.blocks.filter((b) => b.ts === t);
+    const last = blocks[blocks.length - 1];
+    let feeMin = 0n;
+    let feeMax = 0n;
+    let feeSum = 0n;
+    let feesWei = 0n;
+    let floorFeesWei = 0n;
+    let gas = 0;
+    let backlogsMax = before;
+    blocks.forEach((b, k) => {
+      const fee = BigInt(b.baseFee);
+      feeMin = k === 0 ? fee : minBigInt(feeMin, fee);
+      feeMax = maxBigInt(feeMax, fee);
+      feeSum += fee;
+      feesWei += BigInt(b.gasUsed) * fee;
+      floorFeesWei += BigInt(b.gasUsed) * BigInt(b.minBaseFee);
+      gas += b.gasUsed;
+      backlogsMax = b.backlogs.map((v, i) => Math.max(v, backlogsMax[i] ?? 0));
+    });
+    return {
+      t,
+      dt: 1,
+      blocks: blocks.length,
+      gas,
+      feeMin,
+      feeMax,
+      feeSum,
+      feesWei,
+      exponent: last.exponentBips,
+      constraintBips: last.constraintBips ?? [],
+      backlogs: last.backlogs,
+      backlogsMax,
+      minFee: BigInt(last.minBaseFee),
+      floorFeesWei,
+      surplusFeesWei: feesWei - floorFeesWei,
+      setId: this.currentSetId(),
+      replayErrorBips: this.replayError(last.number),
+    };
+  }
+
   /** One wall-clock second with individual blocks, feeding the block ring. */
   private tick(): void {
     const t = this.time;
@@ -378,68 +464,61 @@ export class MockWorld {
       weights.push(w);
       weightSum += w;
     }
-    let feeMin = 0n;
-    let feeMax = 0n;
-    let feeSum = 0n;
-    let feesWei = 0n;
-    let floorFeesWei = 0n;
-    let gasTotal = 0;
     const before = this.currentBacklogs();
-    let backlogsMax = before;
     for (let k = 0; k < count; k++) {
       const gas = Math.round((total * weights[k]) / weightSum);
-      const { fee, exponent, contributions } = this.blockStep(k === 0 ? 1n : 0n, BigInt(gas));
-      const number = first + k;
-      const err = Math.floor(hash01(this.def.demand.seed + 5, number) * 6);
-      const predicted = (fee * (ONE_IN_BIPS - BigInt(err))) / ONE_IN_BIPS;
-      const backlogs = this.currentBacklogs();
-      backlogsMax = backlogs.map((v, i) => Math.max(v, backlogsMax[i]));
-      this.blocks.push({
-        number,
-        ts: t,
-        gasUsed: gas,
-        baseFee: fee.toString(),
-        predictedBaseFee: predicted.toString(),
-        backlogs,
-        constraintBips: contributions,
-        exponentBips: exponent,
-        minBaseFee: this.minFee.toString(),
-        anchored: k === 0,
-      });
-      feeMin = k === 0 ? fee : minBigInt(feeMin, fee);
-      feeMax = maxBigInt(feeMax, fee);
-      feeSum += fee;
-      feesWei += BigInt(gas) * fee;
-      floorFeesWei += BigInt(gas) * this.minFee;
-      gasTotal += gas;
-      this.accumulatedInfra += BigInt(gas) * this.minFee;
-      this.accumulatedNetwork += BigInt(gas) * (fee > this.minFee ? fee - this.minFee : 0n);
-      this.lastFee = fee;
-      this.lastExponent = exponent;
-      this.lastContributions = contributions;
-      this.lastReplayError = err;
+      this.credit(this.mintBlock(first + k, t, k === 0 ? 1n : 0n, gas, k === 0), 1n);
     }
+    this.records.push(this.recordFor(t, before));
     if (this.blocks.length > RING_SIZE) this.blocks.splice(0, this.blocks.length - RING_SIZE);
-    this.records.push({
-      t,
-      dt: 1,
-      blocks: count,
-      gas: gasTotal,
-      feeMin,
-      feeMax,
-      feeSum,
-      feesWei,
-      exponent: this.lastExponent,
-      constraintBips: this.lastContributions,
-      backlogs: this.currentBacklogs(),
-      backlogsMax,
-      minFee: this.minFee,
-      floorFeesWei,
-      surplusFeesWei: feesWei - floorFeesWei,
-      setId: this.currentSetId(),
-      replayErrorBips: this.lastReplayError,
-    });
     this.time = t + 1;
+  }
+
+  /** Puts the pricer back in the state `block` closed with, so the blocks after it can be replayed. */
+  private rewindTo(block: BlockPoint): void {
+    if (this.legacy) {
+      this.legacy.backlog = BigInt(block.backlogs[0] ?? 0);
+      return;
+    }
+    this.constraints.forEach((c, i) => {
+      c.backlog = BigInt(block.backlogs[i] ?? 0);
+    });
+  }
+
+  /**
+   * Replaces the last `depth` blocks of the ring with a canonical fork, the
+   * way a reorg does: the pricer is rewound to the ancestor's end-of-block
+   * state, the orphaned block numbers are replayed with different gas, and
+   * the records of the seconds they belong to are rebuilt from the ring, so
+   * series, balances and the live snapshot agree with the new tail. Returns
+   * the ancestor and the canonical blocks, oldest first; null when the ring
+   * is too short.
+   *
+   * Every ring block was minted by `tick`, which records its second as one
+   * per-second record and never overlaps a coarse one, so the records from
+   * the first forked second on are exactly the ones to rebuild.
+   */
+  reorg(depth: number, salt = 1): { ancestor: number; blocks: BlockPoint[] } | null {
+    if (!Number.isInteger(depth) || depth <= 0 || this.blocks.length <= depth) return null;
+    const ancestor = this.blocks[this.blocks.length - 1 - depth];
+    const firstTs = this.blocks[this.blocks.length - depth].ts;
+    let i = this.records.length;
+    while (i > 0 && this.records[i - 1].t >= firstTs) i -= 1;
+    const orphaned = this.blocks.splice(this.blocks.length - depth);
+    this.records.splice(i);
+    for (const b of orphaned) this.credit(b, -1n);
+    this.rewindTo(ancestor);
+    let prevTs = ancestor.ts;
+    for (const b of orphaned) {
+      const gas = Math.round(b.gasUsed * (0.5 + hash01(this.def.demand.seed + 11 + salt, b.number)));
+      this.credit(this.mintBlock(b.number, b.ts, b.ts > prevTs ? 1n : 0n, gas, b.anchored), 1n);
+      prevTs = b.ts;
+    }
+    for (let t = firstTs; t < this.time; t++) {
+      const opened = this.blocks.filter((b) => b.ts < t).pop();
+      this.records.push(this.recordFor(t, opened ? opened.backlogs : []));
+    }
+    return { ancestor: ancestor.number, blocks: this.blocks.slice(-depth) };
   }
 
   private buildHistory(now: number): void {
@@ -723,27 +802,33 @@ export class MockWorld {
       acc.backlogsMax = acc.backlogsMax.map((v, j) => Math.max(v, r.backlogsMax[j] ?? 0));
       acc.replayErrorBips = Math.max(acc.replayErrorBips, r.replayErrorBips);
     }
+    // Buckets that predate the split migration are served the way the api
+    // serves pre-000006 history: no split, no fee destinations.
+    const recordedFrom = this.def.splitRecordedFrom ? isoToUnix(this.def.splitRecordedFrom) : this.startAt;
     const points: SeriesPoint[] = [...buckets.values()]
       .sort((a, b) => a.t - b.t)
-      .map((b) => ({
-        t: b.t,
-        blocks: b.blocks,
-        gasUsed: b.gas,
-        gasPerSecond: b.duration > 0 ? Math.round(b.gas / b.duration) : 0,
-        feesWei: b.feesWei.toString(),
-        baseFeeMin: b.feeMin.toString(),
-        baseFeeAvg: (b.blocks > 0 ? b.feeSum / BigInt(b.blocks) : b.feeMin).toString(),
-        baseFeeMax: b.feeMax.toString(),
-        exponentBips: b.exponent,
-        constraintBips: b.constraintBips,
-        backlogs: b.backlogs,
-        backlogsMax: b.backlogsMax,
-        minBaseFee: b.minFee.toString(),
-        floorFeesWei: b.floorFeesWei.toString(),
-        surplusFeesWei: b.surplusFeesWei.toString(),
-        constraintSetId: b.setId,
-        replayErrorBips: b.replayErrorBips,
-      }));
+      .map((b) => {
+        const recorded = b.t >= recordedFrom;
+        return {
+          t: b.t,
+          blocks: b.blocks,
+          gasUsed: b.gas,
+          gasPerSecond: b.duration > 0 ? Math.round(b.gas / b.duration) : 0,
+          feesWei: b.feesWei.toString(),
+          baseFeeMin: b.feeMin.toString(),
+          baseFeeAvg: (b.blocks > 0 ? b.feeSum / BigInt(b.blocks) : b.feeMin).toString(),
+          baseFeeMax: b.feeMax.toString(),
+          exponentBips: b.exponent,
+          constraintBips: recorded ? b.constraintBips : null,
+          backlogs: b.backlogs,
+          backlogsMax: b.backlogsMax,
+          minBaseFee: b.minFee.toString(),
+          floorFeesWei: recorded ? b.floorFeesWei.toString() : null,
+          surplusFeesWei: recorded ? b.surplusFeesWei.toString() : null,
+          constraintSetId: b.setId,
+          replayErrorBips: b.replayErrorBips,
+        };
+      });
     return {
       range,
       resolution: spec.resolution,

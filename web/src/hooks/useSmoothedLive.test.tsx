@@ -204,6 +204,40 @@ describe("useSmoothedLive", () => {
     expect(result.current.display?.chainId).toBe(42161);
   });
 
+  it("treats the first tick after a reorg as a fresh commit: shown on the next frame, values snapped, never eased from the orphaned block", () => {
+    const { result, rerender } = renderHook(({ s, reorgs }) => useSmoothedLive({ snapshot: s, recentBlocks: [], reorgs }), { initialProps: { s: snapshot(1), reorgs: 0 } });
+    runFrame(16);
+    expect(result.current.display?.block.number).toBe(1);
+    runFrame(100);
+    // The reorg orphans block 1; the canonical block's tick lands inside the cadence window.
+    clock = 100;
+    rerender({ s: snapshot(2, "800000000"), reorgs: 1 });
+    runFrame(116);
+    expect(result.current.display?.block.number).toBe(2);
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.8);
+    expect(result.current.frame.get().values?.multiplier).toBe(40);
+    // The reorg is consumed: the next tick waits for the cadence and eases again.
+    clock = 132;
+    const third = snapshot(3, "400000000");
+    rerender({ s: third, reorgs: 1 });
+    runFrame(132);
+    expect(result.current.display?.block.number).toBe(2);
+    runFrame(400);
+    expect(result.current.display?.block.number).toBe(3);
+    const eased = result.current.frame.get().values?.baseFeeGwei ?? 0;
+    expect(eased).toBeGreaterThan(0.4);
+    expect(eased).toBeLessThan(0.8);
+    // A reorg with no tick behind it yet changes nothing on screen; the tick that follows is the fresh one.
+    rerender({ s: third, reorgs: 2 });
+    runFrame(416);
+    expect(result.current.display?.block.number).toBe(3);
+    clock = 420;
+    rerender({ s: snapshot(4, "400000000"), reorgs: 2 });
+    runFrame(432);
+    expect(result.current.display?.block.number).toBe(4);
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.4);
+  });
+
   it("reads the store with useLiveFrame", () => {
     const store = createFrameStore({ nowMs: 1 });
     const { result } = renderHook(() => useLiveFrame(store));

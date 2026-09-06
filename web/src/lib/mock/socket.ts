@@ -4,9 +4,11 @@
 // across the second they belong to), a ping every 30 s, and subscribe to
 // switch networks. Blocks within one second share a timestamp, so the short
 // window's backlog climbs block by block and drops at each second boundary.
+// `reorg` is a scenario helper: it forks the world's tail and announces it
+// the way the api does, before the next tick.
 
 import type { SocketLike } from "@/lib/api/ws";
-import type { ServerMessage } from "@/types";
+import type { ReorgData, ServerMessage } from "@/types";
 import { findMockWorld, mockNow } from "./registry";
 
 const OPEN_DELAY_MS = 30;
@@ -26,7 +28,8 @@ export class MockWebSocket implements SocketLike {
   private openTimer: ReturnType<typeof setTimeout> | null = null;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private blockTimers: ReturnType<typeof setTimeout>[] = [];
+  /** Blocks of the current second still waiting for their moment, with the timer that will publish each. */
+  private pendingBlocks: { timer: ReturnType<typeof setTimeout>; publish: () => void }[] = [];
 
   constructor(url: string) {
     this.url = url;
@@ -55,8 +58,15 @@ export class MockWebSocket implements SocketLike {
   }
 
   private clearBlockTimers(): void {
-    for (const timer of this.blockTimers) clearTimeout(timer);
-    this.blockTimers = [];
+    for (const { timer } of this.pendingBlocks) clearTimeout(timer);
+    this.pendingBlocks = [];
+  }
+
+  /** Publishes every block still waiting, in order, so the client has seen the whole chain up to `lastBlock`. */
+  private flushBlockTimers(): void {
+    const pending = this.pendingBlocks;
+    this.clearBlockTimers();
+    for (const { publish } of pending) publish();
   }
 
   private sendHello(): void {
@@ -97,8 +107,28 @@ export class MockWebSocket implements SocketLike {
         this.emit({ type: "blocks", data: [block] });
       };
       if (k === 0) publish();
-      else this.blockTimers.push(setTimeout(publish, Math.round(k * spacing)));
+      else this.pendingBlocks.push({ timer: setTimeout(publish, Math.round(k * spacing)), publish });
     });
+  }
+
+  /**
+   * Scenario helper: replaces the last `depth` blocks the client has seen
+   * with a canonical fork and announces it, as the api does before the next
+   * tick. Blocks still queued for this second go out first (even if the
+   * world then refuses the fork), so the fork starts from a chain the client
+   * knows. Returns what was sent, or null when the socket is not open or the
+   * world cannot fork that deep.
+   */
+  reorg(depth = 3): ReorgData | null {
+    // An open socket always has a world: hello closes it for an unknown network.
+    const world = this.readyState === 1 ? findMockWorld(this.network) : undefined;
+    if (!world) return null;
+    this.flushBlockTimers();
+    const fork = world.reorg(depth);
+    if (!fork) return null;
+    const data: ReorgData = { chainId: world.def.chainId, ancestor: fork.ancestor, blocks: fork.blocks };
+    this.emit({ type: "reorg", data });
+    return data;
   }
 
   send(data: string): void {

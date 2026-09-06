@@ -134,6 +134,7 @@ describe("LiveClient", () => {
     const statuses: LiveStatus[] = [];
     const onHello = vi.fn();
     const onTick = vi.fn();
+    const onReorg = vi.fn();
     const onBlocks = vi.fn();
     const onOwnerAction = vi.fn();
     const onError = vi.fn();
@@ -143,14 +144,44 @@ describe("LiveClient", () => {
       socketFactory: factory,
       onHello,
       onTick,
+      onReorg,
       onBlocks,
       onOwnerAction,
       onError,
       onStatus: (s) => statuses.push(s),
       ...overrides,
     });
-    return { client, statuses, onHello, onTick, onBlocks, onOwnerAction, onError };
+    return { client, statuses, onHello, onTick, onReorg, onBlocks, onOwnerAction, onError };
   }
+
+  it("dispatches a reorg keyed by the confirmed network, and only one that carries its chain id", () => {
+    const { client, onReorg, onBlocks } = makeClient();
+    client.connect();
+    const socket = latest();
+    socket.serverOpen();
+    const reorg = { chainId: 4663, ancestor: 10, blocks: [{ number: 11 }, { number: 12 }] };
+    // Nothing before the hello.
+    socket.serverMessage({ type: "reorg", data: reorg });
+    expect(onReorg).not.toHaveBeenCalled();
+    socket.serverHello("robinhood", 4663);
+    socket.serverMessage({ type: "reorg", data: reorg });
+    expect(onReorg).toHaveBeenCalledWith(reorg, ROBINHOOD);
+    // Another chain's reorg, or one without a chain id, never reaches the feed.
+    socket.serverMessage({ type: "reorg", data: { ...reorg, chainId: 42161 } });
+    socket.serverMessage({ type: "reorg", data: { ancestor: 10, blocks: [] } });
+    expect(onReorg).toHaveBeenCalledTimes(1);
+    // The blocks that follow it are delivered as usual.
+    socket.serverMessage({ type: "blocks", data: [{ number: 13 }] });
+    expect(onBlocks).toHaveBeenCalledWith([{ number: 13 }], ROBINHOOD);
+    // After a subscribe the old network's reorg is dropped until the new hello.
+    client.subscribe("arbitrum-one");
+    socket.serverMessage({ type: "reorg", data: reorg });
+    expect(onReorg).toHaveBeenCalledTimes(1);
+    socket.serverHello("arbitrum-one", 42161);
+    socket.serverMessage({ type: "reorg", data: { ...reorg, chainId: 42161 } });
+    expect(onReorg).toHaveBeenLastCalledWith({ ...reorg, chainId: 42161 }, { name: "arbitrum-one", chainId: 42161 });
+    client.close();
+  });
 
   it("connects with the network in the URL and dispatches messages keyed by the confirmed network", () => {
     const { client, statuses, onHello, onTick, onBlocks, onOwnerAction, onError } = makeClient();

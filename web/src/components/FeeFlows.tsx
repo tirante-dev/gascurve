@@ -3,10 +3,25 @@
 import { useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { LiveSnapshot, PricerModel, Series } from "@/types";
-import { buildChartPoints, spanSeconds, sumWeiEth } from "@/utils/chart";
+import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL } from "@/utils/chart";
 import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, shortAddress } from "@/utils/format";
-import { ChartTooltip } from "./ChartTooltip";
+import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { Card, ChartFrame, Label, Legend, Stat } from "./primitives";
+
+const FLOOR_FILL = "var(--seq-2)";
+const SURPLUS_FILL = "var(--seq-8)";
+/** The hatch that fills buckets whose destination split predates the record: muted ink, never a destination colour. */
+const UNSPLIT_PATTERN_ID = "fee-unsplit-hatch";
+
+/** "0.1234" for a known part, "n/a" for one that predates the fee split. */
+function formatPart(eth: number | null): string {
+  return eth === null ? "n/a" : formatSignificant(eth, 4);
+}
+
+/** "3 buckets predate the fee split", singular when it is one. */
+export function unsplitNote(count: number): string {
+  return `${formatInteger(count)} ${count === 1 ? "bucket predates" : "buckets predate"} the fee split`;
+}
 
 function AccountRow({ name, role, address, balance, explorerUrl }: { name: string; role: string; address: string; balance: string; explorerUrl?: string }) {
   const href = explorerUrl ? `${explorerUrl.replace(/\/+$/, "")}/address/${address}` : undefined;
@@ -28,13 +43,17 @@ function AccountRow({ name, role, address, balance, explorerUrl }: { name: strin
   );
 }
 
-/** Fee totals over the range from the api's exact per-bucket floor and surplus sums. */
-export function feeTotals(series: Pick<Series, "points">): { total: number; floorEth: number; surplusEth: number; perDay: number } {
+/**
+ * Fee totals over the range from the api's exact per-bucket floor and surplus
+ * sums. Buckets that predate the fee split (null parts) count toward `total`
+ * but not toward the floor or surplus; `unsplit` says how many there were.
+ */
+export function feeTotals(series: Pick<Series, "points">): { total: number; floorEth: number; surplusEth: number; perDay: number; unsplit: number } {
   const total = sumWeiEth(series.points, "feesWei");
-  const floorEth = sumWeiEth(series.points, "floorFeesWei");
-  const surplusEth = sumWeiEth(series.points, "surplusFeesWei");
+  const floor = sumKnownWeiEth(series.points, "floorFeesWei");
+  const surplus = sumKnownWeiEth(series.points, "surplusFeesWei");
   const span = spanSeconds(series.points);
-  return { total, floorEth, surplusEth, perDay: span > 0 ? (total / span) * 86_400 : 0 };
+  return { total, floorEth: floor.eth, surplusEth: surplus.eth, perDay: span > 0 ? (total / span) * 86_400 : 0, unsplit: Math.max(floor.unknown, surplus.unknown) };
 }
 
 /** Fee account balances as sampled counters, and fees per bucket from the history split by the floor in force at each block. */
@@ -44,6 +63,19 @@ export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown" }: {
   const [tableOpen, setTableOpen] = useState(false);
   const span = spanSeconds(points);
   const accounts = snapshot?.accounts;
+  const unsplit = (totals?.unsplit ?? 0) > 0;
+  const legend = [
+    { label: "floor to infra", color: FLOOR_FILL },
+    { label: "congestion to network", color: SURPLUS_FILL },
+    ...(unsplit ? [{ label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR }] : []),
+  ];
+  const tooltipRows: TooltipRow[] = [
+    { label: "fees in bucket", value: (r) => `${formatSignificant(Number(r.feesEth), 4)} ETH` },
+    { label: "floor to infra", color: FLOOR_FILL, kind: "rect", value: (r) => `${formatSignificant(Number(r.floorFeesEth), 4)} ETH`, when: (r) => r.unsplitFeesEth === null },
+    { label: "congestion to network", color: SURPLUS_FILL, kind: "rect", value: (r) => `${formatSignificant(Number(r.surplusFeesEth), 4)} ETH`, when: (r) => r.unsplitFeesEth === null },
+    { label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => `${formatSignificant(Number(r.unsplitFeesEth), 4)} ETH`, when: (r) => r.unsplitFeesEth !== null },
+    { label: "floor in force", value: (r) => `${formatSignificant(Number(r.floor), 3)} gwei` },
+  ];
 
   return (
     <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
@@ -66,48 +98,40 @@ export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown" }: {
 
       <Card>
         {totals && series ? (
-          <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
-            <Stat label={`Fees in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" />
-            <Stat label="Per day (est.)" value={formatSignificant(totals.perDay, 4)} unit="ETH" size="sm" />
-            <Stat label="Floor to infra" value={formatSignificant(totals.floorEth, 3)} unit="ETH" size="sm" />
-            <Stat label="Congestion to network" value={formatSignificant(totals.surplusEth, 3)} unit="ETH" size="sm" />
-          </div>
+          <>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
+              <Stat label={`Fees in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" />
+              <Stat label="Per day (est.)" value={formatSignificant(totals.perDay, 4)} unit="ETH" size="sm" />
+              <Stat label="Floor to infra" value={formatSignificant(totals.floorEth, 3)} unit="ETH" size="sm" />
+              <Stat label="Congestion to network" value={formatSignificant(totals.surplusEth, 3)} unit="ETH" size="sm" />
+            </div>
+            {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}; the floor and congestion totals leave them out.</p> : null}
+          </>
         ) : null}
         <div className="mt-4">
           <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
             <div className="text-xs text-ink-2">Fees per bucket (ETH), stacked by destination</div>
-            <Legend
-              items={[
-                { label: "floor to infra", color: "var(--seq-2)" },
-                { label: "congestion to network", color: "var(--seq-8)" },
-              ]}
-            />
+            <Legend items={legend} />
           </div>
           {points.length > 0 ? (
             <>
-              <ChartFrame height={160} minWidth={420} label="Fees collected per bucket in ETH, stacked as the floor part and the congestion part">
+              <ChartFrame height={160} minWidth={420} label="Fees collected per bucket in ETH, stacked as the floor part and the congestion part, hatched where the split predates the record">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={points} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+                    <defs>
+                      <pattern id={UNSPLIT_PATTERN_ID} width={6} height={6} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                        <line x1={0} y1={0} x2={0} y2={6} stroke={UNKNOWN_COLOR} strokeWidth={2} strokeOpacity={0.55} />
+                      </pattern>
+                    </defs>
                     <CartesianGrid vertical={false} />
                     <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
                     <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
-                    <Tooltip
-                      isAnimationActive={false}
-                      content={(props) => (
-                        <ChartTooltip
-                          {...props}
-                          title={(t) => formatDateTime(t)}
-                          rows={[
-                            { label: "fees in bucket", value: (r) => `${formatSignificant(Number(r.feesEth), 4)} ETH` },
-                            { label: "floor to infra", color: "var(--seq-2)", kind: "rect", value: (r) => `${formatSignificant(Number(r.floorFeesEth), 4)} ETH` },
-                            { label: "congestion to network", color: "var(--seq-8)", kind: "rect", value: (r) => `${formatSignificant(Number(r.surplusFeesEth), 4)} ETH` },
-                            { label: "floor in force", value: (r) => `${formatSignificant(Number(r.floor), 3)} gwei` },
-                          ]}
-                        />
-                      )}
-                    />
-                    <Area type="monotone" dataKey="floorFeesEth" stackId="fees" stroke="var(--seq-2)" strokeWidth={1} fill="var(--seq-2)" fillOpacity={0.6} isAnimationActive={false} activeDot={false} />
-                    <Area type="monotone" dataKey="surplusFeesEth" stackId="fees" stroke="var(--seq-8)" strokeWidth={1} fill="var(--seq-8)" fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
+                    <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={tooltipRows} />} />
+                    <Area type="monotone" dataKey="floorFeesEth" stackId="fees" connectNulls={false} stroke={FLOOR_FILL} strokeWidth={1} fill={FLOOR_FILL} fillOpacity={0.6} isAnimationActive={false} activeDot={false} />
+                    <Area type="monotone" dataKey="surplusFeesEth" stackId="fees" connectNulls={false} stroke={SURPLUS_FILL} strokeWidth={1} fill={SURPLUS_FILL} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
+                    {unsplit ? (
+                      <Area type="monotone" dataKey="unsplitFeesEth" stackId="fees" connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={1} strokeDasharray="4 3" fill={`url(#${UNSPLIT_PATTERN_ID})`} isAnimationActive={false} activeDot={false} />
+                    ) : null}
                   </AreaChart>
                 </ResponsiveContainer>
               </ChartFrame>
@@ -131,8 +155,8 @@ export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown" }: {
                           <tr key={p.t} className="border-t border-hairline">
                             <th scope="row" className="py-1 pr-3 font-normal">{formatDateTime(p.t)}</th>
                             <td className="py-1 pr-3">{formatSignificant(p.feesEth, 4)}</td>
-                            <td className="py-1 pr-3">{formatSignificant(p.floorFeesEth, 4)}</td>
-                            <td className="py-1 pr-3">{formatSignificant(p.surplusFeesEth, 4)}</td>
+                            <td className="py-1 pr-3">{formatPart(p.floorFeesEth)}</td>
+                            <td className="py-1 pr-3">{formatPart(p.surplusFeesEth)}</td>
                             <td className="py-1 pr-3">{formatSignificant(p.floor, 3)}</td>
                           </tr>
                         ))}

@@ -54,6 +54,13 @@ export type MockNetworkDef = {
   demand: DemandProfile;
   /** Desired backlog per constraint at "now"; null leaves the simulation alone. */
   anchorBacklogs?: (number | null)[];
+  /**
+   * When the per-constraint split and the fee destinations started being
+   * recorded (migration 000006 on a real deployment). Series buckets before
+   * this carry null `constraintBips`, `floorFeesWei` and `surplusFeesWei`,
+   * as the api serves for history written before the migration.
+   */
+  splitRecordedFrom?: string;
   l1: {
     baseFeeEstimateWei: number;
     surplusWei: bigint;
@@ -207,6 +214,8 @@ export const ROBINHOOD: MockNetworkDef = {
     seed: 4663,
   },
   anchorBacklogs: [null, 11_194_391_810_886],
+  // The first day and a half of the recorded history predates the fee-split migration.
+  splitRecordedFrom: "2026-07-02T12:00:00Z",
   l1: {
     baseFeeEstimateWei: 2_369_608,
     surplusWei: 190_000_000_000_000n,

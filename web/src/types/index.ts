@@ -98,8 +98,11 @@ export type BlockPoint = {
   predictedBaseFee: string;
   /** End-of-block backlogs (after AddGas). */
   backlogs: number[];
-  /** Start-of-block per-constraint exponent, the values that priced this block; sums to exponentBips. */
-  constraintBips: number[];
+  /**
+   * Start-of-block per-constraint exponent, the values that priced this block;
+   * sums to exponentBips. Null only for rows written before migration 000006.
+   */
+  constraintBips: number[] | null;
   exponentBips: number;
   minBaseFee: string;
   anchored: boolean;
@@ -115,16 +118,16 @@ export type SeriesPoint = {
   baseFeeAvg: string;
   baseFeeMax: string;
   exponentBips: number;
-  /** Start-of-block values of the bucket's last block. */
-  constraintBips: number[];
+  /** Start-of-block values of the bucket's last block; null for history written before migration 000006. */
+  constraintBips: number[] | null;
   backlogs: number[];
   backlogsMax: number[];
   /** Floor in force at the bucket's last block. */
   minBaseFee: string;
-  /** Sum of gasUsed times minBaseFee per block, exact. */
-  floorFeesWei: string;
-  /** feesWei minus floorFeesWei, exact. */
-  surplusFeesWei: string;
+  /** Sum of gasUsed times minBaseFee per block, exact; null for history written before migration 000006. */
+  floorFeesWei: string | null;
+  /** feesWei minus floorFeesWei, exact; null whenever floorFeesWei is. */
+  surplusFeesWei: string | null;
   constraintSetId: number;
   replayErrorBips: number;
 };
@@ -194,8 +197,12 @@ export type ApiErrorBody = { error: { code: string; message: string } };
 
 export type HelloData = { network: Network; snapshot: LiveSnapshot | null; recentBlocks: BlockPoint[] };
 
+/** Sent before the next tick: drop every block above `ancestor`, append `blocks` (canonical, oldest first). */
+export type ReorgData = { chainId: number; ancestor: number; blocks: BlockPoint[] };
+
 export type ServerMessage =
   | { type: "hello"; data: HelloData }
+  | { type: "reorg"; data: ReorgData }
   | { type: "tick"; data: LiveSnapshot }
   | { type: "blocks"; data: BlockPoint[] }
   | { type: "owner_action"; data: OwnerAction }
