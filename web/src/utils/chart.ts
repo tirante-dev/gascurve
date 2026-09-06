@@ -112,8 +112,14 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">): 
     const hasPoints = series.points.some((p) => p.constraintBips.length > 0 || p.backlogs.length > 0);
     return hasPoints ? [{ key: contributionKey(0, 0), backlogKey: backlogKey(0, 0), setId: 0, index: 0, label: "legacy backlog", color: seriesColor(0), constraint: null }] : [];
   }
+  // A set is only usable for a point when its constraint count matches the
+  // point's data; the collector can tag blocks with the latest *known* set
+  // while the owner-action scan is still catching up (a 6-constraint genesis
+  // set against a 2-constraint live model, for example). Such sets are left
+  // out and their points fall back to the unknown split.
+  const usable = sets.filter((set) => series.points.some((p) => p.constraintSetId === set.id && shapeMatches(set, p)));
   const out: Segment[] = [];
-  for (const set of sets) {
+  for (const set of usable.length > 0 ? usable : sets) {
     set.constraints.slice(0, MAX_SERIES).forEach((c, i) => {
       out.push({ key: contributionKey(set.id, i), backlogKey: backlogKey(set.id, i), setId: set.id, index: i, label: segmentLabel(set, i, c), color: seriesColor(i), constraint: c });
     });
@@ -121,10 +127,20 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">): 
   return out;
 }
 
-/** True when some point references a constraint set the series does not carry. */
+/** True when the set's constraint count matches the point's per-constraint data. */
+export function shapeMatches(set: Pick<ConstraintSet, "constraints">, p: Pick<SeriesPoint, "constraintBips" | "backlogs">): boolean {
+  const n = p.constraintBips.length > 0 ? p.constraintBips.length : p.backlogs.length;
+  return n === 0 || set.constraints.length === n;
+}
+
+/** True when some point references a constraint set the series does not carry, or one whose shape does not match. */
 export function hasUnknownSets(series: Pick<Series, "constraintSets" | "points">): boolean {
-  const known = new Set(segmentsFor(series).map((s) => s.setId));
-  return series.points.some((p) => !known.has(p.constraintSetId));
+  if (series.constraintSets.length === 0) return false; // legacy model: one implicit segment
+  const byId = new Map(series.constraintSets.map((s) => [s.id, s]));
+  return series.points.some((p) => {
+    const set = byId.get(p.constraintSetId);
+    return !set || !shapeMatches(set, p);
+  });
 }
 
 /** How many constraint slots the charts should draw: from the sets, or from the data for legacy networks. */
@@ -185,7 +201,9 @@ export function buildChartPoints(series: Series): ChartPoint[] {
     bySet.set(s.setId, list);
   }
   return series.points.map((p) => {
-    const own = bySet.get(p.constraintSetId);
+    const candidate = bySet.get(p.constraintSetId);
+    const n = p.constraintBips.length > 0 ? p.constraintBips.length : p.backlogs.length;
+    const own = candidate && (n === 0 || candidate.length === Math.min(n, MAX_SERIES)) ? candidate : undefined;
     const row: ChartPoint = {
       t: p.t,
       feeAvg: weiToGweiNumber(p.baseFeeAvg),

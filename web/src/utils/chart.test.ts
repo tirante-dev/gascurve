@@ -318,3 +318,23 @@ describe("curves and domains", () => {
     expect(logDomain([0, -1, Number.NaN])).toEqual([0.001, 1]);
   });
 });
+
+describe("shape-aware set resolution", () => {
+  const genesis = { id: 1, effectiveBlock: 28, effectiveAt: "2026-04-30T20:37:23Z", source: "genesis" as const, constraints: [60e6, 41e6, 29e6, 20e6, 14e6, 10e6].map((target, i) => ({ target, window: [9, 52, 329, 2105, 13485, 86400][i], startingBacklog: 0 })) };
+  const point = { t: 1, blocks: 1, gasUsed: 1, gasPerSecond: 1, feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "20000000", baseFeeMax: "20000000", exponentBips: 31313, constraintBips: [0, 31313], backlogs: [6042415, 10822088492758], backlogsMax: [6042415, 10822088492758], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 1, replayErrorBips: 0 };
+  it("treats a set whose constraint count differs from the point's data as unknown", () => {
+    const series = { range: "1h" as const, resolution: "block" as const, constraintSets: [genesis], ownerActions: [], points: [point] };
+    expect(hasUnknownSets(series)).toBe(true);
+    const rows = buildChartPoints(series);
+    expect(rows[0].setKnown).toBe(false);
+    expect(rows[0].cUnknown).toBeCloseTo(3.1313, 4);
+    expect(segmentsFor(series).map((s) => s.setId)).toEqual([1, 1, 1, 1, 1, 1]);
+  });
+  it("keeps a set whose shape matches", () => {
+    const current = { ...genesis, id: 6, effectiveBlock: 53_578_754, constraints: genesis.constraints.slice(0, 2) };
+    const series = { range: "1h" as const, resolution: "block" as const, constraintSets: [genesis, current], ownerActions: [], points: [{ ...point, constraintSetId: 6 }] };
+    expect(hasUnknownSets(series)).toBe(false);
+    expect(segmentsFor(series).map((s) => s.setId)).toEqual([6, 6]);
+    expect(buildChartPoints(series)[0].setKnown).toBe(true);
+  });
+});
