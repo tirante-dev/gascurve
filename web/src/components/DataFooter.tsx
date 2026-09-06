@@ -56,7 +56,7 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
         </div>
       </div>
       <p className="mt-6 text-ink-3">
-        gascurve reads the gascurve api only; the browser never calls an RPC. Times are shown in your local zone with its abbreviation; owner actions in UTC.
+        Times are shown in your local zone with its abbreviation; owner actions in UTC.
       </p>
     </footer>
   );
