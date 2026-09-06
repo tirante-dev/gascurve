@@ -44,7 +44,7 @@ export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) 
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
       <div>
         <div className="overflow-x-auto rounded-md border border-hairline bg-surface p-4">
-          <div className="num flex min-w-max flex-wrap items-start gap-x-2 gap-y-3 text-base text-ink-2 sm:text-lg">
+          <div className="num flex flex-wrap items-start gap-x-2 gap-y-3 text-base text-ink-2 sm:text-lg">
             <Term label="base fee">baseFee</Term>
             <Op>=</Op>
             <Term label="floor">minBaseFee</Term>
@@ -63,7 +63,7 @@ export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) 
             <Term label="">)</Term>
           </div>
           {snapshot && live ? (
-            <div className="num mt-4 flex min-w-max flex-wrap items-start gap-x-2 gap-y-3 border-t border-hairline pt-4 text-base text-ink-2 sm:text-lg">
+            <div className="num mt-4 flex flex-wrap items-start gap-x-2 gap-y-3 border-t border-hairline pt-4 text-base text-ink-2 sm:text-lg">
               <Term label="implied, dt = 0">{formatGwei(live.predicted)} gwei</Term>
               <Op>=</Op>
               <Term label="floor">{formatGwei(snapshot.minBaseFee)} gwei</Term>
