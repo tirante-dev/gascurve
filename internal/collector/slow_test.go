@@ -13,6 +13,7 @@ import (
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
+	"github.com/tirante-dev/gascurve/internal/pricer"
 )
 
 func TestSlowTickOwnerActions(t *testing.T) {
@@ -46,9 +47,24 @@ func TestSlowTickOwnerActions(t *testing.T) {
 			t.Fatalf("timestamp resolved via header: %+v", a)
 		}
 	}
+	// The seed had recorded the live shape as an observed set (id 1) at
+	// the head; the action that explains it moved that row in place, so
+	// the id is stable and no second set exists.
 	sets, _ := store.ConstraintSets(ctx, 4663)
 	if len(sets) != 6 || sets[0].Source != model.SourceGenesis || sets[0].EffectiveBlock != 28 || sets[5].Source != model.SourceOwnerAction {
 		t.Fatalf("constraint sets: %+v", sets)
+	}
+	moved := false
+	for _, cs := range sets {
+		if cs.ID == 1 && cs.Source != model.SourceObserved && cs.EffectiveBlock < 250_000 {
+			moved = true
+		}
+		if cs.Source == model.SourceObserved {
+			t.Fatalf("no observed set may remain once the action is known: %+v", cs)
+		}
+	}
+	if !moved {
+		t.Fatalf("the observed set must keep its id: %+v", sets)
 	}
 	var entries []model.ConstraintSetEntry
 	if err := sets[5].Constraints.Unmarshal(&entries); err != nil || len(entries) != 2 || entries[1].StartingBacklog != 9_989_222_400_000 {
@@ -73,7 +89,12 @@ func TestSlowTickOwnerActions(t *testing.T) {
 	if len(f.minFeeChanges) != 1 || f.minFeeChanges[0].block != 174150 || f.minFeeChanges[0].fee.Int64() != 20_000_000 {
 		t.Fatalf("min fee changes: %+v", f.minFeeChanges)
 	}
-	// Second run: only the new range is scanned, nothing new inserted.
+	// The scan reached its head: the timeline is complete through it.
+	if v, _, _ := store.GetState(ctx, 4663, db.StateOwnerScanThrough); v != "250000" || f.ownerScanThrough != 250_000 {
+		t.Fatalf("owner scan through = %q (%d)", v, f.ownerScanThrough)
+	}
+	// Second run: the fast loop scans its catch-up interval, the slow loop
+	// only the range after its cursor; nothing new is inserted.
 	rpc.logRanges = nil
 	rpc.setHead(250_010)
 	if err := f.Tick(ctx); err != nil {
@@ -82,8 +103,11 @@ func TestSlowTickOwnerActions(t *testing.T) {
 	if err := f.SlowTick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(rpc.logRanges) != 1 || rpc.logRanges[0] != [2]uint64{250_001, 250_010} {
+	if len(rpc.logRanges) != 2 || rpc.logRanges[0] != [2]uint64{250_001, 250_010} || rpc.logRanges[1] != [2]uint64{250_001, 250_010} {
 		t.Fatalf("incremental log ranges = %v", rpc.logRanges)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateOwnerScanThrough); v != "250010" {
+		t.Fatalf("owner scan through = %q", v)
 	}
 	if v, _, _ := store.GetState(ctx, 4663, db.StateArbOSVersion); v != "61" {
 		t.Fatalf("arbos version = %q", v)
@@ -132,12 +156,77 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	rpc := newFakeRPC(120_000_000)
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
-	// Without a fast tick the head comes from eth_blockNumber.
+	// Without a fast tick the head comes from eth_blockNumber. Without an
+	// archive endpoint nothing before the cutoff can be priced: the range
+	// is a hole and the origin says so.
 	if err := f.SlowTick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if rpc.calledTimes("BlockNumber") != 1 || rpc.logRanges[0][0] != 70_000_000 {
 		t.Fatalf("large chain scan start: %v", rpc.logRanges)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateOwnerScanOrigin); v != `{"block":70000000,"archive":false}` || f.scanOrigin == nil || f.scanOrigin.Archive {
+		t.Fatalf("origin without archive: %q", v)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].From != 0 || holes[0].To != 69_999_999 {
+		t.Fatalf("pre-cutoff hole: %+v", holes)
+	}
+	if f.minFeeAt(70_000_000).Int64() != pricer.InitialMinimumBaseFeeWei {
+		t.Fatal("no fee is guessed for an unreconstructable origin")
+	}
+	if sets, _ := store.ConstraintSets(ctx, 4663); len(sets) != 0 {
+		t.Fatalf("no set without archive state: %+v", sets)
+	}
+	// With an archive endpoint the state at the cutoff is sampled once:
+	// its fee is the baseline from the cutoff on and its constraints an
+	// observed set there; a second pass does not sample again.
+	archive := newFakeRPC(120_000_000)
+	archive.minFee = big.NewInt(30_000_000)
+	storeA := dbtest.New()
+	fa := newTestFollower(t, rpc, storeA)
+	fa.archive = archive
+	rpc.logRanges = nil
+	if err := fa.SlowTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(archive.sampleAt) != 1 || archive.sampleAt[0] != 70_000_000 {
+		t.Fatalf("origin sample = %v", archive.sampleAt)
+	}
+	if v, _, _ := storeA.GetState(ctx, 4663, db.StateOwnerScanOrigin); v != `{"block":70000000,"minBaseFee":"30000000","archive":true}` {
+		t.Fatalf("origin with archive: %q", v)
+	}
+	if fa.minFeeAt(69_999_999).Int64() != pricer.InitialMinimumBaseFeeWei || fa.minFeeAt(70_000_000).Int64() != 30_000_000 || fa.minFeeChangeBlock(80_000_000) != 70_000_000 {
+		t.Fatalf("origin fee: %s", fa.minFeeAt(70_000_000))
+	}
+	sets, _ := storeA.ConstraintSets(ctx, 4663)
+	if len(sets) != 1 || sets[0].EffectiveBlock != 70_000_000 || sets[0].Source != model.SourceObserved || len(holesOf(t, storeA)) != 0 {
+		t.Fatalf("origin set: %+v holes %+v", sets, holesOf(t, storeA))
+	}
+	delete(storeA.StateRows, "4663/"+db.StateOwnerLogCursor)
+	if err := fa.SlowTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(archive.sampleAt) != 1 {
+		t.Fatal("the origin is established once")
+	}
+	// A restarted follower reloads it; a failing archive sample or a
+	// failing checkpoint write fail the scan without an origin.
+	fb := newTestFollower(t, rpc, storeA)
+	if err := fb.ensureInit(ctx); err != nil || fb.scanOrigin == nil || fb.scanOrigin.MinBaseFee != "30000000" {
+		t.Fatalf("reloaded origin: %+v %v", fb.scanOrigin, err)
+	}
+	archive.errs["FastSampleAt"] = errRPC
+	fc := newTestFollower(t, rpc, dbtest.New())
+	fc.archive = archive
+	if err := fc.SlowTick(ctx); !errors.Is(err, errRPC) || fc.scanOrigin != nil {
+		t.Fatalf("origin sample failure: %v", err)
+	}
+	delete(archive.errs, "FastSampleAt")
+	failing := dbtest.New()
+	failing.FailOn["WithChainTx"] = true
+	fd := newTestFollower(t, rpc, failing)
+	if err := fd.SlowTick(ctx); !errors.Is(err, dbtest.ErrInjected) || fd.scanOrigin != nil {
+		t.Fatalf("origin write failure: %v", err)
 	}
 	// Legacy chains never record observed sets.
 	rpc2 := newFakeRPC(1000)
@@ -163,7 +252,7 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	if err := f3.SlowTick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	sets, _ := store3.ConstraintSets(ctx, 4663)
+	sets, _ = store3.ConstraintSets(ctx, 4663)
 	if len(sets) != 1 || sets[0].Source != model.SourceObserved {
 		t.Fatalf("observed set on a chain without actions: %+v", sets)
 	}
@@ -289,11 +378,20 @@ func TestSlowTickErrors(t *testing.T) {
 		}
 		delete(rpc.errs, method)
 	}
-	for _, method := range []string{"GetState", "SetState", "InsertOwnerActions", "InsertConstraintSet", "TwoTxBlocks", "UpsertBatchReports", "PruneBlocks", "PruneStateSamples", "OldestBlock"} {
+	for _, method := range []string{"GetState", "SetState", "InsertOwnerActions", "InsertConstraintSet", "TwoTxBlocks", "UpsertBatchReports", "PruneBlocks", "PruneStateSamples", "OldestBlock", "WithChainTx"} {
 		fresh := dbtest.New()
 		fresh.FailOn[method] = true
 		ff := newTestFollower(t, rpc, fresh)
-		if method != "SetState" && method != "GetState" {
+		if method == "InsertConstraintSet" {
+			// The seed's observed set is part of the tick's transaction.
+			if err := ff.Tick(ctx); !errors.Is(err, dbtest.ErrInjected) {
+				t.Fatalf("%s: tick must fail, got %v", method, err)
+			}
+			continue
+		}
+		// The tick itself needs the checkpoint writes and the chain
+		// transaction, so those run without one.
+		if method != "SetState" && method != "GetState" && method != "WithChainTx" {
 			if method == "OldestBlock" {
 				delete(fresh.FailOn, method)
 			}
@@ -343,25 +441,47 @@ func TestSlowTickErrors(t *testing.T) {
 	if err := newTestFollower(t, rpc, bad).SlowTick(ctx); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("init failure: %v", err)
 	}
-	// Observed check with an unreadable latest set.
+	// The observed set decision: an unreadable latest set is left alone, a
+	// missing or different one yields an observed set at the sampled block,
+	// a matching one (recorded, or pending in the tick) yields none, and a
+	// legacy sample never does.
+	sample := rpc.sampleLocked(1000, rpc.constraints, nil)
 	f.mu.Lock()
 	f.sets = []db.ConstraintSet{{ID: 1, Constraints: db.JSONB(`{bad`)}}
-	f.observedChecked = false
-	f.ownerScanDone = true
-	err = f.checkObservedLocked(ctx)
-	f.mu.Unlock()
-	if err == nil {
-		t.Fatal("expected entries error")
+	if f.observedSetLocked(sample, nil) != nil {
+		t.Fatal("unreadable latest set must not be shadowed")
 	}
-	f.mu.Lock()
 	f.sets = nil
-	store.FailOn["InsertConstraintSet"] = true
-	err = f.checkObservedLocked(ctx)
+	o := f.observedSetLocked(sample, nil)
+	if o == nil || o.EffectiveBlock != 1000 || o.Source != model.SourceObserved || o.EffectiveAt.Unix() != int64(tsFor(1000)) {
+		t.Fatalf("observed set: %+v", o)
+	}
+	f.sets = []db.ConstraintSet{{ID: 1, EffectiveBlock: 1, Constraints: entriesJSON([]model.ConstraintSetEntry{{Target: 1, Window: 1}})}}
+	if f.observedSetLocked(sample, nil) == nil {
+		t.Fatal("a different latest set yields an observed set")
+	}
+	pending := []*nitro.OwnerAction{{BlockNumber: 999, Constraints: []nitro.ConstraintParam{{GasTargetPerSecond: 60_000_000, AdjustmentWindowSeconds: 15}, {GasTargetPerSecond: 40_000_000, AdjustmentWindowSeconds: 86_400}}}}
+	if f.observedSetLocked(sample, pending) != nil {
+		t.Fatal("a pending action with the live shape explains the sample")
+	}
+	f.sets = []db.ConstraintSet{{ID: 1, EffectiveBlock: 1, Constraints: entriesJSON(entriesFromSample(sample))}}
+	if f.observedSetLocked(sample, nil) != nil {
+		t.Fatal("a matching latest set yields nothing")
+	}
+	lp := legacyParams()
+	if f.observedSetLocked(&nitro.Sample{Legacy: &lp}, nil) != nil {
+		t.Fatal("legacy samples never yield observed sets")
+	}
 	f.mu.Unlock()
-	if !errors.Is(err, dbtest.ErrInjected) {
+	// The observed set is part of the tick's transaction.
+	fresh := dbtest.New()
+	fresh.FailOn["InsertConstraintSet"] = true
+	if err := newTestFollower(t, rpc, fresh).Tick(ctx); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("observed insert failure: %v", err)
 	}
-	delete(store.FailOn, "InsertConstraintSet")
+	if len(fresh.BlockRows[4663]) != 0 {
+		t.Fatal("nothing of the tick may commit without its observed set")
+	}
 }
 
 func TestBatchReportOf(t *testing.T) {

@@ -156,8 +156,15 @@ func TestPostgresQueries(t *testing.T) {
 	if err != nil || len(bk) != 1 || bk[0].BacklogsMax[1] != 4 || bk[0].ConstraintSetID.Int64 != 1 || bk[0].LastBlock != 100 {
 		t.Fatalf("Buckets: %+v %v", bk, err)
 	}
-	if bk[0].BaseFeeSum.Int64() != 20 || bk[0].ConstraintBipsEnd[1] != 6 || bk[0].MinBaseFee.Int64() != 7 || bk[0].FloorFeesWei.Int64() != 8 || bk[0].SurplusFeesWei.Int64() != 9 {
+	if bk[0].BaseFeeSum.Wei.Int64() != 20 || bk[0].ConstraintBipsEnd[1] != 6 || bk[0].MinBaseFee.Int64() != 7 || bk[0].FloorFeesWei.Wei.Int64() != 8 || bk[0].SurplusFeesWei.Wei.Int64() != 9 {
 		t.Fatalf("Buckets new fields: %+v", bk[0])
+	}
+	// A bucket written before the sum and fee split existed scans as
+	// unknown, not zero, and a NULL exponent array as nil.
+	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, "5", "1", "2", "3", nil, 34, "{1,2}", "{3,4}", nil, "7", nil, nil, 1, 50, 100))
+	bk, err = p.Buckets(ctx, 4663, "1m", now, now)
+	if err != nil || len(bk) != 1 || bk[0].BaseFeeSum.Valid || bk[0].FloorFeesWei.Valid || bk[0].SurplusFeesWei.Valid || bk[0].ConstraintBipsEnd != nil {
+		t.Fatalf("Buckets unknown fields: %+v %v", bk, err)
 	}
 
 	mock.ExpectExec("INSERT INTO state_samples").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -177,9 +184,13 @@ func TestPostgresQueries(t *testing.T) {
 	if ss, err := p.L1Samples(ctx, 4663, now, now, time.Minute); err != nil || len(ss) != 1 {
 		t.Fatalf("L1Samples: %+v %v", ss, err)
 	}
-	mock.ExpectExec("DELETE FROM state_samples").WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("DELETE FROM state_samples WHERE chain_id = \\$1 AND sampled_at < \\$2").WillReturnResult(sqlmock.NewResult(0, 2))
 	if n, err := p.PruneStateSamples(ctx, 4663, now); err != nil || n != 2 {
 		t.Fatalf("PruneStateSamples: %d %v", n, err)
+	}
+	mock.ExpectExec("DELETE FROM state_samples WHERE chain_id = \\$1 AND block_number > \\$2").WithArgs(4663, 100).WillReturnResult(sqlmock.NewResult(0, 3))
+	if n, err := p.DeleteStateSamplesAfter(ctx, 4663, 100); err != nil || n != 3 {
+		t.Fatalf("DeleteStateSamplesAfter: %d %v", n, err)
 	}
 
 	mock.ExpectExec("INSERT INTO owner_actions").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -211,6 +222,10 @@ func TestPostgresQueries(t *testing.T) {
 	if id, err := p.InsertConstraintSet(ctx, ConstraintSet{ChainID: 4663, Constraints: JSONB(`[]`), Source: "genesis"}); err != nil || id != 9 {
 		t.Fatalf("InsertConstraintSet: %d %v", id, err)
 	}
+	mock.ExpectExec("UPDATE constraint_sets SET effective_block").WithArgs(9, 4663, 28, now, JSONB(`[]`), "genesis").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.UpdateConstraintSet(ctx, ConstraintSet{ID: 9, ChainID: 4663, EffectiveBlock: 28, EffectiveAt: now, Constraints: JSONB(`[]`), Source: "genesis"}); err != nil {
+		t.Fatal(err)
+	}
 	mock.ExpectQuery("SELECT .* FROM constraint_sets").WillReturnRows(sqlmock.NewRows([]string{"id", "chain_id", "effective_block", "effective_at", "constraints", "source"}).AddRow(9, 4663, 28, now, []byte(`[]`), "genesis"))
 	if cs, err := p.ConstraintSets(ctx, 4663); err != nil || len(cs) != 1 || cs[0].EffectiveBlock != 28 {
 		t.Fatalf("ConstraintSets: %+v %v", cs, err)
@@ -241,6 +256,10 @@ func TestPostgresQueries(t *testing.T) {
 	}
 	mock.ExpectExec("INSERT INTO collector_state").WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := p.SetState(ctx, 4663, "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectExec("DELETE FROM collector_state WHERE chain_id = \\$1 AND key = \\$2").WithArgs(4663, "k").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.DeleteState(ctx, 4663, "k"); err != nil {
 		t.Fatal(err)
 	}
 	mock.ExpectQuery("SELECT key, value FROM collector_state").WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).AddRow("a", "1").AddRow("b", "2"))
@@ -288,17 +307,20 @@ func TestPostgresErrors(t *testing.T) {
 		{"LatestStateSample", true, func() error { _, err := p.LatestStateSample(ctx, 1, false); return err }},
 		{"L1Samples", true, func() error { _, err := p.L1Samples(ctx, 1, now, now, 0); return err }},
 		{"PruneStateSamples", false, func() error { _, err := p.PruneStateSamples(ctx, 1, now); return err }},
+		{"DeleteStateSamplesAfter", false, func() error { _, err := p.DeleteStateSamplesAfter(ctx, 1, 1); return err }},
 		{"InsertOwnerActions", false, func() error { _, err := p.InsertOwnerActions(ctx, []OwnerAction{{}}); return err }},
 		{"OwnerActions", true, func() error { _, err := p.OwnerActions(ctx, 1, now, now, 1); return err }},
 		{"OwnerActionsSince", true, func() error { _, err := p.OwnerActionsSince(ctx, 1, 1); return err }},
 		{"RewindAfter", false, func() error { return p.RewindAfter(ctx, 1, 1) }},
 		{"InsertConstraintSet", true, func() error { _, err := p.InsertConstraintSet(ctx, ConstraintSet{}); return err }},
+		{"UpdateConstraintSet", false, func() error { return p.UpdateConstraintSet(ctx, ConstraintSet{}) }},
 		{"ConstraintSets", true, func() error { _, err := p.ConstraintSets(ctx, 1); return err }},
 		{"UpsertBatchReports", false, func() error { return p.UpsertBatchReports(ctx, []BatchReport{{}}) }},
 		{"BatchReports", true, func() error { _, err := p.BatchReports(ctx, 1, now, now); return err }},
 		{"BatchBuckets", true, func() error { _, err := p.BatchBuckets(ctx, 1, now, now, 0); return err }},
 		{"GetState", true, func() error { _, _, err := p.GetState(ctx, 1, "k"); return err }},
 		{"SetState", false, func() error { return p.SetState(ctx, 1, "k", "v") }},
+		{"DeleteState", false, func() error { return p.DeleteState(ctx, 1, "k") }},
 		{"States", true, func() error { _, err := p.States(ctx, 1); return err }},
 		{"Notify", false, func() error { return p.Notify(ctx, "c", "p") }},
 	}
@@ -361,6 +383,38 @@ func TestWithTx(t *testing.T) {
 	mock.ExpectCommit().WillReturnError(errBoom)
 	if err := p.WithTx(ctx, func(Store) error { return nil }); !errors.Is(err, errBoom) {
 		t.Fatalf("commit error: %v", err)
+	}
+
+	// A chain transaction takes the advisory lock before anything else;
+	// nested chain and plain transactions reuse it.
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock\\(\\$1\\)").WithArgs(int64(4663)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO collector_state").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO collector_state").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	err = p.WithChainTx(ctx, 4663, func(s Store) error {
+		if err := s.WithChainTx(ctx, 4663, func(inner Store) error { return inner.SetState(ctx, 4663, "a", "1") }); err != nil {
+			return err
+		}
+		return s.WithTx(ctx, func(inner Store) error { return inner.SetState(ctx, 4663, "b", "2") })
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A failed lock rolls back without running fn.
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").WillReturnError(errBoom)
+	mock.ExpectRollback()
+	ran := false
+	if err := p.WithChainTx(ctx, 4663, func(Store) error { ran = true; return nil }); !errors.Is(err, errBoom) || ran {
+		t.Fatalf("lock error: %v ran=%v", err, ran)
+	}
+	// A snapshot transaction is repeatable read and read only.
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT value FROM collector_state").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("v"))
+	mock.ExpectCommit()
+	if err := p.WithSnapshotTx(ctx, func(s Store) error { _, _, err := s.GetState(ctx, 1, "k"); return err }); err != nil {
+		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

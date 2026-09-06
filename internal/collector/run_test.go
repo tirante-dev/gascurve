@@ -227,10 +227,14 @@ func TestFollowerRunOnHeads(t *testing.T) {
 	if f.Head() != 1000 || len(rpc.sampleAt) != 0 {
 		t.Fatalf("polling phase: head %d, sampleAt %v", f.Head(), rpc.sampleAt)
 	}
-	// Connected: heads drive ticks pinned to their block numbers and the
-	// timer stops sampling.
-	heads.connected.Store(true)
+	// Connected: the first timer beat runs one explicit tick (a quiet chain
+	// is sampled as soon as the subscription is acknowledged), then heads
+	// drive ticks pinned to their block numbers and the timer stops
+	// sampling.
 	polled := rpc.calledTimes("FastSample")
+	heads.connected.Store(true)
+	waitFor(t, "explicit tick after the subscription", func() bool { return rpc.calledTimes("FastSample") == polled+1 })
+	polled++
 	rpc.setHead(1002)
 	heads.heads <- 1001
 	heads.heads <- 1002
@@ -242,8 +246,8 @@ func TestFollowerRunOnHeads(t *testing.T) {
 		t.Fatalf("sampleAt = %v", sampled)
 	}
 	time.Sleep(20 * time.Millisecond)
-	if rpc.calledTimes("FastSample") > polled+1 {
-		t.Fatalf("timer must not poll while connected: %d > %d", rpc.calledTimes("FastSample"), polled)
+	if rpc.calledTimes("FastSample") != polled {
+		t.Fatalf("timer must not poll while connected: %d != %d", rpc.calledTimes("FastSample"), polled)
 	}
 	// A head the node cannot serve yet is logged and dropped; the timer
 	// then polls once as a safety net, which keeps the head where it was.

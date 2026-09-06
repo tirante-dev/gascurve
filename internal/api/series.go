@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
 	"time"
 
@@ -132,33 +133,55 @@ func setsInForce(sets []db.ConstraintSet, from time.Time) []db.ConstraintSet {
 	return out
 }
 
-func setIDAt(sets []db.ConstraintSet, number uint64) int64 {
+// setIDAt returns the set in force at a block among those whose constraint
+// count matches the block's backlogs (its live model); a block is never
+// tagged with a set of another shape. 0 when none.
+func setIDAt(sets []db.ConstraintSet, number uint64, backlogs int) int64 {
 	var id int64
 	for _, cs := range sets {
-		if cs.EffectiveBlock <= number {
+		if cs.EffectiveBlock <= number && setSize(cs) == backlogs {
 			id = cs.ID
 		}
 	}
 	return id
 }
 
+// setSize is the number of constraints in a set document, -1 when it
+// cannot be read (which matches nothing).
+func setSize(cs db.ConstraintSet) int {
+	var entries []json.RawMessage
+	if err := cs.Constraints.Unmarshal(&entries); err != nil {
+		return -1
+	}
+	return len(entries)
+}
+
+// bucketPoint renders a bucket. The average comes from the exact sum when
+// the bucket carries one and from the stored average otherwise; the fee
+// split and the exponents are null when the bucket predates them.
 func bucketPoint(b db.Bucket, width time.Duration) model.SeriesPoint {
 	secs := max(uint64(width/time.Second), 1)
 	var setID int64
 	if b.ConstraintSetID.Valid {
 		setID = b.ConstraintSetID.Int64
 	}
+	avg := b.BaseFeeAvg.String()
+	if b.BaseFeeSum.Valid && b.Blocks > 0 {
+		avg = new(big.Int).Div(b.BaseFeeSum.Wei.BigInt(), big.NewInt(b.Blocks)).String()
+	}
 	return model.SeriesPoint{
 		T: b.BucketStart.Unix(), Blocks: b.Blocks, GasUsed: b.GasUsed, GasPerSecond: b.GasUsed / secs,
-		FeesWei: b.FeesWei.String(), BaseFeeMin: b.BaseFeeMin.String(), BaseFeeAvg: b.BaseFeeAvg.String(), BaseFeeMax: b.BaseFeeMax.String(),
+		FeesWei: b.FeesWei.String(), BaseFeeMin: b.BaseFeeMin.String(), BaseFeeAvg: avg, BaseFeeMax: b.BaseFeeMax.String(),
 		ExponentBips: b.ExponentEndBips, ConstraintBips: int64s(b.ConstraintBipsEnd), Backlogs: b.BacklogsEnd.Uint64s(), BacklogsMax: b.BacklogsMax.Uint64s(),
-		MinBaseFee: b.MinBaseFee.String(), FloorFeesWei: b.FloorFeesWei.String(), SurplusFeesWei: b.SurplusFeesWei.String(),
+		MinBaseFee: b.MinBaseFee.String(), FloorFeesWei: b.FloorFeesWei.StringPtr(), SurplusFeesWei: b.SurplusFeesWei.StringPtr(),
 		ConstraintSetID: setID, ReplayErrorBips: b.ReplayErrorBips,
 	}
 }
 
 // blockPoints renders one point per block. gasPerSecond is the total gas of
-// all blocks sharing the block's timestamp second.
+// all blocks sharing the block's timestamp second. A block stored before
+// its exponents and floor were recorded (nil ConstraintBips) has no known
+// fee split.
 func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint {
 	perSecond := map[int64]uint64{}
 	for _, b := range blocks {
@@ -168,16 +191,24 @@ func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint
 	for _, b := range blocks {
 		gas := new(big.Int).SetUint64(b.GasUsed)
 		fees := new(big.Int).Mul(b.BaseFee.BigInt(), gas)
-		floor := new(big.Int).Mul(b.MinBaseFee.BigInt(), gas)
-		out = append(out, model.SeriesPoint{
+		p := model.SeriesPoint{
 			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, GasPerSecond: perSecond[b.TS.Unix()],
 			FeesWei: fees.String(), BaseFeeMin: b.BaseFee.String(), BaseFeeAvg: b.BaseFee.String(), BaseFeeMax: b.BaseFee.String(),
 			ExponentBips: b.ExponentBips, ConstraintBips: int64s(b.ConstraintBips), Backlogs: b.Backlogs.Uint64s(), BacklogsMax: b.Backlogs.Uint64s(),
-			MinBaseFee: b.MinBaseFee.String(), FloorFeesWei: floor.String(), SurplusFeesWei: new(big.Int).Sub(fees, floor).String(),
-			ConstraintSetID: setIDAt(sets, b.Number), ReplayErrorBips: replayError(b),
-		})
+			MinBaseFee: b.MinBaseFee.String(), ConstraintSetID: setIDAt(sets, b.Number, len(b.Backlogs)), ReplayErrorBips: replayError(b),
+		}
+		if b.ConstraintBips != nil {
+			floor := new(big.Int).Mul(b.MinBaseFee.BigInt(), gas)
+			p.FloorFeesWei, p.SurplusFeesWei = stringPtr(floor), stringPtr(new(big.Int).Sub(fees, floor))
+		}
+		out = append(out, p)
 	}
 	return out
+}
+
+func stringPtr(v *big.Int) *string {
+	s := v.String()
+	return &s
 }
 
 // stepDown folds blocks into fixed width buckets.
@@ -193,7 +224,7 @@ func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration) [
 			}
 			cur = &acc{start: start, sum: new(big.Int), fees: new(big.Int), floor: new(big.Int)}
 		}
-		cur.add(b, setIDAt(sets, b.Number))
+		cur.add(b, setIDAt(sets, b.Number, len(b.Backlogs)))
 	}
 	if cur != nil {
 		out = append(out, cur.point(secs))
@@ -207,6 +238,7 @@ type acc struct {
 	gas            uint64
 	sum, fees      *big.Int
 	floor          *big.Int
+	unknownFloor   bool // a block without a recorded floor makes the split unknown
 	minFee         *big.Int
 	maxFee         *big.Int
 	exponent       int64
@@ -232,6 +264,7 @@ func (a *acc) add(b db.Block, setID int64) {
 	gas := new(big.Int).SetUint64(b.GasUsed)
 	a.fees.Add(a.fees, new(big.Int).Mul(fee, gas))
 	a.floor.Add(a.floor, new(big.Int).Mul(b.MinBaseFee.BigInt(), gas))
+	a.unknownFloor = a.unknownFloor || b.ConstraintBips == nil
 	a.exponent = b.ExponentBips
 	a.constraintBips = int64s(b.ConstraintBips)
 	a.minBaseFee = b.MinBaseFee.String()
@@ -255,20 +288,20 @@ func (a *acc) point(secs int64) model.SeriesPoint {
 	if a.backlogs == nil {
 		a.backlogs = []uint64{}
 	}
-	if a.constraintBips == nil {
-		a.constraintBips = []int64{}
-	}
 	if a.minBaseFee == "" {
 		a.minBaseFee = "0"
 	}
 	if a.floor == nil {
 		a.floor = new(big.Int)
 	}
-	return model.SeriesPoint{
+	p := model.SeriesPoint{
 		T: a.start, Blocks: a.blocks, GasUsed: a.gas, GasPerSecond: a.gas / uint64(secs),
 		FeesWei: a.fees.String(), BaseFeeMin: a.minFee.String(), BaseFeeAvg: avg.String(), BaseFeeMax: a.maxFee.String(),
 		ExponentBips: a.exponent, ConstraintBips: a.constraintBips, Backlogs: a.backlogs, BacklogsMax: a.maxBacklog,
-		MinBaseFee: a.minBaseFee, FloorFeesWei: a.floor.String(), SurplusFeesWei: new(big.Int).Sub(a.fees, a.floor).String(),
-		ConstraintSetID: a.setID, ReplayErrorBips: a.errBips,
+		MinBaseFee: a.minBaseFee, ConstraintSetID: a.setID, ReplayErrorBips: a.errBips,
 	}
+	if !a.unknownFloor {
+		p.FloorFeesWei, p.SurplusFeesWei = stringPtr(a.floor), stringPtr(new(big.Int).Sub(a.fees, a.floor))
+	}
+	return p
 }

@@ -101,9 +101,12 @@ func (f *Follower) runPolling(ctx context.Context) {
 // into one tick at the newest of them (the catch-up fetches the rest). The
 // timer keeps firing at tick_interval but only ticks while the
 // subscription is down, so the follower degrades to polling and picks the
-// subscription back up on its own. After a failed head tick (say the HTTP
-// node has not seen that block yet) the timer polls once so a quiet chain
-// cannot leave the follower stuck on a stale head.
+// subscription back up on its own; the first timer beat after the
+// subscription comes up runs one explicit tick, so a quiet chain is
+// sampled as soon as the subscription is acknowledged rather than at its
+// next head. After a failed head tick (say the HTTP node has not seen that
+// block yet) the timer polls once so a quiet chain cannot leave the
+// follower stuck on a stale head.
 func (f *Follower) runOnHeads(ctx context.Context) {
 	var mu sync.Mutex
 	var latest uint64
@@ -138,10 +141,15 @@ func (f *Follower) runOnHeads(ctx context.Context) {
 				retry = true
 			}
 		case <-ticker.C:
-			if f.heads.Connected() && !retry {
+			connected := f.heads.Connected()
+			switch {
+			case connected && polling:
+				// Acknowledged since the last beat: one explicit tick now.
+				polling = false
+				f.log.Info("following newHeads, timer polling paused")
+			case connected && !retry:
 				continue
-			}
-			if !polling && !f.heads.Connected() {
+			case !connected && !polling:
 				polling = true
 				f.log.Warn("newHeads subscription down, polling on the timer")
 			}

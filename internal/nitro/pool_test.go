@@ -430,3 +430,44 @@ func TestPoolTypedCalls(t *testing.T) {
 		t.Fatalf("status: %+v", st)
 	}
 }
+
+// TestPoolWindowBudget: on a budgeted endpoint the loops' whole call mix
+// (samples, header batches, logs, full blocks, L1 getters) never puts more
+// than burst + rate*10 calls into any ten second window, and no request
+// carries more items than the bucket can hold, however the callers batch.
+func TestPoolWindowBudget(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeRPC(t)
+	setupChain(f)
+	f.handlers["eth_chainId"] = func([]json.RawMessage) any { return testChainIDHex }
+	f.maxItems = 8 // a request beyond the burst is answered with 429
+	clock := newFakeClock()
+	p := NewPool(PoolConfig{ChainID: testChainID, Endpoints: []config.EndpointConfig{endpointOf(f, 4)}, BatchSize: 100},
+		WithPoolClientOptions(WithHTTPClient(f.server.Client())), withPoolClock(clock.Now, clock.Sleep))
+	nums := make([]uint64, 0, 100)
+	for n := uint64(100); n < 200; n++ {
+		nums = append(nums, n)
+	}
+	steps := []func() error{
+		func() error { _, err := p.FastSample(ctx); return err },
+		func() error { _, err := p.HeadersByNumbers(ctx, nums); return err },
+		func() error { _, err := p.OwnerActsLogs(ctx, 0, 100_000); return err },
+		func() error { _, err := p.L1Sample(ctx); return err },
+		func() error { _, err := p.BlocksWithTxs(ctx, nums[:20]); return err },
+		func() error { _, err := p.FeeAccounts(ctx); return err },
+		func() error { _, err := p.FastSampleAt(ctx, 150); return err },
+		func() error { _, err := p.HeadersByNumbers(ctx, nums[:30]); return err },
+	}
+	for i, step := range steps {
+		if err := step(); err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+		if st := p.Stats(); st.CallsLast10s > 8+40 || st.RateLimitEvents != 0 {
+			t.Fatalf("step %d: %d calls in the last 10 s (rate limit events %d)", i, st.CallsLast10s, st.RateLimitEvents)
+		}
+		clock.Advance(300 * time.Millisecond)
+	}
+	if p.Endpoints()[0].BatchCap() != 100 || f.requestCount() < 13 {
+		t.Fatalf("batches must be chunked to the burst without touching the cap: cap %d requests %d", p.Endpoints()[0].BatchCap(), f.requestCount())
+	}
+}

@@ -33,14 +33,44 @@ func (p *Postgres) Ping(ctx context.Context) error {
 
 // WithTx runs fn in a transaction. Nested calls reuse the outer transaction.
 func (p *Postgres) WithTx(ctx context.Context, fn func(Store) error) error {
+	return p.transact(ctx, nil, nil, fn)
+}
+
+// WithChainTx runs fn in a transaction that holds the chain's advisory
+// lock (pg_advisory_xact_lock, released at commit or rollback) before any
+// other statement. Nested calls reuse the outer transaction.
+func (p *Postgres) WithChainTx(ctx context.Context, chainID uint64, fn func(Store) error) error {
+	return p.transact(ctx, nil, func(s *Postgres) error {
+		if _, err := s.exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(chainID)); err != nil {
+			return fmt.Errorf("chain lock: %w", err)
+		}
+		return nil
+	}, fn)
+}
+
+// WithSnapshotTx runs fn in a read-only repeatable-read transaction.
+func (p *Postgres) WithSnapshotTx(ctx context.Context, fn func(Store) error) error {
+	return p.transact(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, nil, fn)
+}
+
+// transact begins a transaction with opts (reusing an open one), runs
+// setup and then fn on it, and commits unless either failed.
+func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, setup func(*Postgres) error, fn func(Store) error) error {
 	if _, ok := p.q.(*sqlx.Tx); ok {
 		return fn(p)
 	}
-	tx, err := p.db.BeginTxx(ctx, nil)
+	tx, err := p.db.BeginTxx(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	if err := fn(&Postgres{db: p.db, q: tx}); err != nil {
+	bound := &Postgres{db: p.db, q: tx}
+	if setup != nil {
+		err = setup(bound)
+	}
+	if err == nil {
+		err = fn(bound)
+	}
+	if err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -221,7 +251,9 @@ func (p *Postgres) PruneBlocks(ctx context.Context, chainID uint64, before time.
 const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, fees_wei, base_fee_min, base_fee_avg, base_fee_max, base_fee_sum, exponent_end_bips, backlogs_end, backlogs_max, constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, constraint_set_id, replay_error_bips, last_block`
 
 // FoldBuckets adds partial buckets into the stored rows (the backfill's
-// path for windows without block rows; the cursor commits with it).
+// path for windows without block rows; the cursor commits with it). A sum
+// or fee split that is unknown (NULL) on either side stays unknown; the
+// average then uses the rounded reconstruction for the unknown side.
 func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 	for _, b := range buckets {
 		if _, err := p.exec(ctx, `
@@ -237,7 +269,7 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 				base_fee_min = CASE WHEN buckets.blocks = 0 THEN EXCLUDED.base_fee_min ELSE LEAST(buckets.base_fee_min, EXCLUDED.base_fee_min) END,
 				base_fee_max = GREATEST(buckets.base_fee_max, EXCLUDED.base_fee_max),
 				base_fee_avg = CASE WHEN buckets.blocks + EXCLUDED.blocks > 0
-					THEN floor((buckets.base_fee_sum + EXCLUDED.base_fee_sum) / (buckets.blocks + EXCLUDED.blocks))
+					THEN floor((COALESCE(buckets.base_fee_sum, buckets.base_fee_avg * buckets.blocks) + COALESCE(EXCLUDED.base_fee_sum, EXCLUDED.base_fee_avg * EXCLUDED.blocks)) / (buckets.blocks + EXCLUDED.blocks))
 					ELSE 0 END,
 				exponent_end_bips = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.exponent_end_bips ELSE buckets.exponent_end_bips END,
 				backlogs_end = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.backlogs_end ELSE buckets.backlogs_end END,
@@ -259,7 +291,8 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 // RebuildBuckets recomputes buckets from the block rows in their windows,
 // mirroring BucketBuilder in SQL. A window that has no rows loses its
 // bucket. The constraint set is the one in force at the window's last
-// block.
+// block, and only when its constraint count matches the block's backlogs
+// (the live model); a block is never tagged with a set of another shape.
 func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error {
 	width, ok := Resolutions[resolution]
 	if !ok {
@@ -290,7 +323,9 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 			INSERT INTO buckets (`+bucketColumns+`)
 			SELECT $1, $2, $3, agg.blocks, agg.gas_used, agg.fees_wei, agg.base_fee_min, floor(agg.base_fee_sum / agg.blocks), agg.base_fee_max, agg.base_fee_sum,
 				lastb.exponent_bips, lastb.backlogs, bmax.backlogs_max, lastb.constraint_bips, lastb.min_base_fee, agg.floor_fees_wei, agg.fees_wei - agg.floor_fees_wei,
-				(SELECT id FROM constraint_sets cs WHERE cs.chain_id = $1 AND cs.effective_block <= lastb.number ORDER BY cs.effective_block DESC, cs.id DESC LIMIT 1),
+				(SELECT cs.id FROM constraint_sets cs WHERE cs.chain_id = $1 AND cs.effective_block <= lastb.number
+					AND jsonb_array_length(cs.constraints) = COALESCE(array_length(lastb.backlogs, 1), 0)
+					ORDER BY cs.effective_block DESC, cs.id DESC LIMIT 1),
 				agg.replay_error_bips, lastb.number
 			FROM agg, bmax, lastb
 			ON CONFLICT (chain_id, resolution, bucket_start) DO UPDATE SET
@@ -374,6 +409,15 @@ func (p *Postgres) PruneStateSamples(ctx context.Context, chainID uint64, before
 	return res.RowsAffected()
 }
 
+// DeleteStateSamplesAfter deletes samples taken above a block.
+func (p *Postgres) DeleteStateSamplesAfter(ctx context.Context, chainID, block uint64) (int64, error) {
+	res, err := p.exec(ctx, `DELETE FROM state_samples WHERE chain_id = $1 AND block_number > $2`, chainID, block)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 const ownerActionColumns = `chain_id, block_number, tx_hash, log_index, ts, method, selector, args`
 
 // InsertOwnerActions inserts new actions and returns the number added.
@@ -448,6 +492,13 @@ func (p *Postgres) InsertConstraintSet(ctx context.Context, cs ConstraintSet) (i
 	return id, nil
 }
 
+// UpdateConstraintSet rewrites a set in place, keeping its id.
+func (p *Postgres) UpdateConstraintSet(ctx context.Context, cs ConstraintSet) error {
+	_, err := p.exec(ctx, `UPDATE constraint_sets SET effective_block = $3, effective_at = $4, constraints = $5, source = $6 WHERE id = $1 AND chain_id = $2`,
+		cs.ID, cs.ChainID, cs.EffectiveBlock, cs.EffectiveAt, cs.Constraints, cs.Source)
+	return err
+}
+
 // ConstraintSets lists sets ascending by block.
 func (p *Postgres) ConstraintSets(ctx context.Context, chainID uint64) ([]ConstraintSet, error) {
 	return selectAll[ConstraintSet](ctx, p, `SELECT id, chain_id, effective_block, effective_at, constraints, source FROM constraint_sets WHERE chain_id = $1 ORDER BY effective_block ASC, id ASC`, chainID)
@@ -510,6 +561,12 @@ func (p *Postgres) SetState(ctx context.Context, chainID uint64, key, value stri
 	_, err := p.exec(ctx, `
 		INSERT INTO collector_state (chain_id, key, value, updated_at) VALUES ($1, $2, $3, now())
 		ON CONFLICT (chain_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, chainID, key, value)
+	return err
+}
+
+// DeleteState removes a checkpoint.
+func (p *Postgres) DeleteState(ctx context.Context, chainID uint64, key string) error {
+	_, err := p.exec(ctx, `DELETE FROM collector_state WHERE chain_id = $1 AND key = $2`, chainID, key)
 	return err
 }
 

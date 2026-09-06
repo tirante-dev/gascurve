@@ -113,8 +113,8 @@ func TestCooldownSharedAcrossCallers(t *testing.T) {
 	f.handlers["echo"] = echoHandler
 	f.script = []scriptStep{{status: http.StatusTooManyRequests}}
 	clock := newFakeClock()
-	// Four calls per second: a 10-item batch drains the burst of 8 and
-	// waits for two more tokens on every attempt.
+	// Four calls per second: a 10-item batch takes the full burst of 8 and
+	// overdraws by two on every attempt.
 	p := NewPacer(4).withClock(clock.Now, clock.Sleep)
 	c := NewClient(f.server.URL, 4, WithPacer(p), withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()))
 	reqs := make([]Request, 10)
@@ -124,11 +124,11 @@ func TestCooldownSharedAcrossCallers(t *testing.T) {
 	if _, err := c.Batch(context.Background(), reqs); err != nil {
 		t.Fatal(err)
 	}
-	// Attempt 1 pays 10 tokens against a burst of 8 (500 ms). The retry
-	// pays 10 tokens again: the bucket refilled 2 during the first sleep,
-	// so it waits 2.5 s, which already covers the 2 s cooldown.
+	// Attempt 1 finds a full bucket and sends at once (balance -2). The
+	// retry waits for a full bucket again, 2.5 s at 4/s, which already
+	// covers the 2 s cooldown the 429 started.
 	sleeps := clock.Sleeps()
-	if len(sleeps) != 2 || sleeps[0] != 500*time.Millisecond || sleeps[1] != 2500*time.Millisecond {
+	if len(sleeps) != 1 || sleeps[0] != 2500*time.Millisecond {
 		t.Fatalf("sleeps = %v", sleeps)
 	}
 	if c.Stats().Backoff != minBackoff {
@@ -169,6 +169,49 @@ func TestCooldownSharedAcrossCallers(t *testing.T) {
 	cancel()
 	if _, _, _, err := c2.send(ctx, []byte("[]"), 1); err == nil {
 		t.Fatal("expected context error")
+	}
+	// The cooldown is published before the send lock is released: a caller
+	// that queued behind the throttled request sleeps through the cooldown
+	// instead of sending into the throttle.
+	f.script = []scriptStep{{status: http.StatusTooManyRequests}}
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.hold = gate
+	f.mu.Unlock()
+	c3 := NewClient(f.server.URL, 0, WithPacer(NewPacer(0).withClock(clock.Now, clock.Sleep)), withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()), WithMaxAttempts(1))
+	first := make(chan error, 1)
+	go func() {
+		_, err := c3.Call(context.Background(), "echo", "throttled")
+		first <- err
+	}()
+	// Wait until the first request is held by the server, then queue the
+	// second behind the send lock and release the first.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.mu.Lock()
+		held := f.hold == nil
+		f.mu.Unlock()
+		if held || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	second := make(chan error, 1)
+	go func() {
+		_, err := c3.Call(context.Background(), "echo", "queued")
+		second <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	before = len(clock.Sleeps())
+	close(gate)
+	if err := <-first; !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("first caller: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("second caller: %v", err)
+	}
+	if s := clock.Sleeps()[before:]; len(s) != 1 || s[0] != 2*time.Second || c3.Stats().RateLimitEvents != 1 {
+		t.Fatalf("the queued caller must observe the cooldown: sleeps %v stats %+v", s, c3.Stats())
 	}
 }
 

@@ -27,15 +27,18 @@ const (
 // backfillCursor is the resumable checkpoint stored in collector_state.
 // Segments are bounded by constraint sets and replayed forward from the
 // set's starting backlogs; the job walks segments backwards in time until
-// the segment end is older than backfill_depth. On archive networks
-// LastAnchor, LastAnchorErrorBips and AnchorMinFee record the most recent
-// state anchor, the replay error observed just before it and the minimum
-// base fee sampled there. Verified marks a segment chosen after the
-// initial owner-action scan completed; an unverified live-model segment
-// left by an older collector is discarded at start.
+// the segment end is older than backfill_depth. Top is the first live
+// block when the backfill started, the bound of everything it folds: a
+// reorg whose ancestor lies below Top-1 restarts the backfill. On archive
+// networks LastAnchor, LastAnchorErrorBips and AnchorMinFee record the
+// most recent state anchor, the replay error observed just before it and
+// the minimum base fee sampled there. Verified marks a segment chosen
+// after the initial owner-action scan completed; an unverified live-model
+// segment left by an older collector is discarded at start.
 type backfillCursor struct {
 	Done                bool     `json:"done"`
 	DepthStart          uint64   `json:"depthStart"`
+	Top                 uint64   `json:"top,omitempty"`
 	Active              bool     `json:"active"`
 	Verified            bool     `json:"verified,omitempty"`
 	SegStart            uint64   `json:"segStart"`
@@ -77,8 +80,9 @@ func (f *Follower) saveCursor(ctx context.Context, s db.Store, c *backfillCursor
 // blocks; otherwise it is a pure replay from the segment's starting
 // backlogs. Buckets in the hour of the first live block are rebuilt from
 // block rows (the live loop shares them); older buckets are folded
-// additively, committed together with the cursor so every block counts
-// exactly once.
+// additively, committed together with the cursor under the chain lock so
+// every block counts exactly once and no live rebuild sees a half-written
+// fold.
 func (f *Follower) BackfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err := f.ensureInit(ctx); err != nil {
 		return BackfillIdle, err
@@ -156,7 +160,7 @@ func (f *Follower) BackfillStep(ctx context.Context) (BackfillStatus, error) {
 		c.Active = false
 		c.End = c.SegStart
 	}
-	err = f.store.WithTx(ctx, func(s db.Store) error {
+	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		if len(rowBacked) > 0 {
 			if err := s.UpsertBlocks(ctx, rowBacked); err != nil {
 				return fmt.Errorf("backfill blocks: %w", err)
@@ -182,18 +186,25 @@ func (f *Follower) BackfillStep(ctx context.Context) (BackfillStatus, error) {
 // 0) that was not verified against a completed owner-action scan came from
 // an older collector and may carry the wrong constraints. Its buckets
 // (every backfill-only bucket) are deleted and the backfill starts over.
+// The check counts as done only once that cleanup has committed, so a
+// failed cleanup is retried rather than skipped.
 func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor) (*backfillCursor, error) {
 	f.mu.Lock()
 	checked := f.cursorChecked
-	f.cursorChecked = true
 	boundary, hasBoundary := f.boundaryLocked()
 	f.mu.Unlock()
-	if checked || !c.Active || c.SetID != 0 || c.Verified {
+	if checked {
+		return c, nil
+	}
+	if !c.Active || c.SetID != 0 || c.Verified {
+		f.mu.Lock()
+		f.cursorChecked = true
+		f.mu.Unlock()
 		return c, nil
 	}
 	f.log.Warn("discarding an unverified live-model backfill segment, its buckets are re-backfilled", "from", c.SegStart, "next", c.Next)
 	fresh := &backfillCursor{}
-	err := f.store.WithTx(ctx, func(s db.Store) error {
+	err := f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		if hasBoundary {
 			if _, err := s.DeleteBucketsBefore(ctx, f.chainID, boundary); err != nil {
 				return err
@@ -204,6 +215,9 @@ func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor) (*backfil
 	if err != nil {
 		return nil, fmt.Errorf("discard backfill cursor: %w", err)
 	}
+	f.mu.Lock()
+	f.cursorChecked = true
+	f.mu.Unlock()
 	return fresh, nil
 }
 
@@ -254,7 +268,8 @@ func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, number
 // the last one from earlier batches.
 func (f *Follower) backfillFees(c *backfillCursor, headers []nitro.Header, anchorFees map[uint64]*big.Int) []*big.Int {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	tl := f.timelineLocked(nil)
+	f.mu.Unlock()
 	lastAnchor := c.LastAnchor
 	var anchorFee *big.Int
 	if c.AnchorMinFee != "" {
@@ -262,8 +277,8 @@ func (f *Follower) backfillFees(c *backfillCursor, headers []nitro.Header, ancho
 	}
 	out := make([]*big.Int, len(headers))
 	for i, h := range headers {
-		fee := f.minFeeAt(h.Number)
-		if anchorFee != nil && lastAnchor < h.Number && f.minFeeChangeBlock(h.Number) <= lastAnchor {
+		fee := tl.minFeeAt(h.Number)
+		if anchorFee != nil && lastAnchor < h.Number && tl.minFeeChangeBlock(h.Number) <= lastAnchor {
 			fee = new(big.Int).Set(anchorFee)
 		}
 		out[i] = fee
@@ -302,15 +317,19 @@ func (f *Follower) replaySegment(st *pricer.State, c *backfillCursor, headers []
 }
 
 // startSegment picks the next segment to replay, walking backwards through
-// constraint sets. Nothing starts before the initial owner-action scan has
-// completed: only then are the historical sets known. Returns
+// constraint sets. Nothing starts before the owner-action timeline is
+// complete through the block preceding the first live block (the
+// owner_scan_through checkpoint): only then are the historical sets and
+// fees known for everything the backfill touches. A truncated scan's
+// origin bounds the depth: nothing below it is priced. Returns
 // BackfillDone when the depth is reached and BackfillIdle when nothing
 // can be decided yet.
 func (f *Follower) startSegment(ctx context.Context, c *backfillCursor) (BackfillStatus, error) {
 	f.mu.Lock()
-	scanned := f.ownerScanDone
+	ready := f.ownerScanThrough > 0 && f.liveStart != nil && f.ownerScanThrough+1 >= f.liveStart.Block
+	origin := f.scanOrigin
 	f.mu.Unlock()
-	if !scanned {
+	if !ready {
 		return BackfillIdle, nil
 	}
 	if c.End == 0 {
@@ -322,6 +341,7 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor) (Backfil
 			return BackfillIdle, nil
 		}
 		c.End = oldest.Number
+		c.Top = oldest.Number
 	}
 	if c.DepthStart == 0 {
 		start, err := f.findBlockAt(ctx, f.now().Add(-f.cfg.BackfillDepth))
@@ -329,6 +349,10 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor) (Backfil
 			return BackfillIdle, err
 		}
 		c.DepthStart = max(start, 1)
+		if origin != nil && c.DepthStart < origin.Block {
+			f.log.Warn("backfill depth reaches before the owner scan origin, stopping there", "depthStart", c.DepthStart, "origin", origin.Block)
+			c.DepthStart = origin.Block
+		}
 	}
 	if c.End <= c.DepthStart {
 		c.Done = true

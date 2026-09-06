@@ -6,6 +6,7 @@ package dbtest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -16,9 +17,14 @@ import (
 	"github.com/tirante-dev/gascurve/internal/db"
 )
 
-// MemStore is a thread-safe in-memory db.Store.
+// MemStore is a thread-safe in-memory db.Store. WithChainTx holds a
+// per-chain mutex for the duration of fn, so concurrent loops in a test
+// serialize their chain transactions the way the advisory lock does.
 type MemStore struct {
 	mu sync.Mutex
+	// chainMu serializes WithChainTx per chain; chainLocks guards the map.
+	chainLocks sync.Mutex
+	chainMu    map[uint64]*sync.Mutex
 
 	NetworkRows   map[uint64]db.Network
 	BlockRows     map[uint64]map[uint64]db.Block
@@ -50,6 +56,7 @@ func New() *MemStore {
 		ReportRows:  map[string]db.BatchReport{},
 		StateRows:   map[string]string{},
 		FailOn:      map[string]bool{},
+		chainMu:     map[uint64]*sync.Mutex{},
 	}
 }
 
@@ -88,6 +95,52 @@ func (m *MemStore) WithTx(_ context.Context, fn func(db.Store) error) error {
 		return err
 	}
 	return fn(m)
+}
+
+// WithChainTx runs fn holding the chain's mutex; the store passed to fn
+// treats nested chain and plain transactions as part of the same one.
+func (m *MemStore) WithChainTx(_ context.Context, chainID uint64, fn func(db.Store) error) error {
+	m.mu.Lock()
+	err := m.fail("WithChainTx")
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	m.chainLocks.Lock()
+	mu, ok := m.chainMu[chainID]
+	if !ok {
+		mu = &sync.Mutex{}
+		m.chainMu[chainID] = mu
+	}
+	m.chainLocks.Unlock()
+	mu.Lock()
+	defer mu.Unlock()
+	return fn(&chainTx{MemStore: m})
+}
+
+// WithSnapshotTx runs fn against the same store.
+func (m *MemStore) WithSnapshotTx(_ context.Context, fn func(db.Store) error) error {
+	m.mu.Lock()
+	err := m.fail("WithSnapshotTx")
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return fn(m)
+}
+
+// chainTx is the store bound to an open chain transaction: nested
+// transactions reuse it instead of taking the chain mutex again.
+type chainTx struct {
+	*MemStore
+}
+
+// WithTx reuses the open transaction.
+func (c *chainTx) WithTx(_ context.Context, fn func(db.Store) error) error { return fn(c) }
+
+// WithChainTx reuses the open transaction.
+func (c *chainTx) WithChainTx(_ context.Context, _ uint64, fn func(db.Store) error) error {
+	return fn(c)
 }
 
 // UpsertNetwork stores static fields, keeping head data.
@@ -374,12 +427,13 @@ func (m *MemStore) FoldBuckets(_ context.Context, buckets []db.Bucket) error {
 	return nil
 }
 
-// setIDAtLocked is the constraint set in force at a block.
-func (m *MemStore) setIDAtLocked(chainID, number uint64) sql.NullInt64 {
+// setIDAtLocked is the constraint set in force at a block among the sets
+// whose constraint count matches the block's backlogs.
+func (m *MemStore) setIDAtLocked(chainID, number uint64, backlogs int) sql.NullInt64 {
 	var out sql.NullInt64
 	var bestBlock uint64
 	for _, cs := range m.SetRows {
-		if cs.ChainID != chainID || cs.EffectiveBlock > number {
+		if cs.ChainID != chainID || cs.EffectiveBlock > number || setSize(cs) != backlogs {
 			continue
 		}
 		if !out.Valid || cs.EffectiveBlock > bestBlock || (cs.EffectiveBlock == bestBlock && cs.ID > out.Int64) {
@@ -406,7 +460,7 @@ func (m *MemStore) RebuildBuckets(_ context.Context, chainID uint64, resolution 
 		acc := db.NewBucketBuilder(chainID, resolution, start)
 		for _, b := range m.sortedBlocks(chainID) {
 			if !b.TS.Before(start) && b.TS.Before(end) {
-				acc.Add(b, m.setIDAtLocked(chainID, b.Number))
+				acc.Add(b, m.setIDAtLocked(chainID, b.Number, len(b.Backlogs)))
 			}
 		}
 		key := bucketKey(chainID, resolution, start)
@@ -417,6 +471,16 @@ func (m *MemStore) RebuildBuckets(_ context.Context, chainID uint64, resolution 
 		m.BucketRows[key] = acc.Bucket()
 	}
 	return nil
+}
+
+// setSize is the number of constraints in a set document (-1 when it
+// cannot be read, which matches nothing).
+func setSize(cs db.ConstraintSet) int {
+	var entries []json.RawMessage
+	if err := cs.Constraints.Unmarshal(&entries); err != nil {
+		return -1
+	}
+	return len(entries)
 }
 
 // DeleteBucketsBefore drops buckets starting before t.
@@ -532,6 +596,26 @@ func (m *MemStore) PruneStateSamples(_ context.Context, chainID uint64, before t
 	var n int64
 	for _, s := range m.SampleRows {
 		if s.ChainID == chainID && s.SampledAt.Before(before) {
+			n++
+			continue
+		}
+		kept = append(kept, s)
+	}
+	m.SampleRows = kept
+	return n, nil
+}
+
+// DeleteStateSamplesAfter deletes samples taken above a block.
+func (m *MemStore) DeleteStateSamplesAfter(_ context.Context, chainID, block uint64) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("DeleteStateSamplesAfter"); err != nil {
+		return 0, err
+	}
+	var kept []db.StateSample
+	var n int64
+	for _, s := range m.SampleRows {
+		if s.ChainID == chainID && s.BlockNumber > block {
 			n++
 			continue
 		}
@@ -662,6 +746,22 @@ func (m *MemStore) InsertConstraintSet(_ context.Context, cs db.ConstraintSet) (
 	return cs.ID, nil
 }
 
+// UpdateConstraintSet rewrites the set with cs.ID in place.
+func (m *MemStore) UpdateConstraintSet(_ context.Context, cs db.ConstraintSet) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("UpdateConstraintSet"); err != nil {
+		return err
+	}
+	for i, old := range m.SetRows {
+		if old.ID == cs.ID && old.ChainID == cs.ChainID {
+			m.SetRows[i] = cs
+			return nil
+		}
+	}
+	return nil
+}
+
 // ConstraintSets lists sets ascending by block.
 func (m *MemStore) ConstraintSets(_ context.Context, chainID uint64) ([]db.ConstraintSet, error) {
 	m.mu.Lock()
@@ -776,6 +876,17 @@ func (m *MemStore) SetState(_ context.Context, chainID uint64, key, value string
 		return err
 	}
 	m.StateRows[stateKey(chainID, key)] = value
+	return nil
+}
+
+// DeleteState removes a checkpoint.
+func (m *MemStore) DeleteState(_ context.Context, chainID uint64, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("DeleteState"); err != nil {
+		return err
+	}
+	delete(m.StateRows, stateKey(chainID, key))
 	return nil
 }
 

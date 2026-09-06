@@ -89,10 +89,10 @@ func TestMemStore(t *testing.T) {
 		t.Fatal("prune blocks")
 	}
 
-	b1 := db.Bucket{ChainID: 1, Resolution: "1m", BucketStart: base, Blocks: 1, GasUsed: 10, FeesWei: db.WeiFromUint64(10), BaseFeeMin: db.WeiFromUint64(10), BaseFeeAvg: db.WeiFromUint64(10), BaseFeeMax: db.WeiFromUint64(10), ExponentEndBips: 1, BaseFeeSum: db.WeiFromUint64(10), BacklogsEnd: db.Uint64Array{1}, BacklogsMax: db.Uint64Array{1, 5}, ReplayErrorBips: 3, LastBlock: 5}
+	b1 := db.Bucket{ChainID: 1, Resolution: "1m", BucketStart: base, Blocks: 1, GasUsed: 10, FeesWei: db.WeiFromUint64(10), BaseFeeMin: db.WeiFromUint64(10), BaseFeeAvg: db.WeiFromUint64(10), BaseFeeMax: db.WeiFromUint64(10), ExponentEndBips: 1, BaseFeeSum: db.NullWeiFromUint64(10), BacklogsEnd: db.Uint64Array{1}, BacklogsMax: db.Uint64Array{1, 5}, ReplayErrorBips: 3, LastBlock: 5}
 	b2 := b1
 	b2.Blocks, b2.GasUsed, b2.FeesWei = 3, 30, db.WeiFromUint64(30)
-	b2.BaseFeeMin, b2.BaseFeeAvg, b2.BaseFeeMax, b2.BaseFeeSum = db.WeiFromUint64(2), db.WeiFromUint64(30), db.WeiFromUint64(40), db.WeiFromUint64(90)
+	b2.BaseFeeMin, b2.BaseFeeAvg, b2.BaseFeeMax, b2.BaseFeeSum = db.WeiFromUint64(2), db.WeiFromUint64(30), db.WeiFromUint64(40), db.NullWeiFromUint64(90)
 	b2.ExponentEndBips, b2.BacklogsEnd, b2.BacklogsMax, b2.ReplayErrorBips, b2.LastBlock = 9, db.Uint64Array{7}, db.Uint64Array{3, 2, 8}, 1, 9
 	b2.ConstraintSetID.Valid, b2.ConstraintSetID.Int64 = true, 4
 	if err := m.FoldBuckets(ctx, []db.Bucket{b1, b2}); err != nil {
@@ -105,7 +105,7 @@ func TestMemStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	bk, _ := m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour))
-	if len(bk) != 1 || bk[0].Blocks != 5 || bk[0].GasUsed != 50 || bk[0].BaseFeeMin.Int64() != 2 || bk[0].BaseFeeMax.Int64() != 40 || bk[0].BaseFeeAvg.Int64() != 22 || bk[0].BaseFeeSum.Int64() != 110 {
+	if len(bk) != 1 || bk[0].Blocks != 5 || bk[0].GasUsed != 50 || bk[0].BaseFeeMin.Int64() != 2 || bk[0].BaseFeeMax.Int64() != 40 || bk[0].BaseFeeAvg.Int64() != 22 || bk[0].BaseFeeSum.Wei.Int64() != 110 {
 		t.Fatalf("fold: %+v", bk)
 	}
 	if bk[0].ExponentEndBips != 9 || bk[0].BacklogsMax[2] != 8 || bk[0].BacklogsMax[1] != 5 || bk[0].ConstraintSetID.Int64 != 4 || bk[0].ReplayErrorBips != 3 || bk[0].LastBlock != 9 {
@@ -116,8 +116,11 @@ func TestMemStore(t *testing.T) {
 	}
 	// Rebuilding from rows replaces the bucket with the rows' aggregate
 	// (blocks 2..5 remain after the prune above), using the set in force
-	// at the last block; a window without rows loses its bucket.
-	_, _ = m.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 1, EffectiveBlock: 4, Source: "genesis"})
+	// at the last block whose constraint count matches the block's
+	// backlogs (the rows have none, so only an empty set applies); a window
+	// without rows loses its bucket.
+	_, _ = m.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 1, EffectiveBlock: 4, Source: "genesis", Constraints: db.JSONB(`[]`)})
+	_, _ = m.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 1, EffectiveBlock: 5, Source: "owner_action", Constraints: db.JSONB(`[{"target":1}]`)})
 	if err := m.RebuildBuckets(ctx, 1, "1m", []time.Time{base, base.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +130,9 @@ func TestMemStore(t *testing.T) {
 	bk, _ = m.Buckets(ctx, 1, "1m", base, base.Add(2*time.Hour))
 	if len(bk) != 1 || bk[0].Blocks != 4 || bk[0].GasUsed != 14 || bk[0].LastBlock != 5 || bk[0].ConstraintSetID.Int64 != 1 {
 		t.Fatalf("rebuilt: %+v", bk)
+	}
+	if setSize(db.ConstraintSet{Constraints: db.JSONB(`{bad`)}) != -1 || setSize(db.ConstraintSet{Constraints: db.JSONB(`[1,2]`)}) != 2 {
+		t.Fatal("setSize")
 	}
 	if b, _ := m.BlockByNumber(ctx, 1, 5); b == nil || b.Number != 5 {
 		t.Fatal("BlockByNumber")
@@ -162,6 +168,13 @@ func TestMemStore(t *testing.T) {
 	if n, _ := m.PruneStateSamples(ctx, 1, base.Add(time.Second)); n != 1 {
 		t.Fatal("prune samples")
 	}
+	_ = m.InsertStateSample(ctx, db.StateSample{ChainID: 1, SampledAt: base.Add(2 * time.Minute), BlockNumber: 9})
+	if n, _ := m.DeleteStateSamplesAfter(ctx, 1, 5); n != 1 {
+		t.Fatal("delete samples after")
+	}
+	if ls, _ := m.LatestStateSample(ctx, 1, false); ls.BlockNumber == 9 {
+		t.Fatal("sample above the block must go")
+	}
 
 	acts := []db.OwnerAction{{ChainID: 1, TxHash: "a", LogIndex: 0, BlockNumber: 5, TS: base}, {ChainID: 1, TxHash: "a", LogIndex: 1, BlockNumber: 5, TS: base.Add(time.Hour)}}
 	if n, _ := m.InsertOwnerActions(ctx, acts); n != 2 {
@@ -188,8 +201,19 @@ func TestMemStore(t *testing.T) {
 	if id != id2 || id3 == id {
 		t.Fatal("constraint set ids")
 	}
-	if cs, _ := m.ConstraintSets(ctx, 1); len(cs) != 3 || cs[0].EffectiveBlock != 0 || cs[2].EffectiveBlock != 4 {
-		t.Fatal("constraint sets")
+	if cs, _ := m.ConstraintSets(ctx, 1); len(cs) != 4 || cs[0].EffectiveBlock != 0 || cs[2].EffectiveBlock != 4 {
+		t.Fatalf("constraint sets: %+v", cs)
+	}
+	// UpdateConstraintSet rewrites a row in place, keeping its id; an
+	// unknown id is a no-op.
+	if err := m.UpdateConstraintSet(ctx, db.ConstraintSet{ID: id3, ChainID: 1, EffectiveBlock: 2, Source: "owner_action", Constraints: db.JSONB(`[]`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.UpdateConstraintSet(ctx, db.ConstraintSet{ID: 99, ChainID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if cs, _ := m.ConstraintSets(ctx, 1); len(cs) != 4 || cs[1].ID != id3 || cs[1].EffectiveBlock != 2 || cs[1].Source != "owner_action" {
+		t.Fatalf("updated set: %+v", cs)
 	}
 
 	reps := []db.BatchReport{
@@ -211,7 +235,7 @@ func TestMemStore(t *testing.T) {
 	if as, _ := m.OwnerActions(ctx, 1, time.Time{}, time.Time{}, 0); len(as) != 0 {
 		t.Fatal("actions after rewind")
 	}
-	if cs, _ := m.ConstraintSets(ctx, 1); len(cs) != 2 || cs[1].EffectiveBlock != 1 {
+	if cs, _ := m.ConstraintSets(ctx, 1); len(cs) != 1 || cs[0].EffectiveBlock != 1 {
 		t.Fatalf("sets after rewind: %+v", cs)
 	}
 	if rs, _ := m.BatchReports(ctx, 1, base, base.Add(time.Hour)); len(rs) != 1 {
@@ -228,6 +252,13 @@ func TestMemStore(t *testing.T) {
 	if st, _ := m.States(ctx, 1); st["k"] != "v" {
 		t.Fatal("states")
 	}
+	_ = m.SetState(ctx, 1, "gone", "x")
+	if err := m.DeleteState(ctx, 1, "gone"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := m.GetState(ctx, 1, "gone"); ok {
+		t.Fatal("deleted state")
+	}
 	_ = m.Notify(ctx, "c", "p")
 	if n, ok := m.LastNotification("c"); !ok || n.Payload != "p" {
 		t.Fatal("notify")
@@ -237,6 +268,52 @@ func TestMemStore(t *testing.T) {
 	}
 	if err := m.WithTx(ctx, func(s db.Store) error { return s.SetState(ctx, 1, "t", "1") }); err != nil {
 		t.Fatal(err)
+	}
+	if err := m.WithSnapshotTx(ctx, func(s db.Store) error { _, _, err := s.GetState(ctx, 1, "t"); return err }); err != nil {
+		t.Fatal(err)
+	}
+	// Chain transactions nest and serialize per chain: a second one on the
+	// same chain waits for the first, another chain does not.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = m.WithChainTx(ctx, 1, func(s db.Store) error {
+			close(entered)
+			<-release
+			return s.WithChainTx(ctx, 1, func(inner db.Store) error {
+				return inner.WithTx(ctx, func(in db.Store) error { return in.SetState(ctx, 1, "chain", "1") })
+			})
+		})
+	}()
+	<-entered
+	other := make(chan struct{})
+	go func() {
+		_ = m.WithChainTx(ctx, 2, func(db.Store) error { return nil })
+		close(other)
+	}()
+	select {
+	case <-other:
+	case <-time.After(5 * time.Second):
+		t.Fatal("another chain must not wait")
+	}
+	same := make(chan struct{})
+	go func() {
+		_ = m.WithChainTx(ctx, 1, func(db.Store) error { return nil })
+		close(same)
+	}()
+	select {
+	case <-same:
+		t.Fatal("the same chain must wait for the open transaction")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-same:
+	case <-time.After(5 * time.Second):
+		t.Fatal("chain transaction not released")
+	}
+	if v, _, _ := m.GetState(ctx, 1, "chain"); v != "1" {
+		t.Fatal("nested chain write")
 	}
 	m.SetFailure("Ping", true)
 	if !m.FailOn["Ping"] {
@@ -255,22 +332,30 @@ func TestMemStoreFailures(t *testing.T) {
 	if err := m.Ping(ctx); !errors.Is(err, ErrInjected) {
 		t.Fatal("ping")
 	}
-	names := []string{"WithTx", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasUsedBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
+	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasUsedBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
 	for _, n := range names {
 		m.FailOn[n] = true
 	}
 	now := time.Now()
 	calls := map[string]func() error{
-		"WithTx":            func() error { return m.WithTx(ctx, func(db.Store) error { return nil }) },
-		"UpsertNetwork":     func() error { return m.UpsertNetwork(ctx, db.Network{}) },
-		"Networks":          func() error { _, err := m.Networks(ctx); return err },
-		"NetworkByRef":      func() error { _, err := m.NetworkByRef(ctx, ""); return err },
-		"UpdateNetworkHead": func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
-		"SetNetworkError":   func() error { return m.SetNetworkError(ctx, 1, "") },
-		"UpsertBlocks":      func() error { return m.UpsertBlocks(ctx, nil) },
-		"BlockByNumber":     func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
-		"DeleteBlocksAfter": func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
-		"RebuildBuckets":    func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
+		"WithTx":         func() error { return m.WithTx(ctx, func(db.Store) error { return nil }) },
+		"WithChainTx":    func() error { return m.WithChainTx(ctx, 1, func(db.Store) error { return nil }) },
+		"WithSnapshotTx": func() error { return m.WithSnapshotTx(ctx, func(db.Store) error { return nil }) },
+		"DeleteState":    func() error { return m.DeleteState(ctx, 1, "") },
+		"DeleteStateSamplesAfter": func() error {
+			_, err := m.DeleteStateSamplesAfter(ctx, 1, 1)
+			return err
+		},
+		"UpdateConstraintSet": func() error { return m.UpdateConstraintSet(ctx, db.ConstraintSet{}) },
+		"UpsertNetwork":       func() error { return m.UpsertNetwork(ctx, db.Network{}) },
+		"Networks":            func() error { _, err := m.Networks(ctx); return err },
+		"NetworkByRef":        func() error { _, err := m.NetworkByRef(ctx, ""); return err },
+		"UpdateNetworkHead":   func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
+		"SetNetworkError":     func() error { return m.SetNetworkError(ctx, 1, "") },
+		"UpsertBlocks":        func() error { return m.UpsertBlocks(ctx, nil) },
+		"BlockByNumber":       func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
+		"DeleteBlocksAfter":   func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
+		"RebuildBuckets":      func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
 		"DeleteBucketsBefore": func() error {
 			_, err := m.DeleteBucketsBefore(ctx, 1, now)
 			return err

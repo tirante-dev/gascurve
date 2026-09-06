@@ -8,10 +8,10 @@ package collector
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,6 +108,14 @@ const (
 	boundaryWidth = time.Hour
 )
 
+// Owner methods that change the pricer.
+const (
+	methodSetMinimumL2BaseFee      = "setMinimumL2BaseFee"
+	methodSetSpeedLimit            = "setSpeedLimit"
+	methodSetL2GasPricingInertia   = "setL2GasPricingInertia"
+	methodSetL2GasBacklogTolerance = "setL2GasBacklogTolerance"
+)
+
 // Options configure a Follower.
 type Options struct {
 	Network   config.NetworkConfig
@@ -149,30 +157,53 @@ type Follower struct {
 
 	mu          sync.Mutex
 	initialized bool
-	// head, headHash, prevTs, state and lastResult describe the last
-	// committed block; they are only published after the transaction that
-	// wrote it committed.
-	head            uint64
-	headHash        string
-	prevTs          uint64
-	state           *pricer.State
-	lastSample      *nitro.Sample
-	lastResult      *pricer.Result
-	sets            []db.ConstraintSet
-	minFeeChanges   []minFeeChange
-	liveStart       *liveStart
-	l1              *model.L1
-	accounts        *model.Accounts
-	slowPending     bool
-	ownerScanDone   bool
-	observedChecked bool
-	cursorChecked   bool
-	snapshot        *model.LiveSnapshot
+	// head, headHash, prevTs, state, lastSample and lastResult describe
+	// the last committed tick; they are only published after the
+	// transaction that wrote it committed.
+	head          uint64
+	headHash      string
+	prevTs        uint64
+	state         *pricer.State
+	lastSample    *nitro.Sample
+	lastResult    *pricer.Result
+	sets          []db.ConstraintSet
+	minFeeChanges []minFeeChange
+	legacyChanges []legacyChange
+	liveStart     *liveStart
+	// ownerScanThrough is the owner_scan_through checkpoint: the block
+	// through which the recorded owner-action timeline is complete, 0 until
+	// a scan pass has reached its head.
+	ownerScanThrough uint64
+	// scanOrigin is the owner_scan_origin checkpoint, nil for a chain
+	// scanned from genesis.
+	scanOrigin    *scanOrigin
+	l1            *model.L1
+	accounts      *model.Accounts
+	slowPending   bool
+	cursorChecked bool
+	snapshot      *model.LiveSnapshot
 }
 
+// minFeeChange is a recorded setMinimumL2BaseFee.
 type minFeeChange struct {
 	block uint64
 	fee   *big.Int
+}
+
+// legacyChange is a recorded legacy pricer parameter change: the method
+// names the parameter.
+type legacyChange struct {
+	block  uint64
+	method string
+	value  uint64
+}
+
+// setChange is a constraint set taking effect at a block; a set with the
+// same shape as its predecessor still resets the backlogs to its starting
+// values, exactly as setGasPricingConstraints does.
+type setChange struct {
+	block   uint64
+	entries []model.ConstraintSetEntry
 }
 
 // liveStart is the first block the live loop stored (collector_state
@@ -188,6 +219,29 @@ type hole struct {
 	From uint64 `json:"from"`
 	To   uint64 `json:"to"`
 	At   string `json:"at"`
+}
+
+// scanOrigin is where a deliberately truncated owner scan began
+// (collector_state owner_scan_origin). With Archive the minimum base fee in
+// force at Block was sampled there and a constraint set was recorded, so
+// history from Block on is reconstructable; without it nothing before
+// Block can be priced and the range is recorded as a hole.
+type scanOrigin struct {
+	Block      uint64 `json:"block"`
+	MinBaseFee string `json:"minBaseFee,omitempty"`
+	Archive    bool   `json:"archive"`
+}
+
+// fee returns the sampled minimum base fee, nil when none was sampled.
+func (o *scanOrigin) fee() *big.Int {
+	if o == nil || o.MinBaseFee == "" {
+		return nil
+	}
+	v, ok := new(big.Int).SetString(o.MinBaseFee, 10)
+	if !ok {
+		return nil
+	}
+	return v
 }
 
 // NewFollower builds a follower; the network's chain id is the key for
@@ -317,6 +371,9 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	if err := f.reloadHeadLocked(ctx); err != nil {
 		return err
 	}
+	if err := f.loadScanStateLocked(ctx); err != nil {
+		return err
+	}
 	if err := f.reloadSetsLocked(ctx); err != nil {
 		return err
 	}
@@ -340,6 +397,34 @@ func (f *Follower) reloadHeadLocked(ctx context.Context) error {
 		f.head = last.Number
 		f.headHash = last.Hash
 		f.prevTs = uint64(last.TS.Unix())
+	}
+	return nil
+}
+
+// loadScanStateLocked loads the owner scan checkpoints: how far the
+// timeline is complete and where a truncated scan began.
+func (f *Follower) loadScanStateLocked(ctx context.Context) error {
+	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StateOwnerScanThrough)
+	if err != nil {
+		return err
+	}
+	f.ownerScanThrough = 0
+	if ok {
+		if _, err := fmt.Sscanf(raw, "%d", &f.ownerScanThrough); err != nil {
+			return fmt.Errorf("owner scan through %q: %w", raw, err)
+		}
+	}
+	raw, ok, err = f.store.GetState(ctx, f.chainID, db.StateOwnerScanOrigin)
+	if err != nil {
+		return err
+	}
+	f.scanOrigin = nil
+	if ok {
+		o := &scanOrigin{}
+		if err := json.Unmarshal([]byte(raw), o); err != nil {
+			return fmt.Errorf("owner scan origin: %w", err)
+		}
+		f.scanOrigin = o
 	}
 	return nil
 }
@@ -413,7 +498,8 @@ func (f *Follower) recordHole(ctx context.Context, s db.Store, h hole) error {
 	return s.SetState(ctx, f.chainID, db.StateHoles, string(b))
 }
 
-// reloadSetsLocked refreshes the constraint set and min fee caches.
+// reloadSetsLocked refreshes the constraint set, minimum fee and legacy
+// parameter caches from the recorded owner actions.
 func (f *Follower) reloadSetsLocked(ctx context.Context) error {
 	sets, err := f.store.ConstraintSets(ctx, f.chainID)
 	if err != nil {
@@ -425,36 +511,210 @@ func (f *Follower) reloadSetsLocked(ctx context.Context) error {
 		return fmt.Errorf("owner actions: %w", err)
 	}
 	f.minFeeChanges = f.minFeeChanges[:0]
+	f.legacyChanges = f.legacyChanges[:0]
 	for i := len(actions) - 1; i >= 0; i-- { // ascending by block
 		a := actions[i]
-		if a.Method != "setMinimumL2BaseFee" {
-			continue
+		if c, ok := minFeeChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			f.minFeeChanges = append(f.minFeeChanges, c)
 		}
-		var args struct {
-			PriceInWei string `json:"priceInWei"`
-		}
-		if err := a.Args.Unmarshal(&args); err != nil {
-			continue
-		}
-		if fee, ok := new(big.Int).SetString(args.PriceInWei, 10); ok {
-			f.minFeeChanges = append(f.minFeeChanges, minFeeChange{block: a.BlockNumber, fee: fee})
+		if c, ok := legacyChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			f.legacyChanges = append(f.legacyChanges, c)
 		}
 	}
 	return nil
 }
 
-// setIDFor returns the constraint set in force at a block.
-func (f *Follower) setIDFor(number uint64) sql.NullInt64 {
-	var out sql.NullInt64
-	for _, s := range f.sets {
-		if s.EffectiveBlock <= number {
-			out = sql.NullInt64{Int64: s.ID, Valid: true}
-		}
+// minFeeChangeOf decodes a recorded setMinimumL2BaseFee.
+func minFeeChangeOf(block uint64, method string, args db.JSONB) (minFeeChange, bool) {
+	if method != methodSetMinimumL2BaseFee {
+		return minFeeChange{}, false
 	}
-	return out
+	var a struct {
+		PriceInWei string `json:"priceInWei"`
+	}
+	if err := args.Unmarshal(&a); err != nil {
+		return minFeeChange{}, false
+	}
+	fee, ok := new(big.Int).SetString(a.PriceInWei, 10)
+	if !ok {
+		return minFeeChange{}, false
+	}
+	return minFeeChange{block: block, fee: fee}, true
 }
 
-// setAt returns the constraint set in force at a block, or nil.
+// legacyChangeOf decodes a recorded legacy parameter change: the speed
+// limit (setSpeedLimit), the inertia (setL2GasPricingInertia) or the
+// tolerance (setL2GasBacklogTolerance).
+func legacyChangeOf(block uint64, method string, args db.JSONB) (legacyChange, bool) {
+	var a struct {
+		Limit *uint64 `json:"limit"`
+		Sec   *uint64 `json:"sec"`
+	}
+	if err := args.Unmarshal(&a); err != nil {
+		return legacyChange{}, false
+	}
+	switch method {
+	case methodSetSpeedLimit:
+		if a.Limit != nil {
+			return legacyChange{block: block, method: method, value: *a.Limit}, true
+		}
+	case methodSetL2GasPricingInertia, methodSetL2GasBacklogTolerance:
+		if a.Sec != nil {
+			return legacyChange{block: block, method: method, value: *a.Sec}, true
+		}
+	}
+	return legacyChange{}, false
+}
+
+// timeline is the pricer-affecting owner history a replay splits at:
+// constraint sets (a set resets the backlogs to its starting values even
+// when its shape is unchanged), minimum base fee changes and legacy
+// parameter changes, plus the scan origin's sampled fee. It merges the
+// recorded history with actions fetched for the current tick but not yet
+// committed, so a replay can split at them before they are stored.
+type timeline struct {
+	sets   []setChange
+	fees   []minFeeChange
+	legacy []legacyChange
+	origin *scanOrigin
+}
+
+// timelineLocked builds the timeline from the caches plus pending actions.
+func (f *Follower) timelineLocked(pending []*nitro.OwnerAction) *timeline {
+	tl := &timeline{
+		origin: f.scanOrigin,
+		fees:   append([]minFeeChange(nil), f.minFeeChanges...),
+		legacy: append([]legacyChange(nil), f.legacyChanges...),
+	}
+	for _, cs := range f.sets {
+		entries, err := setEntries(cs)
+		if err != nil {
+			continue
+		}
+		tl.sets = append(tl.sets, setChange{block: cs.EffectiveBlock, entries: entries})
+	}
+	for _, a := range pending {
+		if a.Constraints != nil {
+			tl.sets = append(tl.sets, setChange{block: a.BlockNumber, entries: entriesOf(a.Constraints)})
+		}
+		args, _ := db.MarshalJSONB(a.Args)
+		if c, ok := minFeeChangeOf(a.BlockNumber, a.Method, args); ok {
+			tl.fees = append(tl.fees, c)
+		}
+		if c, ok := legacyChangeOf(a.BlockNumber, a.Method, args); ok {
+			tl.legacy = append(tl.legacy, c)
+		}
+	}
+	sort.SliceStable(tl.sets, func(i, j int) bool { return tl.sets[i].block < tl.sets[j].block })
+	sort.SliceStable(tl.fees, func(i, j int) bool { return tl.fees[i].block < tl.fees[j].block })
+	sort.SliceStable(tl.legacy, func(i, j int) bool { return tl.legacy[i].block < tl.legacy[j].block })
+	return tl
+}
+
+// minFeeAt returns the minimum base fee in force at a block from the
+// recorded setMinimumL2BaseFee actions, with the scan origin's sampled fee
+// from the origin block on and nitro's genesis default before the first
+// recorded change. It never uses the live value.
+func (tl *timeline) minFeeAt(number uint64) *big.Int {
+	fee := big.NewInt(pricer.InitialMinimumBaseFeeWei)
+	if of := tl.origin.fee(); of != nil && number >= tl.origin.Block {
+		fee = of
+	}
+	for _, c := range tl.fees {
+		if c.block <= number {
+			fee = c.fee
+		}
+	}
+	return new(big.Int).Set(fee)
+}
+
+// minFeeChangeBlock returns the block of the last fee change at or before
+// number (the origin counts as one; 0 when none).
+func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
+	var block uint64
+	if tl.origin.fee() != nil && number >= tl.origin.Block {
+		block = tl.origin.Block
+	}
+	for _, c := range tl.fees {
+		if c.block <= number {
+			block = c.block
+		}
+	}
+	return block
+}
+
+// legacyAt returns base with every recorded legacy change at or before
+// number applied (the latest per parameter wins); base is the live sample's
+// parameters, which stand in for what was never recorded.
+func (tl *timeline) legacyAt(number uint64, base *pricer.Legacy) *pricer.Legacy {
+	if base == nil {
+		return nil
+	}
+	out := *base
+	for _, c := range tl.legacy {
+		if c.block <= number {
+			applyLegacy(&out, c)
+		}
+	}
+	return &out
+}
+
+func applyLegacy(l *pricer.Legacy, c legacyChange) {
+	switch c.method {
+	case methodSetSpeedLimit:
+		l.SpeedLimit = c.value
+	case methodSetL2GasPricingInertia:
+		l.Inertia = c.value
+	case methodSetL2GasBacklogTolerance:
+		l.Tolerance = c.value
+	}
+}
+
+// boundaryAt reports whether any recorded change takes effect at a block.
+func (tl *timeline) boundaryAt(number uint64) bool {
+	for _, s := range tl.sets {
+		if s.block == number {
+			return true
+		}
+	}
+	for _, c := range tl.fees {
+		if c.block == number {
+			return true
+		}
+	}
+	for _, c := range tl.legacy {
+		if c.block == number {
+			return true
+		}
+	}
+	return false
+}
+
+// applyAt applies every change effective exactly at number to st: a
+// constraint set replaces the constraints and resets the backlogs (on the
+// constraints model only), a fee change replaces the floor, a legacy change
+// replaces its parameter.
+func (tl *timeline) applyAt(st *pricer.State, number uint64) {
+	for _, s := range tl.sets {
+		if s.block == number && !st.IsLegacy() {
+			st.Constraints = stateFromEntries(s.entries, st.MinBaseFee).Constraints
+		}
+	}
+	for _, c := range tl.fees {
+		if c.block == number {
+			st.MinBaseFee = new(big.Int).Set(c.fee)
+		}
+	}
+	if st.Legacy != nil {
+		for _, c := range tl.legacy {
+			if c.block == number {
+				applyLegacy(st.Legacy, c)
+			}
+		}
+	}
+}
+
+// setAt returns the recorded constraint set in force at a block, or nil.
 func (f *Follower) setAt(number uint64) *db.ConstraintSet {
 	var out *db.ConstraintSet
 	for i := range f.sets {
@@ -465,29 +725,22 @@ func (f *Follower) setAt(number uint64) *db.ConstraintSet {
 	return out
 }
 
-// minFeeAt returns the minimum base fee in force at a block from the
-// recorded setMinimumL2BaseFee actions, with nitro's genesis default before
-// the first recorded change. It never uses the live value.
+// minFeeAt is the recorded minimum base fee in force at a block (see
+// timeline.minFeeAt). The caller holds f.mu or is a test.
 func (f *Follower) minFeeAt(number uint64) *big.Int {
-	fee := big.NewInt(pricer.InitialMinimumBaseFeeWei)
-	for _, c := range f.minFeeChanges {
-		if c.block <= number {
-			fee = c.fee
-		}
-	}
-	return new(big.Int).Set(fee)
+	return f.timelineLocked(nil).minFeeAt(number)
 }
 
-// minFeeChangeBlock returns the block of the last recorded change at or
-// before number (0 when none).
+// minFeeChangeBlock is the block of the last recorded fee change at or
+// before number. The caller holds f.mu or is a test.
 func (f *Follower) minFeeChangeBlock(number uint64) uint64 {
-	var block uint64
-	for _, c := range f.minFeeChanges {
-		if c.block <= number {
-			block = c.block
-		}
-	}
-	return block
+	return f.timelineLocked(nil).minFeeChangeBlock(number)
+}
+
+// boundaryAt reports whether a recorded owner action changes the pricer at
+// a block. The caller holds f.mu or is a test.
+func (f *Follower) boundaryAt(number uint64) bool {
+	return f.timelineLocked(nil).boundaryAt(number)
 }
 
 // stateFromSample builds a pricer state carrying the sampled backlogs.
@@ -576,6 +829,29 @@ func sameEntries(entries []model.ConstraintSetEntry, live []nitro.Constraint) bo
 		}
 	}
 	return true
+}
+
+// sameSets compares two set documents by target and window (the starting
+// backlogs may differ: an observed set records the live ones).
+func sameSets(a, b []model.ConstraintSetEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Target != b[i].Target || a[i].Window != b[i].Window {
+			return false
+		}
+	}
+	return true
+}
+
+// entriesOf converts an owner action's constraints into set entries.
+func entriesOf(params []nitro.ConstraintParam) []model.ConstraintSetEntry {
+	entries := make([]model.ConstraintSetEntry, len(params))
+	for i, c := range params {
+		entries[i] = model.ConstraintSetEntry{Target: c.GasTargetPerSecond, Window: c.AdjustmentWindowSeconds, StartingBacklog: c.StartingBacklog}
+	}
+	return entries
 }
 
 func entriesJSON(entries []model.ConstraintSetEntry) db.JSONB {

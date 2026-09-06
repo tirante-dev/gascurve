@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -41,7 +42,9 @@ const (
 
 // Hub fans NOTIFY payloads out to WebSocket clients. It keeps, per network,
 // the latest snapshot and a ring of recent blocks read from the blocks
-// table, so clients get `blocks` messages without querying per client.
+// table (with their hashes, so a reorg that replaces blocks at or below
+// the ring's tip is noticed), so clients get `blocks` messages without
+// querying per client.
 type Hub struct {
 	store        db.Store
 	log          *logger.Logger
@@ -67,9 +70,11 @@ type cachedNetwork struct {
 
 type netState struct {
 	snapshot json.RawMessage
-	blocks   []model.BlockPoint
-	last     uint64
-	clients  map[*client]struct{}
+	// snapshotAt is the sampledAt of the cached snapshot, for reconciling.
+	snapshotAt time.Time
+	blocks     []ringBlock
+	last       uint64
+	clients    map[*client]struct{}
 	// refreshMu serializes block refreshes for the network.
 	refreshMu sync.Mutex
 	// ownerSince and seen track delivered owner actions so a reconnect can
@@ -84,6 +89,29 @@ type actionKey struct {
 	block    uint64
 	txHash   string
 	logIndex uint64
+}
+
+// ringBlock is a ring entry: the point clients get and the stored hash the
+// hub compares against the table to notice a reorg.
+type ringBlock struct {
+	point model.BlockPoint
+	hash  string
+}
+
+// delta is what one refresh found: a reorg (the canonical replacements
+// above the ancestor, which clients apply before anything else) or new
+// blocks appended to the ring.
+type delta struct {
+	reorg  *model.Reorg
+	blocks []model.BlockPoint
+}
+
+func points(ring []ringBlock) []model.BlockPoint {
+	out := make([]model.BlockPoint, len(ring))
+	for i, b := range ring {
+		out[i] = b.point
+	}
+	return out
 }
 
 // HubOption customizes a Hub.
@@ -187,34 +215,61 @@ func (h *Hub) lookupNetwork(ctx context.Context, ref string) (*db.Network, error
 
 func (h *Hub) handleLive(ctx context.Context, payload string) {
 	var head struct {
-		ChainID uint64 `json:"chainId"`
+		ChainID   uint64 `json:"chainId"`
+		SampledAt string `json:"sampledAt"`
 	}
 	if err := json.Unmarshal([]byte(payload), &head); err != nil || head.ChainID == 0 {
 		h.log.Warn("bad live notification", "payload", truncate(payload))
 		return
 	}
-	newBlocks, err := h.refreshBlocks(ctx, head.ChainID)
+	d, err := h.refreshBlocks(ctx, head.ChainID)
 	if err != nil {
 		h.log.Warn("refresh blocks", "err", err.Error())
 	}
-	tick, _ := json.Marshal(wsMessage{Type: msgTick, Data: json.RawMessage(payload)})
+	at, _ := time.Parse(time.RFC3339, head.SampledAt)
 	h.mu.Lock()
 	st := h.state(head.ChainID)
-	st.snapshot = json.RawMessage(payload)
-	for c := range st.clients {
-		c.deliver(outbound{raw: tick})
-		if len(newBlocks) > 0 {
-			c.deliver(outbound{blocks: newBlocks})
-		}
-	}
+	st.snapshot, st.snapshotAt = json.RawMessage(payload), at
+	h.fanOut(st, d, json.RawMessage(payload))
 	h.mu.Unlock()
 }
 
-// refreshBlocks pulls blocks newer than the ring head and returns them,
-// oldest first. Refreshes are serialized per network and their results
-// filtered against the ring head, so concurrent callers never append the
-// same block twice or move the head backwards.
-func (h *Hub) refreshBlocks(ctx context.Context, chainID uint64) ([]model.BlockPoint, error) {
+// fanOut delivers a refresh's outcome and, when given, a tick to every
+// client of a network, in the order clients must apply them: the reorg
+// first, then the tick, then the new blocks. The caller holds h.mu.
+func (h *Hub) fanOut(st *netState, d delta, tick json.RawMessage) {
+	var reorg, tickMsg []byte
+	if d.reorg != nil {
+		reorg, _ = json.Marshal(wsMessage{Type: msgReorg, Data: mustJSON(d.reorg)})
+	}
+	if tick != nil {
+		tickMsg, _ = json.Marshal(wsMessage{Type: msgTick, Data: tick})
+	}
+	for c := range st.clients {
+		if reorg != nil {
+			// The client's hello may have carried orphaned blocks: the
+			// watermark drops to the ancestor so their replacements pass.
+			c.watermark = min(c.watermark, d.reorg.Ancestor)
+			c.deliver(outbound{raw: reorg})
+		}
+		if tickMsg != nil {
+			c.deliver(outbound{raw: tickMsg})
+		}
+		if len(d.blocks) > 0 {
+			c.deliver(outbound{blocks: d.blocks})
+		}
+	}
+}
+
+// refreshBlocks reconciles the ring with the blocks table and returns what
+// changed: the blocks newer than the ring's tip, oldest first, or, when
+// the table no longer holds the tip the ring knows (its hash changed or
+// its row is gone), a reorg: the ring is truncated to the highest entry
+// the table still agrees with and the canonical blocks above it are
+// appended and reported as replacements. Refreshes are serialized per
+// network and their results filtered against the ring, so concurrent
+// callers never append the same block twice or move the tip backwards.
+func (h *Hub) refreshBlocks(ctx context.Context, chainID uint64) (delta, error) {
 	h.mu.Lock()
 	st := h.state(chainID)
 	h.mu.Unlock()
@@ -222,8 +277,11 @@ func (h *Hub) refreshBlocks(ctx context.Context, chainID uint64) ([]model.BlockP
 	defer st.refreshMu.Unlock()
 
 	h.mu.Lock()
-	last := st.last
-	empty := len(st.blocks) == 0
+	last, empty := st.last, len(st.blocks) == 0
+	var tipHash string
+	if !empty {
+		tipHash = st.blocks[len(st.blocks)-1].hash
+	}
 	h.mu.Unlock()
 
 	var rows []db.Block
@@ -234,28 +292,80 @@ func (h *Hub) refreshBlocks(ctx context.Context, chainID uint64) ([]model.BlockP
 			rows[i], rows[j] = rows[j], rows[i]
 		}
 	} else {
-		rows, err = h.store.BlocksAfter(ctx, chainID, last, ringSize)
+		// From the tip itself, so its row proves the ring is still on-chain.
+		rows, err = h.store.BlocksAfter(ctx, chainID, last-1, ringSize)
 	}
 	if err != nil {
-		return nil, err
+		return delta{}, err
+	}
+	if !empty && (len(rows) == 0 || rows[0].Number != last || rows[0].Hash != tipHash) {
+		return h.reorgRing(ctx, st, chainID)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	points := make([]model.BlockPoint, 0, len(rows))
+	added := make([]model.BlockPoint, 0, len(rows))
 	for _, b := range rows {
 		if len(st.blocks) > 0 && b.Number <= st.last {
 			continue
 		}
-		points = append(points, blockPoint(b))
+		added = append(added, blockPoint(b))
+		st.blocks = append(st.blocks, ringBlock{point: blockPoint(b), hash: b.Hash})
 	}
-	st.blocks = append(st.blocks, points...)
+	st.trim()
+	return delta{blocks: added}, nil
+}
+
+// reorgRing rebuilds the ring after the table diverged from it: the
+// ancestor is the highest ring entry whose row still exists with the same
+// hash (rows written before hashes were stored count as matching only
+// against an equally hashless ring entry), everything above it is dropped
+// and replaced by the canonical rows.
+func (h *Hub) reorgRing(ctx context.Context, st *netState, chainID uint64) (delta, error) {
+	rows, err := h.store.RecentBlocks(ctx, chainID, ringSize)
+	if err != nil {
+		return delta{}, err
+	}
+	byNumber := make(map[uint64]db.Block, len(rows))
+	for _, r := range rows {
+		byNumber[r.Number] = r
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	keep := 0
+	for i := len(st.blocks) - 1; i >= 0; i-- {
+		if r, ok := byNumber[st.blocks[i].point.Number]; ok && r.Hash == st.blocks[i].hash {
+			keep = i + 1
+			break
+		}
+	}
+	var ancestor uint64
+	if keep > 0 {
+		ancestor = st.blocks[keep-1].point.Number
+	}
+	st.blocks = st.blocks[:keep]
+	replaced := []model.BlockPoint{}
+	for i := len(rows) - 1; i >= 0; i-- { // ascending
+		r := rows[i]
+		if r.Number <= ancestor {
+			continue
+		}
+		replaced = append(replaced, blockPoint(r))
+		st.blocks = append(st.blocks, ringBlock{point: blockPoint(r), hash: r.Hash})
+	}
+	st.trim()
+	h.log.Warn("blocks replaced below the ring tip, resending the canonical chain", "chainId", chainID, "ancestor", ancestor, "blocks", len(replaced))
+	return delta{reorg: &model.Reorg{ChainID: chainID, Ancestor: ancestor, Blocks: replaced}}, nil
+}
+
+// trim caps the ring and records its tip. The caller holds h.mu.
+func (st *netState) trim() {
 	if len(st.blocks) > ringSize {
 		st.blocks = st.blocks[len(st.blocks)-ringSize:]
 	}
+	st.last = 0
 	if len(st.blocks) > 0 {
-		st.last = max(st.last, st.blocks[len(st.blocks)-1].Number)
+		st.last = st.blocks[len(st.blocks)-1].point.Number
 	}
-	return points, nil
 }
 
 func (h *Hub) handleOwnerAction(payload string) {
@@ -318,9 +428,10 @@ func (h *Hub) initOwnerCursor(ctx context.Context, chainID uint64) {
 }
 
 // reconcile runs after the LISTEN connection was re-established: every
-// notification sent meanwhile was lost, so blocks are refreshed from the
-// table for every network with clients and owner actions since the cursor
-// are delivered once.
+// notification sent meanwhile was lost, so for every network with clients
+// the blocks are refreshed from the table, the live snapshot is rebuilt
+// from the latest sample and sent as a tick when it is newer than the
+// cached one, and owner actions since the cursor are delivered once.
 func (h *Hub) reconcile(ctx context.Context) {
 	h.mu.Lock()
 	ids := make([]uint64, 0, len(h.networks))
@@ -331,18 +442,19 @@ func (h *Hub) reconcile(ctx context.Context) {
 	}
 	h.mu.Unlock()
 	for _, id := range ids {
-		newBlocks, err := h.refreshBlocks(ctx, id)
+		d, err := h.refreshBlocks(ctx, id)
 		if err != nil {
 			h.log.Warn("reconcile blocks", "err", err.Error())
 		}
+		tick := h.newerSnapshot(ctx, id)
 		h.mu.Lock()
 		st := h.state(id)
 		since := st.ownerSince
-		if len(newBlocks) > 0 {
-			for c := range st.clients {
-				c.deliver(outbound{blocks: newBlocks})
-			}
+		if tick != nil {
+			st.snapshot = tick.raw
+			st.snapshotAt = tick.at
 		}
+		h.fanOut(st, d, tick.payload())
 		h.mu.Unlock()
 		actions, err := h.store.OwnerActionsSince(ctx, id, since)
 		if err != nil {
@@ -361,6 +473,45 @@ func (h *Hub) reconcile(ctx context.Context) {
 		}
 		h.mu.Unlock()
 	}
+}
+
+// snapshotUpdate is a live snapshot rebuilt from the table.
+type snapshotUpdate struct {
+	raw json.RawMessage
+	at  time.Time
+}
+
+// payload is the tick to send, nil for no update.
+func (u *snapshotUpdate) payload() json.RawMessage {
+	if u == nil {
+		return nil
+	}
+	return u.raw
+}
+
+// newerSnapshot rebuilds a network's live snapshot from the latest sample
+// and returns it when it is newer than the cached one (or nothing is
+// cached), so a tick lost during a LISTEN outage is made up.
+func (h *Hub) newerSnapshot(ctx context.Context, chainID uint64) *snapshotUpdate {
+	snap, err := h.live(ctx, chainID)
+	if err != nil {
+		if !errors.Is(err, errNoData) {
+			h.log.Warn("reconcile snapshot", "err", err.Error())
+		}
+		return nil
+	}
+	at, err := time.Parse(time.RFC3339, snap.SampledAt)
+	if err != nil {
+		return nil
+	}
+	h.mu.Lock()
+	st := h.state(chainID)
+	stale := st.snapshot == nil || at.After(st.snapshotAt)
+	h.mu.Unlock()
+	if !stale {
+		return nil
+	}
+	return &snapshotUpdate{raw: mustJSON(snap), at: at}
 }
 
 // prepared is everything a hello needs that comes from the database,
@@ -407,8 +558,8 @@ func (h *Hub) prepare(ctx context.Context, n db.Network) (*prepared, error) {
 // subscribe moves the client to a network and queues its hello, all under
 // the hub lock: the hello is built from the ring exactly as it is at
 // registration, and fan-out that arrives from then on is buffered behind
-// it, so nothing between hello and the first tick can be missed or
-// duplicated.
+// it. The client's watermark is the hello's last block: a blocks message
+// never repeats a block the hello carried, whatever refresh produced it.
 func (h *Hub) subscribe(c *client, chainID uint64, p *prepared) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -419,12 +570,13 @@ func (h *Hub) subscribe(c *client, chainID uint64, p *prepared) {
 	st := h.state(chainID)
 	st.clients[c] = struct{}{}
 	snapshot := st.snapshot
-	blocks := append([]model.BlockPoint(nil), st.blocks...)
+	blocks := points(st.blocks)
 	if len(blocks) > helloBlocks {
 		blocks = blocks[len(blocks)-helloBlocks:]
 	}
-	if blocks == nil {
-		blocks = []model.BlockPoint{}
+	c.watermark = 0
+	if len(blocks) > 0 {
+		c.watermark = blocks[len(blocks)-1].Number
 	}
 	if snapshot == nil && p.fallback != nil {
 		snapshot = mustJSON(p.fallback)
@@ -491,6 +643,7 @@ const (
 	msgHello       = "hello"
 	msgTick        = "tick"
 	msgBlocks      = "blocks"
+	msgReorg       = "reorg"
 	msgOwnerAction = "owner_action"
 	msgPing        = "ping"
 	msgPong        = "pong"
@@ -532,17 +685,29 @@ type client struct {
 	send    chan []byte
 	limiter *rate.Limiter
 	chainID uint64
-	once    sync.Once
-	closed  chan struct{}
+	// watermark is the last block the client's hello carried (guarded by
+	// the hub lock): blocks at or below it are never sent again.
+	watermark uint64
+	once      sync.Once
+	closed    chan struct{}
 }
 
-// deliver queues a fan-out item for the client.
+// deliver queues a fan-out item for the client, dropping blocks its hello
+// already carried. The caller holds the hub lock.
 func (c *client) deliver(o outbound) {
 	if o.raw != nil {
 		c.enqueue(o.raw)
 		return
 	}
-	msg, _ := json.Marshal(wsMessage{Type: msgBlocks, Data: mustJSON(o.blocks)})
+	blocks := o.blocks
+	for len(blocks) > 0 && blocks[0].Number <= c.watermark {
+		blocks = blocks[1:]
+	}
+	if len(blocks) == 0 {
+		return
+	}
+	c.watermark = blocks[len(blocks)-1].Number
+	msg, _ := json.Marshal(wsMessage{Type: msgBlocks, Data: mustJSON(blocks)})
 	c.enqueue(msg)
 }
 
@@ -560,7 +725,8 @@ func (c *client) close() {
 }
 
 // ServeWS upgrades the connection and runs the client until it goes away.
-// Every refusal before the upgrade is the JSON error envelope.
+// Every refusal before the upgrade, including a malformed handshake, is
+// the JSON error envelope.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	ref := r.URL.Query().Get(networkParam)
 	if ref == "" {
@@ -582,6 +748,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 	if n == nil {
 		writeError(w, http.StatusNotFound, "not_found", "unknown network "+ref)
+		return
+	}
+	if msg := handshakeError(r); msg != "" {
+		writeError(w, http.StatusBadRequest, "bad_request", msg)
 		return
 	}
 	ip := clientIP(r.RemoteAddr)
@@ -620,6 +790,43 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	go c.readLoop(ctx, pongs)
 	c.writeLoop(ctx, pongs)
 	_ = conn.Close(websocket.StatusNormalClosure, "bye")
+}
+
+// handshakeError validates the WebSocket handshake headers the upgrade
+// library would otherwise refuse with a plaintext response: the Connection
+// token, the protocol version and the client key. It returns the reason,
+// or "" when the handshake is well formed.
+func handshakeError(r *http.Request) string {
+	if !r.ProtoAtLeast(1, 1) {
+		return "websocket handshake requires HTTP/1.1"
+	}
+	if !headerHasToken(r.Header, "Connection", "upgrade") {
+		return "Connection header must include Upgrade"
+	}
+	if r.Header.Get("Sec-WebSocket-Version") != "13" {
+		return "unsupported Sec-WebSocket-Version, only 13 is supported"
+	}
+	keys := r.Header.Values("Sec-WebSocket-Key")
+	if len(keys) != 1 {
+		return "exactly one Sec-WebSocket-Key header is required"
+	}
+	if raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keys[0])); err != nil || len(raw) != 16 {
+		return "Sec-WebSocket-Key must be a base64 encoded 16 byte value"
+	}
+	return ""
+}
+
+// headerHasToken reports whether a comma-separated header carries a token,
+// case-insensitively.
+func headerHasToken(h http.Header, name, token string) bool {
+	for _, v := range h.Values(name) {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // originAllowed checks the Origin header against the configured patterns

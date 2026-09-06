@@ -28,13 +28,13 @@ func TestFoldBlocks(t *testing.T) {
 		t.Fatalf("expected 2 buckets per resolution, got %d", len(buckets))
 	}
 	first := buckets[0]
-	if first.Resolution != Resolution1m || first.Blocks != 2 || first.GasUsed != 30 || first.BaseFeeMin.Int64() != 100 || first.BaseFeeMax.Int64() != 300 || first.BaseFeeAvg.Int64() != 200 || first.BaseFeeSum.Int64() != 400 {
+	if first.Resolution != Resolution1m || first.Blocks != 2 || first.GasUsed != 30 || first.BaseFeeMin.Int64() != 100 || first.BaseFeeMax.Int64() != 300 || first.BaseFeeAvg.Int64() != 200 || first.BaseFeeSum.Wei.Int64() != 400 || !first.BaseFeeSum.Valid {
 		t.Fatalf("first bucket: %+v", first)
 	}
 	if first.FeesWei.Int64() != 100*10+300*20 || first.ExponentEndBips != 2 || first.BacklogsEnd[0] != 9 || first.BacklogsMax[0] != 9 || first.BacklogsMax[1] != 50 || first.LastBlock != 2 {
 		t.Fatalf("first bucket aggregates: %+v", first)
 	}
-	if first.FloorFeesWei.Int64() != 40*10+40*20 || first.SurplusFeesWei.Int64() != 100*10+300*20-40*30 || first.MinBaseFee.Int64() != 40 || first.ConstraintBipsEnd[0] != 2 {
+	if first.FloorFeesWei.Wei.Int64() != 40*10+40*20 || first.SurplusFeesWei.Wei.Int64() != 100*10+300*20-40*30 || !first.SurplusFeesWei.Valid || first.MinBaseFee.Int64() != 40 || first.ConstraintBipsEnd[0] != 2 {
 		t.Fatalf("first bucket fee split: %+v", first)
 	}
 	if !first.ConstraintSetID.Valid || first.ConstraintSetID.Int64 != 20 {
@@ -90,7 +90,7 @@ func TestMergeBucketsExactAverage(t *testing.T) {
 		t.Fatalf("floored partial average: %+v", a)
 	}
 	m := MergeBuckets(a, b)
-	if m.Blocks != 3 || m.BaseFeeSum.Int64() != 6 || m.BaseFeeAvg.Int64() != 2 || m.BaseFeeMin.Int64() != 1 || m.BaseFeeMax.Int64() != 3 {
+	if m.Blocks != 3 || m.BaseFeeSum.Wei.Int64() != 6 || m.BaseFeeAvg.Int64() != 2 || m.BaseFeeMin.Int64() != 1 || m.BaseFeeMax.Int64() != 3 {
 		t.Fatalf("merged: %+v", m)
 	}
 	if m.LastBlock != 3 || m.BacklogsEnd[0] != 3 || m.BacklogsMax[0] != 3 || m.ConstraintSetID.Int64 != 4 || m.MinBaseFee.Int64() != 0 || m.ConstraintBipsEnd[0] != 3 {
@@ -102,11 +102,37 @@ func TestMergeBucketsExactAverage(t *testing.T) {
 	if old.LastBlock != 3 || old.ExponentEndBips != 3 || old.Blocks != 5 || old.BaseFeeAvg.Int64() != 1 {
 		t.Fatalf("older fold: %+v", old)
 	}
-	empty := MergeBuckets(Bucket{FeesWei: NewWei(nil), BaseFeeSum: NewWei(nil), FloorFeesWei: NewWei(nil), SurplusFeesWei: NewWei(nil), BaseFeeMin: NewWei(nil), BaseFeeMax: NewWei(nil)}, b)
+	empty := MergeBuckets(Bucket{FeesWei: NewWei(nil), BaseFeeSum: NewNullWei(nil), FloorFeesWei: NewNullWei(nil), SurplusFeesWei: NewNullWei(nil), BaseFeeMin: NewWei(nil), BaseFeeMax: NewWei(nil)}, b)
 	if empty.BaseFeeMin.Int64() != 3 || empty.Blocks != 1 {
 		t.Fatalf("empty merge: %+v", empty)
 	}
 	if z := MergeBuckets(Bucket{}, Bucket{}); z.BaseFeeAvg.Sign() != 0 {
 		t.Fatal("zero blocks average")
+	}
+}
+
+// TestMergeBucketsUnknown: a stored bucket whose sum and fee split predate
+// the columns (NULL) keeps them unknown after a fold, and its average is
+// carried forward from the rounded reconstruction rather than invented.
+func TestMergeBucketsUnknown(t *testing.T) {
+	t0 := time.Date(2026, 9, 6, 7, 0, 0, 0, time.UTC)
+	old := Bucket{Blocks: 2, BaseFeeAvg: WeiFromUint64(4), FeesWei: WeiFromUint64(100), BaseFeeMin: WeiFromUint64(3), BaseFeeMax: WeiFromUint64(5)}
+	b := FoldBlocks([]Block{mkBlock(3, t0, 7, 1, 1, 3)}, func(uint64) sql.NullInt64 { return sql.NullInt64{} })[0]
+	m := MergeBuckets(old, b)
+	if m.BaseFeeSum.Valid || m.FloorFeesWei.Valid || m.SurplusFeesWei.Valid {
+		t.Fatalf("unknown fields must stay unknown: %+v", m)
+	}
+	// The average is floor((4 times 2 + 7) / 3) = 5.
+	if m.Blocks != 3 || m.BaseFeeAvg.Int64() != 5 || m.FeesWei.Int64() != 107 {
+		t.Fatalf("merged average from the reconstruction: %+v", m)
+	}
+	if baseFeeSumOf(old).Int64() != 8 || baseFeeSumOf(b).Int64() != 7 {
+		t.Fatal("baseFeeSumOf")
+	}
+	if got := addNullWei(NewNullWei(big.NewInt(1)), NullWei{}); got.Valid {
+		t.Fatal("addNullWei with an unknown side")
+	}
+	if got := addNullWei(NewNullWei(big.NewInt(1)), NewNullWei(big.NewInt(2))); !got.Valid || got.Wei.Int64() != 3 {
+		t.Fatal("addNullWei")
 	}
 }

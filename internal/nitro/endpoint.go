@@ -140,15 +140,18 @@ func (e *Endpoint) observe(items int, limited bool) {
 	e.log.Info("batch cap recovered one step", "batchCap", e.batchCap)
 }
 
-// batch sends reqs in chunks of at most the current cap. A throttled chunk
-// is retried after the back-off at whatever the cap has become, so an
+// batch sends reqs in chunks of at most the current cap, itself bounded by
+// what the endpoint's token bucket can hold at once (a budgeted endpoint
+// never sends a batch it has not paid for in full). A throttled chunk is
+// retried after the back-off at whatever the cap has become, so an
 // oversized batch shrinks instead of being resent as is; the attempt
 // budget is the client's.
 func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	out := make([]Result, 0, len(reqs))
 	attempts := 0
 	for start := 0; start < len(reqs); {
-		chunk := reqs[start:min(start+e.BatchCap(), len(reqs))]
+		size := min(e.BatchCap(), e.pacer.MaxBatch())
+		chunk := reqs[start:min(start+size, len(reqs))]
 		results, limited, err := e.attempt(ctx, chunk)
 		if err != nil {
 			return nil, err

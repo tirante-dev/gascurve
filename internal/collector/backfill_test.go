@@ -31,11 +31,11 @@ func seedSets(t *testing.T, store *dbtest.MemStore) {
 	}
 }
 
-// scanned marks the initial owner-action scan as complete, which the
-// backfill requires before it starts any segment.
+// scanned marks the owner-action timeline complete through the followed
+// head, which the backfill requires before it starts any segment.
 func scanned(f *Follower) {
 	f.mu.Lock()
-	f.ownerScanDone = true
+	f.ownerScanThrough = max(f.ownerScanThrough, f.head)
 	f.mu.Unlock()
 }
 
@@ -74,15 +74,25 @@ func TestBackfillSegments(t *testing.T) {
 	f.mu.Lock()
 	f.minFeeChanges = []minFeeChange{{block: 300, fee: big.NewInt(30_000_000)}}
 	f.mu.Unlock()
-	// Nothing starts before the initial owner-action scan completed: the
-	// historical constraint sets are unknown until then.
+	// Nothing starts before the owner-action timeline covers the block
+	// before the first live block: the historical constraint sets and fees
+	// are unknown until then, and a scan that stopped short of the live
+	// start is not enough.
 	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
 		t.Fatalf("before the owner scan: %v %v", st, err)
+	}
+	f.mu.Lock()
+	f.ownerScanThrough = 998
+	f.mu.Unlock()
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
+		t.Fatalf("scan short of the live start: %v %v", st, err)
 	}
 	if _, ok, _ := store.GetState(ctx, 4663, db.StateBackfillCursor); ok {
 		t.Fatal("no cursor may be written before the owner scan")
 	}
-	scanned(f)
+	f.mu.Lock()
+	f.ownerScanThrough = 999
+	f.mu.Unlock()
 	// Nothing happens while the fast loop is catching up.
 	f.catchingUp.Store(true)
 	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
@@ -101,7 +111,7 @@ func TestBackfillSegments(t *testing.T) {
 		t.Fatalf("expected around 92 steps, got %d", steps)
 	}
 	c, err := f.loadCursor(ctx)
-	if err != nil || !c.Done || c.DepthStart != 300 {
+	if err != nil || !c.Done || c.DepthStart != 300 || c.Top != 1000 {
 		t.Fatalf("cursor: %+v %v", c, err)
 	}
 	// Every block from the genesis set (100) to the first stored block is
@@ -170,10 +180,10 @@ func TestBackfillAdditiveBeyondBoundary(t *testing.T) {
 		t.Fatalf("blocks from the boundary hour on are rows: %+v", b)
 	}
 	early, _ := store.Buckets(ctx, 4663, db.Resolution1h, baseTime, boundary)
-	if len(early) != 1 || early[0].Blocks != 6000 || early[0].LastBlock != 35_999 || early[0].BaseFeeSum.Sign() <= 0 {
+	if len(early) != 1 || early[0].Blocks != 6000 || early[0].LastBlock != 35_999 || early[0].BaseFeeSum.Wei.Sign() <= 0 {
 		t.Fatalf("additive hour bucket: %+v", early)
 	}
-	if early[0].BaseFeeAvg.Cmp(new(big.Int).Div(early[0].BaseFeeSum.BigInt(), big.NewInt(6000))) != 0 {
+	if early[0].BaseFeeAvg.Cmp(new(big.Int).Div(early[0].BaseFeeSum.Wei.BigInt(), big.NewInt(6000))) != 0 {
 		t.Fatalf("average must derive from the exact sum: %+v", early[0])
 	}
 	// Discarding an unverified live-model cursor drops only the
@@ -221,6 +231,80 @@ func TestBackfillAdditiveBeyondBoundary(t *testing.T) {
 		t.Fatalf("discard failure: %v", err)
 	}
 	delete(store.FailOn, "DeleteBucketsBefore")
+	// A failed cleanup does not count as checked: the next step retries it
+	// instead of continuing from the unverified cursor.
+	f.mu.Lock()
+	checked := f.cursorChecked
+	f.mu.Unlock()
+	if checked {
+		t.Fatal("cursorChecked must only be set once the cleanup committed")
+	}
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("retried cleanup: %v %v", st, err)
+	}
+	if c2, _ := f.loadCursor(ctx); !c2.Verified || c2.SegStart != 30_000 {
+		t.Fatalf("the retried cleanup must start over: %+v", c2)
+	}
+	f.mu.Lock()
+	checked = f.cursorChecked
+	f.mu.Unlock()
+	if !checked {
+		t.Fatal("cursorChecked after a committed cleanup")
+	}
+}
+
+// TestBackfillStopsAtScanOrigin: on a chain whose owner scan started at a
+// cutoff, the backfill never reaches below it: with an archive origin it
+// replays from the observed set and sampled fee recorded there, without
+// one the range is a hole.
+func TestBackfillStopsAtScanOrigin(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = 70 * time.Second // block 300 without an origin
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 4663, EffectiveBlock: 500, EffectiveAt: baseTime.Add(50 * time.Second), Source: model.SourceObserved,
+		Constraints: entriesJSON([]model.ConstraintSetEntry{{Target: 60_000_000, Window: 15}, {Target: 40_000_000, Window: 86_400, StartingBacklog: 7}})}); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.SetState(ctx, 4663, db.StateOwnerScanOrigin, `{"block":500,"minBaseFee":"30000000","archive":true}`)
+	f2 := newTestFollower(t, rpc, store)
+	if err := f2.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f2.scanOrigin == nil || f2.scanOrigin.Block != 500 || f2.minFeeAt(499).Int64() != pricer.InitialMinimumBaseFeeWei || f2.minFeeAt(500).Int64() != 30_000_000 || f2.minFeeChangeBlock(700) != 500 {
+		t.Fatalf("origin fee: %+v %s", f2.scanOrigin, f2.minFeeAt(500))
+	}
+	f2.cfg.BackfillDepth = 70 * time.Second
+	runBackfill(t, f2, 200)
+	c, _ := f2.loadCursor(ctx)
+	if !c.Done || c.DepthStart != 500 {
+		t.Fatalf("depth clamped to the origin: %+v", c)
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 499); b != nil {
+		t.Fatal("nothing below the origin may be priced")
+	}
+	b500, _ := store.BlockByNumber(ctx, 4663, 500)
+	if b500 == nil || b500.MinBaseFee.Int64() != 30_000_000 || b500.Backlogs[1] != 7+gasFor(500) {
+		t.Fatalf("origin block replays from the sampled state: %+v", b500)
+	}
+	// A corrupt origin checkpoint fails initialization.
+	bad := dbtest.New()
+	_ = bad.SetState(ctx, 4663, db.StateOwnerScanOrigin, "{bad")
+	if err := newTestFollower(t, rpc, bad).ensureInit(ctx); err == nil {
+		t.Fatal("corrupt origin")
+	}
+	bad2 := dbtest.New()
+	_ = bad2.SetState(ctx, 4663, db.StateOwnerScanThrough, "x")
+	if err := newTestFollower(t, rpc, bad2).ensureInit(ctx); err == nil {
+		t.Fatal("corrupt scan through")
+	}
+	if (&scanOrigin{MinBaseFee: "x"}).fee() != nil || (*scanOrigin)(nil).fee() != nil {
+		t.Fatal("origin fee parsing")
+	}
 }
 
 func TestBackfillWithoutSets(t *testing.T) {
@@ -241,9 +325,12 @@ func TestBackfillWithoutSets(t *testing.T) {
 	if steps < 29 {
 		t.Fatalf("steps = %d", steps)
 	}
+	// Backfilled buckets carry no set (none is in force before the seed's
+	// observed set at 1000); only the live bucket, whose last block is the
+	// seed, is tagged with it.
 	for _, b := range store.BucketRows {
-		if b.Resolution == db.Resolution1h && b.ConstraintSetID.Valid {
-			t.Fatal("no set id expected without sets")
+		if b.Resolution == db.Resolution1h && b.ConstraintSetID.Valid != (b.LastBlock == 1000) {
+			t.Fatalf("set id on backfilled bucket: %+v", b)
 		}
 	}
 	if total := blockCountIn(store, db.Resolution1h); total != 301 { // 700..999 backfilled plus the live head

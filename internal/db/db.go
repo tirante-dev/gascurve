@@ -43,6 +43,16 @@ const (
 	// StateEndpoints is the endpoint pool's routing state
 	// (model.EndpointsStatus as JSON), refreshed by the slow loop.
 	StateEndpoints = "endpoints"
+	// StateOwnerScanThrough is the block through which the owner-action
+	// timeline is complete: the slow loop writes it only when a scan pass
+	// reached the head it started from, never per chunk. The backfill
+	// starts a segment only when it covers the block before live_start.
+	StateOwnerScanThrough = "owner_scan_through"
+	// StateOwnerScanOrigin describes where a deliberately truncated owner
+	// scan began ({"block":n,"minBaseFee":"…","archive":bool}): the pricing
+	// state in force there when an archive endpoint could sample it, or a
+	// marker that nothing before the block can be reconstructed.
+	StateOwnerScanOrigin = "owner_scan_origin"
 )
 
 // Open connects to Postgres and applies pool limits.
@@ -137,6 +147,51 @@ func (w *Wei) UnmarshalJSON(b []byte) error {
 		s = string(b)
 	}
 	return w.setString(s)
+}
+
+// NullWei is a nullable Wei: Valid is false for SQL NULL, which marks a
+// value that was never recorded (history written before the column
+// existed) as opposed to a zero.
+type NullWei struct {
+	Wei   Wei
+	Valid bool
+}
+
+// NewNullWei wraps a known value (nil is a known zero).
+func NewNullWei(v *big.Int) NullWei {
+	return NullWei{Wei: NewWei(v), Valid: true}
+}
+
+// NullWeiFromUint64 builds a known NullWei from an unsigned integer.
+func NullWeiFromUint64(v uint64) NullWei {
+	return NullWei{Wei: WeiFromUint64(v), Valid: true}
+}
+
+// Value implements driver.Valuer.
+func (n NullWei) Value() (driver.Value, error) {
+	if !n.Valid {
+		return nil, nil
+	}
+	return n.Wei.Value()
+}
+
+// Scan implements sql.Scanner.
+func (n *NullWei) Scan(src any) error {
+	if src == nil {
+		*n = NullWei{}
+		return nil
+	}
+	n.Valid = true
+	return n.Wei.Scan(src)
+}
+
+// StringPtr renders the value as a decimal string, nil when unknown.
+func (n NullWei) StringPtr() *string {
+	if !n.Valid {
+		return nil
+	}
+	s := n.Wei.String()
+	return &s
 }
 
 // JSONB maps JSONB columns. A nil value is SQL NULL and JSON null.

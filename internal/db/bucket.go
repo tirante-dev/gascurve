@@ -24,8 +24,8 @@ type BucketBuilder struct {
 func NewBucketBuilder(chainID uint64, resolution string, start time.Time) *BucketBuilder {
 	return &BucketBuilder{b: Bucket{
 		ChainID: chainID, Resolution: resolution, BucketStart: start,
-		FeesWei: NewWei(nil), BaseFeeMin: NewWei(nil), BaseFeeAvg: NewWei(nil), BaseFeeMax: NewWei(nil), BaseFeeSum: NewWei(nil),
-		MinBaseFee: NewWei(nil), FloorFeesWei: NewWei(nil), SurplusFeesWei: NewWei(nil),
+		FeesWei: NewWei(nil), BaseFeeMin: NewWei(nil), BaseFeeAvg: NewWei(nil), BaseFeeMax: NewWei(nil), BaseFeeSum: NewNullWei(nil),
+		MinBaseFee: NewWei(nil), FloorFeesWei: NewNullWei(nil), SurplusFeesWei: NewNullWei(nil),
 		BacklogsEnd: Uint64Array{}, BacklogsMax: Uint64Array{}, ConstraintBipsEnd: pq.Int64Array{},
 	}}
 }
@@ -41,13 +41,13 @@ func (a *BucketBuilder) Add(blk Block, setID sql.NullInt64) {
 	}
 	a.b.Blocks++
 	a.b.GasUsed += blk.GasUsed
-	a.b.BaseFeeSum = NewWei(new(big.Int).Add(a.b.BaseFeeSum.BigInt(), fee))
+	a.b.BaseFeeSum = NewNullWei(new(big.Int).Add(a.b.BaseFeeSum.Wei.BigInt(), fee))
 	gas := new(big.Int).SetUint64(blk.GasUsed)
 	fees := new(big.Int).Mul(fee, gas)
 	a.b.FeesWei = NewWei(new(big.Int).Add(fees, a.b.FeesWei.BigInt()))
 	floor := new(big.Int).Mul(blk.MinBaseFee.BigInt(), gas)
-	a.b.FloorFeesWei = NewWei(new(big.Int).Add(floor, a.b.FloorFeesWei.BigInt()))
-	a.b.SurplusFeesWei = NewWei(new(big.Int).Sub(a.b.FeesWei.BigInt(), a.b.FloorFeesWei.BigInt()))
+	a.b.FloorFeesWei = NewNullWei(new(big.Int).Add(floor, a.b.FloorFeesWei.Wei.BigInt()))
+	a.b.SurplusFeesWei = NewNullWei(new(big.Int).Sub(a.b.FeesWei.BigInt(), a.b.FloorFeesWei.Wei.BigInt()))
 	if blk.Number >= a.b.LastBlock {
 		a.b.LastBlock = blk.Number
 		a.b.ExponentEndBips = blk.ExponentBips
@@ -73,9 +73,27 @@ func (a *BucketBuilder) Add(blk Block, setID sql.NullInt64) {
 // Bucket returns the aggregate; the average is derived from the exact sum.
 func (a *BucketBuilder) Bucket() Bucket {
 	if a.b.Blocks > 0 {
-		a.b.BaseFeeAvg = NewWei(new(big.Int).Div(a.b.BaseFeeSum.BigInt(), big.NewInt(a.b.Blocks)))
+		a.b.BaseFeeAvg = NewWei(new(big.Int).Div(a.b.BaseFeeSum.Wei.BigInt(), big.NewInt(a.b.Blocks)))
 	}
 	return a.b
+}
+
+// baseFeeSumOf is the sum behind a bucket's average: the exact one when
+// known, otherwise the rounded average times the block count (the best a
+// row written before the sum existed can offer).
+func baseFeeSumOf(b Bucket) *big.Int {
+	if b.BaseFeeSum.Valid {
+		return b.BaseFeeSum.Wei.BigInt()
+	}
+	return new(big.Int).Mul(b.BaseFeeAvg.BigInt(), big.NewInt(b.Blocks))
+}
+
+// addNullWei adds two nullable values; the sum is unknown when either is.
+func addNullWei(a, b NullWei) NullWei {
+	if !a.Valid || !b.Valid {
+		return NullWei{}
+	}
+	return NewNullWei(new(big.Int).Add(a.Wei.BigInt(), b.Wei.BigInt()))
 }
 
 // Blocks returns how many blocks were folded.
@@ -128,15 +146,17 @@ func FoldBlocks(rows []Block, setID func(uint64) sql.NullInt64) []Bucket {
 
 // MergeBuckets adds partial bucket b into stored bucket old exactly like the
 // SQL fold: counters and sums add, min/max combine, *_end fields follow the
-// higher last block, array maxima are element-wise.
+// higher last block, array maxima are element-wise. A sum or fee split that
+// is unknown on either side stays unknown; the average then falls back to
+// the rounded reconstruction for the unknown side.
 func MergeBuckets(old, b Bucket) Bucket {
 	merged := old
 	merged.Blocks = old.Blocks + b.Blocks
 	merged.GasUsed += b.GasUsed
 	merged.FeesWei = NewWei(new(big.Int).Add(old.FeesWei.BigInt(), b.FeesWei.BigInt()))
-	merged.BaseFeeSum = NewWei(new(big.Int).Add(old.BaseFeeSum.BigInt(), b.BaseFeeSum.BigInt()))
-	merged.FloorFeesWei = NewWei(new(big.Int).Add(old.FloorFeesWei.BigInt(), b.FloorFeesWei.BigInt()))
-	merged.SurplusFeesWei = NewWei(new(big.Int).Add(old.SurplusFeesWei.BigInt(), b.SurplusFeesWei.BigInt()))
+	merged.BaseFeeSum = addNullWei(old.BaseFeeSum, b.BaseFeeSum)
+	merged.FloorFeesWei = addNullWei(old.FloorFeesWei, b.FloorFeesWei)
+	merged.SurplusFeesWei = addNullWei(old.SurplusFeesWei, b.SurplusFeesWei)
 	if old.Blocks == 0 || b.BaseFeeMin.BigInt().Cmp(old.BaseFeeMin.BigInt()) < 0 {
 		merged.BaseFeeMin = b.BaseFeeMin
 	}
@@ -144,7 +164,8 @@ func MergeBuckets(old, b Bucket) Bucket {
 		merged.BaseFeeMax = b.BaseFeeMax
 	}
 	if merged.Blocks > 0 {
-		merged.BaseFeeAvg = NewWei(new(big.Int).Div(merged.BaseFeeSum.BigInt(), big.NewInt(merged.Blocks)))
+		sum := new(big.Int).Add(baseFeeSumOf(old), baseFeeSumOf(b))
+		merged.BaseFeeAvg = NewWei(sum.Div(sum, big.NewInt(merged.Blocks)))
 	} else {
 		merged.BaseFeeAvg = NewWei(nil)
 	}

@@ -50,6 +50,31 @@ func TestWei(t *testing.T) {
 	}
 }
 
+func TestNullWei(t *testing.T) {
+	var n NullWei
+	if err := n.Scan(nil); err != nil || n.Valid || n.StringPtr() != nil {
+		t.Fatalf("scan null: %+v %v", n, err)
+	}
+	if err := n.Scan("42"); err != nil || !n.Valid || *n.StringPtr() != "42" {
+		t.Fatalf("scan value: %+v %v", n, err)
+	}
+	if v, err := n.Value(); err != nil || v != "42" {
+		t.Fatalf("value: %v %v", v, err)
+	}
+	if v, err := (NullWei{}).Value(); err != nil || v != nil {
+		t.Fatalf("null value: %v %v", v, err)
+	}
+	if err := n.Scan("x"); err == nil {
+		t.Fatal("bad numeric")
+	}
+	if w := NewNullWei(nil); !w.Valid || w.Wei.String() != "0" {
+		t.Fatal("NewNullWei nil is a known zero")
+	}
+	if w := NullWeiFromUint64(7); !w.Valid || w.Wei.Int64() != 7 {
+		t.Fatal("NullWeiFromUint64")
+	}
+}
+
 func TestJSONB(t *testing.T) {
 	var j JSONB
 	if v, err := j.Value(); err != nil || v != nil {

@@ -23,8 +23,9 @@ type Network struct {
 }
 
 // Block is a row of the blocks table. Backlogs are the end-of-block
-// values, ConstraintBips the start-of-block per-constraint exponents and
-// MinBaseFee the floor in force at the block.
+// values, ConstraintBips the start-of-block per-constraint exponents (nil
+// for rows written before they were recorded, an empty array for a legacy
+// block) and MinBaseFee the floor in force at the block.
 type Block struct {
 	ChainID          uint64        `db:"chain_id"`
 	Number           uint64        `db:"number"`
@@ -61,7 +62,9 @@ var Resolutions = map[string]time.Duration{
 // the stored row: counters and sums add, min/max combine, the average is
 // derived from the exact sum, and the *_end fields are replaced.
 // RebuildBuckets instead recomputes a row from the block rows in its
-// window.
+// window. BaseFeeSum, ConstraintBipsEnd, FloorFeesWei and SurplusFeesWei
+// are unknown (NULL, nil) for rows written before they were recorded;
+// a fold into such a row keeps them unknown.
 type Bucket struct {
 	ChainID           uint64        `db:"chain_id"`
 	Resolution        string        `db:"resolution"`
@@ -72,14 +75,14 @@ type Bucket struct {
 	BaseFeeMin        Wei           `db:"base_fee_min"`
 	BaseFeeAvg        Wei           `db:"base_fee_avg"`
 	BaseFeeMax        Wei           `db:"base_fee_max"`
-	BaseFeeSum        Wei           `db:"base_fee_sum"`
+	BaseFeeSum        NullWei       `db:"base_fee_sum"`
 	ExponentEndBips   int64         `db:"exponent_end_bips"`
 	BacklogsEnd       Uint64Array   `db:"backlogs_end"`
 	BacklogsMax       Uint64Array   `db:"backlogs_max"`
 	ConstraintBipsEnd pq.Int64Array `db:"constraint_bips_end"`
 	MinBaseFee        Wei           `db:"min_base_fee"`
-	FloorFeesWei      Wei           `db:"floor_fees_wei"`
-	SurplusFeesWei    Wei           `db:"surplus_fees_wei"`
+	FloorFeesWei      NullWei       `db:"floor_fees_wei"`
+	SurplusFeesWei    NullWei       `db:"surplus_fees_wei"`
 	ConstraintSetID   sql.NullInt64 `db:"constraint_set_id"`
 	ReplayErrorBips   int64         `db:"replay_error_bips"`
 	// LastBlock is the highest block folded into the bucket; *_end fields
@@ -155,6 +158,15 @@ type Store interface {
 	// WithTx runs fn inside a transaction; the Store passed to fn is bound
 	// to that transaction.
 	WithTx(ctx context.Context, fn func(Store) error) error
+	// WithChainTx is WithTx holding the chain's transaction-scoped advisory
+	// lock (pg_advisory_xact_lock(chain_id)) from the start, so the live
+	// tick, the slow loop, the backfill and a reorg rewind never interleave
+	// their writes for one chain and no rebuild sees another writer's
+	// uncommitted rows. Nested calls reuse the outer transaction.
+	WithChainTx(ctx context.Context, chainID uint64, fn func(Store) error) error
+	// WithSnapshotTx runs fn in a read-only repeatable-read transaction, so
+	// every read inside it sees one database moment.
+	WithSnapshotTx(ctx context.Context, fn func(Store) error) error
 
 	UpsertNetwork(ctx context.Context, n Network) error
 	Networks(ctx context.Context) ([]Network, error)
@@ -204,6 +216,9 @@ type Store interface {
 	// L1Samples returns one L1-carrying sample per step over [from, to).
 	L1Samples(ctx context.Context, chainID uint64, from, to time.Time, step time.Duration) ([]StateSample, error)
 	PruneStateSamples(ctx context.Context, chainID uint64, before time.Time) (int64, error)
+	// DeleteStateSamplesAfter removes samples taken at blocks above block
+	// (a reorg rewind) and returns how many.
+	DeleteStateSamplesAfter(ctx context.Context, chainID, block uint64) (int64, error)
 
 	// InsertOwnerActions inserts new actions, ignoring duplicates, and
 	// returns how many were new.
@@ -219,6 +234,9 @@ type Store interface {
 
 	// InsertConstraintSet upserts on (chain, block, source) and returns the id.
 	InsertConstraintSet(ctx context.Context, cs ConstraintSet) (int64, error)
+	// UpdateConstraintSet rewrites the effective block, time, constraints
+	// and source of the set with cs.ID, keeping the id.
+	UpdateConstraintSet(ctx context.Context, cs ConstraintSet) error
 	// ConstraintSets lists sets ascending by effective block.
 	ConstraintSets(ctx context.Context, chainID uint64) ([]ConstraintSet, error)
 
@@ -231,6 +249,8 @@ type Store interface {
 
 	GetState(ctx context.Context, chainID uint64, key string) (string, bool, error)
 	SetState(ctx context.Context, chainID uint64, key, value string) error
+	// DeleteState removes a checkpoint; a missing key is not an error.
+	DeleteState(ctx context.Context, chainID uint64, key string) error
 	States(ctx context.Context, chainID uint64) (map[string]string, error)
 
 	Notify(ctx context.Context, channel, payload string) error

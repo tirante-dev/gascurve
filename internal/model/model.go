@@ -138,7 +138,9 @@ type LiveSnapshot struct {
 
 // BlockPoint is one replayed block. Backlogs are the end-of-block values,
 // ConstraintBips the start-of-block per-constraint exponents that priced
-// the block (they sum to ExponentBips) and MinBaseFee the floor in force.
+// the block (they sum to ExponentBips; null for a block stored before they
+// were recorded, an empty array for a legacy block) and MinBaseFee the
+// floor in force.
 type BlockPoint struct {
 	Number           uint64   `json:"number"`
 	TS               uint64   `json:"ts"`
@@ -155,7 +157,9 @@ type BlockPoint struct {
 // SeriesPoint is one bucket of a Series. ExponentBips, ConstraintBips,
 // Backlogs and MinBaseFee describe the bucket's last block; FloorFeesWei
 // is the sum of gasUsed times the minimum base fee per block and
-// SurplusFeesWei is FeesWei minus that.
+// SurplusFeesWei is FeesWei minus that. ConstraintBips, FloorFeesWei and
+// SurplusFeesWei are null for buckets written before they were recorded
+// (history that predates migration 000006); they are never null otherwise.
 type SeriesPoint struct {
 	T               int64    `json:"t"`
 	Blocks          int64    `json:"blocks"`
@@ -170,10 +174,20 @@ type SeriesPoint struct {
 	Backlogs        []uint64 `json:"backlogs"`
 	BacklogsMax     []uint64 `json:"backlogsMax"`
 	MinBaseFee      string   `json:"minBaseFee"`
-	FloorFeesWei    string   `json:"floorFeesWei"`
-	SurplusFeesWei  string   `json:"surplusFeesWei"`
+	FloorFeesWei    *string  `json:"floorFeesWei"`
+	SurplusFeesWei  *string  `json:"surplusFeesWei"`
 	ConstraintSetID int64    `json:"constraintSetId"`
 	ReplayErrorBips int64    `json:"replayErrorBips"`
+}
+
+// Reorg is the WebSocket reorg message: the collector replaced blocks at
+// or below the ring's tip, so the client drops every block above Ancestor
+// and appends Blocks (the canonical replacements, oldest first, never
+// null) before any later blocks message.
+type Reorg struct {
+	ChainID  uint64       `json:"chainId"`
+	Ancestor uint64       `json:"ancestor"`
+	Blocks   []BlockPoint `json:"blocks"`
 }
 
 // Series is a history response.

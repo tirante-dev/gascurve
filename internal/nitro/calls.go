@@ -103,11 +103,13 @@ func (c *Client) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, 
 // batches as it sees fit, and returns one Result per request in order.
 type batcher func(ctx context.Context, reqs []Request) ([]Result, error)
 
-// batchCapped is the Client's batcher: fixed batches of MaxBatch items.
+// batchCapped is the Client's batcher: fixed batches of at most the pacer's
+// MaxBatch items.
 func (c *Client) batchCapped(ctx context.Context, reqs []Request) ([]Result, error) {
 	out := make([]Result, 0, len(reqs))
-	for start := 0; start < len(reqs); start += MaxBatch {
-		results, err := c.Batch(ctx, reqs[start:min(start+MaxBatch, len(reqs))])
+	size := c.pacer.MaxBatch()
+	for start := 0; start < len(reqs); start += size {
+		results, err := c.Batch(ctx, reqs[start:min(start+size, len(reqs))])
 		if err != nil {
 			return nil, err
 		}

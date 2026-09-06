@@ -30,6 +30,9 @@ type fakeRPC struct {
 	// maxItems, when positive, answers any batch with more items with 429
 	// (the way QuickNode rejects oversized batches).
 	maxItems int
+	// hold, when set, makes the next request wait until it is closed
+	// before it is answered, so another caller can queue behind it.
+	hold chan struct{}
 }
 
 type scriptStep struct {
@@ -92,6 +95,13 @@ func (f *fakeRPC) setCallErr(sig string, e *RPCError) {
 func (f *fakeRPC) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
+	if f.hold != nil {
+		hold := f.hold
+		f.hold = nil
+		f.mu.Unlock()
+		<-hold
+		f.mu.Lock()
+	}
 	f.requests++
 	f.agents = append(f.agents, r.Header.Get("User-Agent"))
 	if len(f.script) > 0 {

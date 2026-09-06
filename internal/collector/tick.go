@@ -55,7 +55,7 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 	case stored == 0:
 		// Fresh database: nothing before the sampled head is known, so
 		// the head is persisted alone and replay starts after it.
-		return f.seed(ctx, sample, nil)
+		return f.seed(ctx, sample, nil, nil)
 	case head < stored:
 		f.log.Warn("head behind the stored head, skipping tick", "head", head, "stored", stored)
 		return nil
@@ -131,14 +131,14 @@ func verifyChain(headers []nitro.Header) error {
 func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uint64) ([]nitro.Header, error) {
 	head := sample.Header.Number
 	if stored == 0 {
-		return nil, f.seed(ctx, sample, nil)
+		return nil, f.seed(ctx, sample, nil, nil)
 	}
 	from := stored + 1
 	maxGap := uint64(f.cfg.HeaderBatchSize) * uint64(f.cfg.MaxCatchUpBatches)
 	if gap := head - stored; !f.unlimited() && gap > maxGap {
 		h := hole{From: from, To: head - 1}
 		f.log.Warn("catch-up gap exceeds budget, skipping blocks and restarting from the sampled head", "from", h.From, "to", h.To)
-		return nil, f.seed(ctx, sample, &h)
+		return nil, f.seed(ctx, sample, &h, nil)
 	}
 	headers, err := f.fetchHeaders(ctx, from, head-1)
 	if err != nil {
@@ -169,17 +169,26 @@ func (f *Follower) fetchHeaders(ctx context.Context, from, to uint64) ([]nitro.H
 }
 
 // rewindToAncestor finds the highest stored block at or below from whose
-// hash the node still reports, deletes everything after it (blocks, their
-// bucket contributions, owner actions, constraint sets, batch reports and
-// cursors) in one transaction and reloads the head from the database. It
-// returns the new head.
+// hash the node still reports and, holding the chain lock so no slow scan
+// or backfill transaction from the old fork can interleave, deletes
+// everything after it in one transaction: blocks and their bucket
+// contributions, owner actions, constraint sets, batch reports, state
+// samples, the owner and batch cursors, the owner scan checkpoint, and,
+// when they lie above the ancestor, the live start and the backfill cursor
+// (whose backfill-only buckets are dropped for re-backfilling). It reloads
+// the head from the database and returns it.
 func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, error) {
 	ancestor, err := f.findAncestor(ctx, from)
 	if err != nil {
 		return 0, err
 	}
 	f.log.Warn("reorg detected, rewinding", "ancestor", ancestor)
-	err = f.store.WithTx(ctx, func(s db.Store) error {
+	f.mu.Lock()
+	ls := f.liveStart
+	boundary, hasBoundary := f.boundaryLocked()
+	f.mu.Unlock()
+	clearedStart := false
+	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		removed, err := s.DeleteBlocksAfter(ctx, f.chainID, ancestor)
 		if err != nil {
 			return fmt.Errorf("delete blocks: %w", err)
@@ -192,9 +201,22 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 		if err := s.RewindAfter(ctx, f.chainID, ancestor); err != nil {
 			return err
 		}
-		for _, key := range []string{db.StateOwnerLogCursor, db.StateBatchScanCursor} {
+		if _, err := s.DeleteStateSamplesAfter(ctx, f.chainID, ancestor); err != nil {
+			return fmt.Errorf("delete samples: %w", err)
+		}
+		for _, key := range []string{db.StateOwnerLogCursor, db.StateBatchScanCursor, db.StateOwnerScanThrough} {
 			if err := rewindCursor(ctx, s, f.chainID, key, ancestor); err != nil {
 				return err
+			}
+		}
+		if err := f.rewindBackfill(ctx, s, ancestor, boundary, hasBoundary); err != nil {
+			return err
+		}
+		if ls != nil && ls.Block > ancestor {
+			// The live history starts over at the next committed head.
+			clearedStart = true
+			if err := s.DeleteState(ctx, f.chainID, db.StateLiveStart); err != nil {
+				return fmt.Errorf("live start: %w", err)
 			}
 		}
 		return s.SetState(ctx, f.chainID, db.StateHead, fmt.Sprint(ancestor))
@@ -204,14 +226,46 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if clearedStart {
+		f.liveStart = nil
+	}
+	f.ownerScanThrough = min(f.ownerScanThrough, ancestor)
 	if err := f.reloadHeadLocked(ctx); err != nil {
 		return 0, err
 	}
 	if err := f.reloadSetsLocked(ctx); err != nil {
 		return 0, err
 	}
-	f.observedChecked = false
 	return f.head, nil
+}
+
+// rewindBackfill resets the backfill to a safe checkpoint when its range
+// reaches above the ancestor: everything it folded came from the old fork
+// or was cut off, so its backfill-only buckets are dropped and the cursor
+// starts over (the row-backed buckets above the boundary are rebuilt from
+// the surviving rows by the rewind itself).
+func (f *Follower) rewindBackfill(ctx context.Context, s db.Store, ancestor uint64, boundary time.Time, hasBoundary bool) error {
+	raw, ok, err := s.GetState(ctx, f.chainID, db.StateBackfillCursor)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	c := &backfillCursor{}
+	if err := json.Unmarshal([]byte(raw), c); err != nil {
+		return fmt.Errorf("backfill cursor: %w", err)
+	}
+	if c.Top == 0 || c.Top-1 <= ancestor {
+		return nil
+	}
+	f.log.Warn("backfill range reaches above the reorg ancestor, restarting the backfill", "top", c.Top, "ancestor", ancestor)
+	if hasBoundary {
+		if _, err := s.DeleteBucketsBefore(ctx, f.chainID, boundary); err != nil {
+			return err
+		}
+	}
+	return f.saveCursor(ctx, s, &backfillCursor{})
 }
 
 // rewindCursor lowers a numeric checkpoint to block when it is beyond it.
@@ -234,8 +288,11 @@ func rewindCursor(ctx context.Context, s db.Store, chainID uint64, key string, b
 }
 
 // findAncestor walks down from a block comparing stored hashes with the
-// node's until they agree. A block without a stored hash cannot be checked
-// and is taken as the ancestor.
+// node's until they agree. A row without a stored hash (written before
+// hashes were kept) is unknown rather than trusted: it is the ancestor
+// only when the node's header at that height matches every field the row
+// holds (timestamp, gas used, base fee). A height without any row is the
+// ancestor: nothing below it can be off-chain.
 func (f *Follower) findAncestor(ctx context.Context, from uint64) (uint64, error) {
 	rows, err := f.store.RecentBlocks(ctx, f.chainID, maxReorgDepth+1)
 	if err != nil {
@@ -250,12 +307,18 @@ func (f *Follower) findAncestor(ctx context.Context, from uint64) (uint64, error
 			return 0, nil
 		}
 		row, ok := byNumber[n]
-		if !ok || row.Hash == "" {
+		if !ok {
 			return n, nil
 		}
 		h, err := f.rpc.HeaderByNumber(ctx, n)
 		if err != nil {
 			return 0, fmt.Errorf("header %d: %w", n, err)
+		}
+		if row.Hash == "" {
+			if h.Timestamp == uint64(row.TS.Unix()) && h.GasUsed == row.GasUsed && h.BaseFee != nil && h.BaseFee.Cmp(row.BaseFee.BigInt()) == 0 {
+				return n, nil
+			}
+			continue
 		}
 		if h.Hash == row.Hash {
 			return n, nil
@@ -266,8 +329,9 @@ func (f *Follower) findAncestor(ctx context.Context, from uint64) (uint64, error
 
 // seed persists the sampled head alone: its backlogs come from the
 // sample, nothing before it is replayed. A skipped range is recorded as a
-// hole. The replay continues forward from this block.
-func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole) error {
+// hole and pending owner actions found in it are kept. The replay
+// continues forward from this block.
+func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole, pending []*nitro.OwnerAction) error {
 	st := stateFromSample(sample)
 	// The start-of-block exponents that priced the seed are approximated
 	// from the sampled end-of-block backlogs minus the block's own gas.
@@ -284,7 +348,7 @@ func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole) erro
 	// No known state preceded the seed, so it carries no prediction.
 	r.Predicted, r.ErrorBips = new(big.Int).Set(hdr.BaseFee), 0
 	rows := blockRows(f.chainID, []nitro.Header{hdr}, []pricer.Result{r}, func(uint64) *big.Int { return st.MinBaseFee })
-	if err := f.persist(ctx, sample, rows, &r, h); err != nil {
+	if err := f.persist(ctx, sample, rows, &r, h, pending); err != nil {
 		return f.fail(ctx, err)
 	}
 	f.publish(sample, st, &r)
@@ -292,7 +356,11 @@ func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole) erro
 }
 
 // process replays headers (the last one is the sampled head) forward from
-// the last committed state and persists.
+// the last committed state and persists. The whole interval is scanned for
+// owner actions first (one eth_getLogs): every pricing change in it,
+// constraint sets (including a reset that leaves the shape unchanged), the
+// minimum fee and the legacy parameters, splits the replay at its block,
+// and the actions commit with the tick.
 func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []nitro.Header) error {
 	head := sample.Header.Number
 	f.mu.Lock()
@@ -304,35 +372,34 @@ func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []
 	if st == nil {
 		h := hole{From: headers[0].Number, To: head - 1}
 		f.log.Warn("no known replay state before the first missing block, restarting from the sampled head", "from", h.From, "to", h.To)
-		return f.seed(ctx, sample, &h)
+		return f.seed(ctx, sample, &h, nil)
 	}
-	// A model or fee change since the stored head happened somewhere in
-	// the range: fetch the owner actions now so the replay can split at
-	// their blocks instead of guessing.
-	if !sameShape(st, sample) || st.MinBaseFee.Cmp(bigOrZero(sample.MinBaseFee)) != 0 {
-		if err := f.syncOwnerActions(ctx, headers[0].Number, head); err != nil {
-			return f.fail(ctx, err)
-		}
+	pending, err := f.fetchOwnerActions(ctx, headers[0].Number, head)
+	if err != nil {
+		return f.fail(ctx, err)
 	}
-	rows, results, ok := f.replayLive(st, prevTs, headers, sample)
+	f.mu.Lock()
+	tl := f.timelineLocked(pending)
+	f.mu.Unlock()
+	rows, results, ok := replayLive(f.chainID, st, prevTs, headers, sample, tl)
 	if !ok {
 		h := hole{From: headers[0].Number, To: head - 1}
 		f.log.Warn("pricer parameters changed without a recorded owner action, restarting from the sampled head", "from", h.From, "to", h.To)
-		return f.seed(ctx, sample, &h)
+		return f.seed(ctx, sample, &h, pending)
 	}
 	headResult := results[len(results)-1]
-	if err := f.persist(ctx, sample, rows, &headResult, nil); err != nil {
+	if err := f.persist(ctx, sample, rows, &headResult, nil, pending); err != nil {
 		return f.fail(ctx, err)
 	}
 	f.publish(sample, st, &headResult)
 	return nil
 }
 
-// replayLive replays headers through st, splitting at recorded owner
-// action boundaries (constraint sets and minimum fee changes) and
-// anchoring the head to the sample. ok is false when the state's shape
-// still differs from the sample's after the replay.
-func (f *Follower) replayLive(st *pricer.State, prevTs uint64, headers []nitro.Header, sample *nitro.Sample) (rows []db.Block, results []pricer.Result, ok bool) {
+// replayLive replays headers through st, splitting at every boundary of
+// the timeline and anchoring the head to the sample. ok is false when the
+// state's shape or minimum fee still differs from the sample's after the
+// replay: a change happened that no recorded action explains.
+func replayLive(chainID uint64, st *pricer.State, prevTs uint64, headers []nitro.Header, sample *nitro.Sample, tl *timeline) (rows []db.Block, results []pricer.Result, ok bool) {
 	head := sample.Header.Number
 	anchor := func(n uint64) ([]uint64, bool) {
 		if n == head {
@@ -340,21 +407,12 @@ func (f *Follower) replayLive(st *pricer.State, prevTs uint64, headers []nitro.H
 		}
 		return nil, false
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	fees := map[uint64]*big.Int{}
 	start := 0
 	for start < len(headers) {
-		if cs := f.setAt(headers[start].Number); cs != nil && cs.EffectiveBlock == headers[start].Number && !sample.IsLegacy() {
-			if entries, err := setEntries(*cs); err == nil {
-				st.Constraints = stateFromEntries(entries, st.MinBaseFee).Constraints
-			}
-		}
-		if f.minFeeChangeBlock(headers[start].Number) == headers[start].Number {
-			st.MinBaseFee = f.minFeeAt(headers[start].Number)
-		}
+		tl.applyAt(st, headers[start].Number)
 		end := start + 1
-		for end < len(headers) && !f.boundaryAt(headers[end].Number) {
+		for end < len(headers) && !tl.boundaryAt(headers[end].Number) {
 			end++
 		}
 		chunk := headers[start:end]
@@ -367,28 +425,17 @@ func (f *Follower) replayLive(st *pricer.State, prevTs uint64, headers []nitro.H
 		prevTs = chunk[len(chunk)-1].Timestamp
 		start = end
 	}
-	if !sameShape(st, sample) {
+	if !sameShape(st, sample) || st.MinBaseFee.Cmp(bigOrZero(sample.MinBaseFee)) != 0 {
 		return nil, nil, false
 	}
-	st.MinBaseFee = bigOrZero(sample.MinBaseFee)
-	rows = blockRows(f.chainID, headers, results, func(n uint64) *big.Int { return fees[n] })
+	rows = blockRows(chainID, headers, results, func(n uint64) *big.Int { return fees[n] })
 	return rows, results, true
-}
-
-// boundaryAt reports whether a recorded owner action changes the pricer at
-// a block.
-func (f *Follower) boundaryAt(number uint64) bool {
-	if cs := f.setAt(number); cs != nil && cs.EffectiveBlock == number {
-		return true
-	}
-	return f.minFeeChangeBlock(number) == number
 }
 
 // replayStateLocked returns a clone of the committed replay state, or
 // rebuilds it from the stored head row after a restart or a failed commit.
 // Nil means the state before the first missing block is unknown.
 func (f *Follower) replayStateLocked(ctx context.Context, sample *nitro.Sample) (*pricer.State, uint64, error) {
-	f.lastSample = sample
 	if f.state != nil {
 		return f.state.Clone(), f.prevTs, nil
 	}
@@ -407,23 +454,34 @@ func (f *Follower) replayStateLocked(ctx context.Context, sample *nitro.Sample) 
 		return nil, 0, nil
 	}
 	st.SetBacklogs(last.Backlogs)
-	if last.MinBaseFee.BigInt().Sign() > 0 {
+	// The floor at the stored head: the row's when a recorded change covers
+	// it (a backfill row carries the timeline's fee, a live row the fee in
+	// force when it was written); when nothing recorded explains the block
+	// the live value stands in for the unknown history, since the catch-up
+	// scan finds any change after the row and a default is no evidence.
+	tl := f.timelineLocked(nil)
+	switch {
+	case tl.minFeeChangeBlock(last.Number) == 0:
+		st.MinBaseFee = bigOrZero(sample.MinBaseFee)
+	case last.MinBaseFee.BigInt().Sign() > 0:
 		st.MinBaseFee = new(big.Int).Set(last.MinBaseFee.BigInt())
-	} else {
-		st.MinBaseFee = f.minFeeAt(last.Number)
+	default:
+		st.MinBaseFee = tl.minFeeAt(last.Number)
 	}
 	return st, uint64(last.TS.Unix()), nil
 }
 
 // stateAtLocked builds the pricer shape in force at a block: the recorded
-// constraint set, or the sampled shape when none is recorded (a legacy
-// chain always takes its parameters from the sample).
+// constraint set, or the sampled shape when none is recorded; a legacy
+// chain takes the sample's parameters with the recorded changes up to the
+// block applied.
 func (f *Follower) stateAtLocked(number uint64, sample *nitro.Sample) *pricer.State {
 	if sample.IsLegacy() {
 		if sample.Legacy == nil {
 			return nil
 		}
-		return &pricer.State{MinBaseFee: new(big.Int), Legacy: &pricer.Legacy{SpeedLimit: sample.Legacy.SpeedLimit, Inertia: sample.Legacy.Inertia, Tolerance: sample.Legacy.Tolerance}}
+		base := &pricer.Legacy{SpeedLimit: sample.Legacy.SpeedLimit, Inertia: sample.Legacy.Inertia, Tolerance: sample.Legacy.Tolerance}
+		return &pricer.State{MinBaseFee: new(big.Int), Legacy: f.timelineLocked(nil).legacyAt(number, base)}
 	}
 	if cs := f.setAt(number); cs != nil {
 		if entries, err := setEntries(*cs); err == nil {
@@ -442,7 +500,6 @@ func (f *Follower) stateAtLocked(number uint64, sample *nitro.Sample) *pricer.St
 // is re-anchored and a fresh snapshot is published.
 func (f *Follower) sampleOnly(ctx context.Context, sample *nitro.Sample) error {
 	f.mu.Lock()
-	f.lastSample = sample
 	var st *pricer.State
 	if f.state != nil {
 		st = f.state.Clone()
@@ -458,14 +515,15 @@ func (f *Follower) sampleOnly(ctx context.Context, sample *nitro.Sample) error {
 	if last == nil {
 		last = &pricer.Result{Number: sample.Header.Number}
 	}
-	if err := f.persist(ctx, sample, nil, last, nil); err != nil {
+	if err := f.persist(ctx, sample, nil, last, nil, nil); err != nil {
 		return f.fail(ctx, err)
 	}
 	f.publish(sample, st, last)
 	return nil
 }
 
-// publish makes a committed tick the follower's state.
+// publish makes a committed tick the follower's state: head, replay state,
+// sample and result move together, only after the commit.
 func (f *Follower) publish(sample *nitro.Sample, st *pricer.State, headResult *pricer.Result) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -480,36 +538,68 @@ func (f *Follower) publish(sample *nitro.Sample, st *pricer.State, headResult *p
 	}
 }
 
-// syncOwnerActions fetches and records the owner actions in [from, to]
-// right away (the slow loop would only see them later) and refreshes the
-// set and fee caches. The slow loop's cursor is untouched.
-func (f *Follower) syncOwnerActions(ctx context.Context, from, to uint64) error {
-	actions, err := f.fetchOwnerActions(ctx, from, to)
-	if err != nil {
-		return err
+// observedSetLocked returns the observed constraint set to record with a
+// tick: the sampled constraints at the sampled block whenever the latest
+// known set (recorded, or pending in this tick) has another shape. It is
+// nil for legacy samples and when the latest set matches; an unreadable
+// latest set is left alone rather than shadowed every tick.
+func (f *Follower) observedSetLocked(sample *nitro.Sample, pending []*nitro.OwnerAction) *db.ConstraintSet {
+	if sample.IsLegacy() {
+		return nil
 	}
-	if len(actions) > 0 {
-		if err := f.store.WithTx(ctx, func(s db.Store) error { return f.storeOwnerActions(ctx, s, actions) }); err != nil {
-			return err
+	var latest []model.ConstraintSetEntry
+	known := false
+	if len(f.sets) > 0 {
+		entries, err := setEntries(f.sets[len(f.sets)-1])
+		if err != nil {
+			return nil
+		}
+		latest, known = entries, true
+	}
+	for _, a := range pending {
+		if a.Constraints != nil {
+			latest, known = entriesOf(a.Constraints), true
 		}
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.reloadSetsLocked(ctx)
+	if known && sameEntries(latest, sample.Constraints) {
+		return nil
+	}
+	return &db.ConstraintSet{
+		ChainID: f.chainID, EffectiveBlock: sample.Header.Number, EffectiveAt: time.Unix(int64(sample.Header.Timestamp), 0).UTC(),
+		Constraints: entriesJSON(entriesFromSample(sample)), Source: model.SourceObserved,
+	}
 }
 
-// persist writes everything for a tick in one transaction and notifies.
-// Buckets touched by new rows are rebuilt from the rows in their windows,
-// so a retried or overlapping fold changes nothing.
-func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.Block, headResult *pricer.Result, h *hole) error {
+// persist writes everything for a tick in one chain-locked transaction and
+// notifies: the owner actions found in the catch-up interval with their
+// constraint sets and notifications, an observed set when the sampled
+// shape is not the latest known one, the blocks, their buckets (rebuilt
+// from the rows in their windows, so a retried or overlapping fold changes
+// nothing), the state sample, the head and the live start. The caches
+// follow the commit.
+func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.Block, headResult *pricer.Result, h *hole, pending []*nitro.OwnerAction) error {
 	head := sample.Header.Number
 	headAt := time.Unix(int64(sample.Header.Timestamp), 0).UTC()
 	f.mu.Lock()
 	l1, accounts, includeSlow, ls := f.l1, f.accounts, f.slowPending, f.liveStart
+	observed := f.observedSetLocked(sample, pending)
 	f.mu.Unlock()
 
 	var snapshot *model.LiveSnapshot
-	err := f.store.WithTx(ctx, func(s db.Store) error {
+	reload := false
+	err := f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		recorded, err := f.storeOwnerActions(ctx, s, pending)
+		if err != nil {
+			return err
+		}
+		reload = recorded
+		if observed != nil {
+			f.log.Info("live constraint set differs from the latest known, recording an observed set", "block", observed.EffectiveBlock)
+			if _, err := s.InsertConstraintSet(ctx, *observed); err != nil {
+				return fmt.Errorf("observed set: %w", err)
+			}
+			reload = true
+		}
 		if len(rows) > 0 {
 			if err := s.UpsertBlocks(ctx, rows); err != nil {
 				return fmt.Errorf("upsert blocks: %w", err)
@@ -563,11 +653,16 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 		return err
 	}
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.snapshot = snapshot
 	if includeSlow {
 		f.slowPending = false
 	}
-	f.mu.Unlock()
+	if reload {
+		if err := f.reloadSetsLocked(ctx); err != nil {
+			return fmt.Errorf("after commit: %w", err)
+		}
+	}
 	return nil
 }
 

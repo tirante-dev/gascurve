@@ -340,7 +340,6 @@ func (c *Client) attempt(ctx context.Context, reqs []Request) (results []Result,
 		c.observe(len(reqs), limited)
 	}
 	if limited {
-		c.noteRateLimit()
 		return nil, true, nil
 	}
 	c.resetBackoff(sentAt)
@@ -354,10 +353,12 @@ func (c *Client) cooldown() time.Duration {
 	return c.blockedUntil.Sub(c.now())
 }
 
-// send performs one HTTP round trip under the per-network send lock,
+// send performs one HTTP round trip under the per-endpoint send lock,
 // sleeping through any active cooldown first so every caller respects a
 // 429 seen by any other. limited is true on HTTP 429 or when any item
-// carries a JSON-RPC 429 error; sentAt is when the request left.
+// carries a JSON-RPC 429 error; the cooldown it starts is published before
+// the lock is released, so a caller waiting for the lock observes it
+// instead of sending into the throttle. sentAt is when the request left.
 func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses []rpcResponse, limited bool, sentAt time.Time, err error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -369,6 +370,9 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 	c.recordCalls(calls)
 	sentAt = c.now()
 	responses, limited, err = c.post(ctx, payload)
+	if limited {
+		c.noteRateLimit()
+	}
 	return responses, limited, sentAt, err
 }
 

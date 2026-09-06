@@ -100,7 +100,7 @@ func TestTickFreshStartAndCatchUp(t *testing.T) {
 	if bk[0].Blocks != 1 || bk[0].LastBlock != 1000 || bk[0].BacklogsEnd[1] != 11_194_391_810_886 || bk[0].FeesWei.Sign() <= 0 {
 		t.Fatalf("bucket: %+v", bk[0])
 	}
-	if bk[0].MinBaseFee.Int64() != 20_000_000 || bk[0].FloorFeesWei.Int64() != 20_000_000*int64(gasFor(1000)) || bk[0].SurplusFeesWei.Int64() != (feeFor(1000).Int64()-20_000_000)*int64(gasFor(1000)) {
+	if bk[0].MinBaseFee.Int64() != 20_000_000 || bk[0].FloorFeesWei.Wei.Int64() != 20_000_000*int64(gasFor(1000)) || bk[0].SurplusFeesWei.Wei.Int64() != (feeFor(1000).Int64()-20_000_000)*int64(gasFor(1000)) || !bk[0].BaseFeeSum.Valid {
 		t.Fatalf("bucket fee split: %+v", bk[0])
 	}
 	sample, _ := store.LatestStateSample(ctx, 4663, false)
@@ -283,8 +283,10 @@ func TestTickSplitsAtOwnerAction(t *testing.T) {
 	if blocks[4].Backlogs[0] != 5+gasFor(1005) || db.ReplayErrorBips(blocks[7]) != 0 && !blocks[7].Anchored {
 		t.Fatalf("block 1005: %+v", blocks[4])
 	}
+	// The seed recorded the live shape as an observed set at 1000 (no set
+	// was known); the action's set follows it.
 	sets, _ := store.ConstraintSets(ctx, 4663)
-	if len(sets) != 1 || sets[0].EffectiveBlock != 1005 || sets[0].Source != model.SourceOwnerAction {
+	if len(sets) != 2 || sets[0].EffectiveBlock != 1000 || sets[0].Source != model.SourceObserved || sets[1].EffectiveBlock != 1005 || sets[1].Source != model.SourceOwnerAction {
 		t.Fatalf("constraint set recorded by the fast loop: %+v", sets)
 	}
 	if holes := holesOf(t, store); len(holes) != 0 {
@@ -316,6 +318,272 @@ func TestTickSplitsAtOwnerAction(t *testing.T) {
 	if err := f.Tick(ctx); !errors.Is(err, errRPC) || f.Head() != 1014 {
 		t.Fatalf("log failure: %v head %d", err, f.Head())
 	}
+}
+
+// TestTickCatchUpBoundaries: every catch-up interval is scanned for owner
+// actions and the replay splits at each pricing change in it, even when
+// the sampled head looks exactly like the stored state: a constraint set
+// with the same shape (a backlog reset), a change that is changed back,
+// a fee change that is changed back, and a legacy parameter change.
+func TestTickCatchUpBoundaries(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	same := []nitro.ConstraintParam{{GasTargetPerSecond: 60_000_000, AdjustmentWindowSeconds: 15, StartingBacklog: 11}, {GasTargetPerSecond: 40_000_000, AdjustmentWindowSeconds: 86_400, StartingBacklog: 22}}
+	other := []nitro.ConstraintParam{{GasTargetPerSecond: 1, AdjustmentWindowSeconds: 1, StartingBacklog: 0}}
+	feeSel := nitro.Selector("setMinimumL2BaseFee(uint256)")
+	rpc.logs = []nitro.Log{
+		ownerLog(1003, nitro.EncodeSetGasPricingConstraints(same)),                    // reset, shape unchanged
+		ownerLog(1005, nitro.EncodeSetGasPricingConstraints(other)),                   // change
+		ownerLog(1007, nitro.EncodeSetGasPricingConstraints(same)),                    // and back
+		ownerLog(1008, append(feeSel[:], padTo32(big.NewInt(30_000_000).Bytes())...)), // fee up
+		ownerLog(1009, append(feeSel[:], padTo32(big.NewInt(20_000_000).Bytes())...)), // and back
+	}
+	rpc.setHead(1010)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rpc.calledTimes("OwnerActsLogs") != 1 || rpc.logRanges[0] != [2]uint64{1001, 1010} {
+		t.Fatalf("the interval must be scanned once: %d %v", rpc.calledTimes("OwnerActsLogs"), rpc.logRanges)
+	}
+	if holes := holesOf(t, store); len(holes) != 0 {
+		t.Fatalf("no hole expected: %+v", holes)
+	}
+	blocks, _ := store.BlocksAfter(ctx, 4663, 1000, 100)
+	if len(blocks) != 10 {
+		t.Fatalf("blocks = %d", len(blocks))
+	}
+	b := func(n uint64) db.Block { return blocks[n-1001] }
+	if b(1002).Backlogs[0] != 3_111_506+gasFor(1001)+gasFor(1002) || b(1003).Backlogs[0] != 11+gasFor(1003) || b(1003).Backlogs[1] != 22+gasFor(1003) {
+		t.Fatalf("a same-shape set must reset the backlogs at its block: %v -> %v", b(1002).Backlogs, b(1003).Backlogs)
+	}
+	if len(b(1004).Backlogs) != 2 || len(b(1005).Backlogs) != 1 || len(b(1006).Backlogs) != 1 || len(b(1007).Backlogs) != 2 || b(1007).Backlogs[0] != 11+gasFor(1007) {
+		t.Fatalf("change and change back: %v %v %v %v", b(1004).Backlogs, b(1005).Backlogs, b(1006).Backlogs, b(1007).Backlogs)
+	}
+	if b(1007).MinBaseFee.Int64() != 20_000_000 || b(1008).MinBaseFee.Int64() != 30_000_000 || b(1009).MinBaseFee.Int64() != 20_000_000 || b(1010).MinBaseFee.Int64() != 20_000_000 {
+		t.Fatalf("fee change and change back: %s %s %s", b(1007).MinBaseFee, b(1008).MinBaseFee, b(1009).MinBaseFee)
+	}
+	sets, _ := store.ConstraintSets(ctx, 4663)
+	if len(sets) != 4 || sets[1].EffectiveBlock != 1003 || sets[3].EffectiveBlock != 1007 {
+		t.Fatalf("every set action is recorded, none observed: %+v", sets)
+	}
+	if acts, _ := store.OwnerActions(ctx, 4663, time.Time{}, time.Time{}, 0); len(acts) != 5 {
+		t.Fatalf("actions recorded with the tick: %d", len(acts))
+	}
+	// The actions commit with the tick, in its transaction: when recording
+	// them fails nothing of the tick is written and nobody is notified,
+	// the caches stay put, and the retry records them once.
+	rpc.logs = append(rpc.logs, ownerLog(1012, append(feeSel[:], padTo32(big.NewInt(25_000_000).Bytes())...)))
+	rpc.minFee = big.NewInt(25_000_000)
+	rpc.setHead(1013)
+	notified := len(store.Notifications)
+	store.FailOn["InsertOwnerActions"] = true
+	if err := f.Tick(ctx); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("expected injected error, got %v", err)
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 1011); b != nil || len(store.Notifications) != notified || f.Head() != 1010 {
+		t.Fatalf("nothing of the tick may commit without its actions: block %+v, %d notifications", b, len(store.Notifications)-notified)
+	}
+	if acts, _ := store.OwnerActions(ctx, 4663, time.Time{}, time.Time{}, 0); len(acts) != 5 || f.minFeeAt(1012).Int64() != 20_000_000 {
+		t.Fatalf("caches must not advance before the commit: %d actions, fee %s", len(acts), f.minFeeAt(1012))
+	}
+	delete(store.FailOn, "InsertOwnerActions")
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if acts, _ := store.OwnerActions(ctx, 4663, time.Time{}, time.Time{}, 0); len(acts) != 6 || f.minFeeAt(1012).Int64() != 25_000_000 {
+		t.Fatalf("retry records the action: %d actions, fee %s", len(acts), f.minFeeAt(1012))
+	}
+	b1012, _ := store.BlockByNumber(ctx, 4663, 1012)
+	if b1012.MinBaseFee.Int64() != 25_000_000 {
+		t.Fatalf("fee split on the retry: %+v", b1012)
+	}
+	// A fee change nothing explains (no action in the interval) is a hole,
+	// like a shape change.
+	rpc.minFee = big.NewInt(40_000_000)
+	rpc.setHead(1015)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].From != 1014 || holes[0].To != 1014 {
+		t.Fatalf("unexplained fee change: %+v", holes)
+	}
+
+	// Legacy: a speed limit change inside the interval splits the replay,
+	// so the block after the change drains at the new rate.
+	rpcL := newFakeRPC(1000)
+	lp := legacyParams()
+	lp.Backlog = 5
+	rpcL.legacy = &lp
+	storeL := dbtest.New()
+	fl := newTestFollower(t, rpcL, storeL)
+	if err := fl.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	limitSel := nitro.Selector("setSpeedLimit(uint64)")
+	rpcL.logs = []nitro.Log{ownerLog(1015, append(limitSel[:], padTo32(big.NewInt(1_000_000).Bytes())...))}
+	rpcL.mu.Lock()
+	rpcL.legacy.SpeedLimit = 1_000_000
+	rpcL.mu.Unlock()
+	rpcL.setHead(1021)
+	if err := fl.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if holes := holesOf(t, storeL); len(holes) != 0 {
+		t.Fatalf("a recorded legacy change needs no hole: %+v", holes)
+	}
+	b1009, _ := storeL.BlockByNumber(ctx, 4663, 1009)
+	b1010, _ := storeL.BlockByNumber(ctx, 4663, 1010)
+	b1019, _ := storeL.BlockByNumber(ctx, 4663, 1019)
+	b1020, _ := storeL.BlockByNumber(ctx, 4663, 1020)
+	if b1010.Backlogs[0] != pricer.SaturatingUSub(b1009.Backlogs[0], 7_000_000)+gasFor(1010) {
+		t.Fatalf("before the change the old speed limit drains: %v -> %v", b1009.Backlogs, b1010.Backlogs)
+	}
+	if b1020.Backlogs[0] != pricer.SaturatingUSub(b1019.Backlogs[0], 1_000_000)+gasFor(1020) {
+		t.Fatalf("after the change the new speed limit drains: %v -> %v", b1019.Backlogs, b1020.Backlogs)
+	}
+	fl.mu.Lock()
+	if len(fl.legacyChanges) != 1 || fl.legacyChanges[0].block != 1015 || fl.state.Legacy.SpeedLimit != 1_000_000 {
+		t.Fatalf("legacy change cache: %+v state %+v", fl.legacyChanges, fl.state.Legacy)
+	}
+	fl.mu.Unlock()
+	// A restarted follower rebuilds the legacy state at the stored head
+	// with the recorded changes applied.
+	rpcL.setHead(1022)
+	fl2 := newTestFollower(t, rpcL, storeL)
+	if err := fl2.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	b1022, _ := storeL.BlockByNumber(ctx, 4663, 1022)
+	if b1022 == nil || len(holesOf(t, storeL)) != 0 {
+		t.Fatalf("restart with a recorded legacy change: %+v %+v", b1022, holesOf(t, storeL))
+	}
+	// An unrecorded legacy change is still a hole.
+	rpcL.mu.Lock()
+	rpcL.legacy.Inertia = 7
+	rpcL.mu.Unlock()
+	rpcL.setHead(1024)
+	if err := fl2.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if holes := holesOf(t, storeL); len(holes) != 1 || holes[0].From != 1023 {
+		t.Fatalf("unexplained legacy change: %+v", holes)
+	}
+	// Decoding helpers: unknown methods and malformed arguments are ignored.
+	if _, ok := legacyChangeOf(1, methodSetL2GasPricingInertia, db.JSONB(`{"sec":3}`)); !ok {
+		t.Fatal("inertia change")
+	}
+	if _, ok := legacyChangeOf(1, methodSetL2GasBacklogTolerance, db.JSONB(`{"limit":3}`)); ok {
+		t.Fatal("tolerance without sec")
+	}
+	if _, ok := legacyChangeOf(1, "setSpeedLimit", db.JSONB(`{bad`)); ok {
+		t.Fatal("bad args")
+	}
+	if _, ok := legacyChangeOf(1, "addChainOwner", db.JSONB(`{}`)); ok {
+		t.Fatal("unrelated method")
+	}
+	if _, ok := minFeeChangeOf(1, methodSetMinimumL2BaseFee, db.JSONB(`{"priceInWei":"x"}`)); ok {
+		t.Fatal("bad fee")
+	}
+	if _, ok := minFeeChangeOf(1, methodSetMinimumL2BaseFee, db.JSONB(`{bad`)); ok {
+		t.Fatal("bad fee args")
+	}
+	tl := &timeline{}
+	tl.applyAt(&pricer.State{}, 1)
+	if tl.legacyAt(1, nil) != nil || tl.boundaryAt(1) {
+		t.Fatal("empty timeline")
+	}
+}
+
+// TestTickReorgResetsBackfill: a reorg whose ancestor lies below the top
+// of the backfill's range restarts the backfill from a fresh cursor with
+// its backfill-only buckets dropped; a shallow reorg leaves it alone.
+func TestTickReorgResetsBackfill(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = 30 * time.Second // block 700
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, f, 100)
+	c, _ := f.loadCursor(ctx)
+	if !c.Done || c.Top != 1000 {
+		t.Fatalf("cursor: %+v", c)
+	}
+	// A shallow reorg at the head leaves the cursor alone.
+	rpc.setHead(1002)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.fork(1002, "s")
+	rpc.setHead(1003)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c2, _ := f.loadCursor(ctx); !c2.Done || c2.Top != 1000 {
+		t.Fatalf("shallow reorg must keep the cursor: %+v", c2)
+	}
+	// A reorg below the first live block: the ancestor is 994, below the
+	// backfill's top (1000), so the backfill starts over and the live
+	// start is re-established at the next commit.
+	rpc.fork(995, "d")
+	rpc.setHead(1005)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.Head() != 1005 {
+		t.Fatalf("head = %d", f.Head())
+	}
+	c3, _ := f.loadCursor(ctx)
+	if c3.Done || c3.Active || c3.Top != 0 || c3.DepthStart != 0 {
+		t.Fatalf("backfill must restart after a reorg below its top: %+v", c3)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateLiveStart); v != `{"block":1005,"ts":`+big.NewInt(int64(tsFor(1005))).String()+`}` {
+		t.Fatalf("live start after a rewind below it: %q", v)
+	}
+	for n := uint64(995); n <= 1005; n++ {
+		if b, _ := store.BlockByNumber(ctx, 4663, n); b == nil || b.Hash != rpc.hashFor(n) {
+			t.Fatalf("block %d not canonical: %+v", n, b)
+		}
+	}
+	// The restarted backfill finishes from the surviving rows.
+	runBackfill(t, f, 100)
+	if c4, _ := f.loadCursor(ctx); !c4.Done {
+		t.Fatalf("restarted backfill: %+v", c4)
+	}
+	// A corrupt cursor fails the rewind; so does a failing live start
+	// delete.
+	_ = store.SetState(ctx, 4663, db.StateBackfillCursor, "{bad")
+	if err := f.rewindBackfill(ctx, store, 1, time.Time{}, false); err == nil {
+		t.Fatal("corrupt cursor")
+	}
+	_ = store.SetState(ctx, 4663, db.StateBackfillCursor, `{"top":50}`)
+	store.FailOn["DeleteBucketsBefore"] = true
+	if err := f.rewindBackfill(ctx, store, 1, baseTime, true); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("bucket delete failure: %v", err)
+	}
+	delete(store.FailOn, "DeleteBucketsBefore")
+	store.FailOn["GetState"] = true
+	if err := f.rewindBackfill(ctx, store, 1, baseTime, true); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("cursor read failure: %v", err)
+	}
+	delete(store.FailOn, "GetState")
+	rpc.fork(1004, "e")
+	rpc.setHead(1006)
+	f.mu.Lock()
+	f.liveStart = &liveStart{Block: 1005, TS: int64(tsFor(1005))}
+	f.mu.Unlock()
+	store.FailOn["DeleteState"] = true
+	if err := f.Tick(ctx); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("live start delete failure: %v", err)
+	}
+	delete(store.FailOn, "DeleteState")
 }
 
 // ownerLog builds an OwnerActs log at a block carrying calldata.
@@ -500,10 +768,13 @@ func TestTickNothingAdvancesBeforeCommit(t *testing.T) {
 		t.Fatalf("expected injected error, got %v", err)
 	}
 	f.mu.Lock()
-	head, st := f.head, f.state
+	head, st, sampled := f.head, f.state, f.lastSample
 	f.mu.Unlock()
 	if head != 1000 || f.Snapshot().Block.Number != 1000 {
 		t.Fatalf("head advanced before commit: %d", head)
+	}
+	if sampled == nil || sampled.Header.Number != 1000 {
+		t.Fatalf("the sample must not be published before the commit: %+v", sampled)
 	}
 	if st != nil {
 		t.Fatal("state must be reloaded from the database after a failed commit")
@@ -617,8 +888,8 @@ func TestTickReorg(t *testing.T) {
 	if acts, _ := store.OwnerActions(ctx, 4663, time.Time{}, time.Time{}, 0); len(acts) != 0 {
 		t.Fatalf("owner actions above the ancestor must go: %+v", acts)
 	}
-	if sets, _ := store.ConstraintSets(ctx, 4663); len(sets) != 0 {
-		t.Fatalf("constraint sets above the ancestor must go: %+v", sets)
+	if sets, _ := store.ConstraintSets(ctx, 4663); len(sets) != 1 || sets[0].EffectiveBlock != 1000 {
+		t.Fatalf("constraint sets above the ancestor must go, the seed's observed set stays: %+v", sets)
 	}
 	if len(store.ReportRows) != 0 {
 		t.Fatal("batch reports above the ancestor must go")
@@ -626,6 +897,11 @@ func TestTickReorg(t *testing.T) {
 	for _, key := range []string{db.StateOwnerLogCursor, db.StateBatchScanCursor} {
 		if v, _, _ := store.GetState(ctx, 4663, key); v != "1002" {
 			t.Fatalf("%s = %q, want 1002", key, v)
+		}
+	}
+	for _, sm := range store.SampleRows {
+		if sm.BlockNumber > 1002 && sm.BlockNumber != 1008 {
+			t.Fatalf("samples above the ancestor must go: %+v", sm)
 		}
 	}
 	// Same height, different hash: the head itself is replaced.
@@ -674,6 +950,10 @@ func TestTickReorg(t *testing.T) {
 	if b, _ := shallow.BlockByNumber(ctx, 4663, 1142); b == nil || b.Hash != "0xd476" {
 		t.Fatalf("seeded head after a rewind: %+v", b)
 	}
+	// The live start was above the ancestor: it starts over at the seed.
+	if v, _, _ := shallow.GetState(ctx, 4663, db.StateLiveStart); v != `{"block":1142,"ts":`+big.NewInt(int64(tsFor(1142))).String()+`}` || fs.liveStart == nil || fs.liveStart.Block != 1142 {
+		t.Fatalf("live start after a rewind below it: %q %+v", v, fs.liveStart)
+	}
 	rpc.mu.Lock()
 	rpc.forks = rpc.forks[:2]
 	rpc.mu.Unlock()
@@ -684,15 +964,23 @@ func TestTickReorg(t *testing.T) {
 	if err := verifyChain([]nitro.Header{{Number: 1, Hash: "0xa"}, {Number: 2, ParentHash: "0xa"}, {Number: 3}}); err != nil {
 		t.Fatal(err)
 	}
-	// Rows without hashes cannot be verified and are trusted.
+	// A row without a stored hash (written before hashes were kept) is
+	// unknown, not trusted: it is the ancestor only when the node's header
+	// matches every field it holds.
 	if n, err := f.findAncestor(ctx, 1139); err != nil || n != 1139 {
 		t.Fatalf("ancestor with matching hashes: %d %v", n, err)
 	}
 	keep := store.BlockRows[4663][1137]
 	store.BlockRows[4663][1137] = db.Block{ChainID: 4663, Number: 1137, TS: keep.TS}
 	rpc.fork(1137, "x")
+	if n, err := f.findAncestor(ctx, 1139); err != nil || n != 1136 {
+		t.Fatalf("a hashless row whose fields differ from the node is skipped: %d %v", n, err)
+	}
+	unhashed := keep
+	unhashed.Hash = ""
+	store.BlockRows[4663][1137] = unhashed
 	if n, err := f.findAncestor(ctx, 1139); err != nil || n != 1137 {
-		t.Fatalf("ancestor without a stored hash: %d %v", n, err)
+		t.Fatalf("a hashless row whose fields match the node is the ancestor: %d %v", n, err)
 	}
 	store.BlockRows[4663][1137] = keep
 	rpc.mu.Lock()
@@ -727,6 +1015,22 @@ func TestTickReorg(t *testing.T) {
 	}
 	if b, _ := store.BlockByNumber(ctx, 4663, 1138); b.Hash != "0xg472" {
 		t.Fatalf("block 1138 is the ancestor and must survive: %+v", b)
+	}
+	// State samples above the ancestor go with the rewind (a failure there
+	// fails the tick), so no sample describes an orphaned block.
+	rpc.fork(1145, "j")
+	store.FailOn["DeleteStateSamplesAfter"] = true
+	if err := f.Tick(ctx); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("DeleteStateSamplesAfter: %v", err)
+	}
+	delete(store.FailOn, "DeleteStateSamplesAfter")
+	if err := f.Tick(ctx); err != nil || f.Head() != 1145 {
+		t.Fatalf("same-height reorg after a failure: %v head %d", err, f.Head())
+	}
+	for _, sm := range store.SampleRows {
+		if b, _ := store.BlockByNumber(ctx, 4663, sm.BlockNumber); sm.BlockNumber > 1144 && (b == nil || b.Hash != "0xj479") {
+			t.Fatalf("sample at an orphaned block survived: %+v", sm)
+		}
 	}
 	if err := rewindCursor(ctx, store, 4663, "nope", 5); err != nil {
 		t.Fatal(err)
@@ -816,10 +1120,10 @@ func TestHelpers(t *testing.T) {
 	}
 	f := newTestFollower(t, newFakeRPC(1), dbtest.New())
 	f.sets = []db.ConstraintSet{{ID: 1, EffectiveBlock: 10}, {ID: 2, EffectiveBlock: 20}}
-	if id := f.setIDFor(5); id.Valid || f.setAt(5) != nil {
+	if f.setAt(5) != nil {
 		t.Fatal("no set before 10")
 	}
-	if id := f.setIDFor(25); !id.Valid || id.Int64 != 2 || f.setAt(25).ID != 2 {
+	if f.setAt(25).ID != 2 {
 		t.Fatal("set at 25")
 	}
 	// The minimum fee before the first recorded change is nitro's genesis
@@ -836,6 +1140,9 @@ func TestHelpers(t *testing.T) {
 	}
 	if !sameEntries([]model.ConstraintSetEntry{{Target: 1, Window: 2}}, []nitro.Constraint{{Target: 1, Window: 2}}) || sameEntries(nil, []nitro.Constraint{{}}) || sameEntries([]model.ConstraintSetEntry{{Target: 1}}, []nitro.Constraint{{Target: 2}}) {
 		t.Fatal("sameEntries")
+	}
+	if !sameSets([]model.ConstraintSetEntry{{Target: 1, Window: 2, StartingBacklog: 5}}, []model.ConstraintSetEntry{{Target: 1, Window: 2}}) || sameSets(nil, []model.ConstraintSetEntry{{}}) || sameSets([]model.ConstraintSetEntry{{Target: 1}}, []model.ConstraintSetEntry{{Target: 2}}) {
+		t.Fatal("sameSets")
 	}
 	if string(entriesJSON(nil)) != "[]" {
 		t.Fatal("entriesJSON nil")

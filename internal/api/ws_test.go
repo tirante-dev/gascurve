@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -83,7 +84,7 @@ func send(t *testing.T, conn *websocket.Conn, v any) {
 }
 
 func liveNotification(chainID uint64) db.Notification {
-	snap := model.LiveSnapshot{ChainID: chainID, BaseFee: "42", Constraints: []model.Constraint{}}
+	snap := model.LiveSnapshot{ChainID: chainID, SampledAt: now.Format(time.RFC3339), BaseFee: "42", Constraints: []model.Constraint{}}
 	b, _ := json.Marshal(snap)
 	return db.Notification{Channel: db.ChannelLive, Payload: string(b)}
 }
@@ -258,6 +259,12 @@ func TestWebSocketErrors(t *testing.T) {
 		{"unknown network", "?network=nope", upgrade, http.StatusNotFound, "not_found"},
 		{"not an upgrade", "?network=robinhood", nil, http.StatusBadRequest, "bad_request"},
 		{"bad origin", "?network=robinhood", http.Header{"Upgrade": []string{"websocket"}, "Origin": []string{"http://evil.example"}}, http.StatusForbidden, "forbidden"},
+		// Malformed handshakes get the JSON envelope, never the upgrade
+		// library's plaintext.
+		{"no connection token", "?network=robinhood", http.Header{"Upgrade": []string{"websocket"}, "Sec-WebSocket-Version": []string{"13"}, "Sec-WebSocket-Key": []string{"dGhlIHNhbXBsZSBub25jZQ=="}}, http.StatusBadRequest, "bad_request"},
+		{"bad version", "?network=robinhood", http.Header{"Upgrade": []string{"websocket"}, "Connection": []string{"keep-alive, Upgrade"}, "Sec-WebSocket-Version": []string{"12"}, "Sec-WebSocket-Key": []string{"dGhlIHNhbXBsZSBub25jZQ=="}}, http.StatusBadRequest, "bad_request"},
+		{"bad key", "?network=robinhood", http.Header{"Upgrade": []string{"websocket"}, "Connection": []string{"Upgrade"}, "Sec-WebSocket-Version": []string{"13"}, "Sec-WebSocket-Key": []string{"nope"}}, http.StatusBadRequest, "bad_request"},
+		{"missing key", "?network=robinhood", http.Header{"Upgrade": []string{"websocket"}, "Connection": []string{"Upgrade"}, "Sec-WebSocket-Version": []string{"13"}}, http.StatusBadRequest, "bad_request"},
 	} {
 		req, _ := http.NewRequest(http.MethodGet, h.ts.URL+"/api/v1/ws"+tc.query, http.NoBody)
 		req.Header = tc.headers
@@ -350,6 +357,151 @@ func TestWebSocketErrors(t *testing.T) {
 		t.Fatal("slow consumer not closed")
 	}
 	slow.close() // idempotent
+	// Handshake validation covers HTTP/1.0 too.
+	old := httptest.NewRequest(http.MethodGet, "/ws", http.NoBody)
+	old.Proto, old.ProtoMajor, old.ProtoMinor = "HTTP/1.0", 1, 0
+	if handshakeError(old) == "" {
+		t.Fatal("HTTP/1.0 handshake")
+	}
+}
+
+// TestClientWatermark: a client never receives a block its hello (or an
+// earlier blocks message) already carried, whatever refresh produced it.
+func TestClientWatermark(t *testing.T) {
+	c := &client{send: make(chan []byte, 4), closed: make(chan struct{}), watermark: 5}
+	c.deliver(outbound{blocks: []model.BlockPoint{{Number: 4}, {Number: 5}}})
+	if len(c.send) != 0 {
+		t.Fatal("blocks at or below the watermark must be dropped")
+	}
+	c.deliver(outbound{blocks: []model.BlockPoint{{Number: 5}, {Number: 6}, {Number: 7}}})
+	if len(c.send) != 1 || c.watermark != 7 {
+		t.Fatalf("queued %d, watermark %d", len(c.send), c.watermark)
+	}
+	var m struct {
+		Type string             `json:"type"`
+		Data []model.BlockPoint `json:"data"`
+	}
+	if err := json.Unmarshal(<-c.send, &m); err != nil || m.Type != "blocks" || len(m.Data) != 2 || m.Data[0].Number != 6 {
+		t.Fatalf("filtered message: %+v %v", m, err)
+	}
+	c.deliver(outbound{blocks: []model.BlockPoint{{Number: 7}}})
+	if len(c.send) != 0 {
+		t.Fatal("a repeated block must be dropped")
+	}
+}
+
+// TestHubReorg: when the collector replaces blocks at or below the ring's
+// tip, the hub truncates its ring to the common ancestor, resends the
+// canonical blocks in a reorg message before the tick, and later blocks
+// messages continue above the new tip without repeating any block.
+func TestHubReorg(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(n uint64, tag string) db.Block {
+		return db.Block{ChainID: robinhood, Number: n, Hash: "0x" + tag + strconv.FormatUint(n, 10), TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.WeiFromUint64(n)}
+	}
+	var blocks []db.Block
+	for n := uint64(100); n <= 110; n++ {
+		blocks = append(blocks, mk(n, "a"))
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	h := newWSHarness(t, store, time.Hour)
+	conn := h.dial(t, "robinhood")
+	typ, data := readMsg(t, conn)
+	var hello struct {
+		RecentBlocks []model.BlockPoint `json:"recentBlocks"`
+	}
+	if typ != "hello" || json.Unmarshal(data, &hello) != nil || len(hello.RecentBlocks) != 11 || hello.RecentBlocks[10].Number != 110 {
+		t.Fatalf("hello: %s %s", typ, data)
+	}
+	// Blocks 108..110 are replaced and 111 lands on the new fork.
+	if _, err := store.DeleteBlocksAfter(ctx, robinhood, 107); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertBlocks(ctx, []db.Block{mk(108, "b"), mk(109, "b"), mk(110, "b"), mk(111, "b")}); err != nil {
+		t.Fatal(err)
+	}
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	typ, data = readMsg(t, conn)
+	var reorg model.Reorg
+	if typ != "reorg" || json.Unmarshal(data, &reorg) != nil || reorg.ChainID != robinhood || reorg.Ancestor != 107 || len(reorg.Blocks) != 4 || reorg.Blocks[0].Number != 108 || reorg.Blocks[3].Number != 111 {
+		t.Fatalf("reorg: %s %s", typ, data)
+	}
+	if typ, _ = readMsg(t, conn); typ != "tick" {
+		t.Fatalf("tick after reorg: %s", typ)
+	}
+	h.hub.mu.Lock()
+	st := h.hub.networks[robinhood]
+	tip, last := st.blocks[len(st.blocks)-1], st.last
+	h.hub.mu.Unlock()
+	if last != 111 || tip.hash != "0xb111" || len(st.blocks) != 12 {
+		t.Fatalf("ring after reorg: last %d tip %+v len %d", last, tip, len(st.blocks))
+	}
+	// The next block is a plain blocks message, nothing repeated.
+	if err := store.UpsertBlocks(ctx, []db.Block{mk(112, "b")}); err != nil {
+		t.Fatal(err)
+	}
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	if typ, _ = readMsg(t, conn); typ != "tick" {
+		t.Fatalf("tick: %s", typ)
+	}
+	typ, data = readMsg(t, conn)
+	var more []model.BlockPoint
+	if typ != "blocks" || json.Unmarshal(data, &more) != nil || len(more) != 1 || more[0].Number != 112 {
+		t.Fatalf("blocks after reorg: %s %s", typ, data)
+	}
+	// A reorg below every ring entry replaces the whole ring (ancestor 0),
+	// and a tip row that vanished is a reorg too.
+	if _, err := store.DeleteBlocksAfter(ctx, robinhood, 99); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertBlocks(ctx, []db.Block{mk(100, "c"), mk(101, "c")}); err != nil {
+		t.Fatal(err)
+	}
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	typ, data = readMsg(t, conn)
+	if typ != "reorg" || json.Unmarshal(data, &reorg) != nil || reorg.Ancestor != 0 || len(reorg.Blocks) != 2 || reorg.Blocks[1].Number != 101 {
+		t.Fatalf("deep reorg: %s %s", typ, data)
+	}
+	readMsg(t, conn) // tick
+	h.hub.mu.Lock()
+	w := 0
+	for c := range st.clients {
+		w = int(c.watermark)
+	}
+	h.hub.mu.Unlock()
+	if w != 0 {
+		t.Fatalf("the client's watermark must drop to the ancestor: %d", w)
+	}
+	if _, err := store.DeleteBlocksAfter(ctx, robinhood, 100); err != nil {
+		t.Fatal(err)
+	}
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	typ, data = readMsg(t, conn)
+	if typ != "reorg" || json.Unmarshal(data, &reorg) != nil || reorg.Ancestor != 100 || len(reorg.Blocks) != 0 || !strings.Contains(string(data), `"blocks":[]`) {
+		t.Fatalf("vanished tip: %s %s", typ, data)
+	}
+	// A store failure during the reorg rebuild surfaces and leaves the
+	// ring alone.
+	if _, err := store.DeleteBlocksAfter(ctx, robinhood, 99); err != nil {
+		t.Fatal(err)
+	}
+	store.SetFailure("RecentBlocks", true)
+	if _, err := h.hub.refreshBlocks(ctx, robinhood); err == nil {
+		t.Fatal("expected a store error")
+	}
+	store.SetFailure("RecentBlocks", false)
+	h.hub.mu.Lock()
+	last = st.last
+	h.hub.mu.Unlock()
+	if last != 100 {
+		t.Fatalf("ring must survive a failed rebuild: %d", last)
+	}
 }
 
 func mustRead(t *testing.T, resp *http.Response) []byte {
@@ -380,9 +532,13 @@ func TestWebSocketConnectionCaps(t *testing.T) {
 	if hub.Connections() != 2 {
 		t.Fatalf("connections = %d", hub.Connections())
 	}
-	// Third socket from the same address: refused with the JSON envelope.
+	// Third socket from the same address: a well-formed handshake refused
+	// with the JSON envelope.
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/ws?network=robinhood", http.NoBody)
 	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -513,7 +669,7 @@ func TestWebSocketHelloAtomic(t *testing.T) {
 	}
 	wg.Wait()
 	hub.mu.Lock()
-	ring := append([]model.BlockPoint(nil), hub.networks[robinhood].blocks...)
+	ring := points(hub.networks[robinhood].blocks)
 	last := hub.networks[robinhood].last
 	hub.mu.Unlock()
 	for i := 1; i < len(ring); i++ {
@@ -552,23 +708,61 @@ func TestHubReconcile(t *testing.T) {
 	if typ, _ := readMsg(t, conn); typ != "owner_action" {
 		t.Fatalf("notify: %s", typ)
 	}
+	// The hub has never seen a tick for this network: the reconcile
+	// rebuilds the snapshot from the latest sample and sends it as a tick.
 	h.hub.Handle(ctx, db.Notification{Reconnected: true})
 	got := map[string]int{}
-	for range 2 {
+	for range 3 {
 		typ, data := readMsg(t, conn)
 		got[typ]++
 		if typ == "owner_action" && !strings.Contains(string(data), "setL2GasPricingInertia") {
 			t.Fatalf("the already delivered action must not repeat: %s", data)
 		}
+		if typ == "tick" && !strings.Contains(string(data), `"number":1030`) {
+			t.Fatalf("the reconciled tick must be the latest sample: %s", data)
+		}
 	}
-	if got["blocks"] != 1 || got["owner_action"] != 1 {
+	if got["blocks"] != 1 || got["owner_action"] != 1 || got["tick"] != 1 {
 		t.Fatalf("reconcile delivered %v", got)
 	}
-	// A second reconnect delivers nothing new.
+	// A second reconnect delivers nothing new: the snapshot is not newer.
 	h.hub.Handle(ctx, db.Notification{Reconnected: true})
 	h.hub.Handle(ctx, liveNotification(robinhood))
 	if typ, _ := readMsg(t, conn); typ != "tick" {
 		t.Fatalf("second reconcile must be silent: %s", typ)
+	}
+	// A sample committed while the listener was down is made up for.
+	if err := store.InsertStateSample(ctx, db.StateSample{ChainID: robinhood, SampledAt: now.Add(time.Second), BlockNumber: 1031, BaseFee: db.WeiFromUint64(7), MinBaseFee: db.WeiFromUint64(1), Constraints: db.JSONB(`[]`), Prices: db.JSONB(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	h.hub.Handle(ctx, db.Notification{Reconnected: true})
+	typ, data := readMsg(t, conn)
+	if typ != "tick" || !strings.Contains(string(data), `"baseFee":"7"`) {
+		t.Fatalf("missed tick must be reconciled: %s %s", typ, data)
+	}
+	h.hub.Handle(ctx, db.Notification{Reconnected: true})
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	if typ, data := readMsg(t, conn); typ != "tick" || !strings.Contains(string(data), `"baseFee":"42"`) {
+		t.Fatalf("the reconciled snapshot must not repeat: %s %s", typ, data)
+	}
+	// The synthetic notification above dated the cache before the sample,
+	// so the sample is offered again; an unparsable sampledAt is ignored.
+	if u := h.hub.newerSnapshot(ctx, robinhood); u == nil || !strings.Contains(string(u.raw), `"baseFee":"7"`) {
+		t.Fatalf("update expected: %+v", u)
+	}
+	h.hub.live = func(context.Context, uint64) (*model.LiveSnapshot, error) {
+		return &model.LiveSnapshot{SampledAt: "bad"}, nil
+	}
+	if u := h.hub.newerSnapshot(ctx, robinhood); u != nil || u.payload() != nil {
+		t.Fatal("unparsable snapshot time")
+	}
+	h.hub.live = func(context.Context, uint64) (*model.LiveSnapshot, error) { return nil, errors.New("boom") }
+	if u := h.hub.newerSnapshot(ctx, robinhood); u != nil {
+		t.Fatal("snapshot failure is logged, not delivered")
+	}
+	h.hub.live = func(context.Context, uint64) (*model.LiveSnapshot, error) { return nil, errNoData }
+	if u := h.hub.newerSnapshot(ctx, robinhood); u != nil {
+		t.Fatal("no data is not an update")
 	}
 	// Store failures during a reconcile are logged, not fatal; networks
 	// without clients are skipped.

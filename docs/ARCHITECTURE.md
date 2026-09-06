@@ -110,7 +110,7 @@ owner_actions       (chain_id, block_number, tx_hash, log_index, ts, method, sel
 constraint_sets     (id SERIAL PK, chain_id, effective_block, effective_at, constraints JSONB, source TEXT /* 'genesis'|'owner_action'|'observed' */)
 batch_reports       (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero,
                      extra_gas, l1_base_fee NUMERIC, gas_spent BIGINT, wei_spent NUMERIC, PK(chain_id, block_number))
-collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, backfill_cursor, owner_log_cursor, batch_scan_cursor
+collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, holes, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor, endpoints
 ```
 
 `NOTIFY gascurve_live, '<json>'` is issued by the collector after each tick with the `LiveSnapshot` below (payloads stay under 8 kB; `recentBlocks` is not included in the notify payload, the API keeps its own ring buffer from `blocks` rows).
@@ -142,7 +142,7 @@ Slow loop, every `collector.slow_interval` (60 s): L1 pricer getters (`getL1Base
 
 Backfill job (resumable, checkpoint in `collector_state`): walks backwards from the first stored block to `collector.backfill_depth` fetching headers, replaying from the nearest earlier `constraint_sets` row (starting backlogs from the owner action), and writing buckets only. Runs at low priority inside the same budget (it yields whenever the fast loop needs calls). On `archive: true` networks it re-anchors backlogs from historical state every `backfill_anchor_interval` blocks and records the replay error observed just before each anchor.
 
-Rate limiting: a token bucket per network, `calls_per_second` tokens/s, burst 2× that. Every JSON-RPC call consumes one token, including each item inside a batch. Batches never exceed 100 items and are never sent concurrently for the same network. HTTP 429 or JSON-RPC error code 429: exponential back-off starting at 2 s, capped at 60 s, logged with the calls made in the last 10 s. All requests send `User-Agent: gascurve/<version>`.
+Rate limiting: a token bucket per network, `calls_per_second` tokens/s, burst 2× that. Every JSON-RPC call consumes one token, including each item inside a batch. Batches never exceed 100 items, never exceed the endpoint's pacer burst (2 × `calls_per_second`) on a budgeted endpoint, and are never sent concurrently for the same network. The pacer never spends tokens the bucket does not hold and serves callers first come, first served. HTTP 429 or JSON-RPC error code 429: exponential back-off starting at 2 s, capped at 60 s, logged with the calls made in the last 10 s. All requests send `User-Agent: gascurve/<version>`.
 
 ## 6. API (`internal/api`, chi, prefix `/api/v1`)
 
@@ -201,7 +201,7 @@ type Account = { address: string; balance: string }
 type BlockPoint = {
   number: number; ts: number; gasUsed: number; baseFee: string; predictedBaseFee: string;
   backlogs: number[];        // end-of-block backlogs (after AddGas)
-  constraintBips: number[];  // start-of-block per-constraint exponent, the values that priced this block; sums to exponentBips
+  constraintBips: number[] | null;  // start-of-block per-constraint exponent, the values that priced this block; sums to exponentBips; null only for rows written before migration 000006
   exponentBips: number; minBaseFee: string; anchored: boolean;
 }
 
@@ -215,10 +215,10 @@ type SeriesPoint = {
   t: number;                               // unix seconds, bucket start
   blocks: number; gasUsed: number; gasPerSecond: number; feesWei: string;
   baseFeeMin: string; baseFeeAvg: string; baseFeeMax: string;
-  exponentBips: number; constraintBips: number[];   // start-of-block values of the bucket's last block
+  exponentBips: number; constraintBips: number[] | null;   // start-of-block values of the bucket's last block; null for pre-000006 history
   backlogs: number[]; backlogsMax: number[];
   minBaseFee: string;                               // floor in force at the bucket's last block
-  floorFeesWei: string; surplusFeesWei: string;     // Σ gasUsed × minBaseFee and feesWei minus that, per block, exact
+  floorFeesWei: string | null; surplusFeesWei: string | null;     // Σ gasUsed × minBaseFee and feesWei minus that, per block, exact; null for pre-000006 history
   constraintSetId: number; replayErrorBips: number;
 }
 
@@ -238,6 +238,7 @@ Server to client, one JSON object per message:
 ```ts
 { type: 'hello', data: { network: Network; snapshot: LiveSnapshot | null; recentBlocks: BlockPoint[] } }   // on connect; snapshot null until the collector has sampled
 { type: 'error', error: { code: string; message: string } }   // e.g. unknown subscribe target; the socket stays open
+{ type: 'reorg', data: { chainId: number; ancestor: number; blocks: BlockPoint[] } }   // sent before the next tick: drop every block above ancestor, append blocks (canonical, oldest first)
 { type: 'tick',  data: LiveSnapshot }                    // every collector tick, ~1/s
 { type: 'blocks', data: BlockPoint[] }                   // new blocks since the previous message, oldest first
 { type: 'owner_action', data: OwnerAction }              // when the collector sees a new one

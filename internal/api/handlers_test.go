@@ -66,19 +66,19 @@ func seed(t *testing.T) *dbtest.MemStore {
 	must(s.InsertStateSample(ctx, db.StateSample{ChainID: robinhood, SampledAt: now, BlockNumber: 1030, BaseFee: db.WeiFromUint64(399_726_000), MinBaseFee: db.WeiFromUint64(20_000_000),
 		Constraints: constraints, Prices: prices}))
 	must(s.InsertStateSample(ctx, db.StateSample{ChainID: testnet, SampledAt: now, BlockNumber: 500, BaseFee: db.WeiFromUint64(10_000_000), MinBaseFee: db.WeiFromUint64(10_000_000),
-		Constraints: db.JSONB(`[]`), Legacy: db.JSONB(`{"speedLimit":7000000,"inertia":102,"tolerance":10,"backlog":7}`), Prices: prices}))
+		Constraints: db.JSONB(`[]`), Legacy: db.JSONB(`{"speedLimit":7000000,"inertia":102,"tolerance":10,"backlog":80000000}`), Prices: prices}))
 
 	for _, res := range []string{db.Resolution1m, db.Resolution15m, db.Resolution1h} {
 		width := db.Resolutions[res]
 		for i := 0; i < 3; i++ {
 			start := now.Add(-time.Duration(i+1) * width).Truncate(width)
 			must(s.FoldBuckets(ctx, []db.Bucket{{ChainID: robinhood, Resolution: res, BucketStart: start, Blocks: 10, GasUsed: 100, FeesWei: db.WeiFromUint64(1000),
-				BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(2), BaseFeeMax: db.WeiFromUint64(3), BaseFeeSum: db.WeiFromUint64(20), ExponentEndBips: 5,
+				BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(2), BaseFeeMax: db.WeiFromUint64(3), BaseFeeSum: db.NullWeiFromUint64(25), ExponentEndBips: 5,
 				BacklogsEnd: db.Uint64Array{1, 2}, BacklogsMax: db.Uint64Array{3, 4}, ConstraintBipsEnd: pq.Int64Array{5, 0}, MinBaseFee: db.WeiFromUint64(7),
-				FloorFeesWei: db.WeiFromUint64(700), SurplusFeesWei: db.WeiFromUint64(300), ConstraintSetID: sql.NullInt64{Int64: 2, Valid: true}, ReplayErrorBips: 9, LastBlock: 10}}))
+				FloorFeesWei: db.NullWeiFromUint64(700), SurplusFeesWei: db.NullWeiFromUint64(300), ConstraintSetID: sql.NullInt64{Int64: 2, Valid: true}, ReplayErrorBips: 9, LastBlock: 10}}))
 		}
 	}
-	_, err := s.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: robinhood, EffectiveBlock: 28, EffectiveAt: now.Add(-48 * time.Hour), Source: model.SourceGenesis, Constraints: db.JSONB(`[{"target":60000000,"window":9,"startingBacklog":0}]`)})
+	_, err := s.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: robinhood, EffectiveBlock: 28, EffectiveAt: now.Add(-48 * time.Hour), Source: model.SourceGenesis, Constraints: db.JSONB(`[{"target":60000000,"window":9,"startingBacklog":0},{"target":20000000,"window":86400,"startingBacklog":0}]`)})
 	must(err)
 	_, err = s.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: robinhood, EffectiveBlock: 1010, EffectiveAt: now.Add(-20 * time.Second), Source: model.SourceOwnerAction, Constraints: db.JSONB(`[{"target":60000000,"window":15,"startingBacklog":0},{"target":40000000,"window":86400,"startingBacklog":9989222400000}]`)})
 	must(err)
@@ -201,7 +201,9 @@ func TestEndpoints(t *testing.T) {
 		{"/api/v1/networks/robinhood-testnet/live", 200, cacheNone, func(t *testing.T, b []byte) {
 			var s model.LiveSnapshot
 			decode(t, b, &s)
-			if s.Model != model.ModelLegacy || s.Legacy == nil || s.Legacy.Backlog != 7 || s.ExponentBips != 42 || len(s.Constraints) != 0 || s.L1 != nil {
+			// The exponent is what the sampled legacy backlog yields (the
+			// collector's tick value), not the block row's replay exponent.
+			if s.Model != model.ModelLegacy || s.Legacy == nil || s.Legacy.Backlog != 80_000_000 || s.ExponentBips != legacyExponent(s.Legacy) || s.ExponentBips <= 0 || len(s.Constraints) != 0 || s.L1 != nil {
 				t.Fatalf("legacy live: %+v", s)
 			}
 			if !strings.Contains(string(b), `"constraints":[]`) {
@@ -243,7 +245,7 @@ func TestEndpoints(t *testing.T) {
 			if p.GasPerSecond != 1_000_000 || p.FeesWei != "20000030000000" || p.ExponentBips != 30 || p.ConstraintSetID != 2 || p.ReplayErrorBips != 15 || p.BacklogsMax[1] != 100 {
 				t.Fatalf("series point: %+v", p)
 			}
-			if p.MinBaseFee != "20000000" || p.FloorFeesWei != "20000000000000" || p.SurplusFeesWei != "30000000" || p.ConstraintBips[0] != 30 {
+			if p.MinBaseFee != "20000000" || *p.FloorFeesWei != "20000000000000" || *p.SurplusFeesWei != "30000000" || p.ConstraintBips[0] != 30 {
 				t.Fatalf("series point fee split: %+v", p)
 			}
 			if s.Points[5].ConstraintSetID != 1 {
@@ -256,10 +258,12 @@ func TestEndpoints(t *testing.T) {
 		{"/api/v1/networks/robinhood/series?range=24h", 200, cacheDay, func(t *testing.T, b []byte) {
 			var s model.Series
 			decode(t, b, &s)
+			// The average derives from the exact sum (25 / 10), not the
+			// stored rounded average.
 			if s.Resolution != "1m" || len(s.Points) != 3 || s.Points[0].Blocks != 10 || s.Points[0].GasPerSecond != 1 || s.Points[0].ConstraintSetID != 2 || s.Points[0].BaseFeeAvg != "2" {
 				t.Fatalf("series 24h: %+v", s)
 			}
-			if p := s.Points[0]; p.MinBaseFee != "7" || p.FloorFeesWei != "700" || p.SurplusFeesWei != "300" || p.ConstraintBips[0] != 5 {
+			if p := s.Points[0]; p.MinBaseFee != "7" || *p.FloorFeesWei != "700" || *p.SurplusFeesWei != "300" || p.ConstraintBips[0] != 5 {
 				t.Fatalf("bucket point contract fields: %+v", p)
 			}
 		}},
@@ -428,7 +432,7 @@ func TestSeriesStepDown(t *testing.T) {
 	var blocks []db.Block
 	for i := uint64(0); i < 2500; i++ {
 		blocks = append(blocks, db.Block{ChainID: robinhood, Number: i, TS: now.Add(-time.Duration(2500-i) * 100 * time.Millisecond).Truncate(time.Second), GasUsed: 10,
-			BaseFee: db.WeiFromUint64(100 + i%3), PredictedBaseFee: db.WeiFromUint64(100), Backlogs: db.Uint64Array{i % 5, 9}, MinBaseFee: db.WeiFromUint64(50), ExponentBips: int64(i)})
+			BaseFee: db.WeiFromUint64(100 + i%3), PredictedBaseFee: db.WeiFromUint64(100), Backlogs: db.Uint64Array{i % 5, 9}, ConstraintBips: pq.Int64Array{int64(i), 0}, MinBaseFee: db.WeiFromUint64(50), ExponentBips: int64(i)})
 	}
 	if err := store.UpsertBlocks(ctx, blocks); err != nil {
 		t.Fatal(err)
@@ -447,8 +451,75 @@ func TestSeriesStepDown(t *testing.T) {
 	if p.Blocks != 50 || p.GasUsed != 500 || p.GasPerSecond != 100 || p.BaseFeeMin != "100" || p.BaseFeeMax != "102" || p.BacklogsMax[0] != 4 || p.T%5 != 0 {
 		t.Fatalf("stepped point: %+v", p)
 	}
-	if p.ReplayErrorBips == 0 || p.BaseFeeAvg == "" || len(p.Backlogs) != 2 || p.MinBaseFee != "50" || p.FloorFeesWei != "25000" || p.SurplusFeesWei == "" {
+	if p.ReplayErrorBips == 0 || p.BaseFeeAvg == "" || len(p.Backlogs) != 2 || p.MinBaseFee != "50" || *p.FloorFeesWei != "25000" || p.SurplusFeesWei == nil {
 		t.Fatalf("stepped point aggregates: %+v", p)
+	}
+}
+
+// TestUnknownHistoryIsNull: buckets and blocks written before the fee
+// split and the exponents were recorded (NULL after migration 000006)
+// report them as null, never as fabricated zeros or empty arrays; the
+// average of such a bucket comes from its stored value.
+func TestUnknownHistoryIsNull(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+		t.Fatal(err)
+	}
+	start := now.Add(-2 * time.Minute).Truncate(time.Minute)
+	if err := store.FoldBuckets(ctx, []db.Bucket{{ChainID: robinhood, Resolution: db.Resolution1m, BucketStart: start, Blocks: 3, GasUsed: 30, FeesWei: db.WeiFromUint64(90),
+		BaseFeeMin: db.WeiFromUint64(2), BaseFeeAvg: db.WeiFromUint64(3), BaseFeeMax: db.WeiFromUint64(4), BacklogsEnd: db.Uint64Array{1}, BacklogsMax: db.Uint64Array{1}, LastBlock: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	// Two old blocks (no exponents) and one written after the migration.
+	if err := store.UpsertBlocks(ctx, []db.Block{
+		{ChainID: robinhood, Number: 1, TS: now.Add(-30 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.WeiFromUint64(5), Backlogs: db.Uint64Array{1}},
+		{ChainID: robinhood, Number: 2, TS: now.Add(-29 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.WeiFromUint64(5), Backlogs: db.Uint64Array{1}},
+		{ChainID: robinhood, Number: 3, TS: now.Add(-20 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(6), PredictedBaseFee: db.WeiFromUint64(6), Backlogs: db.Uint64Array{1}, ConstraintBips: pq.Int64Array{}, MinBaseFee: db.WeiFromUint64(2)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ts := newServer(t, store)
+	_, body := get(t, ts, "/api/v1/networks/robinhood/series?range=24h")
+	var s model.Series
+	decode(t, body, &s)
+	if len(s.Points) != 1 || s.Points[0].BaseFeeAvg != "3" || s.Points[0].FloorFeesWei != nil || s.Points[0].SurplusFeesWei != nil || s.Points[0].ConstraintBips != nil {
+		t.Fatalf("unknown bucket fields: %+v", s.Points)
+	}
+	if !strings.Contains(string(body), `"floorFeesWei":null`) || !strings.Contains(string(body), `"constraintBips":null`) {
+		t.Fatalf("null expected in json: %s", body)
+	}
+	_, body = get(t, ts, "/api/v1/networks/robinhood/series?range=1h")
+	decode(t, body, &s)
+	if len(s.Points) != 3 || s.Points[0].FloorFeesWei != nil || s.Points[0].ConstraintBips != nil || s.Points[2].FloorFeesWei == nil || *s.Points[2].FloorFeesWei != "20" || len(s.Points[2].ConstraintBips) != 0 {
+		t.Fatalf("per-block unknown fields: %+v", s.Points)
+	}
+	if !strings.Contains(string(body), `"constraintBips":[]`) {
+		t.Fatalf("a recorded empty array stays an array: %s", body)
+	}
+	_, body = get(t, ts, "/api/v1/networks/robinhood/blocks")
+	var pts []model.BlockPoint
+	decode(t, body, &pts)
+	if len(pts) != 3 || pts[0].ConstraintBips == nil || pts[2].ConstraintBips != nil {
+		t.Fatalf("block points: %+v", pts)
+	}
+	// Stepping down folds unknown blocks into an unknown split.
+	if p := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}}, nil, 5*time.Second); len(p) != 1 || p[0].FloorFeesWei != nil {
+		t.Fatalf("step down with an unknown block: %+v", p)
+	}
+}
+
+// TestLiveIsOneSnapshot: /live reads the sample, its block, the slow
+// sample and the gas rates inside one snapshot transaction.
+func TestLiveIsOneSnapshot(t *testing.T) {
+	store := seed(t)
+	ts := newServer(t, store)
+	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/live"); resp.StatusCode != 200 {
+		t.Fatalf("live: %d", resp.StatusCode)
+	}
+	store.SetFailure("WithSnapshotTx", true)
+	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/live"); resp.StatusCode != 500 {
+		t.Fatalf("live must run inside the snapshot transaction: %d", resp.StatusCode)
 	}
 }
 
@@ -773,8 +844,17 @@ func TestHelpers(t *testing.T) {
 	if got := originPatterns([]string{"http://localhost:3000", "bad host"}); len(got) != 2 || got[0] != "localhost:3000" || got[1] != "bad host" {
 		t.Fatalf("patterns: %v", got)
 	}
-	if setIDAt(nil, 5) != 0 {
+	if setIDAt(nil, 5, 1) != 0 {
 		t.Fatal("setIDAt")
+	}
+	// A block is only tagged with a set whose constraint count matches its
+	// backlogs; an unreadable set matches nothing.
+	shaped := []db.ConstraintSet{{ID: 1, EffectiveBlock: 1, Constraints: db.JSONB(`[{"target":1}]`)}, {ID: 2, EffectiveBlock: 2, Constraints: db.JSONB(`[{"target":1},{"target":2}]`)}, {ID: 3, EffectiveBlock: 3, Constraints: db.JSONB(`{bad`)}}
+	if setIDAt(shaped, 5, 1) != 1 || setIDAt(shaped, 5, 2) != 2 || setIDAt(shaped, 5, 3) != 0 || setIDAt(shaped, 1, 2) != 0 {
+		t.Fatal("setIDAt shape")
+	}
+	if int64s(nil) != nil || int64s([]int64{}) == nil {
+		t.Fatal("int64s keeps null and empty apart")
 	}
 	sets := []db.ConstraintSet{{ID: 1, EffectiveAt: now.Add(-2 * time.Hour)}, {ID: 2, EffectiveAt: now.Add(-time.Hour)}, {ID: 3, EffectiveAt: now}}
 	if got := setsInForce(sets, now.Add(-90*time.Minute)); len(got) != 3 || got[0].ID != 1 {
@@ -801,7 +881,10 @@ func TestHelpers(t *testing.T) {
 	if intParam(httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody), "limit", 1, 1, 10) != 10 {
 		t.Fatal("intParam clamp")
 	}
-	if p := (&acc{blocks: 1, sum: bigInt(0), fees: bigInt(0), minFee: bigInt(1), maxFee: bigInt(1)}).point(5); p.BacklogsMax == nil || p.Backlogs == nil || p.ConstraintBips == nil || p.MinBaseFee != "0" || p.FloorFeesWei != "0" {
+	if p := (&acc{blocks: 1, sum: bigInt(0), fees: bigInt(0), minFee: bigInt(1), maxFee: bigInt(1)}).point(5); p.BacklogsMax == nil || p.Backlogs == nil || p.ConstraintBips != nil || p.MinBaseFee != "0" || *p.FloorFeesWei != "0" {
 		t.Fatalf("point: %+v", p)
+	}
+	if legacyExponent(&model.LegacyParams{SpeedLimit: 1, Inertia: 1, Tolerance: 1, Backlog: 0}) != 0 || legacyExponent(&model.LegacyParams{SpeedLimit: 10, Inertia: 10, Tolerance: 1, Backlog: 110}) != 10_000 {
+		t.Fatal("legacyExponent")
 	}
 }

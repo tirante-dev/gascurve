@@ -138,10 +138,22 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildLive assembles the LiveSnapshot from the latest sample and the
-// block that sample was taken at, so the snapshot is one coherent tick even
-// when the collector commits between the two reads.
+// block that sample was taken at, inside one repeatable-read transaction,
+// so every field describes the same database moment: the tick that wrote
+// the selected sample, even when the collector commits meanwhile.
 func (s *Server) buildLive(ctx context.Context, chainID uint64) (*model.LiveSnapshot, error) {
-	sample, err := s.store.LatestStateSample(ctx, chainID, false)
+	var snap *model.LiveSnapshot
+	err := s.store.WithSnapshotTx(ctx, func(st db.Store) error {
+		var err error
+		snap, err = buildLiveIn(ctx, st, chainID)
+		return err
+	})
+	return snap, err
+}
+
+// buildLiveIn is buildLive against one store view.
+func buildLiveIn(ctx context.Context, store db.Store, chainID uint64) (*model.LiveSnapshot, error) {
+	sample, err := store.LatestStateSample(ctx, chainID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -150,11 +162,11 @@ func (s *Server) buildLive(ctx context.Context, chainID uint64) (*model.LiveSnap
 	}
 	slow := sample
 	if sample.L1 == nil {
-		if slow, err = s.store.LatestStateSample(ctx, chainID, true); err != nil {
+		if slow, err = store.LatestStateSample(ctx, chainID, true); err != nil {
 			return nil, err
 		}
 	}
-	block, err := s.store.BlockByNumber(ctx, chainID, sample.BlockNumber)
+	block, err := store.BlockByNumber(ctx, chainID, sample.BlockNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +192,9 @@ func (s *Server) buildLive(ctx context.Context, chainID uint64) (*model.LiveSnap
 		if err := sample.Legacy.Unmarshal(snap.Legacy); err != nil {
 			return nil, fmt.Errorf("decode legacy: %w", err)
 		}
+		// The exponent the sampled backlog yields, exactly as the collector
+		// computes it for the WebSocket tick.
+		snap.ExponentBips = legacyExponent(snap.Legacy)
 	}
 	if err := sample.Prices.Unmarshal(&snap.Prices); err != nil {
 		return nil, fmt.Errorf("decode prices: %w", err)
@@ -200,14 +215,11 @@ func (s *Server) buildLive(ctx context.Context, chainID uint64) (*model.LiveSnap
 	if block != nil {
 		snap.Block = model.LiveBlock{Number: block.Number, TS: uint64(block.TS.Unix()), GasUsed: block.GasUsed, BaseFee: block.BaseFee.String(), TxCount: block.TxCount}
 		snap.ReplayErrorBips = replayError(*block)
-		if snap.Legacy != nil {
-			snap.ExponentBips = block.ExponentBips
-		}
-		g10, err := s.store.GasUsedBetween(ctx, chainID, block.TS.Add(-10*time.Second), block.TS)
+		g10, err := store.GasUsedBetween(ctx, chainID, block.TS.Add(-10*time.Second), block.TS)
 		if err != nil {
 			return nil, err
 		}
-		g60, err := s.store.GasUsedBetween(ctx, chainID, block.TS.Add(-60*time.Second), block.TS)
+		g60, err := store.GasUsedBetween(ctx, chainID, block.TS.Add(-60*time.Second), block.TS)
 		if err != nil {
 			return nil, err
 		}
@@ -476,9 +488,21 @@ func blockPoint(b db.Block) model.BlockPoint {
 	}
 }
 
-// int64s returns a non-nil copy of a BIGINT[] (JSON arrays are never null).
+// int64s copies a BIGINT[]: a stored array (even empty) becomes a JSON
+// array, a NULL (nil, a value that was never recorded) stays null.
 func int64s(v []int64) []int64 {
+	if v == nil {
+		return nil
+	}
 	return append([]int64{}, v...)
+}
+
+// legacyExponent is the pricer exponent the legacy parameters and backlog
+// yield at the start of the next block, the value the collector publishes.
+func legacyExponent(l *model.LegacyParams) int64 {
+	st := &pricer.State{MinBaseFee: new(big.Int), Legacy: &pricer.Legacy{SpeedLimit: l.SpeedLimit, Inertia: l.Inertia, Tolerance: l.Tolerance, Backlog: l.Backlog}}
+	_, exponent, _ := st.Step(0)
+	return int64(exponent)
 }
 
 func constraintSetModel(cs db.ConstraintSet) (model.ConstraintSet, error) {

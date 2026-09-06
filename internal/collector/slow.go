@@ -95,7 +95,10 @@ func (f *Follower) checkArbOSVersion(ctx context.Context) error {
 
 // scanOwnerActions fetches OwnerActs logs since the cursor in chunks of at
 // most ownerLogChunk blocks and maintains owner_actions and
-// constraint_sets.
+// constraint_sets. A chain too large to scan from genesis starts at a
+// cutoff whose pricing state is established first (see establishOrigin).
+// Once a pass reaches the head it started from, owner_scan_through records
+// that the timeline is complete through it.
 func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	head, err := f.currentHead(ctx)
 	if err != nil {
@@ -114,6 +117,9 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 		from = last + 1
 	} else if head >= smallChainBlocks {
 		from = head - largeChainLookback
+		if err := f.establishOrigin(ctx, from); err != nil {
+			return err
+		}
 	}
 	for from <= head {
 		if ctx.Err() != nil {
@@ -130,20 +136,85 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	if err := f.reloadSetsLocked(ctx); err != nil {
 		return err
 	}
-	f.ownerScanDone = true
-	return f.checkObservedLocked(ctx)
+	if head > f.ownerScanThrough {
+		if err := f.store.SetState(ctx, f.chainID, db.StateOwnerScanThrough, strconv.FormatUint(head, 10)); err != nil {
+			return err
+		}
+		f.ownerScanThrough = head
+	}
+	return nil
+}
+
+// establishOrigin records the pricing state in force at the block a
+// truncated owner scan starts from, once. With an archive endpoint the
+// state is sampled there: the minimum base fee becomes the baseline for
+// every later block and the constraints an observed set at the cutoff, so
+// history from the cutoff on replays from real values. Without one nothing
+// before the cutoff can be priced: the range is recorded as a hole and the
+// backfill never enters it, rather than guessing the fee in force.
+func (f *Follower) establishOrigin(ctx context.Context, cutoff uint64) error {
+	f.mu.Lock()
+	known := f.scanOrigin != nil
+	f.mu.Unlock()
+	if known {
+		return nil
+	}
+	origin := &scanOrigin{Block: cutoff}
+	var set *db.ConstraintSet
+	if f.archive != nil {
+		sample, err := f.archive.FastSampleAt(ctx, cutoff)
+		if err != nil {
+			return fmt.Errorf("origin state at %d: %w", cutoff, err)
+		}
+		origin.Archive = true
+		origin.MinBaseFee = bigOrZero(sample.MinBaseFee).String()
+		if !sample.IsLegacy() {
+			set = &db.ConstraintSet{
+				ChainID: f.chainID, EffectiveBlock: cutoff, EffectiveAt: time.Unix(int64(sample.Header.Timestamp), 0).UTC(),
+				Constraints: entriesJSON(entriesFromSample(sample)), Source: model.SourceObserved,
+			}
+		}
+		f.log.Info("owner scan starts at a cutoff, pricing state sampled from the archive", "block", cutoff, "minBaseFee", origin.MinBaseFee)
+	} else {
+		f.log.Warn("owner scan starts at a cutoff without an archive endpoint, history before it cannot be reconstructed", "block", cutoff)
+	}
+	raw, err := json.Marshal(origin)
+	if err != nil {
+		return err
+	}
+	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		if set != nil {
+			if _, err := s.InsertConstraintSet(ctx, *set); err != nil {
+				return err
+			}
+		}
+		if !origin.Archive && cutoff > 0 {
+			if err := f.recordHole(ctx, s, hole{From: 0, To: cutoff - 1}); err != nil {
+				return err
+			}
+		}
+		return s.SetState(ctx, f.chainID, db.StateOwnerScanOrigin, string(raw))
+	})
+	if err != nil {
+		return fmt.Errorf("owner scan origin: %w", err)
+	}
+	f.mu.Lock()
+	f.scanOrigin = origin
+	f.mu.Unlock()
+	return nil
 }
 
 // scanOwnerRange records the actions in [from, to] and advances the
-// cursor in the same transaction. A malformed OwnerActs event fails the
-// range so the cursor never moves past an event that was not understood.
+// cursor in the same chain-locked transaction. A malformed OwnerActs event
+// fails the range so the cursor never moves past an event that was not
+// understood.
 func (f *Follower) scanOwnerRange(ctx context.Context, from, to uint64) error {
 	actions, err := f.fetchOwnerActions(ctx, from, to)
 	if err != nil {
 		return err
 	}
-	return f.store.WithTx(ctx, func(s db.Store) error {
-		if err := f.storeOwnerActions(ctx, s, actions); err != nil {
+	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		if _, err := f.storeOwnerActions(ctx, s, actions); err != nil {
 			return err
 		}
 		return s.SetState(ctx, f.chainID, db.StateOwnerLogCursor, strconv.FormatUint(to, 10))
@@ -176,21 +247,31 @@ func (f *Follower) fetchOwnerActions(ctx context.Context, from, to uint64) ([]*n
 	return actions, nil
 }
 
-func (f *Follower) storeOwnerActions(ctx context.Context, s db.Store, actions []*nitro.OwnerAction) error {
+// storeOwnerActions records actions and reports whether any was new (the
+// set, fee and legacy caches then need a reload once the transaction
+// committed).
+func (f *Follower) storeOwnerActions(ctx context.Context, s db.Store, actions []*nitro.OwnerAction) (bool, error) {
+	changed := false
 	for _, a := range actions {
-		if err := f.recordAction(ctx, s, a); err != nil {
-			return err
+		c, err := f.recordAction(ctx, s, a)
+		if err != nil {
+			return changed, err
 		}
+		changed = changed || c
 	}
-	return nil
+	return changed, nil
 }
 
 // recordAction stores one decoded action, its constraint set when it is a
-// setGasPricingConstraints call, and notifies the API.
-func (f *Follower) recordAction(ctx context.Context, s db.Store, a *nitro.OwnerAction) error {
+// setGasPricingConstraints call, and notifies the API; it reports whether
+// the action was new. When an observed set with the same constraints was
+// recorded at a later block (the live shape seen before its action was
+// found), that row is moved to the action in place, so the set keeps its
+// id.
+func (f *Follower) recordAction(ctx context.Context, s db.Store, a *nitro.OwnerAction) (recorded bool, err error) {
 	args, err := db.MarshalJSONB(a.Args)
 	if err != nil {
-		return fmt.Errorf("encode args: %w", err)
+		return false, fmt.Errorf("encode args: %w", err)
 	}
 	at := time.Unix(int64(a.Timestamp), 0).UTC()
 	row := db.OwnerAction{
@@ -199,63 +280,65 @@ func (f *Follower) recordAction(ctx context.Context, s db.Store, a *nitro.OwnerA
 	}
 	n, err := s.InsertOwnerActions(ctx, []db.OwnerAction{row})
 	if err != nil {
-		return err
+		return false, err
 	}
 	if n == 0 {
-		return nil
+		return false, nil
 	}
 	f.log.Info("owner action", "block", a.BlockNumber, "method", a.Method)
 	if a.Constraints != nil {
-		entries := make([]model.ConstraintSetEntry, len(a.Constraints))
-		for i, c := range a.Constraints {
-			entries[i] = model.ConstraintSetEntry{Target: c.GasTargetPerSecond, Window: c.AdjustmentWindowSeconds, StartingBacklog: c.StartingBacklog}
-		}
+		entries := entriesOf(a.Constraints)
 		source := model.SourceOwnerAction
 		if a.BlockNumber <= genesisBlockLimit {
 			source = model.SourceGenesis
 		}
-		if _, err := s.InsertConstraintSet(ctx, db.ConstraintSet{
-			ChainID: f.chainID, EffectiveBlock: a.BlockNumber, EffectiveAt: at, Constraints: entriesJSON(entries), Source: source,
-		}); err != nil {
-			return err
+		cs := db.ConstraintSet{ChainID: f.chainID, EffectiveBlock: a.BlockNumber, EffectiveAt: at, Constraints: entriesJSON(entries), Source: source}
+		sets, err := s.ConstraintSets(ctx, f.chainID)
+		if err != nil {
+			return false, err
+		}
+		if o := observedToReplace(sets, a.BlockNumber, source, entries); o != nil {
+			f.log.Info("owner action explains an observed constraint set, moving it to the action", "setId", o.ID, "from", o.EffectiveBlock, "to", a.BlockNumber)
+			cs.ID = o.ID
+			if err := s.UpdateConstraintSet(ctx, cs); err != nil {
+				return false, err
+			}
+		} else if _, err := s.InsertConstraintSet(ctx, cs); err != nil {
+			return false, err
 		}
 	}
 	payload, err := json.Marshal(model.OwnerActionNotification{ChainID: f.chainID, LogIndex: a.LogIndex, Action: model.OwnerAction{
 		Block: a.BlockNumber, At: at.Format(time.RFC3339), TxHash: a.TxHash, Method: a.Method, Selector: a.Selector, Args: json.RawMessage(args),
 	}})
 	if err != nil {
-		return fmt.Errorf("encode notification: %w", err)
+		return false, fmt.Errorf("encode notification: %w", err)
 	}
-	return s.Notify(ctx, db.ChannelOwnerAction, string(payload))
+	return true, s.Notify(ctx, db.ChannelOwnerAction, string(payload))
 }
 
-// checkObservedLocked inserts an 'observed' constraint set once per process
-// when the live set differs from the latest known one.
-func (f *Follower) checkObservedLocked(ctx context.Context) error {
-	if f.observedChecked || !f.ownerScanDone || f.lastSample == nil || f.lastSample.IsLegacy() {
-		return nil
-	}
-	live := f.lastSample.Constraints
-	if len(f.sets) > 0 {
-		entries, err := setEntries(f.sets[len(f.sets)-1])
-		if err != nil {
-			return err
-		}
-		if sameEntries(entries, live) {
-			f.observedChecked = true
+// observedToReplace returns the observed set an action at block with
+// entries explains: the first set at or after the block, when it is
+// observed with the same constraints and no row already occupies (block,
+// source). Nil means the action gets its own row.
+func observedToReplace(sets []db.ConstraintSet, block uint64, source string, entries []model.ConstraintSetEntry) *db.ConstraintSet {
+	var first *db.ConstraintSet
+	for i := range sets {
+		cs := &sets[i]
+		if cs.EffectiveBlock == block && cs.Source == source {
 			return nil
 		}
+		if cs.EffectiveBlock >= block && first == nil {
+			first = cs
+		}
 	}
-	entries := entriesFromSample(f.lastSample)
-	f.log.Info("live constraint set differs from the latest known, recording an observed set", "block", f.lastSample.Header.Number)
-	if _, err := f.store.InsertConstraintSet(ctx, db.ConstraintSet{
-		ChainID: f.chainID, EffectiveBlock: f.lastSample.Header.Number, EffectiveAt: f.now().UTC(),
-		Constraints: entriesJSON(entries), Source: model.SourceObserved,
-	}); err != nil {
-		return err
+	if first == nil || first.Source != model.SourceObserved {
+		return nil
 	}
-	f.observedChecked = true
-	return f.reloadSetsLocked(ctx)
+	have, err := setEntries(*first)
+	if err != nil || !sameSets(have, entries) {
+		return nil
+	}
+	return first
 }
 
 // currentHead returns the followed head, or asks the RPC when unknown.
@@ -320,7 +403,7 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 			}
 		}
 		after = nums[len(nums)-1]
-		err = f.store.WithTx(ctx, func(s db.Store) error {
+		err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 			if len(reports) > 0 {
 				if err := s.UpsertBatchReports(ctx, reports); err != nil {
 					return err
@@ -401,11 +484,14 @@ func (f *Follower) prune(ctx context.Context) error {
 			before = boundary
 		}
 	}
-	n, err := f.store.PruneBlocks(ctx, f.chainID, before)
-	if err != nil {
+	var n, m int64
+	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		if n, err = s.PruneBlocks(ctx, f.chainID, before); err != nil {
+			return err
+		}
+		m, err = s.PruneStateSamples(ctx, f.chainID, now.Add(-f.cfg.SampleRetention))
 		return err
-	}
-	m, err := f.store.PruneStateSamples(ctx, f.chainID, now.Add(-f.cfg.SampleRetention))
+	})
 	if err != nil {
 		return err
 	}
