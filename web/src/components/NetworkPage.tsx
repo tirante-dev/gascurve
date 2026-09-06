@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useApi } from "@/hooks/useApi";
 import { useLive } from "@/hooks/useLive";
+import { useSmoothedLive } from "@/hooks/useSmoothedLive";
 import { useNetwork } from "@/hooks/useNetwork";
 import { useSeries } from "@/hooks/useSeries";
 import { useTicker } from "@/hooks/useTicker";
@@ -37,6 +38,10 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
   const name = network || routeNetwork;
   const [range, setRange] = useState<SeriesRange>("24h");
   const live = useLive(name);
+  // The feed ticks every block; the page follows the smoothed view of it, so
+  // everything below the live strip re-renders at the display cadence at most.
+  const smooth = useSmoothedLive(live);
+  const snapshot = smooth.display;
   const series = useSeries(name, range);
   const networks = useApi("networks", useCallback((signal: AbortSignal) => listNetworks({ signal }), []), { refetchMs: 300_000 });
   const apiStatus = useApi("status", useCallback((signal: AbortSignal) => getStatus({ signal }), []), { refetchMs: 60_000 });
@@ -47,7 +52,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
   const unknown = isUnknownNetwork(networks.data, name);
   // Which pricer the history belongs to. The series carries no model of its
   // own; an empty constraint-set list must not be read as legacy.
-  const model = info?.model ?? live.snapshot?.model ?? "unknown";
+  const model = info?.model ?? snapshot?.model ?? "unknown";
 
   // A chain-id route (/4663) is valid; once the server confirms the network, move to its name.
   const canonical = canonicalNetworkName(name, live.networkInfo);
@@ -84,19 +89,19 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         <div className="relative isolate">
           <div className="vw-horizon" aria-hidden="true" />
           <Section id="live" title="Live" lede="The base fee right now, the floor it sits on, and the last two minutes of blocks.">
-            <LiveStrip snapshot={live.snapshot} recentBlocks={live.recentBlocks} status={live.status} />
+            <LiveStrip live={smooth} status={live.status} />
           </Section>
         </div>
 
-        <Section id="pricer" title="The pricer, live" lede="One card per constraint. Backlogs drain at the target rate between samples and snap on every tick.">
-          <ConstraintCards snapshot={live.snapshot} />
+        <Section id="pricer" title="The pricer, live" lede="One card per constraint. Figures ease toward each sample; long windows drain at their target rate between samples, short ones show a 2 s average of their per-second sawtooth.">
+          <ConstraintCards live={smooth} />
           <div className="mt-6">
-            <PricerEquation snapshot={live.snapshot} />
+            <PricerEquation snapshot={snapshot} />
           </div>
         </Section>
 
         <Section id="explainer" title="How the fee works">
-          <Explainer snapshot={live.snapshot} />
+          <Explainer snapshot={snapshot} />
         </Section>
 
         <Section
@@ -110,11 +115,11 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         </Section>
 
         <Section id="fees" title="Fee flows" lede="The floor in force at each block goes to the infra account, everything above it to the network account.">
-          <FeeFlows snapshot={live.snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} />
+          <FeeFlows snapshot={snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} />
         </Section>
 
         <Section id="l1" title="L1" lede="What the chain pays Ethereum, and the pricer that recovers it.">
-          <L1Section network={name} range={range} snapshot={live.snapshot} series={series.data} />
+          <L1Section network={name} range={range} snapshot={snapshot} series={series.data} />
         </Section>
 
         <Section id="owner" title="Owner actions" lede="Parameter changes decoded from OwnerActs logs. A constraint change replaces the backlogs with the starting values it carries.">
@@ -122,7 +127,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         </Section>
       </main>
 
-      <DataFooter snapshot={live.snapshot} series={series.data} networkInfo={info} status={live.status} apiStatus={apiStatus.data} now={now} />
+      <DataFooter snapshot={snapshot} series={series.data} networkInfo={info} status={live.status} apiStatus={apiStatus.data} now={now} />
     </div>
   );
 }

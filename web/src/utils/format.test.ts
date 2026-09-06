@@ -7,8 +7,14 @@ import {
   formatDateTime,
   formatDuration,
   formatEth,
+  formatEthFixed,
   formatGas,
+  formatGasFixed,
+  formatGasPerSecondFixed,
   formatGwei,
+  formatGweiFixed,
+  formatMultiplierFixed,
+  FIXED_WIDTH_CH,
   formatInteger,
   formatPercent,
   formatSecondsOfTarget,
@@ -210,5 +216,83 @@ describe("time formatting (TZ pinned to America/Chicago)", () => {
     expect(formatAgo(5400)).toBe("1.5 h ago");
     expect(formatAgo(200000)).toBe("2.3 d ago");
     expect(formatAgo(-1)).toBe("n/a");
+  });
+});
+
+describe("fixed-width formatters", () => {
+  it("formats gwei with a fixed decimal count per band", () => {
+    expect(formatGweiFixed(0.02)).toBe("0.0200");
+    expect(formatGweiFixed(0.399726)).toBe("0.3997");
+    expect(formatGweiFixed(0.99996)).toBe("1.000");
+    expect(formatGweiFixed(1)).toBe("1.000");
+    expect(formatGweiFixed(5.31)).toBe("5.310");
+    expect(formatGweiFixed(9.9996)).toBe("10.00");
+    expect(formatGweiFixed(12.3456)).toBe("12.35");
+    expect(formatGweiFixed(99.996)).toBe("100.0");
+    expect(formatGweiFixed(123.456)).toBe("123.5");
+    expect(formatGweiFixed(1234.56)).toBe("1,234.6");
+    expect(formatGweiFixed(0)).toBe("0.0000");
+    expect(formatGweiFixed(-0.5)).toBe("-0.5000");
+    expect(formatGweiFixed(Number.NaN)).toBe("n/a");
+  });
+
+  it("keeps one character count within every gwei band", () => {
+    const bands: [number, number, number][] = [
+      [0.0001, 1, 6],
+      [1, 10, 5],
+      [10, 100, 5],
+      [100, 1000, 5],
+    ];
+    for (const [lo, hi, chars] of bands) {
+      for (let i = 0; i < 50; i++) {
+        const v = lo + ((hi - lo) * i) / 50;
+        expect(formatGweiFixed(v)).toHaveLength(chars);
+      }
+    }
+    expect(FIXED_WIDTH_CH.gwei).toBe(6);
+  });
+
+  it("formats the multiplier with two decimals always", () => {
+    expect(formatMultiplierFixed(1)).toBe("1.00");
+    expect(formatMultiplierFixed(19.9863)).toBe("19.99");
+    expect(formatMultiplierFixed(123.456)).toBe("123.46");
+    expect(formatMultiplierFixed(1234.5)).toBe("1,234.50");
+    for (let m = 10; m < 100; m += 0.7) expect(formatMultiplierFixed(m)).toHaveLength(5);
+  });
+
+  it("formats gas per second in millions with one decimal", () => {
+    expect(formatGasPerSecondFixed(44_100_000)).toBe("44.1");
+    expect(formatGasPerSecondFixed(960_000)).toBe("1.0");
+    expect(formatGasPerSecondFixed(0)).toBe("0.0");
+    expect(formatGasPerSecondFixed(123_456_789)).toBe("123.5");
+    for (let g = 10e6; g < 100e6; g += 3.3e6) expect(formatGasPerSecondFixed(g)).toHaveLength(4);
+  });
+
+  it("formats ETH with a fixed decimal count per decade", () => {
+    expect(formatEthFixed(8.394246e-6)).toBe("0.00000839");
+    expect(formatEthFixed(5.99589e-5)).toBe("0.0000600");
+    expect(formatEthFixed(0.0599)).toBe("0.0599");
+    expect(formatEthFixed(1.5)).toBe("1.50");
+    expect(formatEthFixed(12_345.678)).toBe("12,346");
+    expect(formatEthFixed(0)).toBe("0.00");
+    expect(formatEthFixed(1e-20)).toBe("0.00");
+    for (let e = 1e-6; e < 1e-5; e += 4e-7) expect(formatEthFixed(e)).toHaveLength(10);
+    for (let e = 1e-5; e < 1e-4; e += 4e-6) expect(formatEthFixed(e)).toHaveLength(9);
+  });
+
+  it("formats gas without stripping zeros and re-bands at the edges", () => {
+    expect(formatGasFixed(60_000_000)).toBe("60.0M");
+    expect(formatGasFixed(3_111_506)).toBe("3.11M");
+    expect(formatGasFixed(9_996_000)).toBe("10.0M");
+    expect(formatGasFixed(99_960_000)).toBe("100M");
+    expect(formatGasFixed(999_600_000)).toBe("1.00G");
+    expect(formatGasFixed(11_194_391_810_886)).toBe("11.2T");
+    expect(formatGasFixed(1_500_000_000_000_000)).toBe("1500T");
+    expect(formatGasFixed(402_113)).toBe("402,113");
+    expect(formatGasFixed(-2_500_000)).toBe("-2.50M");
+    expect(formatGasFixed(Number.NaN)).toBe("n/a");
+    expect(formatGas(999_600_000)).toBe("1G");
+    expect(formatGas(9_996_000)).toBe("10M");
+    for (let g = 10e6; g < 100e6; g += 2.1e6) expect(formatGasFixed(g)).toHaveLength(5);
   });
 });

@@ -39,6 +39,19 @@ export function Stat({ label, value, unit, hint, size = "md" }: { label: ReactNo
   );
 }
 
+/**
+ * A live figure in a box of reserved width, so a changing digit or decimal
+ * count never moves its neighbours: tabular figures in the mono face, and
+ * `ch` (the width of a digit) reserved. The unit belongs outside, after it.
+ */
+export function Figure({ children, ch, className = "" }: { children: ReactNode; ch: number; className?: string }) {
+  return (
+    <span className={`num inline-block text-left tabular-nums ${className}`} style={{ minWidth: `${ch}ch` }}>
+      {children}
+    </span>
+  );
+}
+
 export const STATUS_COPY: Record<LiveStatus, { label: string; tone: "good" | "warning" | "critical" | "neutral"; detail: string }> = {
   open: { label: "live", tone: "good", detail: "WebSocket connected, one update per collector tick" },
   connecting: { label: "connecting", tone: "neutral", detail: "Opening the WebSocket" },

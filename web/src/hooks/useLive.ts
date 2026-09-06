@@ -6,7 +6,11 @@ import { keyMatches, LiveClient, resolveSocketFactory, resolveWsUrl, type Networ
 import type { BlockPoint, LiveSnapshot, LiveStatus, Network, OwnerAction } from "@/types";
 import { useDocumentVisible } from "./useDocumentVisible";
 
-export const RECENT_BLOCKS_RING = 120;
+/**
+ * Blocks kept for the sparklines. The short-window sawtooth needs fifteen
+ * seconds of per-block backlogs, and Robinhood produces about ten a second.
+ */
+export const RECENT_BLOCKS_RING = 240;
 export const LIVE_POLL_MS = 2000;
 
 export type LiveState = {

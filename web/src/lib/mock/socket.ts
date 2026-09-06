@@ -1,6 +1,9 @@
 // A WebSocket stand-in that speaks docs/ARCHITECTURE.md section 7 against the
-// mock world: hello on open, a tick and a blocks message every second, a ping
-// every 30 s, and subscribe to switch networks.
+// mock world: hello on open, then a tick and a blocks message for every block
+// (the collector samples every block, about ten a second on Robinhood, spread
+// across the second they belong to), a ping every 30 s, and subscribe to
+// switch networks. Blocks within one second share a timestamp, so the short
+// window's backlog climbs block by block and drops at each second boundary.
 
 import type { SocketLike } from "@/lib/api/ws";
 import type { ServerMessage } from "@/types";
@@ -23,6 +26,7 @@ export class MockWebSocket implements SocketLike {
   private openTimer: ReturnType<typeof setTimeout> | null = null;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private blockTimers: ReturnType<typeof setTimeout>[] = [];
 
   constructor(url: string) {
     this.url = url;
@@ -50,7 +54,13 @@ export class MockWebSocket implements SocketLike {
     this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(message) }));
   }
 
+  private clearBlockTimers(): void {
+    for (const timer of this.blockTimers) clearTimeout(timer);
+    this.blockTimers = [];
+  }
+
   private sendHello(): void {
+    this.clearBlockTimers();
     const world = findMockWorld(this.network);
     if (!world) {
       this.close(4004, "unknown network");
@@ -63,17 +73,32 @@ export class MockWebSocket implements SocketLike {
     this.emit({ type: "hello", data: { network: world.network(now), snapshot: world.snapshot(now), recentBlocks } });
   }
 
+  /**
+   * Once a second the world advances and the second's blocks are published one
+   * at a time, evenly spaced over the coming second: the first at once, the
+   * rest on timers. Each carries its own tick, sampled at that moment.
+   */
   private tick(): void {
     const world = findMockWorld(this.network);
     if (!world) return;
     const now = mockNow();
     world.advanceTo(now);
-    this.emit({ type: "tick", data: world.snapshot(now) });
     const blocks = world.blocksAfter(this.lastBlock);
-    if (blocks.length > 0) {
-      this.lastBlock = blocks[blocks.length - 1].number;
-      this.emit({ type: "blocks", data: blocks });
+    if (blocks.length === 0) {
+      this.emit({ type: "tick", data: world.snapshot(now) });
+      return;
     }
+    this.lastBlock = blocks[blocks.length - 1].number;
+    this.clearBlockTimers();
+    const spacing = TICK_MS / blocks.length;
+    blocks.forEach((block, k) => {
+      const publish = () => {
+        this.emit({ type: "tick", data: world.snapshotForBlock(block, Date.now()) });
+        this.emit({ type: "blocks", data: [block] });
+      };
+      if (k === 0) publish();
+      else this.blockTimers.push(setTimeout(publish, Math.round(k * spacing)));
+    });
   }
 
   send(data: string): void {
@@ -97,6 +122,7 @@ export class MockWebSocket implements SocketLike {
     if (this.openTimer !== null) clearTimeout(this.openTimer);
     if (this.tickTimer !== null) clearInterval(this.tickTimer);
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
+    this.clearBlockTimers();
     this.openTimer = null;
     this.tickTimer = null;
     this.pingTimer = null;

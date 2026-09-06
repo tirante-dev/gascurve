@@ -82,6 +82,43 @@ describe("mock world", () => {
     expect(world.recentBlocks(0)).toEqual([]);
   });
 
+  it("builds a per-block snapshot that agrees with the live one for the last block and shows the sawtooth before it", () => {
+    const world = findMockWorld("robinhood");
+    if (!world) throw new Error("no world");
+    const now = mockNow();
+    const blocks = world.recentBlocks(30);
+    const last = blocks[blocks.length - 1];
+    const live = world.snapshot(now);
+    const perBlock = world.snapshotForBlock(last, now * 1000);
+    expect(perBlock).toEqual({ ...live, sampledAt: new Date(now * 1000).toISOString() });
+    // Earlier blocks in the same second carry a smaller short-window backlog and their own fee.
+    const sameSecond = blocks.filter((b) => b.ts === last.ts);
+    expect(sameSecond.length).toBeGreaterThan(5);
+    let prev = 0;
+    for (const b of sameSecond) {
+      const s = world.snapshotForBlock(b, b.ts * 1000 + 100);
+      expect(s.block.number).toBe(b.number);
+      expect(s.baseFee).toBe(b.baseFee);
+      expect(s.exponentBips).toBe(b.exponentBips);
+      expect(s.constraints[0].backlog).toBe(b.backlogs[0]);
+      expect(s.constraints[0].backlog).toBeGreaterThan(prev);
+      prev = s.constraints[0].backlog;
+      expect(s.replayErrorBips).toBe(Math.round((Number(BigInt(b.baseFee) - BigInt(b.predictedBaseFee)) * 10_000) / Number(b.baseFee)));
+      expect(s.gasPerSecond.s10).toBeLessThanOrEqual(live.gasPerSecond.s10 + 1);
+      expect(s.sampledAt).toBe(new Date(b.ts * 1000 + 100).toISOString());
+    }
+    // The first block of the second drained a whole second of target: its backlog is below the previous second's last.
+    const previousSecond = blocks.filter((b) => b.ts === last.ts - 1);
+    expect(sameSecond[0].backlogs[0]).toBeLessThan(previousSecond[previousSecond.length - 1].backlogs[0]);
+    // The legacy world reports its backlog per block too.
+    const testnet = findMockWorld("robinhood-testnet");
+    if (!testnet) throw new Error("no world");
+    const tb = testnet.recentBlocks(1)[0];
+    const ts = testnet.snapshotForBlock(tb, now * 1000);
+    expect(ts.legacy?.backlog).toBe(tb.backlogs[0]);
+    expect(ts.constraints).toEqual([]);
+  });
+
   it("advances with per-second ticks for short gaps and catches up coarsely for long ones", () => {
     const world = findMockWorld("robinhood");
     if (!world) throw new Error("no world");
@@ -361,23 +398,60 @@ describe("MockWebSocket", () => {
     expect(hello.network.name).toBe("robinhood");
     expect(hello.recentBlocks).toHaveLength(120);
 
+    // The first second's blocks arrive one at a time, each with its own tick, spread over the following second.
     vi.advanceTimersByTime(1000);
     expect(messages.map((m) => m.type)).toEqual(["hello", "tick", "blocks"]);
-    const blocks = messages[2].data as BlockPoint[];
-    expect(blocks[0].number).toBe(hello.recentBlocks[hello.recentBlocks.length - 1].number + 1);
-    expect(blocks.length).toBeGreaterThanOrEqual(10);
-
-    // Fake timers move the clock, so every second brings another batch of blocks.
-    vi.advanceTimersByTime(1000);
-    expect(messages.map((m) => m.type)).toEqual(["hello", "tick", "blocks", "tick", "blocks"]);
+    const firstBlocks = messages[2].data as BlockPoint[];
+    expect(firstBlocks).toHaveLength(1);
+    expect(firstBlocks[0].number).toBe(hello.recentBlocks[hello.recentBlocks.length - 1].number + 1);
+    expect((messages[1].data as LiveSnapshot).block.number).toBe(firstBlocks[0].number);
+    vi.advanceTimersByTime(999);
+    const pairs = (messages.length - 1) / 2;
+    expect(pairs).toBeGreaterThanOrEqual(10);
+    for (let i = 1; i < messages.length; i += 2) {
+      expect(messages[i].type).toBe("tick");
+      expect(messages[i + 1].type).toBe("blocks");
+      const tick = messages[i].data as LiveSnapshot;
+      const blocks = messages[i + 1].data as BlockPoint[];
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0].number).toBe(firstBlocks[0].number + (i - 1) / 2);
+      expect(tick.block.number).toBe(blocks[0].number);
+      expect(tick.constraints[0].backlog).toBe(blocks[0].backlogs[0]);
+      if (i > 1) {
+        const prev = messages[i - 2].data as LiveSnapshot;
+        expect(Date.parse(tick.sampledAt)).toBeGreaterThan(Date.parse(prev.sampledAt));
+        // Blocks in one second share a timestamp and only add gas; the drain lands at the boundary.
+        if (tick.block.ts === prev.block.ts) expect(tick.constraints[0].backlog).toBeGreaterThan(prev.constraints[0].backlog);
+        else expect(tick.constraints[0].backlog).toBeLessThan(prev.constraints[0].backlog);
+      }
+    }
+    // The second second: its first block goes out at once, the sawtooth resets at the boundary.
+    vi.advanceTimersByTime(1);
+    const boundary = messages[messages.length - 2].data as LiveSnapshot;
+    const lastOfFirst = messages[messages.length - 4].data as LiveSnapshot;
+    expect(boundary.block.ts).toBe(lastOfFirst.block.ts + 1);
+    expect(boundary.constraints[0].backlog).toBeLessThan(lastOfFirst.constraints[0].backlog);
+    // A second that brings no new block (the clock did not move on) still gets a heartbeat tick.
+    vi.advanceTimersByTime(999);
+    const beforeHeartbeat = messages.length;
+    vi.setSystemTime(Date.now() - 1000);
+    vi.advanceTimersByTime(1);
+    expect(messages.length).toBe(beforeHeartbeat + 1);
+    expect(messages[messages.length - 1].type).toBe("tick");
+    vi.setSystemTime(Date.now() + 1000);
+    // A pending block timer of the old network never leaks past a subscribe.
+    const seen = messages.length;
 
     socket.send(JSON.stringify({ type: "pong" }));
     socket.send("not json");
     socket.send("42");
     socket.send(JSON.stringify({ type: "subscribe", network: "arbitrum-one" }));
+    expect(messages).toHaveLength(seen + 1);
     const second = messages[messages.length - 1];
     expect(second.type).toBe("hello");
     expect((second.data as { network: Network }).network.name).toBe("arbitrum-one");
+    vi.advanceTimersByTime(500);
+    for (const m of messages.slice(seen + 1)) expect((m.data as LiveSnapshot | BlockPoint[]) instanceof Array || (m.data as LiveSnapshot).chainId === 42161).toBe(true);
 
     vi.advanceTimersByTime(29_000);
     expect(messages.some((m) => m.type === "ping")).toBe(true);

@@ -1,5 +1,5 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import type { BatchSeries, L1Series, LiveSnapshot, Series, SeriesPoint } from "@/types";
 import { buildChartPoints, segmentsFor } from "@/utils/chart";
 
@@ -14,7 +14,8 @@ vi.mock("@/lib/api/batches", () => ({ getBatches: (...args: unknown[]) => getBat
 vi.mock("@/lib/api/l1", () => ({ getL1: (...args: unknown[]) => getL1Mock(...args) }));
 
 import { ChartTooltip } from "./ChartTooltip";
-import { cardValues, ConstraintCards } from "./ConstraintCards";
+import { targetValues } from "@/lib/smoothing";
+import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
 import { FeeFlows, feeTotals } from "./FeeFlows";
 import { L1Section } from "./L1Section";
@@ -213,48 +214,25 @@ describe("FeeFlows", () => {
 });
 
 describe("ConstraintCards", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
-
-  it("recomputes x, shares and colours from the animated backlogs and labels them as a projection", () => {
-    const frames: FrameRequestCallback[] = [];
-    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-      frames.push(cb);
-      return frames.length;
-    });
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
-    vi.spyOn(performance, "now").mockImplementation(() => 1000);
-    render(<ConstraintCards snapshot={snapshot} />);
-    // At the sample: 333 bips for constraint 1, 1.0% of x.
-    expect(screen.getByText("0.0333")).toBeInTheDocument();
-    expect(screen.getByText("1.0% of x")).toBeInTheDocument();
-    expect(screen.queryByText(/projected/)).toBeNull();
+  it("recomputes x, shares and colours from the eased backlogs", () => {
+    // A 30M backlog over 60M × 120 s: 41 bips at the sample, 1.3% of x.
+    const long = { ...snapshot, constraints: [{ ...snapshot.constraints[0], window: 120 }, snapshot.constraints[1]] };
+    const { rerender } = render(<ConstraintCardsView snapshot={long} values={null} blocks={[]} />);
+    expect(screen.getByText("0.0041")).toBeInTheDocument();
+    expect(screen.getByText("0.1%").parentElement).toHaveTextContent("0.1% of x");
+    expect(screen.queryByText(/avg 2 s/)).toBeNull();
     // One second later the 30M backlog has drained at 60M/s: x1 is 0, share 0, and the card says so.
-    act(() => frames[0](2000));
+    rerender(<ConstraintCardsView snapshot={long} values={targetValues(long, [], 1)} blocks={[]} />);
     expect(screen.getByText("0.0000")).toBeInTheDocument();
     expect(screen.getByText("no contribution")).toBeInTheDocument();
-    expect(screen.getByText("100.0% of x")).toBeInTheDocument();
-    expect(screen.getAllByText(/\(projected\)/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Between samples the backlogs are a projection/)).toBeInTheDocument();
-  });
-
-  it("derives card values through integer bips", () => {
-    const values = cardValues(snapshot.constraints, [0, 11_194_391_810_886]);
-    expect(values.bips).toEqual([0, 32_391]);
-    expect(values.shares).toEqual([0, 1]);
-    expect(values.projected).toBe(true);
-    const same = cardValues(snapshot.constraints, [30_000_000, 11_194_391_810_886]);
-    expect(same.bips).toEqual([333, 32_391]);
-    expect(same.projected).toBe(false);
-    expect(cardValues(snapshot.constraints, []).projected).toBe(false);
+    expect(screen.getByText("100.0%").parentElement).toHaveTextContent("100.0% of x");
+    expect(screen.getByText(/Long windows keep draining at their target rate/)).toBeInTheDocument();
   });
 
   it("draws a bounded number of gauge marks however large the backlog", () => {
     // Target 1, window 1, backlog a billion: a billion windows of target.
     const huge = { ...snapshot, constraints: [{ target: 1, window: 1, backlog: 1_000_000_000, exponentBips: 0 }] };
-    render(<ConstraintCards snapshot={huge} />);
+    render(<ConstraintCardsView snapshot={huge} values={null} blocks={[]} />);
     const meter = screen.getByRole("meter");
     expect(meter.querySelectorAll("span").length).toBeLessThanOrEqual(24);
     expect(meter).toHaveAttribute("aria-valuenow", "100");
@@ -263,7 +241,7 @@ describe("ConstraintCards", () => {
   });
 
   it("defines the legacy gauge for zero tolerance and for a zero denominator", () => {
-    const { rerender } = render(<ConstraintCards snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 0, backlog: 1_000_000_000 } }} />);
+    const { rerender } = render(<ConstraintCardsView snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 0, backlog: 1_000_000_000 } }} values={null} blocks={[]} />);
     expect(screen.getByText("no free gas: every unit prices")).toBeInTheDocument();
     expect(screen.getByText("x = 1 at 714M")).toBeInTheDocument();
     expect(screen.getByText("1.43G")).toBeInTheDocument();
@@ -272,27 +250,21 @@ describe("ConstraintCards", () => {
     expect(meter.querySelectorAll("span")).toHaveLength(1);
     // (1B * 10000) / 714M = 14005 bips.
     expect(screen.getByText(/x = 1.4005/)).toBeInTheDocument();
-    rerender(<ConstraintCards snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 0, tolerance: 0, backlog: 5 } }} />);
+    rerender(<ConstraintCardsView snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 0, tolerance: 0, backlog: 5 } }} values={null} blocks={[]} />);
     expect(screen.getByText("no scale (zero inertia or speed limit)")).toBeInTheDocument();
     expect(screen.getByText("n/a")).toBeInTheDocument();
     expect(screen.getByRole("meter")).toHaveAttribute("aria-valuenow", "0");
     expect(screen.getByText(/x = 0.0000/)).toBeInTheDocument();
   });
 
-  it("recomputes the legacy exponent from the projected backlog", () => {
-    const frames: FrameRequestCallback[] = [];
-    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-      frames.push(cb);
-      return frames.length;
-    });
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
-    vi.spyOn(performance, "now").mockImplementation(() => 1000);
-    render(<ConstraintCards snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 160_000_000 } }} />);
+  it("recomputes the legacy exponent from the drained backlog", () => {
+    const legacy: LiveSnapshot = { ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 160_000_000 } };
+    const { rerender } = render(<ConstraintCardsView snapshot={legacy} values={null} blocks={[]} />);
     expect(screen.getByText(/x = 0.1260/)).toBeInTheDocument();
-    act(() => frames[0](11_000));
+    rerender(<ConstraintCardsView snapshot={legacy} values={targetValues(legacy, [], 10)} blocks={[]} />);
     // 70M drained: (90M - 70M) * 10000 / 714M = 280 bips.
     expect(screen.getByText(/x = 0.0280/)).toBeInTheDocument();
-    expect(screen.getByText("Backlog (projected)")).toBeInTheDocument();
+    expect(screen.getByText("90.0M")).toBeInTheDocument();
   });
 });
 

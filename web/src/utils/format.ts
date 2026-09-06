@@ -62,25 +62,112 @@ export function formatGwei(wei: string | bigint): string {
   return formatSignificant(gwei, 4);
 }
 
+const GAS_UNITS: [number, string][] = [
+  [1e12, "T"],
+  [1e9, "G"],
+  [1e6, "M"],
+];
+
+/**
+ * A gas amount scaled to its unit with the decimals of its band (two below
+ * 10, one below 100, none above), before any zero stripping. Rounding that
+ * carries the value into the next band or unit ("999.6M", "9.996M") is
+ * re-banded so the result always has the band's character count.
+ */
+function gasParts(abs: number): { text: string; suffix: string } {
+  if (abs < 1_000_000) return { text: withThousands(Math.round(abs).toString()), suffix: "" };
+  for (const [scale, suffix] of GAS_UNITS) {
+    if (abs < scale) continue;
+    const scaled = abs / scale;
+    const text = scaled.toFixed(gasDecimals(scaled));
+    const rounded = Number(text);
+    if (rounded >= 1000 && scale < 1e12) return gasParts(rounded * scale);
+    return { text: gasDecimals(rounded) === gasDecimals(scaled) ? text : rounded.toFixed(gasDecimals(rounded)), suffix };
+  }
+  return { text: withThousands(Math.round(abs).toString()), suffix: "" };
+}
+
+function gasDecimals(scaled: number): number {
+  return scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+}
+
 /** Gas amounts: thousands separators below 1M, then M, G and T suffixes. */
 export function formatGas(gas: number): string {
   if (!Number.isFinite(gas)) return "n/a";
-  const abs = Math.abs(gas);
   const sign = gas < 0 ? "-" : "";
-  if (abs < 1_000_000) return sign + withThousands(Math.round(abs).toString());
-  const units: [number, string][] = [
-    [1e12, "T"],
-    [1e9, "G"],
-    [1e6, "M"],
-  ];
-  for (const [scale, suffix] of units) {
-    if (abs >= scale) {
-      const scaled = abs / scale;
-      const decimals = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
-      return sign + stripTrailingZeros(scaled.toFixed(decimals)) + suffix;
-    }
-  }
-  return sign + withThousands(Math.round(abs).toString());
+  const { text, suffix } = gasParts(Math.abs(gas));
+  return sign + (suffix === "" ? text : stripTrailingZeros(text)) + suffix;
+}
+
+/**
+ * formatGas without zero stripping ("60.0M", not "60M"), so an animated
+ * backlog keeps one character count per band and never shifts its neighbours.
+ */
+export function formatGasFixed(gas: number): string {
+  if (!Number.isFinite(gas)) return "n/a";
+  const sign = gas < 0 ? "-" : "";
+  const { text, suffix } = gasParts(Math.abs(gas));
+  return sign + text + suffix;
+}
+
+/**
+ * A number with the decimals its magnitude band prescribes. The band is
+ * chosen after rounding ("9.9996" rounds to "10.000" in the 1 to 10 band, so
+ * it takes the 10 to 100 band's "10.00" instead), so every value in a band has
+ * the same character count. Thousands separators apply above 1000.
+ */
+function fixedByBand(value: number, decimals: (abs: number) => number): string {
+  if (!Number.isFinite(value)) return "n/a";
+  const abs = Math.abs(value);
+  let d = decimals(abs);
+  const rounded = Number(abs.toFixed(d));
+  if (decimals(rounded) !== d) d = decimals(rounded);
+  const text = abs.toFixed(d);
+  const dot = text.indexOf(".");
+  const int = dot < 0 ? text : text.slice(0, dot);
+  const sign = value < 0 && rounded !== 0 ? "-" : "";
+  return sign + withThousands(int) + (dot < 0 ? "" : text.slice(dot));
+}
+
+/** Reserved widths in ch for the fixed formatters: the widest band their live values move in. */
+export const FIXED_WIDTH_CH = { gwei: 6, multiplier: 5, gasPerSecond: 4, eth: 10, gas: 6, x: 6 } as const;
+
+/** Decimals of a gwei figure by band: below 1 four, 1 to 10 three, 10 to 100 two, otherwise one. */
+function gweiDecimals(gwei: number): number {
+  if (gwei < 1) return 4;
+  if (gwei < 10) return 3;
+  if (gwei < 100) return 2;
+  return 1;
+}
+
+/**
+ * A gwei figure (already scaled, as the tween holds it) at a fixed width per
+ * band: "0.3997", "5.310", "12.34", "123.4". For tooltips and tables use
+ * formatGwei, which trims.
+ */
+export function formatGweiFixed(gwei: number): string {
+  return fixedByBand(gwei, gweiDecimals);
+}
+
+/** A multiplier over the floor with two decimals always: "19.99". The × sits outside. */
+export function formatMultiplierFixed(multiplier: number): string {
+  return fixedByBand(multiplier, () => 2);
+}
+
+/** Gas per second in millions with one decimal always: "44.1" for 44,100,000. The "M" sits outside. */
+export function formatGasPerSecondFixed(gasPerSecond: number): string {
+  return fixedByBand(gasPerSecond / 1e6, () => 1);
+}
+
+/** Decimals for three significant digits at a fixed count per decade: 8.39e-6 → 8, 0.0599 → 4, 1.5 → 2. */
+function ethDecimals(eth: number): number {
+  if (eth === 0) return 2;
+  return Math.max(0, Math.min(18, 2 - Math.floor(Math.log10(eth))));
+}
+
+/** An ETH amount (as a float, the tween's unit) with a fixed decimal count per decade: "0.00000839". The unit sits outside. */
+export function formatEthFixed(eth: number): string {
+  return fixedByBand(eth, ethDecimals);
 }
 
 /** Plain integer with thousands separators. */

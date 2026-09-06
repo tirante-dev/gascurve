@@ -71,7 +71,6 @@ import { useApi } from "./useApi";
 import { refetchIntervalFor, useSeries } from "./useSeries";
 import { DEFAULT_NETWORK, isValidNetworkName, NETWORK_STORAGE_KEY, readStoredNetwork, storeNetwork, useNetwork } from "./useNetwork";
 import { useDocumentVisible } from "./useDocumentVisible";
-import { useAnimatedBacklogs } from "./useAnimatedBacklogs";
 
 function block(number: number): BlockPoint {
   return { number, ts: 1, gasUsed: 1, baseFee: "1", predictedBaseFee: "1", backlogs: [], constraintBips: [], exponentBips: 0, minBaseFee: "1", anchored: false };
@@ -539,50 +538,5 @@ describe("useDocumentVisible", () => {
     expect(result.current).toBe(false);
     act(() => setHidden(false));
     expect(result.current).toBe(true);
-  });
-});
-
-describe("useAnimatedBacklogs", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("drains between ticks with requestAnimationFrame and snaps on a new tick", () => {
-    const frames: FrameRequestCallback[] = [];
-    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-      frames.push(cb);
-      return frames.length;
-    });
-    const cancel = vi.fn();
-    vi.stubGlobal("cancelAnimationFrame", cancel);
-    let clock = 1000;
-    vi.spyOn(performance, "now").mockImplementation(() => clock);
-    const constraints = [
-      { target: 60_000_000, window: 15, backlog: 90_000_000, exponentBips: 0 },
-      { target: 40_000_000, window: 86_400, backlog: 1_000_000_000, exponentBips: 0 },
-    ];
-    const { result, rerender } = renderHook(({ c, key }) => useAnimatedBacklogs(c, key), {
-      initialProps: { c: constraints, key: "t1" },
-    });
-    expect(result.current).toEqual([90_000_000, 1_000_000_000]);
-    expect(frames).toHaveLength(1);
-    clock = 1500;
-    act(() => frames[0](clock));
-    expect(result.current).toEqual([60_000_000, 980_000_000]);
-    act(() => frames[1](3000));
-    expect(result.current).toEqual([0, 920_000_000]);
-    const next = [{ ...constraints[0], backlog: 12 }, { ...constraints[1], backlog: 34 }];
-    rerender({ c: next, key: "t2" });
-    expect(cancel).toHaveBeenCalled();
-    expect(result.current).toEqual([12, 34]);
-  });
-
-  it("only snaps when reduced motion is preferred", () => {
-    vi.stubGlobal("matchMedia", () => ({ matches: true }));
-    const raf = vi.fn();
-    vi.stubGlobal("requestAnimationFrame", raf);
-    const { result } = renderHook(() => useAnimatedBacklogs([{ target: 1, window: 1, backlog: 5, exponentBips: 0 }], "k"));
-    expect(result.current).toEqual([5]);
-    expect(raf).not.toHaveBeenCalled();
   });
 });

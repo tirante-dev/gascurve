@@ -1,9 +1,11 @@
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { LiveSnapshot, Network, OwnerAction } from "@/types";
-import { ConstraintCards } from "./ConstraintCards";
-import { COLLECTOR_LAG_S, FeeSplitBar, LiveStrip, sampleAge } from "./LiveStrip";
+import type { BlockPoint, LiveSnapshot, Network, OwnerAction } from "@/types";
+import { createFrameStore, targetValues } from "@/lib/smoothing";
+import { ConstraintCards, ConstraintCardsView, Sawtooth, sawtoothPoints } from "./ConstraintCards";
+import { DataFooter } from "./DataFooter";
+import { COLLECTOR_LAG_S, FeeSplitBar, LiveStrip, LiveStripView, sampleAge } from "./LiveStrip";
 import { HistoryTabs } from "./HistoryTabs";
 import { NetworkSwitcher } from "./NetworkSwitcher";
 import { OwnerActionTimeline } from "./OwnerActionTimeline";
@@ -34,20 +36,60 @@ const snapshot: LiveSnapshot = {
   replayErrorBips: 2,
 };
 
+/** Ten blocks a second for `seconds` seconds ending at `lastTs`, the short window climbing 4M a block and dropping at each boundary. */
+function sawtoothBlocks(seconds: number, lastTs: number): BlockPoint[] {
+  const out: BlockPoint[] = [];
+  let n = 1;
+  for (let ts = lastTs - seconds + 1; ts <= lastTs; ts++) {
+    for (let k = 0; k < 10; k++) {
+      out.push({ number: n++, ts, gasUsed: 4_000_000, baseFee: "399726000", predictedBaseFee: "399726000", backlogs: [(k + 1) * 4_000_000, 11_194_391_810_886], constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: k === 0 });
+    }
+  }
+  return out;
+}
+
 describe("LiveStrip", () => {
-  it("shows the fee, multiplier, costs and fee split", () => {
-    render(<LiveStrip snapshot={snapshot} recentBlocks={[]} status="open" />);
-    expect(screen.getByText("0.3997")).toBeInTheDocument();
-    expect(screen.getByText("19.99×")).toBeInTheDocument();
+  it("shows the fee, multiplier, costs and fee split at fixed widths", () => {
+    render(<LiveStripView snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    const hero = screen.getByText("0.3997");
+    expect(hero).toHaveClass("tabular-nums");
+    expect(hero).toHaveStyle({ minWidth: "6ch" });
+    expect(hero.nextSibling).toHaveTextContent("gwei");
+    expect(screen.getByText("19.99")).toHaveStyle({ minWidth: "5ch" });
     expect(screen.getByText("55,812,345")).toBeInTheDocument();
     expect(screen.getByText("4.02M")).toBeInTheDocument();
-    expect(screen.getByText("0.00000839")).toBeInTheDocument();
-    expect(screen.getByText("0.0000599")).toBeInTheDocument();
+    expect(screen.getByText("38.0")).toBeInTheDocument();
+    expect(screen.getByText("40.5")).toBeInTheDocument();
+    expect(screen.getByText("3.2425")).toBeInTheDocument();
+    expect(screen.getByText("0.00000839")).toHaveStyle({ minWidth: "10ch" });
+    expect(screen.getByText("0.0000600")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("live");
     expect(screen.getByRole("img", { name: /Floor 5.0% to the infra account/ })).toBeInTheDocument();
   });
+  it("renders the eased figures rather than the sample when a frame has them", () => {
+    const values = { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.5, multiplier: 25, gasPerSecond10: 41_000_000, transferEth: 1.05e-5, exponent: 3.3 };
+    render(<LiveStripView snapshot={snapshot} values={values} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(screen.getByText("0.5000")).toBeInTheDocument();
+    expect(screen.getByText("25.00")).toBeInTheDocument();
+    expect(screen.getByText("41.0")).toBeInTheDocument();
+    expect(screen.getByText("0.0000105")).toBeInTheDocument();
+    expect(screen.getByText("3.3000")).toBeInTheDocument();
+  });
+  it("subscribes to the frame store", () => {
+    const frame = createFrameStore({ nowMs: Date.parse(snapshot.sampledAt) });
+    render(<LiveStrip live={{ display: snapshot, frame }} status="open" />);
+    expect(screen.getByText("0.3997")).toBeInTheDocument();
+    act(() => frame.set({ blocks: [], values: { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.75 }, nowMs: Date.parse(snapshot.sampledAt) }));
+    expect(screen.getByText("0.7500")).toBeInTheDocument();
+    expect(screen.getByText("last 0 blocks · floor 0.02 gwei")).toBeInTheDocument();
+  });
+  it("draws the block ring", () => {
+    render(<LiveStripView snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(screen.getByRole("img", { name: /Base fee over the last 20 blocks/ })).toBeInTheDocument();
+    expect(screen.getByText("last 20 blocks · floor 0.02 gwei")).toBeInTheDocument();
+  });
   it("waits for the first sample", () => {
-    render(<LiveStrip snapshot={null} recentBlocks={[]} status="connecting" />);
+    render(<LiveStrip live={{ display: null, frame: createFrameStore() }} status="connecting" />);
     expect(screen.getByText("Waiting for the first sample.")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("connecting");
   });
@@ -56,27 +98,18 @@ describe("LiveStrip", () => {
     expect(screen.getByText(/0.02 gwei · 100%/)).toBeInTheDocument();
   });
   it("shows the chain's cadence while the sample is fresh and a collector lag warning once it is stale", () => {
-    vi.useFakeTimers();
-    try {
-      // The block closed at 07:19:59Z and was sampled at 07:20:00Z; three seconds later both are fresh.
-      vi.setSystemTime(Date.parse("2026-09-06T07:20:03Z"));
-      render(<LiveStrip snapshot={snapshot} recentBlocks={[]} status="open" />);
-      expect(screen.getByText("Since last block")).toBeInTheDocument();
-      expect(screen.getByText("4.0")).toBeInTheDocument();
-      expect(screen.queryByText(/collector lagging/)).toBeNull();
-      // Twelve seconds after the sample the number would read as a chain stall; it is the collector that is behind.
-      vi.setSystemTime(Date.parse("2026-09-06T07:20:12.4Z"));
-      act(() => {
-        vi.advanceTimersByTime(250);
-      });
-      const pill = screen.getByText("collector lagging 12 s");
-      expect(pill).toHaveClass("text-warning");
-      expect(pill).toHaveAttribute("title", expect.stringContaining("12 s old"));
-      expect(screen.getByText("Since last block")).toBeInTheDocument();
-      expect(screen.queryByText("13.4")).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+    // The block closed at 07:19:59Z and was sampled at 07:20:00Z; three seconds later both are fresh.
+    const { rerender } = render(<LiveStripView snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse("2026-09-06T07:20:03Z")} status="open" />);
+    expect(screen.getByText("Since last block")).toBeInTheDocument();
+    expect(screen.getByText("4.0")).toBeInTheDocument();
+    expect(screen.queryByText(/collector lagging/)).toBeNull();
+    // Twelve seconds after the sample the number would read as a chain stall; it is the collector that is behind.
+    rerender(<LiveStripView snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse("2026-09-06T07:20:12.4Z")} status="open" />);
+    const pill = screen.getByText("collector lagging 12 s");
+    expect(pill).toHaveClass("text-warning");
+    expect(pill).toHaveAttribute("title", expect.stringContaining("12 s old"));
+    expect(screen.getByText("Since last block")).toBeInTheDocument();
+    expect(screen.queryByText("13.4")).toBeNull();
   });
   it("measures the sample age from the wall clock", () => {
     expect(COLLECTOR_LAG_S).toBe(5);
@@ -87,24 +120,76 @@ describe("LiveStrip", () => {
 });
 
 describe("ConstraintCards", () => {
-  it("renders one card per constraint with its share of x", () => {
-    render(<ConstraintCards snapshot={snapshot} />);
+  it("renders one card per constraint with its share of x, the sample standing in before any frame", () => {
+    render(<ConstraintCardsView snapshot={snapshot} values={null} blocks={[]} />);
     expect(screen.getByText("Constraint 1")).toBeInTheDocument();
     expect(screen.getByText("Constraint 2")).toBeInTheDocument();
-    expect(screen.getByText("99.9% of x")).toBeInTheDocument();
-    expect(screen.getByText("0.1% of x")).toBeInTheDocument();
+    expect(screen.getByText("99.9%").parentElement).toHaveTextContent("99.9% of x");
+    expect(screen.getByText("0.1%").parentElement).toHaveTextContent("0.1% of x");
     expect(screen.getAllByRole("meter")).toHaveLength(2);
     expect(screen.getByText("77.7 h of target")).toBeInTheDocument();
+    // The 15 s window is short: averaged, with its note, but no sparkline until blocks arrive.
+    expect(screen.getByText("Backlog (avg 2 s)")).toBeInTheDocument();
+    expect(screen.getAllByText("Backlog")).toHaveLength(1);
+    expect(screen.getByText("drains 60M gas at each second boundary; bursts show as sawteeth")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Backlog per block/ })).toBeNull();
+    expect(screen.getByText(/Windows of 1 min or less are shown as a 2 s average/)).toBeInTheDocument();
+    expect(screen.getByText("3.11M")).toBeInTheDocument();
+    expect(screen.getByText("11.2T")).toBeInTheDocument();
+  });
+  it("draws the raw sawtooth of a short window and shows the eased figures", () => {
+    const blocks = sawtoothBlocks(20, snapshot.block.ts);
+    const values = { ...targetValues(snapshot, blocks, 0), backlogs: [22_000_000, 11_100_000_000_000], bips: [244.4, 32_118.5] };
+    render(<ConstraintCardsView snapshot={snapshot} values={values} blocks={blocks} />);
+    const spark = screen.getByRole("img", { name: "Backlog per block over the last 15 s, 150 blocks, peak 40M gas" });
+    expect(spark.querySelector("polyline")?.getAttribute("points")).toBe(sawtoothPoints(values.backlogs.length > 0 ? blocks.slice(-150).map((b) => ({ number: b.number, ts: b.ts, backlog: b.backlogs[0] })) : []));
+    expect(screen.getByText("22.0M")).toBeInTheDocument();
+    expect(screen.getByText("11.1T")).toBeInTheDocument();
+    expect(screen.getByText("0.0244")).toBeInTheDocument();
+    expect(screen.getByText(/244 bips/)).toBeInTheDocument();
+    expect(screen.getByText(/32,119 bips/)).toBeInTheDocument();
+  });
+  it("subscribes to the frame store and says so when nothing contributes", () => {
+    const frame = createFrameStore();
+    render(<ConstraintCards live={{ display: snapshot, frame }} />);
+    expect(screen.getByText("3.11M")).toBeInTheDocument();
+    act(() => frame.set({ blocks: [], values: { ...targetValues(snapshot, [], 0), backlogs: [0, 0], bips: [0, 0], shares: [0, 0] }, nowMs: 0 }));
+    expect(screen.getAllByText("no contribution")).toHaveLength(2);
+    expect(screen.getAllByText("0.0000")).toHaveLength(2);
   });
   it("renders the legacy card for legacy networks", () => {
-    render(<ConstraintCards snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 90_000_000 } }} />);
+    render(<ConstraintCardsView snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 90_000_000 } }} values={null} blocks={[]} />);
     expect(screen.getByText(/Legacy pricer/)).toBeInTheDocument();
     expect(screen.getByText("70M gas free")).toBeInTheDocument();
     expect(screen.getByText(/x = 0.0280/)).toBeInTheDocument();
+    expect(screen.getByText("90.0M")).toBeInTheDocument();
+    expect(screen.queryByText(/2 s average/)).toBeNull();
   });
   it("handles a missing snapshot", () => {
-    render(<ConstraintCards snapshot={null} />);
+    render(<ConstraintCardsView snapshot={null} values={null} blocks={[]} />);
     expect(screen.getByText("Waiting for the first sample.")).toBeInTheDocument();
+  });
+  it("draws the sawtooth as a polyline scaled to its peak, or a blank with fewer than two samples", () => {
+    expect(sawtoothPoints([{ number: 1, ts: 1, backlog: 0 }, { number: 2, ts: 1, backlog: 50 }, { number: 3, ts: 1, backlog: 100 }])).toBe("0.0,31.0 100.0,16.0 200.0,1.0");
+    expect(sawtoothPoints([{ number: 1, ts: 1, backlog: 0 }])).toBe("0.0,31.0");
+    const { container, rerender } = render(<Sawtooth samples={[{ number: 1, ts: 1, backlog: 5 }]} color="red" />);
+    expect(container.querySelector("svg")).toBeNull();
+    rerender(<Sawtooth samples={[{ number: 1, ts: 1, backlog: 5 }, { number: 2, ts: 1, backlog: 10 }]} color="red" />);
+    expect(container.querySelector("polyline")).toHaveAttribute("stroke", "red");
+  });
+});
+
+describe("DataFooter", () => {
+  it("credits tirante.dev with an external link after the version line", () => {
+    render(<DataFooter snapshot={null} series={null} networkInfo={null} status="open" apiStatus={{ version: "1.2.3", networks: [] }} now={0} />);
+    const link = screen.getByRole("link", { name: "powered by tirante.dev" });
+    expect(link).toHaveAttribute("href", "https://tirante.dev");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("rel")).toContain("noopener");
+    expect(link.parentElement).toHaveClass("text-label");
+    const versions = screen.getByText("versions");
+    expect(versions.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText(/api 1.2.3/)).toBeInTheDocument();
   });
 });
 

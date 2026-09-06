@@ -53,6 +53,11 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
               {apiStatus ? `, api ${apiStatus.version}` : ""}
             </dd>
           </dl>
+          <p className="mt-3 text-[11px] font-medium uppercase tracking-[0.1em] text-label">
+            <a href="https://tirante.dev" target="_blank" rel="noopener noreferrer" className="hover:text-accent-2">
+              powered by tirante.dev
+            </a>
+          </p>
         </div>
       </div>
       <p className="mt-6 text-ink-3">

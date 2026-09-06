@@ -528,35 +528,73 @@ export class MockWorld {
     };
   }
 
+  /** The snapshot the collector would publish now: the state after the last block of the ring. */
   snapshot(now: number): LiveSnapshot {
     const last = this.blocks[this.blocks.length - 1];
-    const fee = this.lastFee;
-    const minFee = this.minFee;
+    return this.composeSnapshot({
+      block: last,
+      fee: this.lastFee,
+      backlogs: this.currentBacklogs(),
+      exponent: this.lastExponent,
+      replayError: this.lastReplayError,
+      sampledAt: unixToIso(now),
+      now,
+    });
+  }
+
+  /**
+   * The snapshot the collector publishes right after `block`, when it samples
+   * every block: the block's own fee, its end-of-block backlogs and the
+   * exponent that priced it. Within one wall-clock second only the first
+   * block drains the backlogs, so consecutive snapshots show the short
+   * window's sawtooth. `sampledAtMs` keeps millisecond precision.
+   */
+  snapshotForBlock(block: BlockPoint, sampledAtMs: number): LiveSnapshot {
+    const fee = BigInt(block.baseFee);
+    const predicted = BigInt(block.predictedBaseFee);
+    const replayError = fee > 0n ? Math.round((Number(fee - predicted) * 10_000) / Number(fee)) : 0;
+    return this.composeSnapshot({
+      block,
+      fee,
+      backlogs: block.backlogs,
+      exponent: block.exponentBips,
+      replayError: Math.abs(replayError),
+      sampledAt: new Date(sampledAtMs).toISOString(),
+      now: Math.floor(sampledAtMs / 1000),
+    });
+  }
+
+  private composeSnapshot(args: { block: BlockPoint; fee: bigint; backlogs: number[]; exponent: number; replayError: number; sampledAt: string; now: number }): LiveSnapshot {
+    const { block, fee, backlogs, exponent, replayError, sampledAt, now } = args;
+    const minFee = BigInt(block.minBaseFee);
     const congestion = fee > minFee ? fee - minFee : 0n;
     const l1 = this.l1State(now);
     const constraints = this.legacy
       ? []
-      : this.constraints.map((c) => ({
-          target: Number(c.target),
-          window: Number(c.window),
-          backlog: Number(c.backlog),
-          exponentBips: Number(constraintExponentBips(c)),
-        }));
+      : this.constraints.map((c, i) => {
+          const backlog = BigInt(backlogs[i] ?? 0);
+          return {
+            target: Number(c.target),
+            window: Number(c.window),
+            backlog: Number(backlog),
+            exponentBips: Number(constraintExponentBips({ target: c.target, window: c.window, backlog })),
+          };
+        });
     const accounts = this.def.accounts;
     return {
       chainId: this.def.chainId,
-      sampledAt: unixToIso(now),
+      sampledAt,
       block: {
-        number: last.number,
-        ts: last.ts,
-        gasUsed: last.gasUsed,
-        baseFee: last.baseFee,
-        txCount: 1 + Math.max(0, Math.round(last.gasUsed / 45_000)),
+        number: block.number,
+        ts: block.ts,
+        gasUsed: block.gasUsed,
+        baseFee: block.baseFee,
+        txCount: 1 + Math.max(0, Math.round(block.gasUsed / 45_000)),
       },
       baseFee: fee.toString(),
       minBaseFee: minFee.toString(),
       multiplierBips: Number((fee * ONE_IN_BIPS) / minFee),
-      exponentBips: this.lastExponent,
+      exponentBips: exponent,
       model: this.def.model,
       constraints,
       ...(this.legacy
@@ -565,7 +603,7 @@ export class MockWorld {
               speedLimit: Number(this.legacy.speedLimit),
               inertia: Number(this.legacy.inertia),
               tolerance: Number(this.legacy.tolerance),
-              backlog: Number(this.legacy.backlog),
+              backlog: backlogs[0] ?? 0,
             },
           }
         : {}),
@@ -577,22 +615,29 @@ export class MockWorld {
         perArbGasCongestion: congestion.toString(),
         perArbGasTotal: fee.toString(),
       },
-      gasPerSecond: { s10: this.gasPerSecond(10), s60: this.gasPerSecond(60) },
+      gasPerSecond: { s10: this.gasPerSecondUpTo(10, block), s60: this.gasPerSecondUpTo(60, block) },
       l1,
       accounts: {
         infra: { address: accounts.infra, balance: (accounts.infraWei + this.accumulatedInfra).toString() },
         network: { address: accounts.network, balance: (accounts.networkWei + this.accumulatedNetwork).toString() },
         l1Reward: { address: accounts.l1Reward, balance: accounts.l1RewardWei.toString() },
       },
-      replayErrorBips: this.lastReplayError,
+      replayErrorBips: replayError,
     };
   }
 
+  /** Average gas per second over the `windowSeconds` timestamp seconds ending with the last block. */
   gasPerSecond(windowSeconds: number): number {
-    const from = this.time - windowSeconds;
+    return this.gasPerSecondUpTo(windowSeconds, this.blocks[this.blocks.length - 1]);
+  }
+
+  /** The same window ending with `last`, ignoring blocks after it, so a per-block snapshot sees the rate as of that block. */
+  private gasPerSecondUpTo(windowSeconds: number, last: BlockPoint): number {
+    const from = last.ts + 1 - windowSeconds;
     let gas = 0;
     for (let i = this.blocks.length - 1; i >= 0; i--) {
       const b = this.blocks[i];
+      if (b.number > last.number) continue;
       if (b.ts < from) break;
       gas += b.gasUsed;
     }

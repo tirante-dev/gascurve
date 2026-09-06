@@ -253,7 +253,7 @@ Client to server: `{ type: 'pong' }` and `{ type: 'subscribe', network: string }
 src/app/                 layout, page (redirect to default network), [network]/page
 src/components/          LiveStrip, ConstraintCards, PricerEquation, Explainer, HistoryTabs, SeriesCharts,
                          FeeFlows, L1Section, OwnerActionTimeline, NetworkSwitcher, DataFooter
-src/hooks/               useLive (WS + fallback), useSeries, useNetwork
+src/hooks/               useLive (WS + fallback), useSmoothedLive (250 ms render cadence, tweened values, one rAF loop), useSeries, useNetwork
 src/lib/api/             core.ts (fetch with timeout and retry), networks.ts, series.ts, live.ts, ws.ts
 src/lib/pricer.ts        approxExpBips and helpers in TS, unit-tested against the same vectors as Go
 src/types/               the shapes above
