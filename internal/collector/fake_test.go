@@ -47,6 +47,8 @@ type fakeRPC struct {
 	logRanges   [][2]uint64
 	headerCalls [][]uint64
 	sampleAt    []uint64 // block numbers passed to FastSampleAt
+	// classes records the pacer class each method was last called with.
+	classes map[string]nitro.Class
 	// backlogsAt and constraintsAt, when set, supply the backlogs and the
 	// constraint set FastSampleAt reports at a block (an archive node's
 	// real state at that height); nil means the live ones.
@@ -76,6 +78,7 @@ func newFakeRPC(head uint64) *fakeRPC {
 		available:  1000,
 		errs:       map[string]error{},
 		calls:      map[string]int{},
+		classes:    map[string]nitro.Class{},
 		txCount:    func(uint64) int { return 3 },
 		sampledAt:  baseTime,
 	}
@@ -86,6 +89,20 @@ func (f *fakeRPC) fail(method string) error {
 	defer f.mu.Unlock()
 	f.calls[method]++
 	return f.errs[method]
+}
+
+// note records the pacer class a call carried.
+func (f *fakeRPC) note(ctx context.Context, method string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.classes[method] = nitro.ClassOf(ctx)
+}
+
+// classOf returns the pacer class method was last called with.
+func (f *fakeRPC) classOf(method string) nitro.Class {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.classes[method]
 }
 
 func tsFor(n uint64) uint64  { return uint64(baseTime.Unix()) + n/10 }
@@ -131,7 +148,8 @@ func (f *fakeRPC) ChainID(context.Context) (uint64, error) {
 	return f.chainID, nil
 }
 
-func (f *fakeRPC) FastSample(context.Context) (*nitro.Sample, error) {
+func (f *fakeRPC) FastSample(ctx context.Context) (*nitro.Sample, error) {
+	f.note(ctx, "FastSample")
 	if err := f.fail("FastSample"); err != nil {
 		return nil, err
 	}
@@ -140,7 +158,8 @@ func (f *fakeRPC) FastSample(context.Context) (*nitro.Sample, error) {
 	return f.sampleLocked(f.head, f.constraints, nil), nil
 }
 
-func (f *fakeRPC) FastSampleAt(_ context.Context, n uint64) (*nitro.Sample, error) {
+func (f *fakeRPC) FastSampleAt(ctx context.Context, n uint64) (*nitro.Sample, error) {
+	f.note(ctx, "FastSampleAt")
 	if err := f.fail("FastSampleAt"); err != nil {
 		return nil, err
 	}
@@ -184,7 +203,8 @@ func (f *fakeRPC) sampleLocked(n uint64, constraints []nitro.Constraint, backlog
 	return s
 }
 
-func (f *fakeRPC) HeadersByNumbers(_ context.Context, numbers []uint64) ([]nitro.Header, error) {
+func (f *fakeRPC) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]nitro.Header, error) {
+	f.note(ctx, "HeadersByNumbers")
 	if err := f.fail("HeadersByNumbers"); err != nil {
 		return nil, err
 	}

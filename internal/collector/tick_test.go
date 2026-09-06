@@ -1296,6 +1296,10 @@ func TestTickAt(t *testing.T) {
 	if err := f.TickAt(ctx, 1008); err != nil || f.Head() != 1008 {
 		t.Fatalf("catch up to 1008: %v head %d", err, f.Head())
 	}
+	// The sample rides the fast lane, the catch-up headers are bulk work.
+	if rpc.classOf("FastSample") != nitro.Fast || rpc.classOf("FastSampleAt") != nitro.Fast || rpc.classOf("HeadersByNumbers") != nitro.Bulk {
+		t.Fatalf("classes: sample %v, sampleAt %v, headers %v", rpc.classOf("FastSample"), rpc.classOf("FastSampleAt"), rpc.classOf("HeadersByNumbers"))
+	}
 }
 
 // TestTickRestartRebuildsState: after a restart the replay state comes

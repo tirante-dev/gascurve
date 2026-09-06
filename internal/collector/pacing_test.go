@@ -193,6 +193,9 @@ func (c *chainServer) counts() (items, requests, maxItems int) {
 // calls on the wire than the endpoint's bucket allows (burst plus rate
 // times the elapsed time, whatever window is taken) and never send a batch
 // the bucket cannot hold at once, while every loop still makes progress.
+// The fast loop's demand (five calls per tick, two ticks a second) stays
+// inside the budget: the fast lane is served first, so a fast loop that
+// wanted more than the whole rate would leave nothing for bulk work.
 func TestLoopsRespectEndpointBudget(t *testing.T) {
 	chain := newChainServer(t)
 	const rate = 20.0
@@ -207,7 +210,7 @@ func TestLoopsRespectEndpointBudget(t *testing.T) {
 	f := NewFollower(Options{
 		Network: config.NetworkConfig{Name: "robinhood", ChainID: 4663, Enabled: true, CallsPerSecond: rate},
 		Collector: config.CollectorConfig{
-			TickInterval: 10 * time.Millisecond, SlowInterval: 500 * time.Millisecond, HeaderBatchSize: 100,
+			TickInterval: 500 * time.Millisecond, SlowInterval: 500 * time.Millisecond, HeaderBatchSize: 100,
 			BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: 30 * time.Second,
 		},
 		RPC:   pool,
@@ -218,8 +221,9 @@ func TestLoopsRespectEndpointBudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	// A jump of 45 blocks makes the catch-up ask for more headers than the
-	// bucket holds at once: the batch is chunked to the burst and waits its
-	// turn for a full bucket (two seconds at this rate). The run ends once
+	// bucket holds at once: the batch is chunked to the burst minus the fast
+	// reserve and waits its turn for a full bucket (two seconds at this
+	// rate). The run ends once
 	// the follower has caught up past the jump.
 	done := make(chan struct{})
 	go func() {
@@ -228,8 +232,14 @@ func TestLoopsRespectEndpointBudget(t *testing.T) {
 	}()
 	time.Sleep(300 * time.Millisecond)
 	chain.jump(45)
+	// The run ends once the follower has caught up past the jump and the
+	// backfill, queued behind that catch-up, has taken its first step.
+	started := func() bool {
+		c, err := f.loadCursor(ctx)
+		return err == nil && (c.Active || c.Done)
+	}
 	deadline := time.Now().Add(20 * time.Second)
-	for f.Head() < 1045 && time.Now().Before(deadline) {
+	for (f.Head() < 1045 || !started()) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
@@ -251,8 +261,8 @@ func TestLoopsRespectEndpointBudget(t *testing.T) {
 	if blocks, _ := store.BlocksAfter(context.Background(), 4663, 1000, 1000); len(blocks) < 45 {
 		t.Fatalf("catch-up headers: %d blocks", len(blocks))
 	}
-	if maxItems != burst {
-		t.Fatalf("the oversized header batch must be chunked to exactly the burst: %d", maxItems)
+	if bulkMax := pool.Endpoints()[0].Pacer().MaxBatch(); maxItems != bulkMax || bulkMax != burst-int(rate/4) {
+		t.Fatalf("the oversized header batch must be chunked to exactly the burst minus the fast reserve (%d): %d", bulkMax, maxItems)
 	}
 	if _, ok, _ := store.GetState(ctx, 4663, db.StateArbOSVersion); !ok {
 		t.Fatal("slow loop did not run")

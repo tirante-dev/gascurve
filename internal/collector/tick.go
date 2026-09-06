@@ -37,11 +37,15 @@ func (f *Follower) TickAt(ctx context.Context, number uint64) error {
 	})
 }
 
+// tickWith runs a tick around sampleFn. The sample (the head number, the
+// head-pinned header and the state calls) is the latency critical part
+// of the tick and goes through the endpoint's fast lane; the catch-up
+// headers and everything after them are bulk work.
 func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) (*nitro.Sample, error)) error {
 	if err := f.ensureInit(ctx); err != nil {
 		return f.fail(ctx, err)
 	}
-	sample, err := sampleFn(ctx)
+	sample, err := sampleFn(nitro.WithClass(ctx, nitro.Fast))
 	if err != nil {
 		return f.fail(ctx, fmt.Errorf("sample: %w", err))
 	}

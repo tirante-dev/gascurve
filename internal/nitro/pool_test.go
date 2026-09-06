@@ -471,3 +471,100 @@ func TestPoolWindowBudget(t *testing.T) {
 		t.Fatalf("batches must be chunked to the burst without touching the cap: cap %d requests %d", p.Endpoints()[0].BatchCap(), f.requestCount())
 	}
 }
+
+// TestEndpointBatchCapJSONRPC: a batch answered with a JSON-RPC rate limit
+// error on one of its items halves the endpoint's cap and is resent at
+// the new size, and one that keeps failing fails the endpoint over.
+func TestEndpointBatchCapJSONRPC(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeRPC(t)
+	setupChain(f)
+	f.handlers["eth_chainId"] = func([]json.RawMessage) any { return testChainIDHex }
+	f.maxItems = 50
+	f.limitErr = &RPCError{Code: RateLimitCodeQuickNode, Message: "50/second request limit reached"}
+	clock := newFakeClock()
+	p := NewPool(PoolConfig{ChainID: testChainID, Endpoints: []config.EndpointConfig{endpointOf(f, 1000)}, BatchSize: 100},
+		WithPoolClientOptions(WithHTTPClient(f.server.Client())), withPoolClock(clock.Now, clock.Sleep))
+	e := p.Endpoints()[0]
+	nums := make([]uint64, 0, 100)
+	for n := uint64(100); n < 200; n++ {
+		nums = append(nums, n)
+	}
+	hs, err := p.HeadersByNumbers(ctx, nums)
+	if err != nil || len(hs) != 100 || hs[99].Number != 199 {
+		t.Fatalf("headers: %d %v", len(hs), err)
+	}
+	// After eth_chainId: 100 items rejected by one item's error, then two
+	// batches of 50 after the 2 s back-off.
+	if e.BatchCap() != 50 || f.requestCount() != 4 || fmt.Sprint(clock.Sleeps()) != "[2s]" || p.Stats().RateLimitEvents != 1 {
+		t.Fatalf("after a JSON-RPC limit: cap=%d requests=%d sleeps=%v stats=%+v", e.BatchCap(), f.requestCount(), clock.Sleeps(), p.Stats())
+	}
+	// A persistent limit at the floor is an endpoint failure.
+	f.maxItems = 1
+	if _, err := p.HeadersByNumbers(ctx, nums[:20]); !errors.Is(err, ErrRateLimited) || !IsEndpointError(err) {
+		t.Fatalf("expected rate limit failure, got %v", err)
+	}
+	if e.BatchCap() != 10 {
+		t.Fatalf("floor: cap=%d", e.BatchCap())
+	}
+
+	// With a fallback, a primary that keeps answering the limit is failed
+	// over like one answering HTTP 429.
+	a, b := chainFake(t, testChainIDHex), chainFake(t, testChainIDHex)
+	limited := scriptStep{status: http.StatusOK, body: `[{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"limit exceeded"}}]`}
+	// Two attempts per request: the verification at start and the lazy one
+	// before the first call both stay throttled.
+	a.script = []scriptStep{limited, limited, limited, limited}
+	p2 := newTestPool(t, clock, time.Minute, endpointOf(a, 100), endpointOf(b, 100))
+	if err := p2.Verify(ctx); err != nil || p2.ActiveEndpoint() != 0 || p2.Endpoints()[0].Verified() || p2.Endpoints()[0].Disabled() {
+		t.Fatalf("a throttled primary stays unverified: %v active=%d", err, p2.ActiveEndpoint())
+	}
+	echoVia(t, p2, "one")
+	if p2.ActiveEndpoint() != 1 || p2.Failovers() != 1 || b.requestCount() != 2 || p2.Stats().RateLimitEvents != 4 {
+		t.Fatalf("failover on a JSON-RPC limit: active=%d failovers=%d b=%d stats=%+v", p2.ActiveEndpoint(), p2.Failovers(), b.requestCount(), p2.Stats())
+	}
+}
+
+// TestPoolFastLane: the class a context carries reaches the endpoint's
+// pacer through the pool, so a fast call is served while a bulk header
+// batch is still paying for its reservation, within one token interval
+// on a 4/s endpoint.
+func TestPoolFastLane(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeRPC(t)
+	setupChain(f)
+	f.handlers["eth_chainId"] = func([]json.RawMessage) any { return testChainIDHex }
+	f.handlers["echo"] = echoHandler
+	p := NewPool(PoolConfig{ChainID: testChainID, Endpoints: []config.EndpointConfig{endpointOf(f, 4)}, BatchSize: 100},
+		WithPoolClientOptions(WithHTTPClient(f.server.Client())))
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	nums := make([]uint64, 0, 100)
+	for n := uint64(100); n < 200; n++ {
+		nums = append(nums, n)
+	}
+	bctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	bulkDone := make(chan error, 1)
+	go func() {
+		_, err := p.HeadersByNumbers(bctx, nums)
+		bulkDone <- err
+	}()
+	time.Sleep(100 * time.Millisecond) // the first chunk went, the next one sleeps for tokens
+	start := time.Now()
+	raw, err := p.Call(WithClass(ctx, Fast), "echo", "head")
+	if err != nil || string(raw) != `"head"` {
+		t.Fatalf("fast call: %s %v", raw, err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("fast call waited %v behind the bulk batch", elapsed)
+	}
+	cancel()
+	if err := <-bulkDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("bulk batch: %v", err)
+	}
+	if e := p.Endpoints()[0]; e.Pacer().MaxBatch() != 7 || e.Pacer().Reserve() != 1 {
+		t.Fatalf("bulk batches leave the reserve: maxBatch %d reserve %v", e.Pacer().MaxBatch(), e.Pacer().Reserve())
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -301,5 +302,90 @@ func TestIsRevert(t *testing.T) {
 	}
 	if truncate("abc", 2) != "ab..." || truncate("a", 5) != "a" {
 		t.Fatal("truncate")
+	}
+}
+
+func TestIsRateLimit(t *testing.T) {
+	limited := []*RPCError{
+		{Code: RateLimitCode, Message: "x"},
+		{Code: RateLimitCodeExceeded, Message: "limit exceeded"},
+		{Code: RateLimitCodeQuickNode, Message: "50/second request limit reached"},
+		{Code: -32000, Message: "Rate Limit Exceeded"},
+		{Code: -32000, Message: "Too Many Requests"},
+		{Code: -32000, Message: "daily request limit reached"},
+		{Code: 1, Message: "project limit exceeded"},
+		{Code: 1, Message: "monthly quota LIMIT REACHED"},
+	}
+	for _, e := range limited {
+		if !IsRateLimit(e) {
+			t.Fatalf("%v should be a rate limit", e)
+		}
+	}
+	answers := []*RPCError{
+		nil,
+		{Code: -32000, Message: "execution reverted"},
+		{Code: -32601, Message: "method not found"},
+		{Code: -32000, Message: "missing trie node"},
+		{Code: 3, Message: "limited liability"},
+	}
+	for _, e := range answers {
+		if IsRateLimit(e) {
+			t.Fatalf("%v is an answer, not a rate limit", e)
+		}
+	}
+}
+
+// TestJSONRPCRateLimit: a JSON-RPC error that reports throttling (by code
+// or message) is handled exactly like an HTTP 429: it counts as a rate
+// limit event, starts the back-off, retries the whole batch even when only
+// one item carried it, and past the attempt budget becomes the endpoint
+// error that drives failover.
+func TestJSONRPCRateLimit(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeRPC(t)
+	f.handlers["echo"] = echoHandler
+	c, clock := newTestClient(t, f, 100)
+	// A single call answered with QuickNode's per-second limit.
+	f.script = []scriptStep{{status: http.StatusOK, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32007,"message":"50/second request limit reached"}}`}}
+	raw, err := c.Call(ctx, "echo", "ok")
+	if err != nil || string(raw) != `"ok"` {
+		t.Fatalf("Call after a JSON-RPC limit: %s %v", raw, err)
+	}
+	if s := clock.Sleeps(); len(s) != 1 || s[0] != minBackoff {
+		t.Fatalf("back-off sleeps = %v", s)
+	}
+	if st := c.Stats(); st.RateLimitEvents != 1 || st.Last429At.IsZero() || st.Backoff != minBackoff {
+		t.Fatalf("stats = %+v", st)
+	}
+	// A batch where one item alone carries the limit is retried as a whole
+	// after the back-off, so every item is answered by one attempt.
+	var once atomic.Bool
+	f.handlers["echo"] = func(params []json.RawMessage) any {
+		if paramString(params[0]) == "b" && once.CompareAndSwap(false, true) {
+			return &RPCError{Code: RateLimitCodeExceeded, Message: "limit exceeded"}
+		}
+		return echoHandler(params)
+	}
+	f.mu.Lock()
+	f.items = 0
+	f.mu.Unlock()
+	res, err := c.Batch(ctx, []Request{{Method: "echo", Params: []any{"a"}}, {Method: "echo", Params: []any{"b"}}, {Method: "echo", Params: []any{"c"}}})
+	if err != nil || len(res) != 3 || res[0].Err != nil || res[1].Err != nil || res[2].Err != nil || string(res[1].Raw) != `"b"` {
+		t.Fatalf("batch after a partial limit: %+v %v", res, err)
+	}
+	if s := clock.Sleeps(); len(s) != 2 || s[1] != minBackoff || f.items != 6 || c.Stats().RateLimitEvents != 2 {
+		t.Fatalf("the whole batch is resent once: sleeps %v items %d stats %+v", s, f.items, c.Stats())
+	}
+	// A limit that persists past the attempt budget, reported by message
+	// alone, is the same endpoint error an HTTP 429 leaves behind.
+	f.handlers["echo"] = func([]json.RawMessage) any {
+		return &RPCError{Code: -32000, Message: "Too Many Requests"}
+	}
+	_, err = c.Call(ctx, "echo", "x")
+	if !errors.Is(err, ErrRateLimited) || !IsEndpointError(err) {
+		t.Fatalf("expected a rate limit endpoint error, got %v", err)
+	}
+	if st := c.Stats(); st.RateLimitEvents != 2+uint64(c.maxAttempts) {
+		t.Fatalf("every throttled attempt counts: %+v", st)
 	}
 }

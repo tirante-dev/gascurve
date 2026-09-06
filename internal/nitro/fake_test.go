@@ -28,8 +28,11 @@ type fakeRPC struct {
 	// script of HTTP statuses/bodies to return before normal handling.
 	script []scriptStep
 	// maxItems, when positive, answers any batch with more items with 429
-	// (the way QuickNode rejects oversized batches).
+	// (the way QuickNode rejects oversized batches), or, when limitErr is
+	// set, with HTTP 200 and limitErr on the first item alone (the way
+	// QuickNode reports its per-second request limit).
 	maxItems int
+	limitErr *RPCError
 	// hold, when set, makes the next request wait until it is closed
 	// before it is answered, so another caller can queue behind it.
 	hold chan struct{}
@@ -126,16 +129,25 @@ func (f *fakeRPC) serve(w http.ResponseWriter, r *http.Request) {
 		single = true
 	}
 	f.mu.Lock()
+	var limitErr *RPCError
 	if f.maxItems > 0 && len(reqs) > f.maxItems {
-		f.mu.Unlock()
-		w.WriteHeader(http.StatusTooManyRequests)
-		return
+		if f.limitErr == nil {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		limitErr = f.limitErr
 	}
 	f.items += len(reqs)
 	f.mu.Unlock()
 	responses := make([]map[string]any, 0, len(reqs))
-	for _, req := range reqs {
+	for i, req := range reqs {
 		resp := map[string]any{"jsonrpc": "2.0", "id": req.ID}
+		if i == 0 && limitErr != nil {
+			resp["error"] = limitErr
+			responses = append(responses, resp)
+			continue
+		}
 		f.mu.Lock()
 		h, ok := f.handlers[req.Method]
 		f.mu.Unlock()

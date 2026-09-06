@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
@@ -22,6 +23,12 @@ const (
 	MaxBatch = 100
 	// RateLimitCode is the JSON-RPC error code some endpoints use for throttling.
 	RateLimitCode = 429
+	// RateLimitCodeExceeded is the JSON-RPC code providers such as Infura
+	// and Alchemy answer with when a request limit is exceeded.
+	RateLimitCodeExceeded = -32005
+	// RateLimitCodeQuickNode is the JSON-RPC code QuickNode answers with
+	// when its per-second request limit is reached.
+	RateLimitCodeQuickNode = -32007
 
 	minBackoff = 2 * time.Second
 	maxBackoff = 60 * time.Second
@@ -31,6 +38,26 @@ const (
 // ErrRateLimited is returned when the endpoint kept throttling after all
 // retry attempts.
 var ErrRateLimited = errors.New("rpc: rate limited")
+
+// rateLimitMessage matches the messages providers put on a throttling
+// error whatever code they choose ("50/second request limit reached",
+// "limit exceeded", "too many requests").
+var rateLimitMessage = regexp.MustCompile(`(?i)rate limit|request limit|too many requests|limit reached|limit exceeded`)
+
+// IsRateLimit reports whether a JSON-RPC error is the endpoint throttling
+// the caller rather than answering: code 429, -32005 or -32007, or a
+// message naming a rate or request limit. Such an error is handled like
+// an HTTP 429: the batch is retried as a whole after the back-off.
+func IsRateLimit(e *RPCError) bool {
+	if e == nil {
+		return false
+	}
+	switch e.Code {
+	case RateLimitCode, RateLimitCodeExceeded, RateLimitCodeQuickNode:
+		return true
+	}
+	return rateLimitMessage.MatchString(e.Message)
+}
 
 // EndpointError marks a failure of the endpoint itself rather than an
 // answer from the node: a transport error, an HTTP 5xx, throttling that
@@ -280,10 +307,12 @@ func (c *Client) Call(ctx context.Context, method string, params ...any) (json.R
 }
 
 // Batch sends up to MaxBatch calls in one HTTP request and returns one
-// Result per request, in order. Throttling (HTTP 429 or a JSON-RPC 429 on
-// any item) retries the whole batch with exponential back-off. Every
-// attempt pays for its calls at the pacer and honors the network-wide
-// cooldown, so a retry can never exceed the budget or race other callers.
+// Result per request, in order. Throttling (HTTP 429, or a JSON-RPC rate
+// limit error, see IsRateLimit, on any item) retries the whole batch with
+// exponential back-off. Every attempt pays for its calls at the pacer, in
+// the lane the context's Class selects (WithClass, Bulk by default), and
+// honors the network-wide cooldown, so a retry can never exceed the
+// budget or race other callers.
 func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	if len(reqs) == 0 {
 		return nil, nil
@@ -356,9 +385,10 @@ func (c *Client) cooldown() time.Duration {
 // send performs one HTTP round trip under the per-endpoint send lock,
 // sleeping through any active cooldown first so every caller respects a
 // 429 seen by any other. limited is true on HTTP 429 or when any item
-// carries a JSON-RPC 429 error; the cooldown it starts is published before
-// the lock is released, so a caller waiting for the lock observes it
-// instead of sending into the throttle. sentAt is when the request left.
+// carries a JSON-RPC rate limit error; the cooldown it starts is
+// published before the lock is released, so a caller waiting for the lock
+// observes it instead of sending into the throttle. sentAt is when the
+// request left.
 func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses []rpcResponse, limited bool, sentAt time.Time, err error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -410,7 +440,7 @@ func (c *Client) post(ctx context.Context, payload []byte) (responses []rpcRespo
 		if err2 := json.Unmarshal(data, &single); err2 != nil {
 			return nil, false, fmt.Errorf("rpc: decode response: %w", err)
 		}
-		if single.Error != nil && single.Error.Code == RateLimitCode {
+		if IsRateLimit(single.Error) {
 			return nil, true, nil
 		}
 		if single.Error != nil {
@@ -419,7 +449,7 @@ func (c *Client) post(ctx context.Context, payload []byte) (responses []rpcRespo
 		responses = []rpcResponse{single}
 	}
 	for _, r := range responses {
-		if r.Error != nil && r.Error.Code == RateLimitCode {
+		if IsRateLimit(r.Error) {
 			return nil, true, nil
 		}
 	}
