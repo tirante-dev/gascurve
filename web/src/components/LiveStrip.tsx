@@ -11,15 +11,28 @@ import { Label, Stat, StatusPill } from "./primitives";
 export const TRANSFER_GAS = 21_000;
 export const SWAP_GAS = 150_000;
 
+/**
+ * A snapshot older than this many seconds is a stale collector, not a quiet
+ * chain: "since last block" would otherwise keep counting up and read as a
+ * stall on the chain's side.
+ */
+export const COLLECTOR_LAG_S = 5;
+
+/** Seconds between the collector's sample and the wall clock `nowMs`; zero for an unparseable timestamp. */
+export function sampleAge(sampledAt: string, nowMs: number): number {
+  const at = Date.parse(sampledAt);
+  return Number.isNaN(at) ? 0 : Math.max(0, (nowMs - at) / 1000);
+}
+
 /** Last-120-blocks sparkline of the base fee. One series, so no legend. */
 export function Sparkline({ blocks }: { blocks: BlockPoint[] }) {
   const data = useMemo(() => blocks.map((b) => ({ n: b.number, fee: weiToGweiNumber(b.baseFee) })), [blocks]);
-  if (data.length < 2) return <div className="h-12 w-full rounded bg-surface-2" aria-hidden="true" />;
+  if (data.length < 2) return <div className="h-12 w-full rounded bg-chart" aria-hidden="true" />;
   const last = data[data.length - 1];
   const min = Math.min(...data.map((d) => d.fee));
   const max = Math.max(...data.map((d) => d.fee));
   return (
-    <div className="h-12 w-full" role="img" aria-label={`Base fee over the last ${data.length} blocks, from ${formatGwei(blocks[0].baseFee)} to ${formatGwei(blocks[blocks.length - 1].baseFee)} gwei`}>
+    <div className="h-12 w-full rounded-sm bg-chart" role="img" aria-label={`Base fee over the last ${data.length} blocks, from ${formatGwei(blocks[0].baseFee)} to ${formatGwei(blocks[blocks.length - 1].baseFee)} gwei`}>
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 2, right: 2, bottom: 2, left: 2 }}>
           <YAxis hide domain={[min === max ? min * 0.9 : min, max === min ? max * 1.1 : max]} />
@@ -29,7 +42,7 @@ export function Sparkline({ blocks }: { blocks: BlockPoint[] }) {
             stroke="var(--accent)"
             strokeWidth={1.5}
             fill="var(--accent)"
-            fillOpacity={0.1}
+            fillOpacity={0.12}
             isAnimationActive={false}
             dot={false}
             activeDot={false}
@@ -79,11 +92,31 @@ export function FeeSplitBar({ snapshot }: { snapshot: LiveSnapshot }) {
   );
 }
 
+/**
+ * "Since last block" is the chain's own cadence. Once the sample itself is
+ * older than COLLECTOR_LAG_S the number would mostly measure the collector,
+ * so the stat becomes a warning pill that names the lag instead.
+ */
+function Freshness({ sinceBlock, age }: { sinceBlock: number; age: number }) {
+  if (age <= COLLECTOR_LAG_S) return <Stat label="Since last block" value={sinceBlock.toFixed(1)} unit="s" />;
+  return (
+    <div className="min-w-0" aria-live="polite">
+      <Label>Since last block</Label>
+      <div className="mt-1">
+        <span className="num inline-flex items-center gap-1.5 rounded-full border border-warning px-2.5 py-1 text-xs font-medium text-warning" title={`The collector's last sample is ${Math.floor(age)} s old; the chain may well be producing blocks`}>
+          <span className="inline-block h-2 w-2 rounded-full bg-warning" aria-hidden="true" />
+          collector lagging {Math.floor(age)} s
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function LiveStrip({ snapshot, recentBlocks, status }: { snapshot: LiveSnapshot | null; recentBlocks: BlockPoint[]; status: LiveStatus }) {
   const now = useTicker(250);
   if (!snapshot) {
     return (
-      <div className="rounded-md border border-hairline bg-surface p-5 text-sm text-ink-2" aria-busy="true">
+      <div className="vw-card p-5 text-sm text-ink-2" aria-busy="true">
         <div className="flex items-center justify-between">
           <span>Waiting for the first sample.</span>
           <StatusPill status={status} />
@@ -93,20 +126,21 @@ export function LiveStrip({ snapshot, recentBlocks, status }: { snapshot: LiveSn
   }
   const step = rampStep(snapshot.multiplierBips);
   const sinceBlock = Math.max(0, now / 1000 - snapshot.block.ts);
+  const age = sampleAge(snapshot.sampledAt, now);
   return (
-    <div className="rounded-md border border-hairline bg-surface p-5">
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)]">
+    <div className="vw-card p-5">
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)]">
         <div className="flex flex-col gap-4">
           <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
             <div>
               <Label>Base fee now</Label>
               <div className="num mt-1 text-5xl leading-none tracking-tight text-ink sm:text-6xl">
-                {formatGwei(snapshot.baseFee)}
+                <span className="vw-hero">{formatGwei(snapshot.baseFee)}</span>
                 <span className="ml-1.5 text-lg font-normal text-ink-2">gwei</span>
               </div>
             </div>
             <div
-              className="num rounded-md px-3 py-2 text-2xl leading-none"
+              className="num vw-tile rounded-md px-3 py-2 text-2xl leading-none"
               style={{ background: rampColor(snapshot.multiplierBips), color: rampInk(step) }}
               title={`Multiplier over the ${formatGwei(snapshot.minBaseFee)} gwei floor`}
             >
@@ -125,7 +159,7 @@ export function LiveStrip({ snapshot, recentBlocks, status }: { snapshot: LiveSn
 
         <div className="grid grid-cols-2 gap-x-4 gap-y-5 sm:grid-cols-3 lg:grid-cols-2">
           <Stat label="Block" value={formatInteger(snapshot.block.number)} />
-          <Stat label="Since last block" value={sinceBlock.toFixed(1)} unit="s" />
+          <Freshness sinceBlock={sinceBlock} age={age} />
           <Stat label="Gas in last block" value={formatGas(snapshot.block.gasUsed)} hint={`${formatInteger(snapshot.block.txCount)} tx`} />
           <Stat label="Gas/s (10 s)" value={formatGas(snapshot.gasPerSecond.s10)} />
           <Stat label="Gas/s (60 s)" value={formatGas(snapshot.gasPerSecond.s60)} />

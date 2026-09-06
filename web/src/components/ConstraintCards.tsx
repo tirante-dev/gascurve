@@ -8,11 +8,11 @@ import { constraintGauge, contributionRampStep, legacyGauge, seriesColor, shares
 import { formatDuration, formatGas, formatInteger, formatPercent, formatSecondsOfTarget } from "@/utils/format";
 import { Card, Label, Swatch } from "./primitives";
 
-/** A meter whose fill carries magnitude on the sequential ramp; the track is the lightest step. */
+/** A meter whose fill carries magnitude on the sequential ramp; the track is an inset of the surface. */
 export function Gauge({ fraction, step, label, marks = [] }: { fraction: number; step: number; label: string; marks?: number[] }) {
   const pct = (Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : 0) * 100;
   return (
-    <div className="relative h-2.5 w-full rounded-sm" style={{ background: "var(--seq-1)" }} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label={label}>
+    <div className="relative h-2.5 w-full rounded-sm bg-track" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label={label}>
       <div className="h-full rounded-sm" style={{ width: `${pct}%`, background: `var(--seq-${step})` }} />
       {marks.map((m) => (
         <span key={m} className="absolute top-[-3px] h-4 w-px bg-ink-3" style={{ left: `${Math.min(100, m * 100)}%` }} aria-hidden="true" />

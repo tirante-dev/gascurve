@@ -10,10 +10,10 @@ export function NetworkSwitcher({ networks, current, onChange, loading }: { netw
   const options = match ? known : [{ name: current, displayName: current, chainId: 0 } as Network, ...known];
   const value = match ? match.name : current;
   return (
-    <label className="flex items-center gap-2 text-xs text-ink-2">
+    <label className="flex min-w-0 max-w-full items-center gap-2 text-xs text-ink-2">
       <span className="sr-only">Network</span>
       <select
-        className="num rounded-md border border-hairline bg-surface px-2 py-1 text-sm text-ink"
+        className="vw-control num min-w-0 max-w-full px-3 py-1 text-sm text-ink"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={loading && known.length === 0}

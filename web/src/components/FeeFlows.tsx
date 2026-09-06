@@ -46,7 +46,7 @@ export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown" }: {
   const accounts = snapshot?.accounts;
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
       <Card>
         <Label>Fee accounts (sampled balances)</Label>
         {accounts ? (

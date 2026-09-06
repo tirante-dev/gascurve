@@ -24,10 +24,20 @@ export function rampColor(multiplierBips: number): string {
   return `var(--seq-${rampStep(multiplierBips)})`;
 }
 
-/** Text colour that clears contrast on the given ramp step. */
+/**
+ * Text colour that clears AA contrast on the given ramp step. Each step has
+ * its own ink token because the step at which the ramp flips from light ink
+ * to dark ink differs between the light and dark surfaces.
+ */
 export function rampInk(step: number): string {
-  return step >= 6 ? "var(--seq-ink-dark)" : "var(--seq-ink-light)";
+  return `var(--seq-ink-${Math.max(1, Math.min(9, Math.round(step)))})`;
 }
+
+/** The floor line and its legend swatch: the cyan accent, never a constraint colour. */
+export const FLOOR_COLOR = "var(--floor)";
+
+/** Owner-action markers on the history charts: the magenta accent. */
+export const MARKER_COLOR = "var(--marker)";
 
 /** Ramp step for a single constraint's exponent contribution, 0 to 4 spans the ramp. */
 export function contributionRampStep(exponentBips: number): number {

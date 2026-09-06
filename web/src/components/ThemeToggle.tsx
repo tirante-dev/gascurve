@@ -42,6 +42,8 @@ function getServerSnapshot(): ThemeChoice {
   return "system";
 }
 
+const GLYPH: Record<ThemeChoice, string> = { system: "◐", light: "○", dark: "●" };
+
 /** Cycles system, light, dark. The layout script applies the stored choice before paint. */
 export function ThemeToggle() {
   const choice = useSyncExternalStore(subscribe, readTheme, getServerSnapshot);
@@ -49,11 +51,14 @@ export function ThemeToggle() {
   return (
     <button
       type="button"
-      className="rounded-md border border-hairline bg-surface px-2.5 py-1 text-xs font-medium text-ink-2 hover:text-ink"
+      className="vw-control inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-1 text-xs font-medium"
       onClick={() => applyTheme(next)}
       aria-label={`Theme: ${choice}. Switch to ${next}`}
       title={`Switch to ${next} theme`}
     >
+      <span className="text-accent-2" aria-hidden="true">
+        {GLYPH[choice]}
+      </span>
       theme: {choice}
     </button>
   );

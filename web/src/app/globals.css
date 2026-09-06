@@ -1,136 +1,225 @@
 @import "tailwindcss";
 
 /*
-  Design tokens. The bare :root block is the complete light palette; the dark
-  blocks redefine only tokens. Three viewer states are covered: an explicit
+  Design tokens. The bare :root block is the complete light palette (the
+  "daytime" vaporwave: lavender ground, deep indigo ink); the dark blocks
+  redefine only tokens. Three viewer states are covered: an explicit
   data-theme, and the un-stamped document following prefers-color-scheme.
+
+  Chart colours: --chart is the surface every chart draws on and the surface
+  the categorical palette was validated against (scripts/validate_palette.js
+  in the dataviz skill, light "#f3ecff", dark "#140a2e"). --series-N are
+  assigned in fixed order and never cycled; --floor and --marker are the two
+  accents in chart roles; --seq-N is one sequential ramp, lavender to magenta
+  to orange, monotone in lightness, with a per-step ink that clears AA.
 */
 :root {
   color-scheme: light;
-  --page: #f5f6f8;
+  --page: #faf5ff;
   --surface: #ffffff;
-  --surface-2: #eef0f3;
-  --ink: #151a21;
-  --ink-2: #4d5561;
-  --ink-3: #7c8593;
-  --hairline: #e1e4e9;
-  --grid: #e9ebef;
-  --axis: #c9ced6;
-  --accent: #2a78d6;
+  --surface-2: #efe6ff;
+  --chart: #f3ecff;
+  --track: #e9defb;
+  --ink: #1a0b3d;
+  --ink-2: #4d3a73;
+  --ink-3: #6b5b8f;
+  --label: #0f7a66;
+  --hairline: rgba(192, 24, 154, 0.2);
+  --hairline-strong: rgba(192, 24, 154, 0.4);
+  --grid: rgba(192, 24, 154, 0.1);
+  --axis: rgba(192, 24, 154, 0.3);
+  --accent: #c0189a;
+  --accent-2: #0a86a0;
   --accent-ink: #ffffff;
-  --focus: #2a78d6;
-  --good: #006300;
-  --warning: #9a6200;
-  --critical: #b32b2b;
+  --focus: #0a86a0;
+  --floor: #0a86a0;
+  --marker: #c0189a;
+  --glow: rgba(192, 24, 154, 0.22);
+  --glow-2: rgba(10, 134, 160, 0.3);
+  --scanline: rgba(26, 11, 61, 0.035);
+  --good: #0f7a4e;
+  --warning: #8a4b00;
+  --critical: #c0263d;
 
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --series-3: #1baf7a;
-  --series-4: #eda100;
-  --series-5: #e87ba4;
-  --series-6: #008300;
+  --series-1: #c0189a;
+  --series-2: #0f855c;
+  --series-3: #5e36cc;
+  --series-4: #c25415;
+  --series-5: #0a86a0;
+  --series-6: #86378f;
 
-  /* Sequential ramp for "multiplier over floor": one hue, light to dark. */
-  --seq-1: #cde2fb;
-  --seq-2: #b7d3f6;
-  --seq-3: #9ec5f4;
-  --seq-4: #86b6ef;
-  --seq-5: #6da7ec;
-  --seq-6: #3987e5;
-  --seq-7: #2a78d6;
-  --seq-8: #1c5cab;
-  --seq-9: #104281;
-  --seq-ink-light: #151a21;
-  --seq-ink-dark: #ffffff;
+  --seq-1: #e1d2fe;
+  --seq-2: #ddb2fe;
+  --seq-3: #dc93ec;
+  --seq-4: #dc72d4;
+  --seq-5: #db4bb5;
+  --seq-6: #ce377c;
+  --seq-7: #ba2846;
+  --seq-8: #9f2109;
+  --seq-9: #723200;
+  --seq-ink-1: #1a0b3d;
+  --seq-ink-2: #1a0b3d;
+  --seq-ink-3: #1a0b3d;
+  --seq-ink-4: #1a0b3d;
+  --seq-ink-5: #1a0b3d;
+  --seq-ink-6: #ffffff;
+  --seq-ink-7: #ffffff;
+  --seq-ink-8: #ffffff;
+  --seq-ink-9: #ffffff;
+
+  --sunset-text: linear-gradient(100deg, #c0189a 0%, #c25415 55%, #8a6200 100%);
+  --chrome-text: linear-gradient(90deg, #c0189a 0%, #5e36cc 55%, #0a86a0 100%);
+  --chrome-rule: linear-gradient(90deg, transparent 0%, rgba(192, 24, 154, 0.7) 25%, rgba(10, 134, 160, 0.8) 50%, rgba(192, 24, 154, 0.7) 75%, transparent 100%);
+  --horizon-line: rgba(192, 24, 154, 0.2);
+  --horizon-sun: rgba(255, 138, 61, 0.3);
+  --horizon-sun-2: rgba(192, 24, 154, 0.14);
 
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-display: var(--font-orbitron), "Orbitron", "Avenir Next", system-ui, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --page: #0f1216;
-    --surface: #161a20;
-    --surface-2: #1d222a;
-    --ink: #f2f4f7;
-    --ink-2: #b5bcc7;
-    --ink-3: #7f8794;
-    --hairline: #262c35;
-    --grid: #222831;
-    --axis: #3a414c;
-    --accent: #3987e5;
-    --accent-ink: #0f1216;
-    --focus: #6da7ec;
-    --good: #0ca30c;
-    --warning: #fab219;
-    --critical: #e66767;
+    --page: #0f0326;
+    --surface: #1c1040;
+    --surface-2: #261553;
+    --chart: #140a2e;
+    --track: #2b1a5a;
+    --ink: #f7f2ff;
+    --ink-2: #f2bfe6;
+    --ink-3: #ab9fcb;
+    --label: #a8f0d8;
+    --hairline: rgba(255, 79, 216, 0.22);
+    --hairline-strong: rgba(255, 79, 216, 0.45);
+    --grid: rgba(255, 79, 216, 0.12);
+    --axis: rgba(255, 79, 216, 0.35);
+    --accent: #ff4fd8;
+    --accent-2: #2ee6ff;
+    --accent-ink: #14062e;
+    --focus: #2ee6ff;
+    --floor: #2ee6ff;
+    --marker: #ff4fd8;
+    --glow: rgba(255, 79, 216, 0.45);
+    --glow-2: rgba(46, 230, 255, 0.45);
+    --scanline: rgba(0, 0, 0, 0.14);
+    --good: #3ddc97;
+    --warning: #ffb020;
+    --critical: #ff5c7a;
 
-    --series-1: #3987e5;
-    --series-2: #d95926;
-    --series-3: #199e70;
-    --series-4: #c98500;
-    --series-5: #d55181;
-    --series-6: #008300;
+    --series-1: #d62aa8;
+    --series-2: #1fae78;
+    --series-3: #7d5ce0;
+    --series-4: #d9722a;
+    --series-5: #1d9fb8;
+    --series-6: #a58d22;
 
-    --seq-1: #86b6ef;
-    --seq-2: #6da7ec;
-    --seq-3: #5598e7;
-    --seq-4: #3987e5;
-    --seq-5: #2a78d6;
-    --seq-6: #256abf;
-    --seq-7: #1c5cab;
-    --seq-8: #184f95;
-    --seq-9: #104281;
+    --seq-1: #583879;
+    --seq-2: #773f8e;
+    --seq-3: #98449e;
+    --seq-4: #b340a0;
+    --seq-5: #e24bac;
+    --seq-6: #ff6295;
+    --seq-7: #ff8f8e;
+    --seq-8: #feb298;
+    --seq-9: #ffd0ae;
+    --seq-ink-1: #f7f2ff;
+    --seq-ink-2: #f7f2ff;
+    --seq-ink-3: #f7f2ff;
+    --seq-ink-4: #f7f2ff;
+    --seq-ink-5: #14062e;
+    --seq-ink-6: #14062e;
+    --seq-ink-7: #14062e;
+    --seq-ink-8: #14062e;
+    --seq-ink-9: #14062e;
+
+    --sunset-text: linear-gradient(100deg, #ff4fd8 0%, #ff8a3d 55%, #ffd23f 100%);
+    --chrome-text: linear-gradient(90deg, #ff4fd8 0%, #b07cff 50%, #2ee6ff 100%);
+    --chrome-rule: linear-gradient(90deg, transparent 0%, rgba(255, 79, 216, 0.75) 25%, rgba(46, 230, 255, 0.9) 50%, rgba(255, 79, 216, 0.75) 75%, transparent 100%);
+    --horizon-line: rgba(255, 79, 216, 0.28);
+    --horizon-sun: rgba(255, 138, 61, 0.32);
+    --horizon-sun-2: rgba(255, 79, 216, 0.2);
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --page: #0f1216;
-  --surface: #161a20;
-  --surface-2: #1d222a;
-  --ink: #f2f4f7;
-  --ink-2: #b5bcc7;
-  --ink-3: #7f8794;
-  --hairline: #262c35;
-  --grid: #222831;
-  --axis: #3a414c;
-  --accent: #3987e5;
-  --accent-ink: #0f1216;
-  --focus: #6da7ec;
-  --good: #0ca30c;
-  --warning: #fab219;
-  --critical: #e66767;
+  --page: #0f0326;
+  --surface: #1c1040;
+  --surface-2: #261553;
+  --chart: #140a2e;
+  --track: #2b1a5a;
+  --ink: #f7f2ff;
+  --ink-2: #f2bfe6;
+  --ink-3: #ab9fcb;
+  --label: #a8f0d8;
+  --hairline: rgba(255, 79, 216, 0.22);
+  --hairline-strong: rgba(255, 79, 216, 0.45);
+  --grid: rgba(255, 79, 216, 0.12);
+  --axis: rgba(255, 79, 216, 0.35);
+  --accent: #ff4fd8;
+  --accent-2: #2ee6ff;
+  --accent-ink: #14062e;
+  --focus: #2ee6ff;
+  --floor: #2ee6ff;
+  --marker: #ff4fd8;
+  --glow: rgba(255, 79, 216, 0.45);
+  --glow-2: rgba(46, 230, 255, 0.45);
+  --scanline: rgba(0, 0, 0, 0.14);
+  --good: #3ddc97;
+  --warning: #ffb020;
+  --critical: #ff5c7a;
 
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --series-3: #199e70;
-  --series-4: #c98500;
-  --series-5: #d55181;
-  --series-6: #008300;
+  --series-1: #d62aa8;
+  --series-2: #1fae78;
+  --series-3: #7d5ce0;
+  --series-4: #d9722a;
+  --series-5: #1d9fb8;
+  --series-6: #a58d22;
 
-  --seq-1: #86b6ef;
-  --seq-2: #6da7ec;
-  --seq-3: #5598e7;
-  --seq-4: #3987e5;
-  --seq-5: #2a78d6;
-  --seq-6: #256abf;
-  --seq-7: #1c5cab;
-  --seq-8: #184f95;
-  --seq-9: #104281;
+  --seq-1: #583879;
+  --seq-2: #773f8e;
+  --seq-3: #98449e;
+  --seq-4: #b340a0;
+  --seq-5: #e24bac;
+  --seq-6: #ff6295;
+  --seq-7: #ff8f8e;
+  --seq-8: #feb298;
+  --seq-9: #ffd0ae;
+  --seq-ink-1: #f7f2ff;
+  --seq-ink-2: #f7f2ff;
+  --seq-ink-3: #f7f2ff;
+  --seq-ink-4: #f7f2ff;
+  --seq-ink-5: #14062e;
+  --seq-ink-6: #14062e;
+  --seq-ink-7: #14062e;
+  --seq-ink-8: #14062e;
+  --seq-ink-9: #14062e;
+
+  --sunset-text: linear-gradient(100deg, #ff4fd8 0%, #ff8a3d 55%, #ffd23f 100%);
+  --chrome-text: linear-gradient(90deg, #ff4fd8 0%, #b07cff 50%, #2ee6ff 100%);
+  --chrome-rule: linear-gradient(90deg, transparent 0%, rgba(255, 79, 216, 0.75) 25%, rgba(46, 230, 255, 0.9) 50%, rgba(255, 79, 216, 0.75) 75%, transparent 100%);
+  --horizon-line: rgba(255, 79, 216, 0.28);
+  --horizon-sun: rgba(255, 138, 61, 0.32);
+  --horizon-sun-2: rgba(255, 79, 216, 0.2);
 }
 
 @theme inline {
   --color-page: var(--page);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-chart: var(--chart);
+  --color-track: var(--track);
   --color-ink: var(--ink);
   --color-ink-2: var(--ink-2);
   --color-ink-3: var(--ink-3);
+  --color-label: var(--label);
   --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
   --color-grid: var(--grid);
   --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
   --color-accent-ink: var(--accent-ink);
   --color-focus: var(--focus);
   --color-good: var(--good);
@@ -138,6 +227,7 @@
   --color-critical: var(--critical);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
 }
 
 html {
@@ -163,6 +253,142 @@ body {
 :focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+/*
+  Chrome. Every decorative layer is pointer-events: none, sits behind its
+  content, and only tints the ground: the ink tokens were checked against the
+  composite (page plus horizon glow, card plus scanline) and stay above AA.
+*/
+
+/* A card: the surface with a faint scanline field behind its content. */
+@utility vw-card {
+  position: relative;
+  isolation: isolate;
+  border: 1px solid var(--hairline);
+  border-radius: 0.375rem;
+  background: var(--surface);
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    border-radius: inherit;
+    background: repeating-linear-gradient(to bottom, transparent 0 2px, var(--scanline) 2px 3px);
+  }
+}
+
+/* A chrome rule: a gradient hairline in place of a plain border-top. */
+@utility vw-rule {
+  border-top: 1px solid transparent;
+  border-image: var(--chrome-rule) 1;
+}
+
+/* Section titles: the sans in a heavier weight with a short magenta underline. */
+@utility vw-title {
+  &::after {
+    content: "";
+    display: block;
+    margin-top: 0.4rem;
+    height: 2px;
+    width: 2.5rem;
+    border-radius: 1px;
+    background: linear-gradient(90deg, var(--accent) 0%, transparent 100%);
+  }
+}
+
+/* The wordmark: the display face, letter-spaced, in a magenta to cyan chrome. */
+@utility vw-wordmark {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.42em;
+  text-transform: lowercase;
+  background: var(--chrome-text);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 10px var(--glow));
+}
+
+/* The live base fee: the sunset gradient with a soft glow. */
+@utility vw-hero {
+  background: var(--sunset-text);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 14px var(--glow));
+}
+
+/* The multiplier tile: an inset hairline and a glow in the tile's own colour. */
+@utility vw-tile {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 0 20px var(--glow);
+}
+
+/* Pill controls: the switcher, the theme toggle, the range tabs, status pills. */
+@utility vw-control {
+  border: 1px solid var(--hairline-strong);
+  border-radius: 9999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  transition:
+    box-shadow 150ms ease,
+    color 150ms ease;
+  &:hover {
+    color: var(--ink);
+    box-shadow: 0 0 0 1px var(--accent-2), 0 0 12px var(--glow-2);
+  }
+}
+
+@utility vw-tab-on {
+  box-shadow: 0 0 12px var(--glow);
+}
+
+@utility vw-dot-glow {
+  box-shadow: 0 0 8px currentColor;
+}
+
+/* The perspective grid horizon behind the hero, fading toward a sunset band. */
+@utility vw-horizon {
+  position: absolute;
+  inset: 0 -1rem;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background: radial-gradient(ellipse 70% 42% at 50% 46%, var(--horizon-sun) 0%, var(--horizon-sun-2) 40%, transparent 72%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 10%, #000 85%, transparent 100%);
+  &::before {
+    content: "";
+    position: absolute;
+    left: -25%;
+    right: -25%;
+    top: 44%;
+    bottom: -40%;
+    background-image:
+      linear-gradient(to right, var(--horizon-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--horizon-line) 1px, transparent 1px);
+    background-size: 72px 56px;
+    transform: perspective(560px) rotateX(64deg);
+    transform-origin: 50% 0;
+    mask-image: linear-gradient(to bottom, #000 0%, transparent 92%);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .vw-horizon::before {
+    animation: vw-drift 24s linear infinite;
+  }
+}
+
+@keyframes vw-drift {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 0 56px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

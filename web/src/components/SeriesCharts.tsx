@@ -5,8 +5,10 @@ import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, Res
 import type { OwnerAction, PricerModel, Series } from "@/types";
 import {
   buildChartPoints,
+  FLOOR_COLOR,
   hasUnknownSets,
   logDomain,
+  MARKER_COLOR,
   segmentsFor,
   seriesColor,
   seriesCount,
@@ -67,7 +69,7 @@ export function describeSplit(row: ChartPoint, segments: readonly Segment[]): st
 
 function ChartBlock({ title, legend, children, height, label }: { title: string; legend?: { label: string; color: string; kind?: "rect" | "line" }[]; children: React.ReactNode; height: number; label: string }) {
   return (
-    <div className="rounded-md border border-hairline bg-surface p-3">
+    <div className="vw-card p-3">
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h3 className="text-sm font-semibold text-ink">{title}</h3>
         {legend && legend.length > 1 ? <Legend items={legend} /> : null}
@@ -89,7 +91,7 @@ function PointInspector({ points, groups, note }: { points: ChartPoint[]; groups
   const row = points[clamped] as unknown as Record<string, unknown>;
   const extra = note(row);
   return (
-    <div className="rounded-md border border-hairline bg-surface p-3 text-xs text-ink-2">
+    <div className="vw-card p-3 text-xs text-ink-2">
       <label className="flex flex-wrap items-center gap-3">
         <span className="font-semibold text-ink">Point inspector</span>
         <input type="range" min={0} max={points.length - 1} value={clamped} onChange={(e) => setIndex(Number(e.target.value))} aria-label="Select a bucket to read its values" className="min-w-[160px] flex-1" />
@@ -139,19 +141,19 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
 
   if (!series) {
     return (
-      <div className="rounded-md border border-hairline bg-surface p-6 text-sm text-ink-2" aria-busy={loading}>
+      <div className="vw-card p-6 text-sm text-ink-2" aria-busy={loading}>
         {loading ? "Loading history." : "No history yet."}
       </div>
     );
   }
   if (points.length === 0) {
-    return <div className="rounded-md border border-hairline bg-surface p-6 text-sm text-ink-2">No buckets in this range yet.</div>;
+    return <div className="vw-card p-6 text-sm text-ink-2">No buckets in this range yet.</div>;
   }
 
   const feeRows: TooltipRow[] = [
     { label: "base fee, average", color: "var(--series-1)", value: (r) => `${formatSignificant(Number(r.feeAvg), 4)} gwei` },
     { label: "min to max in bucket", value: (r) => `${formatSignificant(Number(r.feeMin), 3)} to ${formatSignificant(Number(r.feeMax), 3)} gwei` },
-    { label: "floor in force", color: "var(--ink-3)", value: (r) => `${formatSignificant(Number(r.floor), 3)} gwei` },
+    { label: "floor in force", color: FLOOR_COLOR, value: (r) => `${formatSignificant(Number(r.floor), 3)} gwei` },
     { label: "x", value: (r) => Number(r.x).toFixed(4) },
     { label: "blocks", value: (r) => formatInteger(Number(r.blocks)) },
   ];
@@ -176,14 +178,14 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
   const gasLegend = [{ label: "gas/s", color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
   // Markers carry their chronological number; the list under the charts decodes them.
   const markerLines = markers.map((m, i) => (
-    <ReferenceLine key={`${m.t}-${m.action.txHash}`} x={m.t} stroke="var(--ink-2)" strokeWidth={1} label={{ value: String(i + 1), position: "insideTopLeft", fill: "var(--ink-2)", fontSize: 10 }} />
+    <ReferenceLine key={`${m.t}-${m.action.txHash}`} x={m.t} stroke={MARKER_COLOR} strokeWidth={1} strokeDasharray="2 3" label={{ value: String(i + 1), position: "insideTopLeft", fill: "var(--ink-2)", fontSize: 10 }} />
   ));
 
   const xAxis = <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={tickFormatter} tickLine={false} axisLine={false} minTickGap={48} />;
 
   return (
     <div className="flex flex-col gap-4" style={{ opacity: loading ? 0.7 : 1, transition: "opacity 200ms" }}>
-      <ChartBlock title="Base fee (gwei, log scale)" legend={[{ label: "base fee", color: "var(--series-1)", kind: "line" }, { label: "floor in force (stepped)", color: "var(--ink-3)", kind: "line" }]} height={260} label="Base fee over time on a log scale with the floor in force drawn as a stepped line">
+      <ChartBlock title="Base fee (gwei, log scale)" legend={[{ label: "base fee", color: "var(--series-1)", kind: "line" }, { label: "floor in force (stepped)", color: FLOOR_COLOR, kind: "line" }]} height={260} label="Base fee over time on a log scale with the floor in force drawn as a stepped line">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={drawn} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
@@ -191,9 +193,9 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
             <YAxis scale="log" domain={feeDomain} tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={title} rows={feeRows} note={note} />} />
             <Area type="monotone" dataKey="feeMax" stroke="none" fill="var(--series-1)" fillOpacity={0.12} isAnimationActive={false} activeDot={false} />
-            <Area type="monotone" dataKey="feeMin" stroke="none" fill="var(--surface)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
+            <Area type="monotone" dataKey="feeMin" stroke="none" fill="var(--chart)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
             <Line type="monotone" dataKey="feeAvg" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} />
-            <Line type="stepAfter" dataKey="floor" stroke="var(--ink-3)" strokeWidth={1} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+            <Line type="stepAfter" dataKey="floor" stroke={FLOOR_COLOR} strokeWidth={1.5} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
             {markerLines}
           </ComposedChart>
         </ResponsiveContainer>
@@ -207,9 +209,9 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={title} rows={contributionRows} note={note} />} />
             {segments.map((s) => (
-              <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--surface)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
+              <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
             ))}
-            {unknown ? <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" connectNulls={false} stroke="var(--surface)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} /> : null}
+            {unknown ? <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} /> : null}
             {markerLines}
           </AreaChart>
         </ResponsiveContainer>
@@ -228,7 +230,7 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
         </ResponsiveContainer>
       </ChartBlock>
 
-      <div className="rounded-md border border-hairline bg-surface p-3">
+      <div className="vw-card p-3">
         <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
           <h3 className="text-sm font-semibold text-ink">Backlog per constraint (gas)</h3>
           <span className="text-xs text-ink-3">one panel per slot, each on its own scale; a replaced constraint starts a new series</span>

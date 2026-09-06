@@ -63,7 +63,7 @@ export function OwnerActionTimeline({ actions, explorerUrl, loading, error }: { 
   if (actions.length === 0) return <p className="text-sm text-ink-2">No owner actions decoded for this network yet.</p>;
   const base = explorerUrl?.replace(/\/+$/, "");
   return (
-    <ol className="divide-y divide-hairline rounded-md border border-hairline bg-surface">
+    <ol className="vw-card divide-y divide-hairline">
       {actions.map((a) => (
         <li key={`${a.txHash}-${a.block}`} className="grid gap-2 px-4 py-3 sm:grid-cols-[180px_minmax(0,1fr)]">
           <div className="num text-xs text-ink-3">

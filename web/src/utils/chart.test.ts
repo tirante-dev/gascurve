@@ -17,6 +17,8 @@ import {
   rampColor,
   rampInk,
   rampStep,
+  FLOOR_COLOR,
+  MARKER_COLOR,
   resampleBatches,
   resampleFees,
   safeFraction,
@@ -141,6 +143,8 @@ describe("colours and ramps", () => {
   it("assigns series colours in fixed order and caps at six", () => {
     expect(seriesColor(0)).toBe("var(--series-1)");
     expect(seriesColor(7)).toBe("var(--series-6)");
+    expect(FLOOR_COLOR).toBe("var(--floor)");
+    expect(MARKER_COLOR).toBe("var(--marker)");
   });
   it("maps multipliers onto the sequential ramp", () => {
     expect(rampStep(10_000)).toBe(1);
@@ -149,8 +153,10 @@ describe("colours and ramps", () => {
     expect(rampStep(1_000_000)).toBe(9);
     expect(rampStep(50_000_000)).toBe(9);
     expect(rampColor(199_900)).toBe("var(--seq-6)");
-    expect(rampInk(1)).toBe("var(--seq-ink-light)");
-    expect(rampInk(6)).toBe("var(--seq-ink-dark)");
+    expect(rampInk(1)).toBe("var(--seq-ink-1)");
+    expect(rampInk(6)).toBe("var(--seq-ink-6)");
+    expect(rampInk(12)).toBe("var(--seq-ink-9)");
+    expect(rampInk(0)).toBe("var(--seq-ink-1)");
     expect(contributionRampStep(0)).toBe(1);
     expect(contributionRampStep(20_000)).toBe(5);
     expect(contributionRampStep(90_000)).toBe(9);

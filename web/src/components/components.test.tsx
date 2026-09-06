@@ -1,9 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { LiveSnapshot, Network, OwnerAction } from "@/types";
 import { ConstraintCards } from "./ConstraintCards";
-import { FeeSplitBar, LiveStrip } from "./LiveStrip";
+import { COLLECTOR_LAG_S, FeeSplitBar, LiveStrip, sampleAge } from "./LiveStrip";
 import { HistoryTabs } from "./HistoryTabs";
 import { NetworkSwitcher } from "./NetworkSwitcher";
 import { OwnerActionTimeline } from "./OwnerActionTimeline";
@@ -54,6 +54,35 @@ describe("LiveStrip", () => {
   it("splits a fee at the floor entirely to infra", () => {
     render(<FeeSplitBar snapshot={{ ...snapshot, prices: { ...snapshot.prices, perArbGasCongestion: "0" } }} />);
     expect(screen.getByText(/0.02 gwei · 100%/)).toBeInTheDocument();
+  });
+  it("shows the chain's cadence while the sample is fresh and a collector lag warning once it is stale", () => {
+    vi.useFakeTimers();
+    try {
+      // The block closed at 07:19:59Z and was sampled at 07:20:00Z; three seconds later both are fresh.
+      vi.setSystemTime(Date.parse("2026-09-06T07:20:03Z"));
+      render(<LiveStrip snapshot={snapshot} recentBlocks={[]} status="open" />);
+      expect(screen.getByText("Since last block")).toBeInTheDocument();
+      expect(screen.getByText("4.0")).toBeInTheDocument();
+      expect(screen.queryByText(/collector lagging/)).toBeNull();
+      // Twelve seconds after the sample the number would read as a chain stall; it is the collector that is behind.
+      vi.setSystemTime(Date.parse("2026-09-06T07:20:12.4Z"));
+      act(() => {
+        vi.advanceTimersByTime(250);
+      });
+      const pill = screen.getByText("collector lagging 12 s");
+      expect(pill).toHaveClass("text-warning");
+      expect(pill).toHaveAttribute("title", expect.stringContaining("12 s old"));
+      expect(screen.getByText("Since last block")).toBeInTheDocument();
+      expect(screen.queryByText("13.4")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("measures the sample age from the wall clock", () => {
+    expect(COLLECTOR_LAG_S).toBe(5);
+    expect(sampleAge("2026-09-06T07:20:00Z", Date.parse("2026-09-06T07:20:07.9Z"))).toBeCloseTo(7.9);
+    expect(sampleAge("2026-09-06T07:20:00Z", Date.parse("2026-09-06T07:19:00Z"))).toBe(0);
+    expect(sampleAge("not a date", 1)).toBe(0);
   });
 });
 

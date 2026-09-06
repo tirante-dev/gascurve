@@ -8,7 +8,7 @@ const LABELS: Record<SeriesRange, string> = { "1h": "1h", "24h": "24h", "30d": "
 export function HistoryTabs({ range, onChange, loading }: { range: SeriesRange; onChange: (range: SeriesRange) => void; loading?: boolean }) {
   return (
     <div className="flex items-center gap-3" role="tablist" aria-label="History range">
-      <div className="inline-flex rounded-md border border-hairline bg-surface p-0.5">
+      <div className="vw-control inline-flex p-0.5">
         {SERIES_RANGES.map((r) => {
           const selected = r === range;
           return (
@@ -17,7 +17,7 @@ export function HistoryTabs({ range, onChange, loading }: { range: SeriesRange; 
               type="button"
               role="tab"
               aria-selected={selected}
-              className={`num rounded px-3 py-1 text-sm ${selected ? "bg-accent text-accent-ink" : "text-ink-2 hover:text-ink"}`}
+              className={`num rounded-full px-3 py-1 text-sm ${selected ? "vw-tab-on bg-accent font-medium text-accent-ink" : "text-ink-2 hover:text-ink"}`}
               onClick={() => onChange(r)}
             >
               {LABELS[r]}

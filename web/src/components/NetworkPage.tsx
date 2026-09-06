@@ -58,29 +58,35 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
   return (
     <div className="mx-auto max-w-[1200px] px-4 pb-12 sm:px-6">
       <header className="flex flex-wrap items-center justify-between gap-3 py-4">
-        <div className="flex items-baseline gap-3">
-          <Link href="/" className="text-base font-semibold tracking-tight text-ink">
+        <div className="flex min-w-0 flex-col gap-1">
+          <Link href="/" className="vw-wordmark text-lg leading-none sm:text-xl">
             gascurve
           </Link>
-          <span className="text-sm text-ink-3">{info ? `${info.displayName} · chain ${info.chainId}` : name}</span>
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+            <span className="text-[11px] uppercase tracking-[0.18em] text-label">nitro base fee telemetry</span>
+            <span className="text-sm text-ink-3">{info ? `${info.displayName} · chain ${info.chainId}` : name}</span>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex max-w-full flex-wrap items-center gap-2">
           <NetworkSwitcher networks={networks.data} current={name} onChange={setNetwork} loading={networks.loading} />
           <ThemeToggle />
         </div>
       </header>
 
       {unknown ? (
-        <div className="mb-6 rounded-md border border-hairline bg-surface p-4 text-sm text-ink-2">
+        <div className="vw-card mb-6 p-4 text-sm text-ink-2">
           The api does not know a network called <span className="num text-ink">{name}</span>. Pick one from the list above.
         </div>
       ) : null}
       {live.error ? <div className="mb-4 text-xs text-critical">Live data: {live.error}</div> : null}
 
       <main>
-        <Section id="live" title="Live" lede="The base fee right now, the floor it sits on, and the last two minutes of blocks.">
-          <LiveStrip snapshot={live.snapshot} recentBlocks={live.recentBlocks} status={live.status} />
-        </Section>
+        <div className="relative isolate">
+          <div className="vw-horizon" aria-hidden="true" />
+          <Section id="live" title="Live" lede="The base fee right now, the floor it sits on, and the last two minutes of blocks.">
+            <LiveStrip snapshot={live.snapshot} recentBlocks={live.recentBlocks} status={live.status} />
+          </Section>
+        </div>
 
         <Section id="pricer" title="The pricer, live" lede="One card per constraint. Backlogs drain at the target rate between samples and snap on every tick.">
           <ConstraintCards snapshot={live.snapshot} />

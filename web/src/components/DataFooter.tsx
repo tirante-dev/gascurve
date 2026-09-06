@@ -11,7 +11,7 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
   const networkStatus = apiStatus?.networks.find((n) => n.name === networkInfo?.name);
   const webVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "dev";
   return (
-    <footer className="border-t border-hairline py-8 text-xs leading-relaxed text-ink-2">
+    <footer className="vw-rule py-8 text-xs leading-relaxed text-ink-2">
       <div className="grid gap-6 md:grid-cols-3">
         <div>
           <h2 className="mb-2 text-sm font-semibold text-ink">What is live</h2>

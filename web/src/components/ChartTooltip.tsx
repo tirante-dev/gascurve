@@ -27,7 +27,7 @@ export function ChartTooltip({ active, payload, label, rows, title, note }: Part
   const row = (payload[0]?.payload ?? {}) as Record<string, unknown>;
   const extra = note?.(row) ?? null;
   return (
-    <div className="rounded-md border border-hairline bg-surface px-3 py-2 text-xs shadow-sm">
+    <div className="rounded-md border border-hairline bg-surface px-3 py-2 text-xs shadow-lg">
       <div className="mb-1 text-ink-3">{title(Number(label))}</div>
       <table className="border-separate border-spacing-y-0.5">
         <tbody>

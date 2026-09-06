@@ -41,9 +41,9 @@ export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) 
   const legacy = snapshot?.model === "legacy";
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
       <div>
-        <div className="overflow-x-auto rounded-md border border-hairline bg-surface p-4">
+        <div className="vw-card overflow-x-auto p-4">
           <div className="num flex flex-wrap items-start gap-x-2 gap-y-3 text-base text-ink-2 sm:text-lg">
             <Term label="base fee">baseFee</Term>
             <Op>=</Op>
@@ -129,7 +129,7 @@ export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) 
               />
               <Line type="monotone" dataKey="exp" stroke="var(--series-2)" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line type="monotone" dataKey="p4" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} />
-              {live ? <ReferenceDot x={Math.min(5, Math.round(x * 10) / 10)} y={Math.max(1, live.multiplier)} r={5} fill="var(--series-1)" stroke="var(--surface)" strokeWidth={2} /> : null}
+              {live ? <ReferenceDot x={Math.min(5, Math.round(x * 10) / 10)} y={Math.max(1, live.multiplier)} r={5} fill="var(--series-1)" stroke="var(--chart)" strokeWidth={2} /> : null}
             </LineChart>
           </ResponsiveContainer>
         </ChartFrame>

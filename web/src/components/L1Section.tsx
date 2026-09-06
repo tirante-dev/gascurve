@@ -42,7 +42,7 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
 
   return (
     <details
-      className="rounded-md border border-hairline bg-surface"
+      className="vw-card"
       open={open}
       onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
     >
