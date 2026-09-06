@@ -33,10 +33,24 @@ ENV NODE_ENV=production \
     NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
     HOSTNAME=0.0.0.0 \
     PORT=3000
-# Patch the base's OS packages and drop the bundled npm and corepack: the
-# standalone server only needs node, and npm's own dependency tree is where
-# most of the image's CVEs live.
-RUN apk upgrade --no-cache \
+# Drop the bundled npm, corepack and yarn: the standalone server only needs
+# node, and npm's own dependency tree is where the rest of the image's CVEs
+# live (brace-expansion, pacote, sigstore, tar). Nothing in this application
+# shells out to npm at runtime.
+#
+# No blanket `apk upgrade` here. It would install whatever the Alpine index
+# happens to hold at build time, so the same commit and the same base digest
+# would produce a different runtime on a later rebuild. OS patches come from
+# bumping the digest-pinned base above, which Dependabot does.
+#
+# The one package pinned by hand is just as reproducible, because the version
+# is exact and a missing version fails the build instead of drifting: the
+# newest node:22-alpine (the digest above, Alpine 3.24.1) still ships
+# openssl 3.5.7-r0, which Trivy reports as CVE-2026-14456 (HIGH, fixed in
+# 3.5.8-r0), and there is no newer base to bump to. With this pin the runtime
+# stage has no fixed HIGH or CRITICAL findings at all. Drop the apk add line
+# once a base digest with libcrypto3 3.5.8-r0 or newer lands.
+RUN apk add --no-cache libcrypto3=3.5.8-r0 libssl3=3.5.8-r0 \
  && rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
  && addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
 COPY --from=builder /app/public ./public

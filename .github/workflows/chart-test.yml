@@ -38,47 +38,11 @@ jobs:
             helm lint charts/gascurve --strict --values "${values}"
           done
 
-      - name: helm template (schema rejections, url, existing secret, ingress, web only)
-        run: |
-          set -euo pipefail
-          chart=charts/gascurve
-
-          # Defaults: no database configured, the schema must reject the render.
-          if helm template gascurve "${chart}" > /tmp/default.yaml 2> /tmp/default.err; then
-            echo "::error::helm template with default values succeeded, but no database is configured"
-            exit 1
-          fi
-          grep -q 'database' /tmp/default.err
-          echo "ok: defaults rejected by values.schema.json"
-
-          # Both database sources set: also rejected.
-          if helm template gascurve "${chart}" --set database.url=postgres://x:y@db/gascurve --set database.existingSecret=my-db > /dev/null 2> /tmp/both.err; then
-            echo "::error::helm template succeeded with both database.url and database.existingSecret set"
-            exit 1
-          fi
-          grep -q 'database' /tmp/both.err
-          echo "ok: url plus existingSecret rejected by values.schema.json"
-
-          # database.url renders the chart-managed Secret.
-          helm template gascurve "${chart}" --values "${chart}/ci/database-url-values.yaml" > /tmp/url.yaml
-          grep -q 'kind: Secret' /tmp/url.yaml
-          grep -q 'checksum/db-secret' /tmp/url.yaml
-
-          # existingSecret renders no Secret.
-          helm template gascurve "${chart}" --values "${chart}/ci/existing-secret-values.yaml" > /tmp/existing.yaml
-          ! grep -q 'kind: Secret' /tmp/existing.yaml
-          grep -q 'name: my-db' /tmp/existing.yaml
-
-          # Ingress with an existing Secret.
-          helm template gascurve "${chart}" --values "${chart}/ci/ingress-values.yaml" > /tmp/ingress.yaml
-          grep -q 'kind: Ingress' /tmp/ingress.yaml
-          ! grep -q 'kind: Secret' /tmp/ingress.yaml
-
-          # Web only: no database needed, no Go deployments rendered.
-          helm template gascurve "${chart}" --values "${chart}/ci/web-only-values.yaml" > /tmp/web.yaml
-          grep -q 'app.kubernetes.io/component: web' /tmp/web.yaml
-          ! grep -q 'DB_URL' /tmp/web.yaml
-          echo "ok: chart templates"
+      # The render assertions live in scripts/chart-checks.sh, which
+      # `make chart-template` runs too, so this job and the local target
+      # cannot drift apart.
+      - name: chart render checks
+        run: bash scripts/chart-checks.sh
 
       - uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
       - name: ct lint

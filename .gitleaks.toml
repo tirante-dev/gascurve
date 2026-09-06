@@ -1,12 +1,24 @@
-# Extends the default ruleset; only the allowlists below are added.
+# Extends the default ruleset. Nothing below turns a rule off wholesale: the
+# one known finding is suppressed by exact fingerprint in .gitleaksignore, and
+# the single allowlist here is scoped to one rule, one directory and one shape
+# of value at the same time.
 [extend]
 useDefault = true
 
+# The eth_getLogs fixtures are captured JSON-RPC responses whose address,
+# topics and data fields are long hex blobs, which the entropy-based
+# generic-api-key rule can read as a credential.
+#
+# targetRules limits this allowlist to that one rule, and condition = "AND"
+# means a finding is skipped only when the path AND the value both match, not
+# either one (the gitleaks default is OR, which is what made the previous
+# path-only allowlist suppress every rule for the whole directory). Verified
+# by planting fakes in a scratch copy of the fixture: an AWS key, a PEM
+# private key and a non-hex high-entropy api_key are all still reported, and
+# the same hex value outside internal/nitro/testdata is still reported.
 [[allowlists]]
-description = "WebSocket handshake nonces in tests (RFC 6455 sample keys, base64 of 16 bytes)"
-regexTarget = "line"
-regexes = ['''Sec-WebSocket-Key''']
-
-[[allowlists]]
-description = "Raw eth_getLogs fixtures: hex log data, not credentials"
-paths = ['''internal/nitro/testdata/.*\.json''']
+description = "Raw eth_getLogs fixtures: hex log payloads, not credentials"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^internal/nitro/testdata/[^/]+\.json$''']
+regexes = ['''^0x[0-9a-fA-F]+$''']

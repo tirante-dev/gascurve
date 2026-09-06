@@ -24,9 +24,51 @@ helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
 | `migrations.enabled` | Run `gascurve-migrate up` as an init container on the collector and api pods | `true` |
 | `collector.securityContext`, `api.securityContext`, `web.securityContext`, `migrations.securityContext` | Numeric `runAsUser`/`runAsGroup`, must match the image's `USER` | `65532` (Go images), `1001` (web) |
 | `config` | Rendered to `config.yaml` (networks, collector pacing, CORS) | see values.yaml |
-| `extraEnv` | Extra env for the Go binaries, e.g. private RPC URLs from a Secret | `[]` |
+| `collector.extraEnv`, `api.extraEnv`, `migrations.extraEnv` | Extra env for that container only. Private RPC URLs belong in `collector.extraEnv` | `[]` |
+| `extraEnv` | Deprecated alias applied to all three. Kept so existing installs keep working; move entries to the component lists | `[]` |
 
 The web image is built with `NEXT_PUBLIC_API_URL=/api/v1`, so it talks to the API through the same host. Put the API on another host only if you rebuild the image with a different value.
+
+## RPC URLs and Secrets
+
+The collector is the only component that talks to an RPC, so RPC credentials must reach the collector and nothing else. `collector.extraEnv` is the place for them:
+
+```yaml
+collector:
+  extraEnv:
+    - name: NETWORK_ROBINHOOD_RPC_URL
+      valueFrom:
+        secretKeyRef:
+          name: gascurve-rpc
+          key: robinhood
+config:
+  networks:
+    - name: robinhood
+      chain_id: 4663
+      enabled: true
+      # rpc_url omitted on purpose: the Secret above supplies it.
+```
+
+`NETWORK_<NAME>_RPC_URL` (name upper-cased, dashes to underscores) overrides `config.networks[].rpc_url`, so the plaintext URL can be left out of the ConfigMap entirely. Every network the collector runs needs a primary URL from one of the two places: the chart refuses to render an enabled network that has neither, with a message naming the network and the environment variable. Disabled networks and installs without the collector are not checked.
+
+The three component lists are separate on purpose. Before this split, one top-level `extraEnv` was copied into the collector, the api, and both migrate init containers, so a private RPC credential also sat in the public-facing api pod. The top-level `extraEnv` still works and still goes to all three, and NOTES prints a warning while it is set; a component entry with the same name replaces the top-level one. Do not put RPC credentials there.
+
+Upgrading from a chart that only had the top-level `extraEnv`: move each entry to the component that needs it, most often
+
+```yaml
+# before
+extraEnv:
+  - name: NETWORK_ROBINHOOD_RPC_URL
+    valueFrom:
+      secretKeyRef: { name: gascurve-rpc, key: robinhood }
+
+# after
+collector:
+  extraEnv:
+    - name: NETWORK_ROBINHOOD_RPC_URL
+      valueFrom:
+        secretKeyRef: { name: gascurve-rpc, key: robinhood }
+```
 
 ## Migrations
 
@@ -39,10 +81,25 @@ What a slow or failed migration means for each component differs:
 
 ## Rolling pods on Secret changes
 
-The collector and api pod templates carry `checksum/config` and, when the chart renders the database Secret from `database.url`, `checksum/db-secret`, so changing either value rolls the pods on upgrade. Secrets the chart does not manage are not tracked: after rotating `database.existingSecret` or any Secret referenced from `extraEnv`, run
+The collector and api pod templates carry `checksum/config` and, when the chart renders the database Secret from `database.url`, `checksum/db-secret`, so changing either value rolls the pods on upgrade. Secrets the chart does not manage are not tracked: after rotating `database.existingSecret` or any Secret referenced from `collector.extraEnv`, `api.extraEnv`, `migrations.extraEnv` or the deprecated top-level `extraEnv`, run
 
 ```bash
 kubectl rollout restart deploy/<release>-collector deploy/<release>-api
 ```
 
 or use a reloader controller. Containers read Secret-backed environment variables only at startup.
+
+## Releasing
+
+The chart is versioned and released separately from the application. release-please keeps two release PRs open on `main`: one for the application (tag `v<version>`, publishes the three images) and one for the chart (tag `gascurve-chart-v<version>`, packages and pushes the chart to the OCI registry). `Chart.yaml` `appVersion` is what a published chart pulls, and it is the version Helm Publish packages and verifies, so the chart tag and the application version it ships are fixed together at tag time.
+
+Keeping `appVersion` current is automatic but has a repository prerequisite:
+
+- When an application release is published, the Release Please workflow opens a `fix(helm): update chart app version to <version>` PR and enables auto-merge on it. Merging that PR is what makes release-please open the next chart release PR.
+- **Allow auto-merge must be enabled** in the repository settings (Settings, General, Pull Requests, "Allow auto-merge"). GitHub rejects `gh pr merge --auto` when the repository setting is off, so without it the sync PR is opened and then sits there, and `appVersion` stays behind until someone merges it by hand. The workflow step prints the PR number and the exact recovery command when this happens.
+- Auto-merge still waits for required reviews and required status checks. It does not bypass branch protection.
+
+If a publish workflow has to be repaired, both take a `workflow_dispatch`:
+
+- **Docker Publish** requires a published, non-prerelease release for `v<version>` and checks that `.release-please-manifest.json` at that tag agrees. Repairs push only the exact version tag; `latest` and the `<major>.<minor>` alias move only when the version being published is the greatest published stable release, so repairing an old version never rolls `latest` backward.
+- **Helm Publish** checks out the chart tag first and packages the `appVersion` recorded there. The `app_version` input is an explicit override and is ignored unless `override_app_version` is also set; a mismatch with the tag is logged as a warning.

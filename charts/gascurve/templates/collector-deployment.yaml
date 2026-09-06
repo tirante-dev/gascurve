@@ -1,4 +1,5 @@
 {{- if .Values.collector.enabled }}
+{{- include "gascurve.validateNetworkRPC" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,7 +44,7 @@ spec:
           securityContext:
             {{- include "gascurve.containerSecurityContext" (list . .Values.collector.securityContext) | nindent 12 }}
           env:
-            {{- include "gascurve.goEnv" . | nindent 12 }}
+            {{- include "gascurve.goEnv" (list . .Values.collector.extraEnv) | nindent 12 }}
           volumeMounts:
             - name: config
               mountPath: /etc/gascurve

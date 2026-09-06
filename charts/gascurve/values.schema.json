@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "gascurve values",
-  "description": "Validated by helm install, upgrade, template and lint. A database is mandatory whenever the collector or the api is enabled: set exactly one of database.url (rendered into a Secret) and database.existingSecret.",
+  "description": "Validated by helm install, upgrade, template and lint. A database is mandatory whenever the collector or the api is enabled: set exactly one of database.url (rendered into a Secret) and database.existingSecret. Every network the collector runs also needs a primary RPC URL, from config.networks[].rpc_url or a collector.extraEnv entry named NETWORK_<NAME>_RPC_URL; that cross-reference is checked by the templates, not here.",
   "type": "object",
   "properties": {
     "nameOverride": { "type": "string" },
@@ -29,7 +29,8 @@
         "enabled": { "type": "boolean" },
         "image": { "$ref": "#/definitions/componentImage" },
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
-        "resources": { "type": "object" }
+        "resources": { "type": "object" },
+        "extraEnv": { "$ref": "#/definitions/envVarList" }
       },
       "required": ["enabled", "image"]
     },
@@ -41,7 +42,8 @@
         "image": { "$ref": "#/definitions/componentImage" },
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
         "service": { "$ref": "#/definitions/service" },
-        "resources": { "type": "object" }
+        "resources": { "type": "object" },
+        "extraEnv": { "$ref": "#/definitions/envVarList" }
       },
       "required": ["enabled", "image", "service"]
     },
@@ -85,7 +87,8 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
-        "resources": { "type": "object" }
+        "resources": { "type": "object" },
+        "extraEnv": { "$ref": "#/definitions/envVarList" }
       },
       "required": ["enabled"]
     },
@@ -110,16 +113,23 @@
             "properties": {
               "name": { "type": "string", "minLength": 1 },
               "chain_id": { "type": "integer", "minimum": 1 },
-              "rpc_url": { "type": "string", "minLength": 1 },
+              "rpc_url": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Primary RPC URL. Omit it only when the collector's environment supplies NETWORK_<NAME>_RPC_URL, which the templates check."
+              },
               "enabled": { "type": "boolean" }
             },
-            "required": ["name", "chain_id", "rpc_url"]
+            "required": ["name", "chain_id"]
           }
         }
       },
       "required": ["server", "networks"]
     },
-    "extraEnv": { "type": "array", "items": { "type": "object" } },
+    "extraEnv": {
+      "description": "Deprecated alias applied to the collector, api and migration containers alike. Use collector.extraEnv, api.extraEnv and migrations.extraEnv instead.",
+      "$ref": "#/definitions/envVarList"
+    },
     "logLevel": { "type": "string", "pattern": "^(?i)(debug|info|warn|error)$" },
     "podSecurityContext": { "type": "object" },
     "containerSecurityContext": { "type": "object" },
@@ -185,6 +195,61 @@
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
       },
       "required": ["type", "port"]
-    }
+    },
+    "keySelector": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "key": { "type": "string", "minLength": 1 },
+        "optional": { "type": "boolean" }
+      },
+      "required": ["name", "key"],
+      "additionalProperties": false
+    },
+    "envVar": {
+      "title": "Kubernetes EnvVar",
+      "description": "A name plus exactly one of value and valueFrom. valueFrom holds exactly one of secretKeyRef, configMapKeyRef, fieldRef and resourceFieldRef.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "pattern": "^[-._a-zA-Z][-._a-zA-Z0-9]*$" },
+        "value": { "type": "string" },
+        "valueFrom": {
+          "type": "object",
+          "properties": {
+            "secretKeyRef": { "$ref": "#/definitions/keySelector" },
+            "configMapKeyRef": { "$ref": "#/definitions/keySelector" },
+            "fieldRef": {
+              "type": "object",
+              "properties": {
+                "apiVersion": { "type": "string", "minLength": 1 },
+                "fieldPath": { "type": "string", "minLength": 1 }
+              },
+              "required": ["fieldPath"],
+              "additionalProperties": false
+            },
+            "resourceFieldRef": {
+              "type": "object",
+              "properties": {
+                "containerName": { "type": "string", "minLength": 1 },
+                "resource": { "type": "string", "minLength": 1 },
+                "divisor": { "type": ["string", "integer", "number"] }
+              },
+              "required": ["resource"],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1,
+          "maxProperties": 1
+        }
+      },
+      "required": ["name"],
+      "additionalProperties": false,
+      "oneOf": [
+        { "title": "value", "required": ["value"], "not": { "required": ["valueFrom"] } },
+        { "title": "valueFrom", "required": ["valueFrom"], "not": { "required": ["value"] } }
+      ]
+    },
+    "envVarList": { "type": "array", "items": { "$ref": "#/definitions/envVar" } }
   }
 }

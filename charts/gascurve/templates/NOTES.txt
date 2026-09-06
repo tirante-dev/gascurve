@@ -35,3 +35,11 @@ Pods do not restart on their own when that Secret changes; after rotating it run
 
 WARNING: no database configured. Set database.url or database.existingSecret.
 {{- end }}
+{{- if .Values.extraEnv }}
+
+WARNING: top-level extraEnv is deprecated and was applied to the collector, api
+and migration containers alike. Move each entry to collector.extraEnv,
+api.extraEnv or migrations.extraEnv (RPC credentials belong in
+collector.extraEnv only) and remove extraEnv; a future chart major version
+drops the alias.
+{{- end }}

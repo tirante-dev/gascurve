@@ -10,10 +10,15 @@ on:
         required: true
         type: string
       app_version:
-        description: Application version to package as appVersion, without the v prefix. Defaults to the latest published application release.
+        description: "Override the appVersion recorded in Chart.yaml at the chart tag. Bootstrap and repair only, and ignored unless override_app_version is also checked."
         required: false
         type: string
         default: ""
+      override_app_version:
+        description: Confirm that app_version should replace the appVersion recorded at the chart tag.
+        required: false
+        type: boolean
+        default: false
       overwrite:
         description: Repair mode. Push even if this chart version already exists in the registry.
         required: false
@@ -22,6 +27,13 @@ on:
 
 permissions:
   contents: read
+
+# Serialize publishes: the "already published" check below is check-then-push,
+# so overlapping runs could both pass it. The registry's immutable-tag rule on
+# the charts repository is the second line of defence.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   helm:
@@ -32,29 +44,23 @@ jobs:
       REGISTRY: ${{ secrets.REGISTRY_HOST || 'registry.ahkc.win' }}
       REGISTRY_PROJECT: gascurve
     steps:
-      # The chart version comes from the release tag (or the dispatch input)
-      # and the chart contents from that tag, never from a branch. The
-      # appVersion is deliberately NOT read from the checked-out tree: chart
-      # and application releases are separate PRs, so the manifest at the
-      # chart tag may predate the application release. It is resolved from
-      # the latest published application release (tag vX.Y.Z) instead, or
-      # from the app_version input.
-      - name: Resolve chart and app versions
-        id: version
+      # The chart version comes from the release tag (or the dispatch input),
+      # and is validated before anything is checked out so a malformed input
+      # cannot select a ref.
+      - name: Resolve chart version
+        id: chart
         env:
           INPUT_VERSION: ${{ inputs.version }}
-          INPUT_APP_VERSION: ${{ inputs.app_version }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          semver='^[0-9]+\.[0-9]+\.[0-9]+$'
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             chart_version="${INPUT_VERSION}"
           else
             chart_version="${RELEASE_TAG#gascurve-chart-v}"
           fi
-          if ! printf '%s\n' "${chart_version}" | grep -Eq "${semver}"; then
+          if ! printf '%s\n' "${chart_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::Refusing to publish: chart version '${chart_version}' is not a plain semantic version"
             exit 1
           fi
@@ -63,46 +69,75 @@ jobs:
             echo "::error::Refusing to publish: tag ${chart_tag} does not exist in ${GITHUB_REPOSITORY}. Merge the chart release PR first, then dispatch this workflow with its version."
             exit 1
           fi
+          echo "version=${chart_version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${chart_tag}" >> "$GITHUB_OUTPUT"
+
+      # The chart contents come from the chart tag, never from a branch, and
+      # the checkout happens before the appVersion is resolved because the
+      # chart tag is what records it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.chart.outputs.tag }}
+
+      # A chart tag is an immutable association between a chart version and
+      # the application version it was released against. That association is
+      # Chart.yaml appVersion at this tag, so it is read from the checked-out
+      # tree rather than resolved from "the latest application release": a
+      # newer application release published while this chart was waiting must
+      # not be substituted into an older chart.
+      - name: Resolve appVersion from the chart tag
+        id: version
+        env:
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
+          CHART_TAG: ${{ steps.chart.outputs.tag }}
+          INPUT_APP_VERSION: ${{ inputs.app_version }}
+          OVERRIDE_APP_VERSION: ${{ inputs.override_app_version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+
+          manifest_version="$(sed -n 's/^version:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' charts/gascurve/Chart.yaml)"
+          if [ "${manifest_version}" != "${CHART_VERSION}" ]; then
+            echo "::error::charts/gascurve/Chart.yaml at ${CHART_TAG} says version ${manifest_version}, expected ${CHART_VERSION}"
+            exit 1
+          fi
+
+          tag_app_version="$(sed -n 's/^appVersion:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' charts/gascurve/Chart.yaml)"
+          echo "Chart.yaml at ${CHART_TAG} records appVersion ${tag_app_version}"
 
           if [ -n "${INPUT_APP_VERSION}" ]; then
+            if [ "${OVERRIDE_APP_VERSION}" != "true" ]; then
+              echo "::error::app_version=${INPUT_APP_VERSION} was given but override_app_version was not checked. The appVersion normally comes from Chart.yaml at ${CHART_TAG} (${tag_app_version}). Dispatch again with override_app_version checked only to bootstrap a chart tag that predates the first application release, or to repair a wrong appVersion."
+              exit 1
+            fi
             app_version="${INPUT_APP_VERSION}"
             if ! printf '%s\n' "${app_version}" | grep -Eq "${semver}"; then
               echo "::error::app_version '${app_version}' is not a plain semantic version"
               exit 1
             fi
-            state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${app_version}" --jq 'if .draft then "draft" elif .prerelease then "prerelease" else "published" end' 2> /dev/null || echo missing)"
-            if [ "${state}" != "published" ]; then
-              echo "::error::Application release v${app_version} is ${state}. Only published, non-prerelease application releases can be packaged."
-              exit 1
+            if [ "${app_version}" != "${tag_app_version}" ]; then
+              echo "::warning::appVersion mismatch: chart tag ${CHART_TAG} records appVersion ${tag_app_version}, but this run overrides it with ${app_version}. The published chart ${CHART_VERSION} will not match its own tag."
             fi
           else
-            app_version="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate \
-              --jq '.[] | select((.draft or .prerelease) | not) | .tag_name' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V | tail -n 1 || true)"
-            if [ -z "${app_version}" ]; then
-              echo "::error::No published application release (tag vX.Y.Z) exists yet, so there is no appVersion to package. Merge and publish the application release first, then start a new workflow_dispatch of this workflow with version=${chart_version}."
+            app_version="${tag_app_version}"
+            if ! printf '%s\n' "${app_version}" | grep -Eq "${semver}"; then
+              echo "::error::charts/gascurve/Chart.yaml at ${CHART_TAG} records appVersion '${app_version}', which is not a plain semantic version. A chart tag from before the first application release still carries the placeholder 0.0.0; dispatch this workflow with app_version=<released version> and override_app_version checked to bootstrap it."
               exit 1
             fi
           fi
-          echo "chart=${chart_version}" >> "$GITHUB_OUTPUT"
-          echo "chart_tag=${chart_tag}" >> "$GITHUB_OUTPUT"
-          echo "app=${app_version}" >> "$GITHUB_OUTPUT"
-          echo "Chart ${chart_version} (tag ${chart_tag}) with appVersion ${app_version}"
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: refs/tags/${{ steps.version.outputs.chart_tag }}
-
-      - name: Verify the tag matches Chart.yaml
-        env:
-          CHART_VERSION: ${{ steps.version.outputs.chart }}
-        run: |
-          set -euo pipefail
-          manifest_version="$(sed -n 's/^version:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' charts/gascurve/Chart.yaml)"
-          if [ "${manifest_version}" != "${CHART_VERSION}" ]; then
-            echo "::error::charts/gascurve/Chart.yaml at the checked-out tag says version ${manifest_version}, expected ${CHART_VERSION}"
+          # Whatever the source, the application version must have a
+          # published, non-prerelease release.
+          state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${app_version}" \
+            --jq 'if .draft then "draft" elif .prerelease then "prerelease" else "published" end' 2> /dev/null || echo missing)"
+          if [ "${state}" != "published" ]; then
+            echo "::error::Application release v${app_version} is ${state}. Only published, non-prerelease application releases can be packaged. If the application release for this chart has not been published yet, wait for it and re-run this workflow."
             exit 1
           fi
+
+          echo "app=${app_version}" >> "$GITHUB_OUTPUT"
+          echo "Chart ${CHART_VERSION} (tag ${CHART_TAG}) with appVersion ${app_version}"
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
@@ -119,7 +154,7 @@ jobs:
       - name: Verify application images exist
         env:
           APP_VERSION: ${{ steps.version.outputs.app }}
-          CHART_VERSION: ${{ steps.version.outputs.chart }}
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
         run: |
           set -euo pipefail
           missing=0
@@ -143,11 +178,12 @@ jobs:
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: echo "${REGISTRY_PASSWORD}" | helm registry login "${REGISTRY}" -u "${REGISTRY_USERNAME}" --password-stdin
 
-      # A chart version is immutable once published. Re-pushing it is only
-      # allowed in repair mode.
+      # A chart version is immutable once published, here and in the
+      # registry's immutable-tag rule. Re-pushing it is only allowed in repair
+      # mode.
       - name: Refuse to overwrite a published chart version
         env:
-          CHART_VERSION: ${{ steps.version.outputs.chart }}
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
           OVERWRITE: ${{ inputs.overwrite }}
         run: |
           set -euo pipefail
@@ -168,11 +204,11 @@ jobs:
 
       - name: Package chart
         env:
-          CHART_VERSION: ${{ steps.version.outputs.chart }}
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
           APP_VERSION: ${{ steps.version.outputs.app }}
         run: helm package charts/gascurve --version "${CHART_VERSION}" --app-version "${APP_VERSION}"
 
       - name: Push chart
         env:
-          CHART_VERSION: ${{ steps.version.outputs.chart }}
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
         run: helm push "gascurve-${CHART_VERSION}.tgz" "oci://${REGISTRY}/${REGISTRY_PROJECT}/charts"

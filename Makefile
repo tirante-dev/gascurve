@@ -153,19 +153,10 @@ chart-lint:
 		helm lint $(CHART) --strict --values "$$values"; \
 	done
 
-# Same render checks as .github/workflows/chart-test.yml.
+# The render assertions live in one script so this target and
+# .github/workflows/chart-test.yml can never drift apart.
 chart-template:
-	@set -e; \
-	err=$$(mktemp); \
-	if helm template gascurve $(CHART) > /dev/null 2> "$$err"; then echo "FAIL: default render succeeded without a database"; exit 1; fi; \
-	grep -q database "$$err"; rm -f "$$err"; \
-	! helm template gascurve $(CHART) --set database.url=postgres://x:y@db/gascurve --set database.existingSecret=my-db > /dev/null 2>&1; \
-	helm template gascurve $(CHART) --values $(CHART)/ci/database-url-values.yaml | grep -q 'kind: Secret'; \
-	! helm template gascurve $(CHART) --values $(CHART)/ci/existing-secret-values.yaml | grep -q 'kind: Secret'; \
-	helm template gascurve $(CHART) --values $(CHART)/ci/ingress-values.yaml | grep -q 'kind: Ingress'; \
-	! helm template gascurve $(CHART) --values $(CHART)/ci/ingress-values.yaml | grep -q 'kind: Secret'; \
-	! helm template gascurve $(CHART) --values $(CHART)/ci/web-only-values.yaml | grep -q 'DB_URL'; \
-	echo "OK: chart templates"
+	bash scripts/chart-checks.sh
 
 # ---------------------------------------------------------------- Web
 

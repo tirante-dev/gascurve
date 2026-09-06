@@ -77,23 +77,93 @@ Image reference for a component. Usage: include "gascurve.image" (list . .Values
 {{- end }}
 
 {{/*
-Environment shared by the Go binaries.
+Extra environment for one component: the deprecated top-level extraEnv (an
+alias applied to every Go container, kept so existing installs keep working)
+followed by the component's own list. An entry in the component list replaces
+the top-level entry of the same name rather than shadowing it, so the
+container never gets two env vars with one name.
+Usage: include "gascurve.extraEnv" (list . .Values.collector.extraEnv)
+*/}}
+{{- define "gascurve.extraEnv" -}}
+{{- $root := index . 0 -}}
+{{- $component := default (list) (index . 1) -}}
+{{- $overridden := list -}}
+{{- range $component -}}
+{{- $overridden = append $overridden .name -}}
+{{- end -}}
+{{- $merged := list -}}
+{{- range default (list) $root.Values.extraEnv -}}
+{{- if not (has .name $overridden) -}}
+{{- $merged = append $merged . -}}
+{{- end -}}
+{{- end -}}
+{{- range $component -}}
+{{- $merged = append $merged . -}}
+{{- end -}}
+{{- if $merged -}}
+{{- toYaml $merged -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Environment shared by the Go binaries plus that component's extra env.
+Usage: include "gascurve.goEnv" (list . .Values.api.extraEnv)
 */}}
 {{- define "gascurve.goEnv" -}}
+{{- $root := index . 0 -}}
+{{- $component := index . 1 -}}
 - name: DB_URL
   valueFrom:
     secretKeyRef:
-      name: {{ include "gascurve.databaseSecretName" . }}
-      key: {{ include "gascurve.databaseSecretKey" . }}
+      name: {{ include "gascurve.databaseSecretName" $root }}
+      key: {{ include "gascurve.databaseSecretKey" $root }}
 - name: CONFIG_PATH
   value: /etc/gascurve/config.yaml
 - name: LOG_LEVEL
-  value: {{ .Values.logLevel | quote }}
+  value: {{ $root.Values.logLevel | quote }}
 - name: PORT
-  value: {{ .Values.config.server.port | quote }}
-{{- with .Values.extraEnv }}
-{{ toYaml . }}
+  value: {{ $root.Values.config.server.port | quote }}
+{{- with include "gascurve.extraEnv" (list $root $component) }}
+{{ . }}
 {{- end }}
+{{- end }}
+
+{{/*
+Every network the collector will actually run needs a primary RPC URL from
+somewhere: config.networks[].rpc_url in the ConfigMap, or a
+NETWORK_<NAME>_RPC_URL entry in the collector's environment (collector.extraEnv
+or the deprecated top-level extraEnv), which is how a private URL is kept in a
+Secret. values.schema.json cannot express that cross-reference, so it is
+checked here: the render fails with a message instead of the collector
+crash-looping on "rpc_url is required (set NETWORK_<NAME>_RPC_URL)". A literal
+NETWORK_<NAME>_ENABLED value in the same environment overrides the network's
+enabled flag, matching applyEnv in internal/config; a name supplied through
+valueFrom cannot be read here, so such a network is checked as configured.
+Only the collector talks to an RPC, so web-only and api-only installs never
+reach this check.
+*/}}
+{{- define "gascurve.validateNetworkRPC" -}}
+{{- $names := list -}}
+{{- $literals := dict -}}
+{{- range concat (default (list) .Values.extraEnv) (default (list) .Values.collector.extraEnv) -}}
+{{- $names = append $names (toString .name) -}}
+{{- if hasKey . "value" -}}
+{{- $_ := set $literals (toString .name) (toString .value) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.config.networks -}}
+{{- $key := printf "NETWORK_%s" (.name | toString | replace "-" "_" | upper) -}}
+{{- $enabled := .enabled -}}
+{{- $override := get $literals (printf "%s_ENABLED" $key) -}}
+{{- if has $override (list "1" "t" "T" "true" "TRUE" "True") -}}
+{{- $enabled = true -}}
+{{- else if has $override (list "0" "f" "F" "false" "FALSE" "False") -}}
+{{- $enabled = false -}}
+{{- end -}}
+{{- if and $enabled (not .rpc_url) (not (has (printf "%s_RPC_URL" $key) $names)) -}}
+{{- fail (printf "network %s is enabled but has no rpc_url and no collector.extraEnv entry named %s_RPC_URL. Set config.networks[].rpc_url, or add %s_RPC_URL to collector.extraEnv (valueFrom.secretKeyRef to a Secret holding the private URL), or set enabled: false on that network." .name $key $key) -}}
+{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -124,7 +194,9 @@ checksum/db-secret: {{ include (print .Template.BasePath "/secret.yaml") . | sha
 Migration init container. Runs the migrations embedded in the same image as
 the main container, so the schema is never newer or older than the binary
 that follows it. golang-migrate takes a Postgres advisory lock, so the
-collector and api pods can start at the same time without racing.
+collector and api pods can start at the same time without racing. Its
+environment is the shared Go env plus migrations.extraEnv only: RPC
+credentials from collector.extraEnv never reach it.
 Usage: include "gascurve.migrateInitContainer" (list . .Values.api.image)
 */}}
 {{- define "gascurve.migrateInitContainer" -}}
@@ -137,7 +209,7 @@ Usage: include "gascurve.migrateInitContainer" (list . .Values.api.image)
   securityContext:
     {{- include "gascurve.containerSecurityContext" (list $root $root.Values.migrations.securityContext) | nindent 4 }}
   env:
-    {{- include "gascurve.goEnv" $root | nindent 4 }}
+    {{- include "gascurve.goEnv" (list $root $root.Values.migrations.extraEnv) | nindent 4 }}
   volumeMounts:
     - name: config
       mountPath: /etc/gascurve

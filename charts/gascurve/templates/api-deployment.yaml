@@ -44,7 +44,7 @@ spec:
               containerPort: {{ .Values.config.server.port }}
               protocol: TCP
           env:
-            {{- include "gascurve.goEnv" . | nindent 12 }}
+            {{- include "gascurve.goEnv" (list . .Values.api.extraEnv) | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /api/v1/health

@@ -20,6 +20,19 @@ collector:
   securityContext:
     runAsUser: 65532
     runAsGroup: 65532
+  # Extra env for the collector container only (Kubernetes EnvVar objects).
+  # This is where private RPC URLs belong: the collector is the only RPC
+  # client, so a Secret referenced here never reaches the api or the
+  # migration init containers. Every enabled network needs either rpc_url
+  # in config.networks or an entry named NETWORK_<NAME>_RPC_URL here (NAME
+  # upper-cased, dashes to underscores); the chart refuses to render
+  # otherwise.
+  extraEnv: []
+  # - name: NETWORK_ROBINHOOD_RPC_URL
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: gascurve-rpc
+  #       key: robinhood
   resources:
     requests:
       cpu: 100m
@@ -37,6 +50,9 @@ api:
   securityContext:
     runAsUser: 65532
     runAsGroup: 65532
+  # Extra env for the api container only. The api never talks to an RPC, so
+  # RPC credentials do not belong here.
+  extraEnv: []
   service:
     type: ClusterIP
     port: 8080
@@ -98,6 +114,9 @@ migrations:
   securityContext:
     runAsUser: 65532
     runAsGroup: 65532
+  # Extra env for the migrate init containers only. They need DB_URL (always
+  # set by the chart) and nothing else in the usual case.
+  extraEnv: []
   resources:
     requests:
       cpu: 50m
@@ -109,7 +128,8 @@ migrations:
 # Rendered into config.yaml and mounted into the collector and api pods.
 # Environment overrides still apply (NETWORK_<NAME>_RPC_URL etc). For dedicated
 # nodes set calls_per_second: 0 and optionally ws_url and archive: true per
-# network; keep private URLs in a Secret via extraEnv rather than here.
+# network; keep private URLs in a Secret via collector.extraEnv rather than
+# here (rpc_url may then be omitted for that network).
 config:
   server:
     port: 8080
@@ -157,8 +177,14 @@ config:
       calls_per_second: 4
       enabled: true
 
-# Extra environment variables for the Go binaries, for example private RPC
-# URLs kept in a Secret: NETWORK_ROBINHOOD_RPC_URL from secretKeyRef.
+# Deprecated: use collector.extraEnv, api.extraEnv and migrations.extraEnv.
+# Anything listed here is still applied to all three, and NOTES prints a
+# warning while it is set. A component entry with the same name replaces the
+# entry here rather than being appended after it, so a container never gets
+# two env vars with one name. It exists so existing installs keep working
+# across the split and will be removed in a future chart major version. Do not
+# put RPC credentials here: they would reach the api and the migration init
+# containers too.
 extraEnv: []
 
 logLevel: info

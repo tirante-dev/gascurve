@@ -1,0 +1,19 @@
+# Exact fingerprints of reviewed, non-secret findings, in the commit-less form
+# <file>:<rule>:<startline> so rewriting history does not invalidate an entry.
+# Nothing here is broader than one line of one file under one rule: a finding
+# on any other line, or under any other rule, still fails the scan.
+#
+# To regenerate after a suppressed line moves, scan with this file renamed out
+# of the way and take the Fingerprint of the finding, minus its leading
+# "<commit>:":
+#
+#   docker run --rm -v "$PWD:/repo" -v /tmp:/out zricethezav/gitleaks:v8.30.1 \
+#     git --redact --report-format json --report-path /out/gitleaks.json /repo
+#   jq -r '.[] | .Fingerprint' /tmp/gitleaks.json
+
+# internal/api/ws_test.go builds a WebSocket client handshake by hand. The
+# Sec-WebSocket-Key header value is the RFC 6455 sample nonce (base64 of 16
+# bytes), which the entropy-based generic-api-key rule reads as a credential.
+# A handshake nonce is public by construction: the client sends it in
+# plaintext on every connection.
+internal/api/ws_test.go:generic-api-key:541

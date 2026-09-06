@@ -46,10 +46,17 @@ jobs:
 
   # Keeps charts/gascurve/Chart.yaml appVersion in step with the application
   # release so a source-tree install of the chart resolves to a published
-  # image tag. Opens a PR (never pushes to main) with auto-merge enabled; the
-  # merged fix commit under charts/gascurve makes release-please open the
-  # next chart release PR. Uses the same token as release-please so the PR
-  # gets CI runs and the merge triggers workflows.
+  # image tag, and so Helm Publish packages the right appVersion (it reads it
+  # from Chart.yaml at the chart tag). Opens a PR (never pushes to main) with
+  # auto-merge enabled; the merged fix commit under charts/gascurve makes
+  # release-please open the next chart release PR. Uses the same token as
+  # release-please so the PR gets CI runs and the merge triggers workflows.
+  #
+  # Prerequisite: "Allow auto-merge" must be enabled in the repository
+  # settings, otherwise `gh pr merge --auto` fails and the PR just sits there.
+  # See the Releasing section of charts/gascurve/README.md. The step below
+  # prints the exact recovery steps when that happens rather than failing
+  # silently.
   sync-chart-app-version:
     name: Sync Chart App Version
     needs: release-please
@@ -106,4 +113,16 @@ jobs:
           else
             echo "PR #${number} already open for ${branch}; branch updated"
           fi
-          gh pr merge "${number}" --auto --squash
+          if ! merge_output="$(gh pr merge "${number}" --auto --squash 2>&1)"; then
+            printf '%s\n' "${merge_output}"
+            {
+              echo "::error::Could not enable auto-merge on PR #${number} (${branch})."
+              echo "The PR is open and correct; only the automatic merge failed, so charts/gascurve/Chart.yaml still says appVersion ${VERSION} is pending."
+              echo "Most likely cause: 'Allow auto-merge' is off for this repository (Settings, General, Pull Requests)."
+              echo "To recover: enable that setting, then re-run this job, or run 'gh pr merge ${number} --auto --squash' locally, or simply review and merge PR #${number} by hand."
+              echo "Until it is merged, Helm Publish will package the older appVersion recorded at the chart tag."
+            }
+            exit 1
+          fi
+          printf '%s\n' "${merge_output}"
+          echo "Auto-merge enabled on PR #${number}; it merges once required reviews and checks pass."
