@@ -12,13 +12,24 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    # release-please needs a token other than GITHUB_TOKEN so that the release
+    # PR gets CI runs and the published release triggers the publish
+    # workflows. Preferred: an org-owned GitHub App (RELEASE_APP_ID +
+    # RELEASE_APP_PRIVATE_KEY, Contents and Pull requests read/write, installed
+    # on this repo only). Fallback: a classic PAT in RELEASE_PLEASE_TOKEN.
+    env:
+      HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' }}
     steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        if: env.HAS_RELEASE_APP == 'true'
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - uses: googleapis/release-please-action@v5
         id: release
         with:
-          # A PAT is used so the published release triggers the Docker Publish
-          # workflow; releases created with the default GITHUB_TOKEN do not
-          # trigger other workflow runs.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          token: ${{ steps.app.outputs.token || secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
