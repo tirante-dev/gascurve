@@ -21,7 +21,7 @@ type seriesRange struct {
 	duration        time.Duration // 0 = everything
 	resolution      string        // bucket resolution, "" = per block
 	cache           string
-	batchStep       time.Duration
+	batchStep       time.Duration // 0 = one point per batch report
 	batchResolution string
 	l1Step          time.Duration
 }
@@ -35,7 +35,7 @@ const (
 )
 
 var ranges = map[string]seriesRange{
-	rangeHour:  {name: rangeHour, duration: time.Hour, resolution: "", cache: cacheHour, batchStep: time.Second, batchResolution: "batch", l1Step: time.Second},
+	rangeHour:  {name: rangeHour, duration: time.Hour, resolution: "", cache: cacheHour, batchStep: 0, batchResolution: "batch", l1Step: time.Second},
 	rangeDay:   {name: rangeDay, duration: 24 * time.Hour, resolution: db.Resolution1m, cache: cacheDay, batchStep: time.Minute, batchResolution: db.Resolution1m, l1Step: time.Minute},
 	rangeMonth: {name: rangeMonth, duration: 30 * 24 * time.Hour, resolution: db.Resolution15m, cache: cacheMonth, batchStep: 15 * time.Minute, batchResolution: db.Resolution15m, l1Step: 15 * time.Minute},
 	rangeAll:   {name: rangeAll, duration: 0, resolution: db.Resolution1h, cache: cacheAll, batchStep: time.Hour, batchResolution: db.Resolution1h, l1Step: time.Hour},
@@ -151,7 +151,8 @@ func bucketPoint(b db.Bucket, width time.Duration) model.SeriesPoint {
 	return model.SeriesPoint{
 		T: b.BucketStart.Unix(), Blocks: b.Blocks, GasUsed: b.GasUsed, GasPerSecond: b.GasUsed / secs,
 		FeesWei: b.FeesWei.String(), BaseFeeMin: b.BaseFeeMin.String(), BaseFeeAvg: b.BaseFeeAvg.String(), BaseFeeMax: b.BaseFeeMax.String(),
-		ExponentBips: b.ExponentEndBips, Backlogs: db.Uint64s(b.BacklogsEnd), BacklogsMax: db.Uint64s(b.BacklogsMax),
+		ExponentBips: b.ExponentEndBips, ConstraintBips: int64s(b.ConstraintBipsEnd), Backlogs: b.BacklogsEnd.Uint64s(), BacklogsMax: b.BacklogsMax.Uint64s(),
+		MinBaseFee: b.MinBaseFee.String(), FloorFeesWei: b.FloorFeesWei.String(), SurplusFeesWei: b.SurplusFeesWei.String(),
 		ConstraintSetID: setID, ReplayErrorBips: b.ReplayErrorBips,
 	}
 }
@@ -165,11 +166,14 @@ func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint
 	}
 	out := make([]model.SeriesPoint, 0, len(blocks))
 	for _, b := range blocks {
-		fees := new(big.Int).Mul(b.BaseFee.BigInt(), new(big.Int).SetUint64(b.GasUsed))
+		gas := new(big.Int).SetUint64(b.GasUsed)
+		fees := new(big.Int).Mul(b.BaseFee.BigInt(), gas)
+		floor := new(big.Int).Mul(b.MinBaseFee.BigInt(), gas)
 		out = append(out, model.SeriesPoint{
 			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, GasPerSecond: perSecond[b.TS.Unix()],
 			FeesWei: fees.String(), BaseFeeMin: b.BaseFee.String(), BaseFeeAvg: b.BaseFee.String(), BaseFeeMax: b.BaseFee.String(),
-			ExponentBips: b.ExponentBips, Backlogs: db.Uint64s(b.Backlogs), BacklogsMax: db.Uint64s(b.Backlogs),
+			ExponentBips: b.ExponentBips, ConstraintBips: int64s(b.ConstraintBips), Backlogs: b.Backlogs.Uint64s(), BacklogsMax: b.Backlogs.Uint64s(),
+			MinBaseFee: b.MinBaseFee.String(), FloorFeesWei: floor.String(), SurplusFeesWei: new(big.Int).Sub(fees, floor).String(),
 			ConstraintSetID: setIDAt(sets, b.Number), ReplayErrorBips: replayError(b),
 		})
 	}
@@ -187,7 +191,7 @@ func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration) [
 			if cur != nil {
 				out = append(out, cur.point(secs))
 			}
-			cur = &acc{start: start, sum: new(big.Int), fees: new(big.Int)}
+			cur = &acc{start: start, sum: new(big.Int), fees: new(big.Int), floor: new(big.Int)}
 		}
 		cur.add(b, setIDAt(sets, b.Number))
 	}
@@ -198,17 +202,20 @@ func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration) [
 }
 
 type acc struct {
-	start      int64
-	blocks     int64
-	gas        uint64
-	sum, fees  *big.Int
-	minFee     *big.Int
-	maxFee     *big.Int
-	exponent   int64
-	backlogs   []uint64
-	maxBacklog []uint64
-	setID      int64
-	errBips    int64
+	start          int64
+	blocks         int64
+	gas            uint64
+	sum, fees      *big.Int
+	floor          *big.Int
+	minFee         *big.Int
+	maxFee         *big.Int
+	exponent       int64
+	constraintBips []int64
+	backlogs       []uint64
+	maxBacklog     []uint64
+	minBaseFee     string
+	setID          int64
+	errBips        int64
 }
 
 func (a *acc) add(b db.Block, setID int64) {
@@ -222,9 +229,13 @@ func (a *acc) add(b db.Block, setID int64) {
 	a.blocks++
 	a.gas += b.GasUsed
 	a.sum.Add(a.sum, fee)
-	a.fees.Add(a.fees, new(big.Int).Mul(fee, new(big.Int).SetUint64(b.GasUsed)))
+	gas := new(big.Int).SetUint64(b.GasUsed)
+	a.fees.Add(a.fees, new(big.Int).Mul(fee, gas))
+	a.floor.Add(a.floor, new(big.Int).Mul(b.MinBaseFee.BigInt(), gas))
 	a.exponent = b.ExponentBips
-	a.backlogs = db.Uint64s(b.Backlogs)
+	a.constraintBips = int64s(b.ConstraintBips)
+	a.minBaseFee = b.MinBaseFee.String()
+	a.backlogs = b.Backlogs.Uint64s()
 	for i, v := range a.backlogs {
 		if i >= len(a.maxBacklog) {
 			a.maxBacklog = append(a.maxBacklog, v)
@@ -241,10 +252,23 @@ func (a *acc) point(secs int64) model.SeriesPoint {
 	if a.maxBacklog == nil {
 		a.maxBacklog = []uint64{}
 	}
+	if a.backlogs == nil {
+		a.backlogs = []uint64{}
+	}
+	if a.constraintBips == nil {
+		a.constraintBips = []int64{}
+	}
+	if a.minBaseFee == "" {
+		a.minBaseFee = "0"
+	}
+	if a.floor == nil {
+		a.floor = new(big.Int)
+	}
 	return model.SeriesPoint{
 		T: a.start, Blocks: a.blocks, GasUsed: a.gas, GasPerSecond: a.gas / uint64(secs),
 		FeesWei: a.fees.String(), BaseFeeMin: a.minFee.String(), BaseFeeAvg: avg.String(), BaseFeeMax: a.maxFee.String(),
-		ExponentBips: a.exponent, Backlogs: a.backlogs, BacklogsMax: a.maxBacklog,
+		ExponentBips: a.exponent, ConstraintBips: a.constraintBips, Backlogs: a.backlogs, BacklogsMax: a.maxBacklog,
+		MinBaseFee: a.minBaseFee, FloorFeesWei: a.floor.String(), SurplusFeesWei: new(big.Int).Sub(a.fees, a.floor).String(),
 		ConstraintSetID: a.setID, ReplayErrorBips: a.errBips,
 	}
 }

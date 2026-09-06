@@ -5,6 +5,12 @@ server:
   cors_origins:
     - http://localhost:3000
   dev_mode: false
+  # Reverse proxies (CIDRs or addresses) whose X-Forwarded-For is believed
+  # for rate limiting. Empty: the peer address is always the client.
+  trusted_proxies: []
+  # Concurrent WebSocket connections allowed per client address and in total.
+  ws_max_per_ip: 8
+  ws_max_total: 2000
 
 database:
   url: postgres://postgres:postgres@127.0.0.1:5432/gascurve?sslmode=disable

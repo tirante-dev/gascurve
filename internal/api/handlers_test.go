@@ -50,11 +50,11 @@ func seed(t *testing.T) *dbtest.MemStore {
 		blocks = append(blocks, db.Block{
 			ChainID: robinhood, Number: 1000 + i, TS: now.Add(-time.Duration(31-i) * time.Second), GasUsed: 1_000_000,
 			BaseFee: db.WeiFromUint64(20_000_000 + i), PredictedBaseFee: db.WeiFromUint64(19_970_000), L1Block: 5, TxCount: 3,
-			Backlogs: pq.Int64Array{int64(i), 100}, ExponentBips: int64(i), Anchored: i == 30,
+			Backlogs: db.Uint64Array{i, 100}, ConstraintBips: pq.Int64Array{int64(i), 0}, MinBaseFee: db.WeiFromUint64(20_000_000), ExponentBips: int64(i), Anchored: i == 30,
 		})
 	}
 	must(s.UpsertBlocks(ctx, blocks))
-	must(s.UpsertBlocks(ctx, []db.Block{{ChainID: testnet, Number: 500, TS: now.Add(-3 * time.Second), GasUsed: 5, BaseFee: db.WeiFromUint64(10_000_000), PredictedBaseFee: db.WeiFromUint64(10_000_000), Backlogs: pq.Int64Array{7}, ExponentBips: 42}}))
+	must(s.UpsertBlocks(ctx, []db.Block{{ChainID: testnet, Number: 500, TS: now.Add(-3 * time.Second), GasUsed: 5, BaseFee: db.WeiFromUint64(10_000_000), PredictedBaseFee: db.WeiFromUint64(10_000_000), Backlogs: db.Uint64Array{7}, ExponentBips: 42}}))
 
 	constraints := db.JSONB(`[{"target":60000000,"window":15,"backlog":3111506,"exponentBips":34},{"target":40000000,"window":86400,"backlog":11194391810886,"exponentBips":32391}]`)
 	prices := db.JSONB(`{"perL2Tx":"1","perL1CalldataByte":"2","perL2Storage":"3","perArbGasBase":"4","perArbGasCongestion":"5","perArbGasTotal":"6"}`)
@@ -73,8 +73,9 @@ func seed(t *testing.T) *dbtest.MemStore {
 		for i := 0; i < 3; i++ {
 			start := now.Add(-time.Duration(i+1) * width).Truncate(width)
 			must(s.FoldBuckets(ctx, []db.Bucket{{ChainID: robinhood, Resolution: res, BucketStart: start, Blocks: 10, GasUsed: 100, FeesWei: db.WeiFromUint64(1000),
-				BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(2), BaseFeeMax: db.WeiFromUint64(3), ExponentEndBips: 5,
-				BacklogsEnd: pq.Int64Array{1, 2}, BacklogsMax: pq.Int64Array{3, 4}, ConstraintSetID: sql.NullInt64{Int64: 2, Valid: true}, ReplayErrorBips: 9, LastBlock: 10}}))
+				BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(2), BaseFeeMax: db.WeiFromUint64(3), BaseFeeSum: db.WeiFromUint64(20), ExponentEndBips: 5,
+				BacklogsEnd: db.Uint64Array{1, 2}, BacklogsMax: db.Uint64Array{3, 4}, ConstraintBipsEnd: pq.Int64Array{5, 0}, MinBaseFee: db.WeiFromUint64(7),
+				FloorFeesWei: db.WeiFromUint64(700), SurplusFeesWei: db.WeiFromUint64(300), ConstraintSetID: sql.NullInt64{Int64: 2, Valid: true}, ReplayErrorBips: 9, LastBlock: 10}}))
 		}
 	}
 	_, err := s.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: robinhood, EffectiveBlock: 28, EffectiveAt: now.Add(-48 * time.Hour), Source: model.SourceGenesis, Constraints: db.JSONB(`[{"target":60000000,"window":9,"startingBacklog":0}]`)})
@@ -89,6 +90,7 @@ func seed(t *testing.T) *dbtest.MemStore {
 	must(s.UpsertBatchReports(ctx, []db.BatchReport{
 		{ChainID: robinhood, BlockNumber: 1005, BatchNumber: 1, BatchTS: now.Add(-10 * time.Minute), Poster: "0xp", CalldataLen: 100, GasSpent: 1000, WeiSpent: db.WeiFromUint64(5000), L1BaseFee: db.WeiFromUint64(5)},
 		{ChainID: robinhood, BlockNumber: 1015, BatchNumber: 2, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 50, GasSpent: 500, WeiSpent: db.WeiFromUint64(1500), L1BaseFee: db.WeiFromUint64(3)},
+		{ChainID: robinhood, BlockNumber: 1016, BatchNumber: 3, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 8, GasSpent: 7, WeiSpent: db.WeiFromUint64(77), L1BaseFee: db.WeiFromUint64(9)},
 	}))
 	must(s.SetState(ctx, robinhood, db.StateRateLimitEvents, "4"))
 	must(s.SetState(ctx, robinhood, db.StateLast429At, "2026-09-06T07:00:00Z"))
@@ -152,21 +154,28 @@ func TestEndpoints(t *testing.T) {
 		{"/api/v1/networks", 200, cacheNetwork, func(t *testing.T, b []byte) {
 			var nets []model.Network
 			decode(t, b, &nets)
-			if len(nets) != 3 || nets[0].Name != "robinhood" || nets[0].Model != model.ModelConstraints || nets[0].HeadBlock != 1030 || nets[0].LagSeconds != 1 {
+			if len(nets) != 3 || nets[0].Name != "robinhood" || nets[0].Model != model.ModelConstraints || nets[0].HeadBlock != 1030 || nets[0].LagSeconds == nil || *nets[0].LagSeconds != 1 {
 				t.Fatalf("networks: %+v", nets)
 			}
-			if nets[1].Name != "arbitrum-one" || nets[1].Model != model.ModelUnknown || nets[1].HeadAt != "" || nets[2].Model != model.ModelLegacy {
+			if nets[1].Name != "arbitrum-one" || nets[1].Model != model.ModelUnknown || nets[1].HeadAt != nil || nets[1].LagSeconds != nil || nets[2].Model != model.ModelLegacy {
 				t.Fatalf("networks models: %+v", nets)
+			}
+			// Timestamps of a network without a head are JSON null, never "".
+			if !strings.Contains(string(b), `"headAt":null`) || !strings.Contains(string(b), `"lagSeconds":null`) {
+				t.Fatalf("null timestamps expected: %s", b)
 			}
 		}},
 		{"/api/v1/networks/robinhood", 200, cacheNetwork, func(t *testing.T, b []byte) {
 			var n model.Network
 			decode(t, b, &n)
-			if n.ChainID != robinhood || n.HeadAt != now.Add(-time.Second).Format(time.RFC3339) || n.ExplorerURL != "https://x" {
+			if n.ChainID != robinhood || n.HeadAt == nil || *n.HeadAt != now.Add(-time.Second).Format(time.RFC3339) || n.ExplorerURL != "https://x" {
 				t.Fatalf("network: %+v", n)
 			}
 		}},
 		{"/api/v1/networks/4663", 200, cacheNetwork, nil},
+		// A decimal beyond BIGINT is looked up as a name and is unknown,
+		// not an internal error.
+		{"/api/v1/networks/9223372036854775808", 404, cacheNone, nil},
 		{"/api/v1/networks/nope", 404, cacheNone, func(t *testing.T, b []byte) {
 			var e model.ErrorBody
 			decode(t, b, &e)
@@ -204,6 +213,9 @@ func TestEndpoints(t *testing.T) {
 			if len(pts) != 5 || pts[0].Number != 1030 || !pts[0].Anchored || pts[0].Backlogs[0] != 30 || pts[4].Number != 1026 {
 				t.Fatalf("blocks: %+v", pts)
 			}
+			if pts[0].ConstraintBips[0] != 30 || len(pts[0].ConstraintBips) != 2 || pts[0].MinBaseFee != "20000000" {
+				t.Fatalf("block point contract fields: %+v", pts[0])
+			}
 		}},
 		{"/api/v1/networks/robinhood/blocks?limit=abc", 200, cacheShort, func(t *testing.T, b []byte) {
 			var pts []model.BlockPoint
@@ -229,6 +241,9 @@ func TestEndpoints(t *testing.T) {
 			if p.GasPerSecond != 1_000_000 || p.FeesWei != "20000030000000" || p.ExponentBips != 30 || p.ConstraintSetID != 2 || p.ReplayErrorBips != 15 || p.BacklogsMax[1] != 100 {
 				t.Fatalf("series point: %+v", p)
 			}
+			if p.MinBaseFee != "20000000" || p.FloorFeesWei != "20000000000000" || p.SurplusFeesWei != "30000000" || p.ConstraintBips[0] != 30 {
+				t.Fatalf("series point fee split: %+v", p)
+			}
 			if s.Points[5].ConstraintSetID != 1 {
 				t.Fatalf("set before block 1010: %+v", s.Points[5])
 			}
@@ -241,6 +256,9 @@ func TestEndpoints(t *testing.T) {
 			decode(t, b, &s)
 			if s.Resolution != "1m" || len(s.Points) != 3 || s.Points[0].Blocks != 10 || s.Points[0].GasPerSecond != 1 || s.Points[0].ConstraintSetID != 2 || s.Points[0].BaseFeeAvg != "2" {
 				t.Fatalf("series 24h: %+v", s)
+			}
+			if p := s.Points[0]; p.MinBaseFee != "7" || p.FloorFeesWei != "700" || p.SurplusFeesWei != "300" || p.ConstraintBips[0] != 5 {
+				t.Fatalf("bucket point contract fields: %+v", p)
 			}
 		}},
 		{"/api/v1/networks/robinhood/series?range=30d", 200, cacheMonth, func(t *testing.T, b []byte) {
@@ -283,6 +301,7 @@ func TestEndpoints(t *testing.T) {
 				t.Fatalf("empty constraints: %s", b)
 			}
 		}},
+
 		{"/api/v1/networks/robinhood/owner-actions?limit=1", 200, cacheDay, func(t *testing.T, b []byte) {
 			var acts []model.OwnerAction
 			decode(t, b, &acts)
@@ -293,15 +312,20 @@ func TestEndpoints(t *testing.T) {
 		{"/api/v1/networks/robinhood/batches?range=24h", 200, cacheDay, func(t *testing.T, b []byte) {
 			var s model.BatchSeries
 			decode(t, b, &s)
-			if s.Range != "24h" || s.Resolution != "1m" || len(s.Points) != 2 || s.Points[0].Batches != 1 || s.Points[0].WeiSpent != "5000" || s.Points[0].L1BaseFeeAvg != "5" || s.Points[0].CalldataBytes != 100 {
+			if s.Range != "24h" || s.Resolution != "1m" || len(s.Points) != 2 || s.Points[0].Batches != 1 || s.Points[0].WeiSpent != "5000" || s.Points[0].L1BaseFeeAvg != "5" || s.Points[0].CalldataBytes != 100 || s.Points[1].Batches != 2 {
 				t.Fatalf("batches: %+v", s)
 			}
 		}},
 		{"/api/v1/networks/robinhood/batches?range=1h", 200, cacheHour, func(t *testing.T, b []byte) {
 			var s model.BatchSeries
 			decode(t, b, &s)
-			if s.Resolution != "batch" || len(s.Points) != 2 {
+			// Exactly one point per report, even for reports sharing a
+			// second, ordered by time then block.
+			if s.Resolution != "batch" || len(s.Points) != 3 || s.Points[0].Batches != 1 || s.Points[1].Batches != 1 || s.Points[2].Batches != 1 {
 				t.Fatalf("batches 1h: %+v", s)
+			}
+			if s.Points[1].T != s.Points[2].T || s.Points[1].WeiSpent != "1500" || s.Points[2].WeiSpent != "77" || s.Points[2].L1BaseFeeAvg != "9" || s.Points[2].CalldataBytes != 8 {
+				t.Fatalf("batches per report: %+v", s.Points)
 			}
 		}},
 		{"/api/v1/networks/robinhood/batches?range=x", 400, cacheNone, nil},
@@ -327,11 +351,14 @@ func TestEndpoints(t *testing.T) {
 				t.Fatalf("status: %+v", s)
 			}
 			rh := s.Networks[0]
-			if rh.RateLimitEvents != 4 || rh.Last429At == nil || *rh.Last429At != "2026-09-06T07:00:00Z" || rh.ArbOSVersion == nil || rh.BackfillCursor == nil || rh.LagSeconds != 1 || rh.LastSampleAt == "" {
+			if rh.RateLimitEvents != 4 || rh.Last429At == nil || *rh.Last429At != "2026-09-06T07:00:00Z" || rh.ArbOSVersion == nil || rh.BackfillCursor == nil || rh.LagSeconds == nil || *rh.LagSeconds != 1 || rh.LastSampleAt == nil {
 				t.Fatalf("status robinhood: %+v", rh)
 			}
-			if arb := s.Networks[1]; arb.LastError == nil || *arb.LastError != "rpc down" || arb.Enabled || arb.Last429At != nil {
+			if arb := s.Networks[1]; arb.LastError == nil || *arb.LastError != "rpc down" || arb.Enabled || arb.Last429At != nil || arb.HeadAt != nil || arb.LagSeconds != nil || arb.LastSampleAt != nil {
 				t.Fatalf("status arbitrum: %+v", arb)
+			}
+			if !strings.Contains(string(b), `"lastSampleAt":null`) {
+				t.Fatalf("null lastSampleAt expected: %s", b)
 			}
 		}},
 		{"/api/v1/nothing", 404, cacheNone, nil},
@@ -386,7 +413,7 @@ func TestSeriesStepDown(t *testing.T) {
 	var blocks []db.Block
 	for i := uint64(0); i < 2500; i++ {
 		blocks = append(blocks, db.Block{ChainID: robinhood, Number: i, TS: now.Add(-time.Duration(2500-i) * 100 * time.Millisecond).Truncate(time.Second), GasUsed: 10,
-			BaseFee: db.WeiFromUint64(100 + i%3), PredictedBaseFee: db.WeiFromUint64(100), Backlogs: pq.Int64Array{int64(i % 5), 9}, ExponentBips: int64(i)})
+			BaseFee: db.WeiFromUint64(100 + i%3), PredictedBaseFee: db.WeiFromUint64(100), Backlogs: db.Uint64Array{i % 5, 9}, MinBaseFee: db.WeiFromUint64(50), ExponentBips: int64(i)})
 	}
 	if err := store.UpsertBlocks(ctx, blocks); err != nil {
 		t.Fatal(err)
@@ -405,7 +432,7 @@ func TestSeriesStepDown(t *testing.T) {
 	if p.Blocks != 50 || p.GasUsed != 500 || p.GasPerSecond != 100 || p.BaseFeeMin != "100" || p.BaseFeeMax != "102" || p.BacklogsMax[0] != 4 || p.T%5 != 0 {
 		t.Fatalf("stepped point: %+v", p)
 	}
-	if p.ReplayErrorBips == 0 || p.BaseFeeAvg == "" || len(p.Backlogs) != 2 {
+	if p.ReplayErrorBips == 0 || p.BaseFeeAvg == "" || len(p.Backlogs) != 2 || p.MinBaseFee != "50" || p.FloorFeesWei != "25000" || p.SurplusFeesWei == "" {
 		t.Fatalf("stepped point aggregates: %+v", p)
 	}
 }
@@ -416,7 +443,7 @@ func TestStoreFailures(t *testing.T) {
 		"/api/v1/networks/robinhood/series", "/api/v1/networks/robinhood/series?range=24h", "/api/v1/networks/robinhood/constraints",
 		"/api/v1/networks/robinhood/owner-actions", "/api/v1/networks/robinhood/batches", "/api/v1/networks/robinhood/l1", "/api/v1/status",
 	}
-	methods := []string{"Networks", "NetworkByRef", "LatestStateSample", "RecentBlocks", "BlocksBetween", "Buckets", "ConstraintSets", "OwnerActions", "BatchBuckets", "L1Samples", "States", "LatestBlock", "GasUsedBetween"}
+	methods := []string{"Networks", "NetworkByRef", "LatestStateSample", "RecentBlocks", "BlocksBetween", "Buckets", "ConstraintSets", "OwnerActions", "BatchBuckets", "BatchReports", "L1Samples", "States", "BlockByNumber", "GasUsedBetween"}
 	for _, m := range methods {
 		store := seed(t)
 		store.SetFailure(m, true)
@@ -487,6 +514,61 @@ func TestStoreFailures(t *testing.T) {
 	if resp.StatusCode != 200 || snap.Block.Number != 1030 || snap.GasPerSecond.S10 != 0 {
 		t.Fatalf("live without blocks: %d %+v", resp.StatusCode, snap)
 	}
+	// Constraints: a sample lookup failure is an internal error.
+	store = seed(t)
+	store.SetFailure("LatestStateSample", true)
+	ts = newServer(t, store)
+	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/constraints"); resp.StatusCode != 500 {
+		t.Fatalf("constraints sample failure: %d", resp.StatusCode)
+	}
+}
+
+// TestConstraintsCurrentIsModelGated: a network with recorded sets whose
+// latest sample is the legacy model reports current as null while keeping
+// the history.
+func TestConstraintsCurrentIsModelGated(t *testing.T) {
+	store := dbtest.New()
+	ctx := context.Background()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: arbOne, Name: "arbitrum-one"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: arbOne, EffectiveBlock: 1, EffectiveAt: now.Add(-time.Hour), Source: model.SourceObserved, Constraints: db.JSONB(`[{"target":1,"window":1,"startingBacklog":0}]`)}); err != nil {
+		t.Fatal(err)
+	}
+	ts := newServer(t, store)
+	// No sample yet: null.
+	if _, b := get(t, ts, "/api/v1/networks/arbitrum-one/constraints"); !strings.Contains(string(b), `"current":null`) || !strings.Contains(string(b), `"source":"observed"`) {
+		t.Fatalf("no sample: %s", b)
+	}
+	if err := store.InsertStateSample(ctx, db.StateSample{ChainID: arbOne, SampledAt: now, BlockNumber: 5, Constraints: db.JSONB(`[]`), Legacy: db.JSONB(`{"speedLimit":1,"inertia":1,"tolerance":1,"backlog":0}`), Prices: db.JSONB(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, b := get(t, ts, "/api/v1/networks/arbitrum-one/constraints"); !strings.Contains(string(b), `"current":null`) {
+		t.Fatalf("legacy sample: %s", b)
+	}
+	if err := store.InsertStateSample(ctx, db.StateSample{ChainID: arbOne, SampledAt: now.Add(time.Second), BlockNumber: 6, Constraints: db.JSONB(`[{"target":1,"window":1,"backlog":0,"exponentBips":0}]`), Prices: db.JSONB(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, b := get(t, ts, "/api/v1/networks/arbitrum-one/constraints"); !strings.Contains(string(b), `"current":{"id":1`) {
+		t.Fatalf("constraints sample: %s", b)
+	}
+}
+
+// TestLiveIsOneTick: /live describes the block the latest sample was taken
+// at, even when the collector stored a newer block meanwhile.
+func TestLiveIsOneTick(t *testing.T) {
+	store := seed(t)
+	ctx := context.Background()
+	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now.Add(time.Second), GasUsed: 9, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.WeiFromUint64(5), Backlogs: db.Uint64Array{1, 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	ts := newServer(t, store)
+	resp, body := get(t, ts, "/api/v1/networks/robinhood/live")
+	var snap model.LiveSnapshot
+	decode(t, body, &snap)
+	if resp.StatusCode != 200 || snap.Block.Number != 1030 || snap.Block.BaseFee != "20000030" || snap.ReplayErrorBips != 15 {
+		t.Fatalf("live must use the sample's block: %d %+v", resp.StatusCode, snap)
+	}
 }
 
 func TestRateLimit(t *testing.T) {
@@ -513,15 +595,10 @@ func TestRateLimit(t *testing.T) {
 		t.Fatal("handler")
 	}
 	rl := newRateLimiter(1, 1)
-	rl.now = func() time.Time { return now }
+	clock := now
+	rl.now = func() time.Time { return clock }
 	if !rl.allow("a") || rl.allow("a") {
 		t.Fatal("limiter")
-	}
-	for i := range maxRateEntries {
-		rl.clients[strings.Repeat("x", 1)+string(rune(i))] = &rateEntry{limiter: nil, seen: now.Add(-time.Hour)}
-	}
-	if !rl.allow("fresh") || len(rl.clients) > 2 {
-		t.Fatalf("stale entries should be evicted: %d", len(rl.clients))
 	}
 	// IPv6 remote addresses keep the whole address.
 	req := httptest.NewRequest(http.MethodGet, "/health", http.NoBody)
@@ -530,6 +607,147 @@ func TestRateLimit(t *testing.T) {
 	rl.middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })).ServeHTTP(rec, req)
 	if rec.Code != 204 || rl.clients["[::1]"] == nil {
 		t.Fatalf("ipv6 key: %d %v", rec.Code, rl.clients)
+	}
+	if clientIP("1.2.3.4") != "1.2.3.4" || clientIP("1.2.3.4:5") != "1.2.3.4" || clientIP("[::1]:5") != "[::1]" {
+		t.Fatal("clientIP")
+	}
+}
+
+// TestRateLimiterBounded: the limiter never holds more than the cap (the
+// least recently seen address is evicted), idle addresses expire on a
+// timer independent of new clients, and a returning address keeps its
+// bucket.
+func TestRateLimiterBounded(t *testing.T) {
+	rl := newRateLimiter(1, 1)
+	rl.maxEntry = 3
+	clock := now
+	rl.now = func() time.Time { return clock }
+	for _, ip := range []string{"a", "b", "c"} {
+		rl.allow(ip)
+	}
+	clock = clock.Add(time.Second)
+	rl.allow("a") // a is now the most recently seen
+	rl.allow("d") // over the cap: b, the least recently seen, is evicted
+	if rl.size() != 3 || rl.clients["b"] != nil || rl.clients["a"] == nil || rl.clients["d"] == nil {
+		t.Fatalf("eviction: size %d clients %v", rl.size(), rl.clients)
+	}
+	// b comes back with a fresh bucket, evicting c.
+	if !rl.allow("b") || rl.clients["c"] != nil {
+		t.Fatal("re-admission")
+	}
+	// a's bucket is drained (one token, used twice); it refills with time.
+	if rl.allow("a") {
+		t.Fatal("a should be out of tokens")
+	}
+	clock = clock.Add(2 * time.Second)
+	if !rl.allow("a") {
+		t.Fatal("a should refill")
+	}
+	// Idle entries expire on the sweep even when no new address arrives.
+	clock = clock.Add(rateEntryTTL + rateSweepEvery)
+	rl.allow("a")
+	if rl.size() != 1 || rl.clients["b"] != nil || rl.clients["d"] != nil {
+		t.Fatalf("sweep: size %d clients %v", rl.size(), rl.clients)
+	}
+	// The sweep is rate limited: an entry that goes stale less than a sweep
+	// interval after the last sweep survives until the next one.
+	rl.allow("e")
+	clock = clock.Add(rateEntryTTL - 30*time.Second)
+	rl.allow("a") // sweeps; e is still fresh
+	if rl.size() != 2 {
+		t.Fatalf("fresh entry swept: %d", rl.size())
+	}
+	clock = clock.Add(31 * time.Second)
+	rl.allow("a") // e is stale now but the last sweep was 31 s ago
+	if rl.size() != 2 {
+		t.Fatalf("sweep should wait for its interval: %d", rl.size())
+	}
+	clock = clock.Add(rateSweepEvery)
+	rl.allow("a")
+	if rl.size() != 1 {
+		t.Fatalf("stale entry should be swept: %d", rl.size())
+	}
+	// Ten thousand distinct addresses stay within the cap.
+	full := newRateLimiter(1, 1)
+	full.now = func() time.Time { return clock }
+	for i := range maxRateEntries * 2 {
+		full.allow(strings.Repeat("x", 1) + string(rune(i)))
+	}
+	if full.size() != maxRateEntries {
+		t.Fatalf("cap: %d", full.size())
+	}
+}
+
+// TestRealIPTrustedProxies: forwarding headers only count when the peer is
+// a configured proxy, and the chain is walked right to left past trusted
+// hops, so a client cannot mint addresses through X-Forwarded-For.
+func TestRealIPTrustedProxies(t *testing.T) {
+	trusted, err := (config.ServerConfig{TrustedProxies: []string{"10.0.0.0/8", "127.0.0.1"}}).TrustedProxyNets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := ""
+	handler := realIP(trusted)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { seen = r.RemoteAddr }))
+	call := func(remote string, headers map[string]string) string {
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+		req.RemoteAddr = remote
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+		return seen
+	}
+	cases := []struct {
+		name    string
+		remote  string
+		headers map[string]string
+		want    string
+	}{
+		{"untrusted peer keeps its address", "203.0.113.5:1", map[string]string{"X-Forwarded-For": "198.51.100.7"}, "203.0.113.5:1"},
+		{"private but untrusted peer keeps its address", "192.168.1.9:1", map[string]string{"X-Forwarded-For": "198.51.100.7"}, "192.168.1.9:1"},
+		{"trusted proxy, one hop", "10.1.1.1:1", map[string]string{"X-Forwarded-For": "198.51.100.7"}, "198.51.100.7:0"},
+		{"trusted proxy, spoofed prefix is skipped", "10.1.1.1:1", map[string]string{"X-Forwarded-For": "1.1.1.1, 198.51.100.7, 10.2.2.2"}, "198.51.100.7:0"},
+		{"all hops trusted keeps the leftmost", "10.1.1.1:1", map[string]string{"X-Forwarded-For": "10.3.3.3, 10.2.2.2"}, "10.3.3.3:0"},
+		{"two headers", "127.0.0.1:1", map[string]string{"X-Forwarded-For": "198.51.100.9"}, "198.51.100.9:0"},
+		{"garbage hops are ignored", "10.1.1.1:1", map[string]string{"X-Forwarded-For": "nope, 198.51.100.7"}, "198.51.100.7:0"},
+		{"x-real-ip fallback", "10.1.1.1:1", map[string]string{"X-Real-IP": "198.51.100.8"}, "198.51.100.8:0"},
+		{"nothing forwarded", "10.1.1.1:1", nil, "10.1.1.1:1"},
+		{"bad remote", "nonsense", map[string]string{"X-Forwarded-For": "198.51.100.7"}, "nonsense"},
+	}
+	for _, tc := range cases {
+		if got := call(tc.remote, tc.headers); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+	}
+	// Without trusted proxies the peer is always the client.
+	none := realIP(nil)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { seen = r.RemoteAddr }))
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "127.0.0.1:1"
+	req.Header.Set("X-Forwarded-For", "198.51.100.7")
+	none.ServeHTTP(httptest.NewRecorder(), req)
+	if seen != "127.0.0.1:1" {
+		t.Fatalf("no trusted proxies: %q", seen)
+	}
+	// An invalid configuration is ignored with a warning, not fatal.
+	s := New(seed(t), config.ServerConfig{TrustedProxies: []string{"bad"}}, nil, nil)
+	if s.Handler() == nil {
+		t.Fatal("handler")
+	}
+	// The limiter keys on the forwarded client behind a trusted proxy.
+	srv := New(seed(t), config.ServerConfig{RateLimitPerSecond: 1, RateLimitBurst: 1, TrustedProxies: []string{"127.0.0.1", "::1"}}, nil, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	for i, want := range []int{200, 200, 429} {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/health", http.NoBody)
+		req.Header.Set("X-Forwarded-For", []string{"198.51.100.1", "198.51.100.2", "198.51.100.2"}[i])
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("request %d: %d want %d", i, resp.StatusCode, want)
+		}
 	}
 }
 
@@ -568,7 +786,7 @@ func TestHelpers(t *testing.T) {
 	if intParam(httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody), "limit", 1, 1, 10) != 10 {
 		t.Fatal("intParam clamp")
 	}
-	if b := (&acc{blocks: 1, sum: bigInt(0), fees: bigInt(0), minFee: bigInt(1), maxFee: bigInt(1)}); b.point(5).BacklogsMax == nil {
-		t.Fatal("point")
+	if p := (&acc{blocks: 1, sum: bigInt(0), fees: bigInt(0), minFee: bigInt(1), maxFee: bigInt(1)}).point(5); p.BacklogsMax == nil || p.Backlogs == nil || p.ConstraintBips == nil || p.MinBaseFee != "0" || p.FloorFeesWei != "0" {
+		t.Fatalf("point: %+v", p)
 	}
 }

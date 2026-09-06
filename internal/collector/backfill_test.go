@@ -31,8 +31,17 @@ func seedSets(t *testing.T, store *dbtest.MemStore) {
 	}
 }
 
+// scanned marks the initial owner-action scan as complete, which the
+// backfill requires before it starts any segment.
+func scanned(f *Follower) {
+	f.mu.Lock()
+	f.ownerScanDone = true
+	f.mu.Unlock()
+}
+
 func runBackfill(t *testing.T, f *Follower, maxSteps int) (steps int) {
 	t.Helper()
+	scanned(f)
 	for steps < maxSteps {
 		status, err := f.BackfillStep(context.Background())
 		if err != nil {
@@ -59,10 +68,21 @@ func TestBackfillSegments(t *testing.T) {
 	f := newTestFollower(t, rpc, store)
 	// now is base+100s; a depth of 70s lands on block 300 (ts base+30s).
 	f.cfg.BackfillDepth = 70 * time.Second
-	f.minFeeChanges = []minFeeChange{{block: 300, fee: big.NewInt(30_000_000)}}
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	f.mu.Lock()
+	f.minFeeChanges = []minFeeChange{{block: 300, fee: big.NewInt(30_000_000)}}
+	f.mu.Unlock()
+	// Nothing starts before the initial owner-action scan completed: the
+	// historical constraint sets are unknown until then.
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
+		t.Fatalf("before the owner scan: %v %v", st, err)
+	}
+	if _, ok, _ := store.GetState(ctx, 4663, db.StateBackfillCursor); ok {
+		t.Fatal("no cursor may be written before the owner scan")
+	}
+	scanned(f)
 	// Nothing happens while the fast loop is catching up.
 	f.catchingUp.Store(true)
 	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
@@ -85,15 +105,21 @@ func TestBackfillSegments(t *testing.T) {
 		t.Fatalf("cursor: %+v %v", c, err)
 	}
 	// Every block from the genesis set (100) to the first stored block is
-	// folded exactly once: 891 backfilled plus the 10 live ones.
-	var total int64
-	for _, b := range store.BucketRows {
-		if b.Resolution == db.Resolution1m {
-			total += b.Blocks
-		}
-	}
-	if total != 901 {
+	// folded exactly once: 900 backfilled plus the live head.
+	if total := blockCountIn(store, db.Resolution1m); total != 901 {
 		t.Fatalf("1m bucket blocks = %d", total)
+	}
+	// Blocks in the hour of the first live block are row-backed (the live
+	// loop rebuilds those buckets from rows), so they exist as rows and
+	// carry the minimum fee in force: the genesis default before block
+	// 300, the recorded change from there.
+	b299, _ := store.BlockByNumber(ctx, 4663, 299)
+	b300, _ := store.BlockByNumber(ctx, 4663, 300)
+	if b299 == nil || b300 == nil || b299.MinBaseFee.Int64() != pricer.InitialMinimumBaseFeeWei || b300.MinBaseFee.Int64() != 30_000_000 {
+		t.Fatalf("backfill rows and fees: %+v %+v", b299, b300)
+	}
+	if b299.PredictedBaseFee.Cmp(b300.PredictedBaseFee.BigInt()) <= 0 {
+		t.Fatalf("the higher genesis floor must price higher: %s vs %s", b299.PredictedBaseFee, b300.PredictedBaseFee)
 	}
 	bk, _ := store.Buckets(ctx, 4663, db.Resolution1m, baseTime, baseTime.Add(time.Minute))
 	if len(bk) != 1 || !bk[0].ConstraintSetID.Valid || bk[0].ConstraintSetID.Int64 != 2 || bk[0].LastBlock != 599 {
@@ -118,6 +144,85 @@ func TestBackfillSegments(t *testing.T) {
 	}
 }
 
+// TestBackfillAdditiveBeyondBoundary: buckets before the hour of the first
+// live block have no rows and are folded additively, committed with the
+// cursor, so a replayed batch never double counts.
+func TestBackfillAdditiveBeyondBoundary(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(40_000) // ts base + 4000 s
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.now = func() time.Time { return baseTime.Add(4000 * time.Second) }
+	f.cfg.BackfillDepth = 1000 * time.Second // block 30000, an hour before the live start's hour
+	f.cfg.HeaderBatchSize = 100
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, f, 200)
+	if total := blockCountIn(store, db.Resolution1h); total != 10_001 {
+		t.Fatalf("1h bucket blocks = %d", total)
+	}
+	boundary := baseTime.Add(3600 * time.Second)
+	if b, _ := store.BlockByNumber(ctx, 4663, 35_999); b != nil {
+		t.Fatal("blocks before the boundary hour must not become rows")
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 36_000); b == nil || b.TS.Before(boundary) {
+		t.Fatalf("blocks from the boundary hour on are rows: %+v", b)
+	}
+	early, _ := store.Buckets(ctx, 4663, db.Resolution1h, baseTime, boundary)
+	if len(early) != 1 || early[0].Blocks != 6000 || early[0].LastBlock != 35_999 || early[0].BaseFeeSum.Sign() <= 0 {
+		t.Fatalf("additive hour bucket: %+v", early)
+	}
+	if early[0].BaseFeeAvg.Cmp(new(big.Int).Div(early[0].BaseFeeSum.BigInt(), big.NewInt(6000))) != 0 {
+		t.Fatalf("average must derive from the exact sum: %+v", early[0])
+	}
+	// Discarding an unverified live-model cursor drops only the
+	// backfill-only buckets and starts over.
+	f.mu.Lock()
+	f.cursorChecked = false
+	f.mu.Unlock()
+	c, _ := f.loadCursor(ctx)
+	c.Done, c.Active, c.SetID, c.Verified = false, true, 0, false
+	if err := f.saveCursor(ctx, store, c); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("after discard: %v %v", st, err)
+	}
+	// The discarded buckets are gone; the step that followed rebuilt the
+	// first batch of the fresh segment only.
+	if early, _ := store.Buckets(ctx, 4663, db.Resolution1h, baseTime, boundary); len(early) != 1 || early[0].Blocks != 100 || early[0].LastBlock != 30_099 {
+		t.Fatalf("backfill-only buckets must be deleted and re-backfilled: %+v", early)
+	}
+	if late, _ := store.Buckets(ctx, 4663, db.Resolution1h, boundary, boundary.Add(time.Hour)); len(late) != 1 {
+		t.Fatalf("row-backed buckets must survive: %+v", late)
+	}
+	c, _ = f.loadCursor(ctx)
+	if !c.Active || !c.Verified || c.Done {
+		t.Fatalf("fresh cursor: %+v", c)
+	}
+	// The discard runs once per process; a verified cursor is kept.
+	f.mu.Lock()
+	f.cursorChecked = false
+	f.mu.Unlock()
+	if _, err := f.BackfillStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c2, _ := f.loadCursor(ctx); c2.Next <= c.Next {
+		t.Fatalf("verified cursor must not be discarded: %+v", c2)
+	}
+	f.mu.Lock()
+	f.cursorChecked = false
+	f.mu.Unlock()
+	c.Verified = false
+	_ = f.saveCursor(ctx, store, c)
+	store.FailOn["DeleteBucketsBefore"] = true
+	if _, err := f.BackfillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("discard failure: %v", err)
+	}
+	delete(store.FailOn, "DeleteBucketsBefore")
+}
+
 func TestBackfillWithoutSets(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
@@ -125,6 +230,7 @@ func TestBackfillWithoutSets(t *testing.T) {
 	f := newTestFollower(t, rpc, store)
 	f.cfg.BackfillDepth = 30 * time.Second // block 700
 	// No sample yet and no blocks: idle.
+	scanned(f)
 	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
 		t.Fatalf("no blocks: %v %v", st, err)
 	}
@@ -135,17 +241,16 @@ func TestBackfillWithoutSets(t *testing.T) {
 	if steps < 29 {
 		t.Fatalf("steps = %d", steps)
 	}
-	var total int64
 	for _, b := range store.BucketRows {
-		if b.Resolution == db.Resolution1h {
-			total += b.Blocks
-			if b.ConstraintSetID.Valid {
-				t.Fatal("no set id expected without sets")
-			}
+		if b.Resolution == db.Resolution1h && b.ConstraintSetID.Valid {
+			t.Fatal("no set id expected without sets")
 		}
 	}
-	if total != 301 { // 700..990 backfilled plus 991..1000 live
+	if total := blockCountIn(store, db.Resolution1h); total != 301 { // 700..999 backfilled plus the live head
 		t.Fatalf("hour bucket blocks = %d", total)
+	}
+	if c, _ := f.loadCursor(ctx); !c.Verified {
+		t.Fatalf("segments chosen after the scan are verified: %+v", c)
 	}
 	// Legacy chains backfill the same way from the live parameters.
 	rpcL := newFakeRPC(1000)
@@ -173,6 +278,7 @@ func TestBackfillErrors(t *testing.T) {
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	scanned(f)
 	store.FailOn["GetState"] = true
 	if _, err := f.BackfillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("GetState: %v", err)
@@ -204,11 +310,13 @@ func TestBackfillErrors(t *testing.T) {
 		t.Fatalf("headers: %v", err)
 	}
 	delete(rpc.errs, "HeadersByNumbers")
-	store.FailOn["FoldBuckets"] = true
-	if _, err := f.BackfillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
-		t.Fatalf("fold: %v", err)
+	for _, method := range []string{"FoldBuckets", "UpsertBlocks", "RebuildBuckets"} {
+		store.FailOn[method] = true
+		if _, err := f.BackfillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
+			t.Fatalf("%s: %v", method, err)
+		}
+		delete(store.FailOn, method)
 	}
-	delete(store.FailOn, "FoldBuckets")
 	// A cursor pointing at an unknown set is reported.
 	c, _ := f.loadCursor(ctx)
 	c.SetID = 99
@@ -316,8 +424,23 @@ func TestBackfillArchiveAnchors(t *testing.T) {
 		t.Fatalf("anchor samples = %v", rpc.sampleAt)
 	}
 	c, err := f.loadCursor(ctx)
-	if err != nil || !c.Done || c.LastAnchor != 400 {
+	if err != nil || !c.Done || c.LastAnchor != 400 || c.AnchorMinFee != "20000000" {
 		t.Fatalf("cursor: %+v %v", c, err)
+	}
+	// The minimum fee sampled at an anchor is used from the next block on
+	// (no change is recorded, so the genesis default applied before).
+	b100, _ := store.BlockByNumber(ctx, 4663, 100)
+	b101, _ := store.BlockByNumber(ctx, 4663, 101)
+	if b100.MinBaseFee.Int64() != pricer.InitialMinimumBaseFeeWei || b101.MinBaseFee.Int64() != 20_000_000 {
+		t.Fatalf("anchor min fee: %s then %s", b100.MinBaseFee, b101.MinBaseFee)
+	}
+	// A recorded change after the anchor wins over the anchor.
+	f.mu.Lock()
+	f.minFeeChanges = []minFeeChange{{block: 150, fee: big.NewInt(7)}}
+	f.mu.Unlock()
+	fees := f.backfillFees(&backfillCursor{LastAnchor: 100, AnchorMinFee: "20000000"}, []nitro.Header{{Number: 149}, {Number: 150}, {Number: 200}, {Number: 201}}, map[uint64]*big.Int{200: big.NewInt(9)})
+	if fees[0].Int64() != 20_000_000 || fees[1].Int64() != 7 || fees[2].Int64() != 7 || fees[3].Int64() != 9 {
+		t.Fatalf("backfill fees: %v", fees)
 	}
 	if c.LastAnchorErrorBips != replayErrorAt(t, f, 400) {
 		t.Fatalf("anchor error %d should be the pre-anchor replay error", c.LastAnchorErrorBips)
@@ -388,16 +511,16 @@ func replayErrorAt(t *testing.T, f *Follower, number uint64) int64 {
 		numbers = append(numbers, n)
 	}
 	headers, _ := f.rpc.HeadersByNumbers(ctx, numbers)
-	anchor, err := f.backfillAnchors(ctx, st, numbers)
+	anchor, fees, err := f.backfillAnchors(ctx, st, numbers)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := f.replaySegment(st, c, headers, anchor)
+	rows := f.replaySegment(st, c, headers, anchor, fees)
 	last := rows[len(rows)-1]
 	if last.Number != number || !last.Anchored {
 		t.Fatalf("expected anchored row %d: %+v", number, last)
 	}
-	return replayError(last)
+	return db.ReplayErrorBips(last)
 }
 
 func TestBackfillAnchorEdgeCases(t *testing.T) {
@@ -415,9 +538,9 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 	}
 	st := &pricer.State{MinBaseFee: big.NewInt(1), Constraints: []pricer.Constraint{{Target: 60_000_000, Window: 15}, {Target: 40_000_000, Window: 86_400}}}
 	numbers := []uint64{98, 99, 100, 101, 102, 103, 104, 105}
-	anchor, err := f.backfillAnchors(ctx, st, numbers)
-	if err != nil || anchor == nil {
-		t.Fatalf("anchors: %v", err)
+	anchor, fees, err := f.backfillAnchors(ctx, st, numbers)
+	if err != nil || anchor == nil || fees[100].Int64() != 20_000_000 {
+		t.Fatalf("anchors: %v %v", fees, err)
 	}
 	if b, ok := anchor(100); !ok || b[0] != 100 {
 		t.Fatalf("anchor at 100: %v %v", b, ok)
@@ -426,33 +549,33 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 		t.Fatal("101 is not an anchor block")
 	}
 	headers, _ := rpc.HeadersByNumbers(ctx, numbers)
-	rows := f.replaySegment(st, &backfillCursor{}, headers, anchor)
+	rows := f.replaySegment(st, &backfillCursor{}, headers, anchor, fees)
 	for _, r := range rows {
 		anchored := r.Number == 100 || r.Number == 105
 		if r.Anchored != anchored {
 			t.Fatalf("row %d anchored = %v", r.Number, r.Anchored)
 		}
-		if anchored && (r.Backlogs[0] != int64(r.Number) || r.Backlogs[1] != int64(r.Number)) {
+		if anchored && (r.Backlogs[0] != r.Number || r.Backlogs[1] != r.Number) {
 			t.Fatalf("anchored row %d backlogs = %v", r.Number, r.Backlogs)
 		}
 	}
 	// No anchor block in range: nil anchor, no calls.
 	rpc.sampleAt = nil
-	if a, err := f.backfillAnchors(ctx, st, []uint64{101, 102}); err != nil || a != nil || len(rpc.sampleAt) != 0 {
+	if a, _, err := f.backfillAnchors(ctx, st, []uint64{101, 102}); err != nil || a != nil || len(rpc.sampleAt) != 0 {
 		t.Fatalf("out of range: %v %v %v", a, err, rpc.sampleAt)
 	}
 	// A sample whose model differs from the segment is skipped.
 	rpc.mu.Lock()
 	rpc.constraints = rpc.constraints[:1]
 	rpc.mu.Unlock()
-	if a, err := f.backfillAnchors(ctx, st, []uint64{100}); err != nil || a != nil {
+	if a, _, err := f.backfillAnchors(ctx, st, []uint64{100}); err != nil || a != nil {
 		t.Fatalf("shape mismatch: %v %v", a, err)
 	}
 	// Legacy chains anchor the single backlog.
 	lp := legacyParams()
 	rpc.legacy = &lp
 	lst := &pricer.State{MinBaseFee: big.NewInt(1), Legacy: &pricer.Legacy{SpeedLimit: lp.SpeedLimit, Inertia: lp.Inertia, Tolerance: lp.Tolerance}}
-	a, err := f.backfillAnchors(ctx, lst, []uint64{100})
+	a, _, err := f.backfillAnchors(ctx, lst, []uint64{100})
 	if err != nil || a == nil {
 		t.Fatalf("legacy anchors: %v", err)
 	}
@@ -461,9 +584,10 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 	}
 	// A failing archive call fails the step so it is retried.
 	rpc.errs["FastSampleAt"] = errRPC
-	if _, err := f.backfillAnchors(ctx, lst, []uint64{100}); !errors.Is(err, errRPC) {
+	if _, _, err := f.backfillAnchors(ctx, lst, []uint64{100}); !errors.Is(err, errRPC) {
 		t.Fatalf("anchor error: %v", err)
 	}
+	scanned(f)
 	if _, err := f.BackfillStep(ctx); !errors.Is(err, errRPC) {
 		t.Fatalf("step with failing anchor: %v", err)
 	}

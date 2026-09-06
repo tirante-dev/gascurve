@@ -134,35 +134,55 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	return f.checkObservedLocked(ctx)
 }
 
+// scanOwnerRange records the actions in [from, to] and advances the
+// cursor in the same transaction. A malformed OwnerActs event fails the
+// range so the cursor never moves past an event that was not understood.
 func (f *Follower) scanOwnerRange(ctx context.Context, from, to uint64) error {
+	actions, err := f.fetchOwnerActions(ctx, from, to)
+	if err != nil {
+		return err
+	}
+	return f.store.WithTx(ctx, func(s db.Store) error {
+		if err := f.storeOwnerActions(ctx, s, actions); err != nil {
+			return err
+		}
+		return s.SetState(ctx, f.chainID, db.StateOwnerLogCursor, strconv.FormatUint(to, 10))
+	})
+}
+
+// fetchOwnerActions reads and decodes the OwnerActs logs in [from, to].
+// Unknown selectors decode to raw actions; a structurally malformed event
+// is an error.
+func (f *Follower) fetchOwnerActions(ctx context.Context, from, to uint64) ([]*nitro.OwnerAction, error) {
 	logs, err := f.rpc.OwnerActsLogs(ctx, from, to)
 	if err != nil {
-		return fmt.Errorf("logs %d..%d: %w", from, to, err)
+		return nil, fmt.Errorf("logs %d..%d: %w", from, to, err)
 	}
 	actions := make([]*nitro.OwnerAction, 0, len(logs))
 	for _, l := range logs {
 		a, err := nitro.DecodeOwnerActs(l)
 		if err != nil {
-			f.log.Warn("undecodable OwnerActs log", "err", err.Error())
-			continue
+			return nil, fmt.Errorf("owner action in %d..%d: %w", from, to, err)
 		}
 		if a.Timestamp == 0 {
 			h, err := f.rpc.HeaderByNumber(ctx, a.BlockNumber)
 			if err != nil {
-				return fmt.Errorf("header %d: %w", a.BlockNumber, err)
+				return nil, fmt.Errorf("header %d: %w", a.BlockNumber, err)
 			}
 			a.Timestamp = h.Timestamp
 		}
 		actions = append(actions, a)
 	}
-	return f.store.WithTx(ctx, func(s db.Store) error {
-		for _, a := range actions {
-			if err := f.recordAction(ctx, s, a); err != nil {
-				return err
-			}
+	return actions, nil
+}
+
+func (f *Follower) storeOwnerActions(ctx context.Context, s db.Store, actions []*nitro.OwnerAction) error {
+	for _, a := range actions {
+		if err := f.recordAction(ctx, s, a); err != nil {
+			return err
 		}
-		return s.SetState(ctx, f.chainID, db.StateOwnerLogCursor, strconv.FormatUint(to, 10))
-	})
+	}
+	return nil
 }
 
 // recordAction stores one decoded action, its constraint set when it is a
@@ -200,7 +220,7 @@ func (f *Follower) recordAction(ctx context.Context, s db.Store, a *nitro.OwnerA
 			return err
 		}
 	}
-	payload, err := json.Marshal(model.OwnerActionNotification{ChainID: f.chainID, Action: model.OwnerAction{
+	payload, err := json.Marshal(model.OwnerActionNotification{ChainID: f.chainID, LogIndex: a.LogIndex, Action: model.OwnerAction{
 		Block: a.BlockNumber, At: at.Format(time.RFC3339), TxHash: a.TxHash, Method: a.Method, Selector: a.Selector, Args: json.RawMessage(args),
 	}})
 	if err != nil {
@@ -363,10 +383,25 @@ func batchReportOf(chainID uint64, b nitro.Block) *db.BatchReport {
 	return nil
 }
 
-// prune drops per-block rows and raw samples beyond retention.
+// prune drops per-block rows and raw samples beyond retention. Rows in the
+// hour of the first live block are kept while the backfill is still
+// running: its last segment rebuilds those buckets from rows.
 func (f *Follower) prune(ctx context.Context) error {
 	now := f.now()
-	n, err := f.store.PruneBlocks(ctx, f.chainID, now.Add(-f.cfg.BlockRetention))
+	before := now.Add(-f.cfg.BlockRetention)
+	c, err := f.loadCursor(ctx)
+	if err != nil {
+		return err
+	}
+	if !c.Done {
+		f.mu.Lock()
+		boundary, ok := f.boundaryLocked()
+		f.mu.Unlock()
+		if ok && boundary.Before(before) {
+			before = boundary
+		}
+	}
+	n, err := f.store.PruneBlocks(ctx, f.chainID, before)
 	if err != nil {
 		return err
 	}

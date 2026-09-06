@@ -10,11 +10,8 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
-
-	"github.com/lib/pq"
 
 	"github.com/tirante-dev/gascurve/internal/db"
 )
@@ -125,16 +122,17 @@ func (m *MemStore) Networks(context.Context) ([]db.Network, error) {
 	return out, nil
 }
 
-// NetworkByRef resolves a name or chain id.
+// NetworkByRef resolves a chain id (a decimal within the BIGINT range) or
+// otherwise a name, never both.
 func (m *MemStore) NetworkByRef(_ context.Context, ref string) (*db.Network, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.fail("NetworkByRef"); err != nil {
 		return nil, err
 	}
-	id, _ := strconv.ParseUint(ref, 10, 64)
+	id, byID := db.ChainIDRef(ref)
 	for _, n := range m.NetworkRows {
-		if n.Name == ref || n.ChainID == id {
+		if (byID && n.ChainID == uint64(id)) || (!byID && n.Name == ref) {
 			n := n
 			return &n, nil
 		}
@@ -196,6 +194,37 @@ func (m *MemStore) sortedBlocks(chainID uint64) []db.Block {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
 	return out
+}
+
+// BlockByNumber returns one block.
+func (m *MemStore) BlockByNumber(_ context.Context, chainID, number uint64) (*db.Block, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("BlockByNumber"); err != nil {
+		return nil, err
+	}
+	b, ok := m.BlockRows[chainID][number]
+	if !ok {
+		return nil, nil
+	}
+	return &b, nil
+}
+
+// DeleteBlocksAfter removes and returns blocks above a number.
+func (m *MemStore) DeleteBlocksAfter(_ context.Context, chainID, after uint64) ([]db.Block, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("DeleteBlocksAfter"); err != nil {
+		return nil, err
+	}
+	var out []db.Block
+	for _, b := range m.sortedBlocks(chainID) {
+		if b.Number > after {
+			out = append(out, b)
+			delete(m.BlockRows[chainID], b.Number)
+		}
+	}
+	return out, nil
 }
 
 // LatestBlock returns the highest block.
@@ -340,45 +369,71 @@ func (m *MemStore) FoldBuckets(_ context.Context, buckets []db.Bucket) error {
 			m.BucketRows[key] = b
 			continue
 		}
-		total := old.Blocks + b.Blocks
-		merged := old
-		merged.Blocks = total
-		merged.GasUsed += b.GasUsed
-		merged.FeesWei = db.NewWei(new(big.Int).Add(old.FeesWei.BigInt(), b.FeesWei.BigInt()))
-		if old.Blocks == 0 || b.BaseFeeMin.BigInt().Cmp(old.BaseFeeMin.BigInt()) < 0 {
-			merged.BaseFeeMin = b.BaseFeeMin
-		}
-		if b.BaseFeeMax.BigInt().Cmp(old.BaseFeeMax.BigInt()) > 0 {
-			merged.BaseFeeMax = b.BaseFeeMax
-		}
-		if total > 0 {
-			sum := new(big.Int).Mul(old.BaseFeeAvg.BigInt(), big.NewInt(old.Blocks))
-			sum.Add(sum, new(big.Int).Mul(b.BaseFeeAvg.BigInt(), big.NewInt(b.Blocks)))
-			merged.BaseFeeAvg = db.NewWei(sum.Div(sum, big.NewInt(total)))
-		}
-		if b.LastBlock >= old.LastBlock {
-			merged.ExponentEndBips = b.ExponentEndBips
-			merged.BacklogsEnd = b.BacklogsEnd
-			if b.ConstraintSetID.Valid {
-				merged.ConstraintSetID = b.ConstraintSetID
-			}
-			merged.LastBlock = b.LastBlock
-		}
-		n := max(len(old.BacklogsMax), len(b.BacklogsMax))
-		mx := make(pq.Int64Array, n)
-		for i := range n {
-			if i < len(old.BacklogsMax) {
-				mx[i] = old.BacklogsMax[i]
-			}
-			if i < len(b.BacklogsMax) && b.BacklogsMax[i] > mx[i] {
-				mx[i] = b.BacklogsMax[i]
-			}
-		}
-		merged.BacklogsMax = mx
-		merged.ReplayErrorBips = max(old.ReplayErrorBips, b.ReplayErrorBips)
-		m.BucketRows[key] = merged
+		m.BucketRows[key] = db.MergeBuckets(old, b)
 	}
 	return nil
+}
+
+// setIDAtLocked is the constraint set in force at a block.
+func (m *MemStore) setIDAtLocked(chainID, number uint64) sql.NullInt64 {
+	var out sql.NullInt64
+	var bestBlock uint64
+	for _, cs := range m.SetRows {
+		if cs.ChainID != chainID || cs.EffectiveBlock > number {
+			continue
+		}
+		if !out.Valid || cs.EffectiveBlock > bestBlock || (cs.EffectiveBlock == bestBlock && cs.ID > out.Int64) {
+			out, bestBlock = sql.NullInt64{Int64: cs.ID, Valid: true}, cs.EffectiveBlock
+		}
+	}
+	return out
+}
+
+// RebuildBuckets recomputes buckets from the rows in their windows.
+func (m *MemStore) RebuildBuckets(_ context.Context, chainID uint64, resolution string, starts []time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("RebuildBuckets"); err != nil {
+		return err
+	}
+	width, ok := db.Resolutions[resolution]
+	if !ok {
+		return fmt.Errorf("rebuild buckets: unknown resolution %q", resolution)
+	}
+	for _, start := range starts {
+		start = start.UTC()
+		end := start.Add(width)
+		acc := db.NewBucketBuilder(chainID, resolution, start)
+		for _, b := range m.sortedBlocks(chainID) {
+			if !b.TS.Before(start) && b.TS.Before(end) {
+				acc.Add(b, m.setIDAtLocked(chainID, b.Number))
+			}
+		}
+		key := bucketKey(chainID, resolution, start)
+		if acc.Blocks() == 0 {
+			delete(m.BucketRows, key)
+			continue
+		}
+		m.BucketRows[key] = acc.Bucket()
+	}
+	return nil
+}
+
+// DeleteBucketsBefore drops buckets starting before t.
+func (m *MemStore) DeleteBucketsBefore(_ context.Context, chainID uint64, before time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("DeleteBucketsBefore"); err != nil {
+		return 0, err
+	}
+	var n int64
+	for k, b := range m.BucketRows {
+		if b.ChainID == chainID && b.BucketStart.Before(before) {
+			delete(m.BucketRows, k)
+			n++
+		}
+	}
+	return n, nil
 }
 
 // Buckets returns buckets in [from, to).
@@ -537,6 +592,56 @@ func (m *MemStore) OwnerActions(_ context.Context, chainID uint64, from, to time
 	return out, nil
 }
 
+// OwnerActionsSince lists actions from a block on, ascending.
+func (m *MemStore) OwnerActionsSince(_ context.Context, chainID, block uint64) ([]db.OwnerAction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("OwnerActionsSince"); err != nil {
+		return nil, err
+	}
+	var out []db.OwnerAction
+	for _, a := range m.ActionRows {
+		if a.ChainID == chainID && a.BlockNumber >= block {
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].BlockNumber != out[j].BlockNumber {
+			return out[i].BlockNumber < out[j].BlockNumber
+		}
+		return out[i].LogIndex < out[j].LogIndex
+	})
+	return out, nil
+}
+
+// RewindAfter deletes owner actions, constraint sets and batch reports
+// above a block.
+func (m *MemStore) RewindAfter(_ context.Context, chainID, block uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("RewindAfter"); err != nil {
+		return err
+	}
+	for k, a := range m.ActionRows {
+		if a.ChainID == chainID && a.BlockNumber > block {
+			delete(m.ActionRows, k)
+		}
+	}
+	kept := m.SetRows[:0]
+	for _, cs := range m.SetRows {
+		if cs.ChainID != chainID || cs.EffectiveBlock <= block {
+			kept = append(kept, cs)
+		}
+	}
+	m.SetRows = kept
+	for k, r := range m.ReportRows {
+		if r.ChainID == chainID && r.BlockNumber > block {
+			delete(m.ReportRows, k)
+		}
+	}
+	return nil
+}
+
 // InsertConstraintSet upserts on (chain, block, source).
 func (m *MemStore) InsertConstraintSet(_ context.Context, cs db.ConstraintSet) (int64, error) {
 	m.mu.Lock()
@@ -590,6 +695,28 @@ func (m *MemStore) UpsertBatchReports(_ context.Context, reports []db.BatchRepor
 		m.ReportRows[fmt.Sprintf("%d/%d", r.ChainID, r.BlockNumber)] = r
 	}
 	return nil
+}
+
+// BatchReports lists reports in [from, to) by batch time then block.
+func (m *MemStore) BatchReports(_ context.Context, chainID uint64, from, to time.Time) ([]db.BatchReport, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("BatchReports"); err != nil {
+		return nil, err
+	}
+	var out []db.BatchReport
+	for _, r := range m.ReportRows {
+		if r.ChainID == chainID && !r.BatchTS.Before(from) && r.BatchTS.Before(to) {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].BatchTS.Equal(out[j].BatchTS) {
+			return out[i].BatchTS.Before(out[j].BatchTS)
+		}
+		return out[i].BlockNumber < out[j].BlockNumber
+	})
+	return out, nil
 }
 
 // BatchBuckets aggregates reports per step.

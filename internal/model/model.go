@@ -20,17 +20,18 @@ const (
 	SourceObserved    = "observed"
 )
 
-// Network is a configured chain and its collector head.
+// Network is a configured chain and its collector head. HeadAt and
+// LagSeconds are null until the collector has produced a head.
 type Network struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName"`
-	ChainID     uint64 `json:"chainId"`
-	ExplorerURL string `json:"explorerUrl"`
-	Model       string `json:"model"`
-	HeadBlock   uint64 `json:"headBlock"`
-	HeadAt      string `json:"headAt"`
-	LagSeconds  int64  `json:"lagSeconds"`
-	Enabled     bool   `json:"enabled"`
+	Name        string  `json:"name"`
+	DisplayName string  `json:"displayName"`
+	ChainID     uint64  `json:"chainId"`
+	ExplorerURL string  `json:"explorerUrl"`
+	Model       string  `json:"model"`
+	HeadBlock   uint64  `json:"headBlock"`
+	HeadAt      *string `json:"headAt"`
+	LagSeconds  *int64  `json:"lagSeconds"`
+	Enabled     bool    `json:"enabled"`
 }
 
 // Constraint is a live pricing constraint with its exponent share.
@@ -135,7 +136,9 @@ type LiveSnapshot struct {
 	ReplayErrorBips int64         `json:"replayErrorBips"`
 }
 
-// BlockPoint is one replayed block.
+// BlockPoint is one replayed block. Backlogs are the end-of-block values,
+// ConstraintBips the start-of-block per-constraint exponents that priced
+// the block (they sum to ExponentBips) and MinBaseFee the floor in force.
 type BlockPoint struct {
 	Number           uint64   `json:"number"`
 	TS               uint64   `json:"ts"`
@@ -143,11 +146,16 @@ type BlockPoint struct {
 	BaseFee          string   `json:"baseFee"`
 	PredictedBaseFee string   `json:"predictedBaseFee"`
 	Backlogs         []uint64 `json:"backlogs"`
+	ConstraintBips   []int64  `json:"constraintBips"`
 	ExponentBips     int64    `json:"exponentBips"`
+	MinBaseFee       string   `json:"minBaseFee"`
 	Anchored         bool     `json:"anchored"`
 }
 
-// SeriesPoint is one bucket of a Series.
+// SeriesPoint is one bucket of a Series. ExponentBips, ConstraintBips,
+// Backlogs and MinBaseFee describe the bucket's last block; FloorFeesWei
+// is the sum of gasUsed times the minimum base fee per block and
+// SurplusFeesWei is FeesWei minus that.
 type SeriesPoint struct {
 	T               int64    `json:"t"`
 	Blocks          int64    `json:"blocks"`
@@ -158,8 +166,12 @@ type SeriesPoint struct {
 	BaseFeeAvg      string   `json:"baseFeeAvg"`
 	BaseFeeMax      string   `json:"baseFeeMax"`
 	ExponentBips    int64    `json:"exponentBips"`
+	ConstraintBips  []int64  `json:"constraintBips"`
 	Backlogs        []uint64 `json:"backlogs"`
 	BacklogsMax     []uint64 `json:"backlogsMax"`
+	MinBaseFee      string   `json:"minBaseFee"`
+	FloorFeesWei    string   `json:"floorFeesWei"`
+	SurplusFeesWei  string   `json:"surplusFeesWei"`
 	ConstraintSetID int64    `json:"constraintSetId"`
 	ReplayErrorBips int64    `json:"replayErrorBips"`
 }
@@ -215,15 +227,16 @@ type L1Series struct {
 	Points []L1Point `json:"points"`
 }
 
-// NetworkStatus is the collector status of one network.
+// NetworkStatus is the collector status of one network. HeadAt,
+// LagSeconds and LastSampleAt are null before the first head.
 type NetworkStatus struct {
 	Name            string  `json:"name"`
 	ChainID         uint64  `json:"chainId"`
 	Enabled         bool    `json:"enabled"`
 	HeadBlock       uint64  `json:"headBlock"`
-	HeadAt          string  `json:"headAt"`
-	LagSeconds      int64   `json:"lagSeconds"`
-	LastSampleAt    string  `json:"lastSampleAt"`
+	HeadAt          *string `json:"headAt"`
+	LagSeconds      *int64  `json:"lagSeconds"`
+	LastSampleAt    *string `json:"lastSampleAt"`
 	LastError       *string `json:"lastError"`
 	RateLimitEvents uint64  `json:"rateLimitEvents"`
 	Last429At       *string `json:"last429At"`
@@ -238,10 +251,12 @@ type Status struct {
 }
 
 // OwnerActionNotification is the payload of the gascurve_owner_action
-// NOTIFY channel.
+// NOTIFY channel. LogIndex completes the (block, tx hash, log index) key
+// the API de-duplicates deliveries by.
 type OwnerActionNotification struct {
-	ChainID uint64      `json:"chainId"`
-	Action  OwnerAction `json:"action"`
+	ChainID  uint64      `json:"chainId"`
+	LogIndex uint64      `json:"logIndex"`
+	Action   OwnerAction `json:"action"`
 }
 
 // ErrorBody is the error envelope.

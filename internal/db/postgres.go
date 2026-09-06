@@ -5,11 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	"github.com/lib/pq"
 )
 
 // Postgres implements Store on sqlx.
@@ -96,10 +96,24 @@ func (p *Postgres) Networks(ctx context.Context) ([]Network, error) {
 	return selectAll[Network](ctx, p, `SELECT `+networkColumns+` FROM networks ORDER BY chain_id`)
 }
 
-// NetworkByRef resolves a name or chain id.
+// NetworkByRef resolves a reference deterministically: a decimal within
+// the BIGINT range is a chain id and nothing else, anything else is a name.
 func (p *Postgres) NetworkByRef(ctx context.Context, ref string) (*Network, error) {
-	id, _ := strconv.ParseUint(ref, 10, 64)
-	return getOne[Network](ctx, p, `SELECT `+networkColumns+` FROM networks WHERE name = $1 OR chain_id = $2 LIMIT 1`, ref, id)
+	if id, ok := ChainIDRef(ref); ok {
+		return getOne[Network](ctx, p, `SELECT `+networkColumns+` FROM networks WHERE chain_id = $1`, id)
+	}
+	return getOne[Network](ctx, p, `SELECT `+networkColumns+` FROM networks WHERE name = $1`, ref)
+}
+
+// ChainIDRef reports whether a network reference is a chain id: a decimal
+// number that fits a BIGINT. Larger numbers and names are looked up by
+// name only.
+func ChainIDRef(ref string) (int64, bool) {
+	id, err := strconv.ParseInt(ref, 10, 64)
+	if err != nil || id < 0 || strconv.FormatInt(id, 10) != ref {
+		return 0, false
+	}
+	return id, true
 }
 
 // UpdateNetworkHead records the newest block and sample time.
@@ -119,24 +133,37 @@ func (p *Postgres) SetNetworkError(ctx context.Context, chainID uint64, msg stri
 	return err
 }
 
-const blockColumns = `chain_id, number, ts, gas_used, base_fee, l1_block, tx_count, backlogs, exponent_bips, predicted_base_fee, anchored`
+const blockColumns = `chain_id, number, hash, parent_hash, ts, gas_used, base_fee, l1_block, tx_count, backlogs, constraint_bips, exponent_bips, predicted_base_fee, min_base_fee, anchored`
 
 // UpsertBlocks writes blocks, replacing replay fields on conflict.
 func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
 	for _, b := range blocks {
 		if _, err := p.exec(ctx, `
 			INSERT INTO blocks (`+blockColumns+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT (chain_id, number) DO UPDATE SET
+				hash = EXCLUDED.hash, parent_hash = EXCLUDED.parent_hash,
 				ts = EXCLUDED.ts, gas_used = EXCLUDED.gas_used, base_fee = EXCLUDED.base_fee,
 				l1_block = EXCLUDED.l1_block, tx_count = EXCLUDED.tx_count, backlogs = EXCLUDED.backlogs,
-				exponent_bips = EXCLUDED.exponent_bips, predicted_base_fee = EXCLUDED.predicted_base_fee,
+				constraint_bips = EXCLUDED.constraint_bips, exponent_bips = EXCLUDED.exponent_bips,
+				predicted_base_fee = EXCLUDED.predicted_base_fee, min_base_fee = EXCLUDED.min_base_fee,
 				anchored = EXCLUDED.anchored`,
-			b.ChainID, b.Number, b.TS, b.GasUsed, b.BaseFee, b.L1Block, b.TxCount, b.Backlogs, b.ExponentBips, b.PredictedBaseFee, b.Anchored); err != nil {
+			b.ChainID, b.Number, b.Hash, b.ParentHash, b.TS, b.GasUsed, b.BaseFee, b.L1Block, b.TxCount, b.Backlogs, b.ConstraintBips,
+			b.ExponentBips, b.PredictedBaseFee, b.MinBaseFee, b.Anchored); err != nil {
 			return fmt.Errorf("block %d: %w", b.Number, err)
 		}
 	}
 	return nil
+}
+
+// BlockByNumber returns one block.
+func (p *Postgres) BlockByNumber(ctx context.Context, chainID, number uint64) (*Block, error) {
+	return getOne[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 AND number = $2`, chainID, number)
+}
+
+// DeleteBlocksAfter removes and returns blocks above a number.
+func (p *Postgres) DeleteBlocksAfter(ctx context.Context, chainID, after uint64) ([]Block, error) {
+	return selectAll[Block](ctx, p, `DELETE FROM blocks WHERE chain_id = $1 AND number > $2 RETURNING `+blockColumns+``, chainID, after)
 }
 
 // LatestBlock returns the highest stored block.
@@ -191,37 +218,111 @@ func (p *Postgres) PruneBlocks(ctx context.Context, chainID uint64, before time.
 	return res.RowsAffected()
 }
 
-// FoldBuckets merges partial buckets into the stored rows.
+const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, fees_wei, base_fee_min, base_fee_avg, base_fee_max, base_fee_sum, exponent_end_bips, backlogs_end, backlogs_max, constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, constraint_set_id, replay_error_bips, last_block`
+
+// FoldBuckets adds partial buckets into the stored rows (the backfill's
+// path for windows without block rows; the cursor commits with it).
 func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 	for _, b := range buckets {
 		if _, err := p.exec(ctx, `
-			INSERT INTO buckets (chain_id, resolution, bucket_start, blocks, gas_used, fees_wei, base_fee_min, base_fee_avg, base_fee_max,
-				exponent_end_bips, backlogs_end, backlogs_max, constraint_set_id, replay_error_bips, last_block)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			INSERT INTO buckets (`+bucketColumns+`)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 			ON CONFLICT (chain_id, resolution, bucket_start) DO UPDATE SET
 				blocks = buckets.blocks + EXCLUDED.blocks,
 				gas_used = buckets.gas_used + EXCLUDED.gas_used,
 				fees_wei = buckets.fees_wei + EXCLUDED.fees_wei,
+				base_fee_sum = buckets.base_fee_sum + EXCLUDED.base_fee_sum,
+				floor_fees_wei = buckets.floor_fees_wei + EXCLUDED.floor_fees_wei,
+				surplus_fees_wei = buckets.surplus_fees_wei + EXCLUDED.surplus_fees_wei,
 				base_fee_min = CASE WHEN buckets.blocks = 0 THEN EXCLUDED.base_fee_min ELSE LEAST(buckets.base_fee_min, EXCLUDED.base_fee_min) END,
 				base_fee_max = GREATEST(buckets.base_fee_max, EXCLUDED.base_fee_max),
 				base_fee_avg = CASE WHEN buckets.blocks + EXCLUDED.blocks > 0
-					THEN floor((buckets.base_fee_avg * buckets.blocks + EXCLUDED.base_fee_avg * EXCLUDED.blocks) / (buckets.blocks + EXCLUDED.blocks))
+					THEN floor((buckets.base_fee_sum + EXCLUDED.base_fee_sum) / (buckets.blocks + EXCLUDED.blocks))
 					ELSE 0 END,
 				exponent_end_bips = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.exponent_end_bips ELSE buckets.exponent_end_bips END,
 				backlogs_end = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.backlogs_end ELSE buckets.backlogs_end END,
+				constraint_bips_end = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.constraint_bips_end ELSE buckets.constraint_bips_end END,
+				min_base_fee = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.min_base_fee ELSE buckets.min_base_fee END,
 				backlogs_max = ARRAY(SELECT GREATEST(a, b) FROM unnest(buckets.backlogs_max, EXCLUDED.backlogs_max) AS u(a, b)),
 				constraint_set_id = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN COALESCE(EXCLUDED.constraint_set_id, buckets.constraint_set_id) ELSE buckets.constraint_set_id END,
 				replay_error_bips = GREATEST(buckets.replay_error_bips, EXCLUDED.replay_error_bips),
 				last_block = GREATEST(buckets.last_block, EXCLUDED.last_block)`,
-			b.ChainID, b.Resolution, b.BucketStart, b.Blocks, b.GasUsed, b.FeesWei, b.BaseFeeMin, b.BaseFeeAvg, b.BaseFeeMax,
-			b.ExponentEndBips, b.BacklogsEnd, b.BacklogsMax, b.ConstraintSetID, b.ReplayErrorBips, b.LastBlock); err != nil {
+			b.ChainID, b.Resolution, b.BucketStart, b.Blocks, b.GasUsed, b.FeesWei, b.BaseFeeMin, b.BaseFeeAvg, b.BaseFeeMax, b.BaseFeeSum,
+			b.ExponentEndBips, b.BacklogsEnd, b.BacklogsMax, b.ConstraintBipsEnd, b.MinBaseFee, b.FloorFeesWei, b.SurplusFeesWei,
+			b.ConstraintSetID, b.ReplayErrorBips, b.LastBlock); err != nil {
 			return fmt.Errorf("bucket %s %s: %w", b.Resolution, b.BucketStart.Format(time.RFC3339), err)
 		}
 	}
 	return nil
 }
 
-const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, fees_wei, base_fee_min, base_fee_avg, base_fee_max, exponent_end_bips, backlogs_end, backlogs_max, constraint_set_id, replay_error_bips, last_block`
+// RebuildBuckets recomputes buckets from the block rows in their windows,
+// mirroring BucketBuilder in SQL. A window that has no rows loses its
+// bucket. The constraint set is the one in force at the window's last
+// block.
+func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error {
+	width, ok := Resolutions[resolution]
+	if !ok {
+		return fmt.Errorf("rebuild buckets: unknown resolution %q", resolution)
+	}
+	for _, start := range starts {
+		end := start.Add(width)
+		if _, err := p.exec(ctx, `
+			WITH w AS (
+				SELECT * FROM blocks WHERE chain_id = $1 AND ts >= $3 AND ts < $4
+			), lastb AS (
+				SELECT * FROM w ORDER BY number DESC LIMIT 1
+			), agg AS (
+				SELECT count(*) AS blocks,
+					COALESCE(sum(gas_used), 0)::BIGINT AS gas_used,
+					COALESCE(sum(base_fee * gas_used), 0) AS fees_wei,
+					COALESCE(min(base_fee), 0) AS base_fee_min,
+					COALESCE(max(base_fee), 0) AS base_fee_max,
+					COALESCE(sum(base_fee), 0) AS base_fee_sum,
+					COALESCE(sum(min_base_fee * gas_used), 0) AS floor_fees_wei,
+					COALESCE(max(CASE WHEN base_fee > 0
+						THEN LEAST(floor(abs(predicted_base_fee - base_fee) * 10000 / base_fee), $5::NUMERIC)
+						ELSE 0 END), 0)::BIGINT AS replay_error_bips
+				FROM w
+			), bmax AS (
+				SELECT COALESCE(ARRAY(SELECT max(u.v) FROM w, unnest(w.backlogs) WITH ORDINALITY AS u(v, i) GROUP BY u.i ORDER BY u.i), '{}'::NUMERIC[]) AS backlogs_max
+			)
+			INSERT INTO buckets (`+bucketColumns+`)
+			SELECT $1, $2, $3, agg.blocks, agg.gas_used, agg.fees_wei, agg.base_fee_min, floor(agg.base_fee_sum / agg.blocks), agg.base_fee_max, agg.base_fee_sum,
+				lastb.exponent_bips, lastb.backlogs, bmax.backlogs_max, lastb.constraint_bips, lastb.min_base_fee, agg.floor_fees_wei, agg.fees_wei - agg.floor_fees_wei,
+				(SELECT id FROM constraint_sets cs WHERE cs.chain_id = $1 AND cs.effective_block <= lastb.number ORDER BY cs.effective_block DESC, cs.id DESC LIMIT 1),
+				agg.replay_error_bips, lastb.number
+			FROM agg, bmax, lastb
+			ON CONFLICT (chain_id, resolution, bucket_start) DO UPDATE SET
+				blocks = EXCLUDED.blocks, gas_used = EXCLUDED.gas_used, fees_wei = EXCLUDED.fees_wei,
+				base_fee_min = EXCLUDED.base_fee_min, base_fee_avg = EXCLUDED.base_fee_avg, base_fee_max = EXCLUDED.base_fee_max,
+				base_fee_sum = EXCLUDED.base_fee_sum, exponent_end_bips = EXCLUDED.exponent_end_bips,
+				backlogs_end = EXCLUDED.backlogs_end, backlogs_max = EXCLUDED.backlogs_max,
+				constraint_bips_end = EXCLUDED.constraint_bips_end, min_base_fee = EXCLUDED.min_base_fee,
+				floor_fees_wei = EXCLUDED.floor_fees_wei, surplus_fees_wei = EXCLUDED.surplus_fees_wei,
+				constraint_set_id = EXCLUDED.constraint_set_id, replay_error_bips = EXCLUDED.replay_error_bips,
+				last_block = EXCLUDED.last_block`,
+			chainID, resolution, start, end, strconv.FormatInt(math.MaxInt64, 10)); err != nil {
+			return fmt.Errorf("rebuild bucket %s %s: %w", resolution, start.Format(time.RFC3339), err)
+		}
+		if _, err := p.exec(ctx, `
+			DELETE FROM buckets WHERE chain_id = $1 AND resolution = $2 AND bucket_start = $3
+				AND NOT EXISTS (SELECT 1 FROM blocks WHERE chain_id = $1 AND ts >= $3 AND ts < $4)`,
+			chainID, resolution, start, end); err != nil {
+			return fmt.Errorf("drop empty bucket %s %s: %w", resolution, start.Format(time.RFC3339), err)
+		}
+	}
+	return nil
+}
+
+// DeleteBucketsBefore drops every resolution's buckets starting before t.
+func (p *Postgres) DeleteBucketsBefore(ctx context.Context, chainID uint64, before time.Time) (int64, error) {
+	res, err := p.exec(ctx, `DELETE FROM buckets WHERE chain_id = $1 AND bucket_start < $2`, chainID, before)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
 
 // Buckets returns buckets in a range, ascending.
 func (p *Postgres) Buckets(ctx context.Context, chainID uint64, resolution string, from, to time.Time) ([]Bucket, error) {
@@ -313,6 +414,26 @@ func (p *Postgres) OwnerActions(ctx context.Context, chainID uint64, from, to ti
 	return selectAll[OwnerAction](ctx, p, q, args...)
 }
 
+// OwnerActionsSince lists actions from a block on, ascending.
+func (p *Postgres) OwnerActionsSince(ctx context.Context, chainID, block uint64) ([]OwnerAction, error) {
+	return selectAll[OwnerAction](ctx, p, `SELECT `+ownerActionColumns+` FROM owner_actions WHERE chain_id = $1 AND block_number >= $2 ORDER BY block_number ASC, log_index ASC`, chainID, block)
+}
+
+// RewindAfter deletes owner actions, constraint sets and batch reports
+// above a block.
+func (p *Postgres) RewindAfter(ctx context.Context, chainID, block uint64) error {
+	for _, q := range []string{
+		`DELETE FROM owner_actions WHERE chain_id = $1 AND block_number > $2`,
+		`DELETE FROM constraint_sets WHERE chain_id = $1 AND effective_block > $2`,
+		`DELETE FROM batch_reports WHERE chain_id = $1 AND block_number > $2`,
+	} {
+		if _, err := p.exec(ctx, q, chainID, block); err != nil {
+			return fmt.Errorf("rewind after %d: %w", block, err)
+		}
+	}
+	return nil
+}
+
 // InsertConstraintSet upserts a set and returns its id.
 func (p *Postgres) InsertConstraintSet(ctx context.Context, cs ConstraintSet) (int64, error) {
 	var id int64
@@ -347,6 +468,13 @@ func (p *Postgres) UpsertBatchReports(ctx context.Context, reports []BatchReport
 		}
 	}
 	return nil
+}
+
+const batchReportColumns = `chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent`
+
+// BatchReports lists reports in a time range, one row per report.
+func (p *Postgres) BatchReports(ctx context.Context, chainID uint64, from, to time.Time) ([]BatchReport, error) {
+	return selectAll[BatchReport](ctx, p, `SELECT `+batchReportColumns+` FROM batch_reports WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 ORDER BY batch_ts ASC, block_number ASC`, chainID, from, to)
 }
 
 // BatchBuckets aggregates reports per step.
@@ -418,11 +546,3 @@ func ResetSchema(ctx context.Context, d *sqlx.DB) error {
 }
 
 var _ Store = (*Postgres)(nil)
-
-// pqArray is a helper to build BIGINT[] parameters from unsigned values.
-func pqArray(v []uint64) pq.Int64Array {
-	return pq.Int64Array(Int64s(v))
-}
-
-// PQArray converts backlogs into the BIGINT[] parameter type.
-func PQArray(v []uint64) pq.Int64Array { return pqArray(v) }

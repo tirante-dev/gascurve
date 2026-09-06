@@ -1,8 +1,9 @@
 // Package collector follows Arbitrum Nitro chains: one Follower per network
 // samples the precompiles every tick, fetches the headers it missed, replays
-// the pricer with re-anchoring, folds buckets, records owner actions, batch
-// posting reports and L1 pricer state, runs a resumable backfill and
-// publishes a LiveSnapshot with NOTIFY after each tick.
+// the pricer forward from a known state with re-anchoring, rebuilds buckets,
+// records owner actions, batch posting reports and L1 pricer state, runs a
+// resumable backfill and publishes a LiveSnapshot with NOTIFY after each
+// tick.
 package collector
 
 import (
@@ -36,6 +37,7 @@ type RPC interface {
 	FeeAccounts(ctx context.Context) (*nitro.FeeAccounts, error)
 	ArbOSVersion(ctx context.Context) (uint64, error)
 	BlockNumber(ctx context.Context) (uint64, error)
+	ChainID(ctx context.Context) (uint64, error)
 	Stats() nitro.Stats
 	Available() int
 }
@@ -56,8 +58,6 @@ const (
 	defaultCatchUpBatches = 10
 	// defaultAnchorInterval is the fallback for collector.backfill_anchor_interval.
 	defaultAnchorInterval = 1000
-	// initialBlocks is how many blocks are fetched on a fresh database.
-	initialBlocks = 10
 	// ownerLogChunk is the widest eth_getLogs range.
 	ownerLogChunk = 100_000
 	// smallChainBlocks: chains below this head start the owner scan at 0.
@@ -78,6 +78,11 @@ const (
 	backfillIdle = time.Second
 	// restartDelay is the pause before a failed follower is restarted.
 	restartDelay = 5 * time.Second
+	// maxReorgDepth bounds the common-ancestor search on a reorg.
+	maxReorgDepth = 128
+	// boundaryWidth is the widest bucket: buckets from the hour of the
+	// first live block on are rebuilt from block rows.
+	boundaryWidth = time.Hour
 )
 
 // Options configure a Follower.
@@ -108,26 +113,47 @@ type Follower struct {
 
 	catchingUp atomic.Bool
 
-	mu              sync.Mutex
-	initialized     bool
+	mu          sync.Mutex
+	initialized bool
+	// head, headHash, prevTs, state and lastResult describe the last
+	// committed block; they are only published after the transaction that
+	// wrote it committed.
 	head            uint64
+	headHash        string
 	prevTs          uint64
 	state           *pricer.State
 	lastSample      *nitro.Sample
 	lastResult      *pricer.Result
 	sets            []db.ConstraintSet
 	minFeeChanges   []minFeeChange
+	liveStart       *liveStart
 	l1              *model.L1
 	accounts        *model.Accounts
 	slowPending     bool
 	ownerScanDone   bool
 	observedChecked bool
+	cursorChecked   bool
 	snapshot        *model.LiveSnapshot
 }
 
 type minFeeChange struct {
 	block uint64
 	fee   *big.Int
+}
+
+// liveStart is the first block the live loop stored (collector_state
+// live_start). Buckets from the hour containing it on are rebuilt from
+// block rows; older buckets belong to the backfill's additive folds.
+type liveStart struct {
+	Block uint64 `json:"block"`
+	TS    int64  `json:"ts"`
+}
+
+// hole is a block range the replay skipped (collector_state holes).
+type hole struct {
+	From uint64 `json:"from"`
+	To   uint64 `json:"to"`
+	At   string `json:"at"`
 }
 
 // NewFollower builds a follower; the network's chain id is the key for
@@ -213,19 +239,103 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("register network: %w", err)
 	}
-	last, err := f.store.LatestBlock(ctx, f.chainID)
-	if err != nil {
-		return fmt.Errorf("latest block: %w", err)
-	}
-	if last != nil {
-		f.head = last.Number
-		f.prevTs = uint64(last.TS.Unix())
+	if err := f.reloadHeadLocked(ctx); err != nil {
+		return err
 	}
 	if err := f.reloadSetsLocked(ctx); err != nil {
 		return err
 	}
+	if err := f.loadLiveStartLocked(ctx); err != nil {
+		return err
+	}
 	f.initialized = true
 	return nil
+}
+
+// reloadHeadLocked reads the last committed block from the database and
+// forgets the in-memory replay state, so the next tick rebuilds it from
+// the stored row. Used at start and after a failed commit.
+func (f *Follower) reloadHeadLocked(ctx context.Context) error {
+	last, err := f.store.LatestBlock(ctx, f.chainID)
+	if err != nil {
+		return fmt.Errorf("latest block: %w", err)
+	}
+	f.head, f.headHash, f.prevTs, f.state, f.lastResult = 0, "", 0, nil, nil
+	if last != nil {
+		f.head = last.Number
+		f.headHash = last.Hash
+		f.prevTs = uint64(last.TS.Unix())
+	}
+	return nil
+}
+
+// loadLiveStartLocked loads the live_start checkpoint. A database written
+// before the checkpoint existed derives it from the oldest stored block.
+func (f *Follower) loadLiveStartLocked(ctx context.Context) error {
+	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StateLiveStart)
+	if err != nil {
+		return err
+	}
+	if ok {
+		ls := &liveStart{}
+		if err := json.Unmarshal([]byte(raw), ls); err != nil {
+			return fmt.Errorf("live start: %w", err)
+		}
+		f.liveStart = ls
+		return nil
+	}
+	oldest, err := f.store.OldestBlock(ctx, f.chainID)
+	if err != nil {
+		return err
+	}
+	if oldest == nil {
+		return nil
+	}
+	ls := &liveStart{Block: oldest.Number, TS: oldest.TS.Unix()}
+	if err := f.saveLiveStart(ctx, f.store, ls); err != nil {
+		return err
+	}
+	f.liveStart = ls
+	return nil
+}
+
+func (f *Follower) saveLiveStart(ctx context.Context, s db.Store, ls *liveStart) error {
+	b, err := json.Marshal(ls)
+	if err != nil {
+		return err
+	}
+	return s.SetState(ctx, f.chainID, db.StateLiveStart, string(b))
+}
+
+// boundaryLocked returns the start of the hour containing the first live
+// block: buckets from there on are row-backed.
+func (f *Follower) boundaryLocked() (time.Time, bool) {
+	if f.liveStart == nil {
+		return time.Time{}, false
+	}
+	return time.Unix(f.liveStart.TS, 0).UTC().Truncate(boundaryWidth), true
+}
+
+// recordHole appends a skipped range to collector_state holes.
+func (f *Follower) recordHole(ctx context.Context, s db.Store, h hole) error {
+	raw, ok, err := s.GetState(ctx, f.chainID, db.StateHoles)
+	if err != nil {
+		return err
+	}
+	holes := make([]hole, 0, 1)
+	if ok {
+		if err := json.Unmarshal([]byte(raw), &holes); err != nil {
+			f.log.Warn("unreadable holes checkpoint, starting over", "err", err.Error())
+			holes = nil
+		}
+	}
+	h.At = f.now().UTC().Format(time.RFC3339)
+	holes = append(holes, h)
+	b, err := json.Marshal(holes)
+	if err != nil {
+		return err
+	}
+	return s.SetState(ctx, f.chainID, db.StateHoles, string(b))
 }
 
 // reloadSetsLocked refreshes the constraint set and min fee caches.
@@ -269,19 +379,40 @@ func (f *Follower) setIDFor(number uint64) sql.NullInt64 {
 	return out
 }
 
-// minFeeAt returns the minimum base fee in force at a block, falling back
-// to the live value.
-func (f *Follower) minFeeAt(number uint64, live *big.Int) *big.Int {
-	fee := live
+// setAt returns the constraint set in force at a block, or nil.
+func (f *Follower) setAt(number uint64) *db.ConstraintSet {
+	var out *db.ConstraintSet
+	for i := range f.sets {
+		if f.sets[i].EffectiveBlock <= number {
+			out = &f.sets[i]
+		}
+	}
+	return out
+}
+
+// minFeeAt returns the minimum base fee in force at a block from the
+// recorded setMinimumL2BaseFee actions, with nitro's genesis default before
+// the first recorded change. It never uses the live value.
+func (f *Follower) minFeeAt(number uint64) *big.Int {
+	fee := big.NewInt(pricer.InitialMinimumBaseFeeWei)
 	for _, c := range f.minFeeChanges {
 		if c.block <= number {
 			fee = c.fee
 		}
 	}
-	if fee == nil {
-		return new(big.Int)
-	}
 	return new(big.Int).Set(fee)
+}
+
+// minFeeChangeBlock returns the block of the last recorded change at or
+// before number (0 when none).
+func (f *Follower) minFeeChangeBlock(number uint64) uint64 {
+	var block uint64
+	for _, c := range f.minFeeChanges {
+		if c.block <= number {
+			block = c.block
+		}
+	}
+	return block
 }
 
 // stateFromSample builds a pricer state carrying the sampled backlogs.
@@ -299,6 +430,16 @@ func stateFromSample(s *nitro.Sample) *pricer.State {
 	st.Constraints = make([]pricer.Constraint, len(s.Constraints))
 	for i, c := range s.Constraints {
 		st.Constraints[i] = pricer.Constraint{Target: c.Target, Window: c.Window, Backlog: c.Backlog}
+	}
+	return st
+}
+
+// stateFromEntries builds a pricer state for a constraint set document,
+// backlogs at the set's starting values.
+func stateFromEntries(entries []model.ConstraintSetEntry, minFee *big.Int) *pricer.State {
+	st := &pricer.State{MinBaseFee: new(big.Int).Set(minFee), Constraints: make([]pricer.Constraint, len(entries))}
+	for i, e := range entries {
+		st.Constraints[i] = pricer.Constraint{Target: e.Target, Window: e.Window, Backlog: e.StartingBacklog}
 	}
 	return st
 }

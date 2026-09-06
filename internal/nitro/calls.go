@@ -34,13 +34,22 @@ func callBytes(r Result) ([]byte, error) {
 
 // BlockNumber returns the latest block number.
 func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
-	raw, err := c.Call(ctx, "eth_blockNumber")
+	return c.quantity(ctx, "eth_blockNumber")
+}
+
+// ChainID returns the chain id the node reports (eth_chainId).
+func (c *Client) ChainID(ctx context.Context) (uint64, error) {
+	return c.quantity(ctx, "eth_chainId")
+}
+
+func (c *Client) quantity(ctx context.Context, method string) (uint64, error) {
+	raw, err := c.Call(ctx, method)
 	if err != nil {
 		return 0, err
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return 0, fmt.Errorf("decode eth_blockNumber: %w", err)
+		return 0, fmt.Errorf("decode %s: %w", method, err)
 	}
 	return HexUint64(s)
 }
@@ -184,11 +193,18 @@ func (c *Client) ArbOSVersion(ctx context.Context) (uint64, error) {
 	return v - ArbOSVersionOffset, nil
 }
 
-// FastSample performs the fast tick batch: latest header, constraints,
-// prices and minimum base fee. When the constraints call reverts or returns
-// an empty list a second batch reads the legacy pricer parameters.
+// FastSample performs the fast tick: it resolves the head number first
+// (eth_blockNumber) and then samples header, constraints, prices and
+// minimum base fee pinned to that block, so a batch whose items execute
+// at different "latest" heights can never mix two blocks. When the
+// constraints call reverts or returns an empty list a second batch reads
+// the legacy pricer parameters at the same block.
 func (c *Client) FastSample(ctx context.Context) (*Sample, error) {
-	return c.sampleAt(ctx, latestTag)
+	head, err := c.BlockNumber(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.sampleAt(ctx, blockTag(head))
 }
 
 // FastSampleAt is FastSample with every call pinned to one block number, so

@@ -202,6 +202,7 @@ func blockJSON(number, ts, gasUsed uint64, baseFee string, txs []any, l1 uint64)
 	m := map[string]any{
 		"number":        blockTag(number),
 		"hash":          "0xabc",
+		"parentHash":    "0xparent",
 		"timestamp":     blockTag(ts),
 		"gasUsed":       blockTag(gasUsed),
 		"gasLimit":      "0x1e84800",

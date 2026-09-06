@@ -1,6 +1,8 @@
 package config
 
 import (
+	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,6 +76,9 @@ func TestLoadWith(t *testing.T) {
 	if cfg.Collector.BackfillAnchorInterval != 1000 || cfg.Collector.MaxCatchUpBatches != 10 {
 		t.Fatalf("collector defaults not applied: %+v", cfg.Collector)
 	}
+	if cfg.Server.WSMaxPerIP != 8 || cfg.Server.WSMaxTotal != 2000 || len(cfg.Server.TrustedProxies) != 0 {
+		t.Fatalf("server defaults not applied: %+v", cfg.Server)
+	}
 	if len(cfg.EnabledNetworks()) != 2 || cfg.EnabledNetworks()[0].Name != "robinhood" {
 		t.Fatalf("enabled networks: %+v", cfg.EnabledNetworks())
 	}
@@ -130,6 +135,10 @@ func TestEnvErrors(t *testing.T) {
 		{"NETWORK_ROBINHOOD_ARCHIVE": "sometimes"},
 		{"NETWORK_ROBINHOOD_WS_URL": "https://not-a-socket"},
 		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "-1"},
+		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "NaN"},
+		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "+Inf"},
+		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "Infinity"},
+		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "10001"},
 	} {
 		if _, err := LoadWith(Options{Path: p, Getenv: envOf(m)}); err == nil {
 			t.Fatalf("expected error for %v", m)
@@ -176,7 +185,7 @@ func TestBadFiles(t *testing.T) {
 func TestValidate(t *testing.T) {
 	base := func() Config {
 		return Config{
-			Server:   ServerConfig{Port: 8080, RateLimitPerSecond: 1, RateLimitBurst: 1},
+			Server:   ServerConfig{Port: 8080, RateLimitPerSecond: 1, RateLimitBurst: 1, WSMaxPerIP: 8, WSMaxTotal: 100, TrustedProxies: []string{"10.0.0.0/8", "::1", " "}},
 			Database: DatabaseConfig{URL: "postgres://x"},
 			Collector: CollectorConfig{
 				TickInterval: time.Second, SlowInterval: time.Second, HeaderBatchSize: 10,
@@ -208,6 +217,13 @@ func TestValidate(t *testing.T) {
 		"zero chain":      func(c *Config) { c.Networks[0].ChainID = 0 },
 		"dup chain":       func(c *Config) { n := c.Networks[0]; n.Name = "b"; c.Networks = append(c.Networks, n) },
 		"calls":           func(c *Config) { c.Networks[0].CallsPerSecond = -4 },
+		"calls nan":       func(c *Config) { c.Networks[0].CallsPerSecond = math.NaN() },
+		"calls inf":       func(c *Config) { c.Networks[0].CallsPerSecond = math.Inf(1) },
+		"calls huge":      func(c *Config) { c.Networks[0].CallsPerSecond = MaxCallsPerSecond + 1 },
+		"ws per ip":       func(c *Config) { c.Server.WSMaxPerIP = 0 },
+		"ws total":        func(c *Config) { c.Server.WSMaxTotal = 0 },
+		"proxy cidr":      func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/33"} },
+		"proxy ip":        func(c *Config) { c.Server.TrustedProxies = []string{"not-an-ip"} },
 		"ws url scheme":   func(c *Config) { c.Networks[0].WSURL = "http://x" },
 		"anchor interval": func(c *Config) { c.Collector.BackfillAnchorInterval = 0 },
 		"catch up":        func(c *Config) { c.Collector.MaxCatchUpBatches = 0 },
@@ -223,3 +239,19 @@ func TestValidate(t *testing.T) {
 }
 
 func ptr(c Config) *Config { return &c }
+
+func TestTrustedProxyNets(t *testing.T) {
+	nets, err := (ServerConfig{TrustedProxies: []string{"10.0.0.0/8", "192.168.1.5", "fd00::1", ""}}).TrustedProxyNets()
+	if err != nil || len(nets) != 3 {
+		t.Fatalf("nets: %v %v", nets, err)
+	}
+	if !nets[0].Contains(net.ParseIP("10.1.2.3")) || nets[0].Contains(net.ParseIP("11.0.0.1")) {
+		t.Fatal("cidr")
+	}
+	if !nets[1].Contains(net.ParseIP("192.168.1.5")) || nets[1].Contains(net.ParseIP("192.168.1.6")) {
+		t.Fatal("single ipv4 is a /32")
+	}
+	if !nets[2].Contains(net.ParseIP("fd00::1")) || nets[2].Contains(net.ParseIP("fd00::2")) {
+		t.Fatal("single ipv6 is a /128")
+	}
+}

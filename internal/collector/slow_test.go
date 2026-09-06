@@ -171,7 +171,7 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 
 func TestSlowTickBatchReportsAndPrune(t *testing.T) {
 	ctx := context.Background()
-	rpc := newFakeRPC(1000)
+	rpc := newFakeRPC(990)
 	rpc.txCount = func(n uint64) int {
 		if n == 995 || n == 998 {
 			return 2
@@ -191,6 +191,10 @@ func TestSlowTickBatchReportsAndPrune(t *testing.T) {
 	}}
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.setHead(1000)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -217,18 +221,31 @@ func TestSlowTickBatchReportsAndPrune(t *testing.T) {
 	if rpc.calledTimes("BlocksWithTxs") != 1 {
 		t.Fatal("no new two-tx blocks should mean no fetch")
 	}
-	// Pruning removes blocks and samples older than the retention.
+	// Pruning removes blocks and samples older than the retention, except
+	// the rows of the first live block's hour while the backfill still
+	// runs: its last segment rebuilds those buckets from rows.
+	rpc.setHead(1005)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
 	f.cfg.BlockRetention = time.Nanosecond
 	f.cfg.SampleRetention = time.Nanosecond
 	if err := f.SlowTick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Only the head block, whose timestamp equals now, may survive.
-	if bs, _ := store.RecentBlocks(ctx, 4663, 100); len(bs) > 1 {
-		t.Fatalf("blocks not pruned: %d", len(bs))
+	if bs, _ := store.RecentBlocks(ctx, 4663, 100); len(bs) != 16 {
+		t.Fatalf("boundary rows must be kept while the backfill runs: %d", len(bs))
 	}
 	if s, _ := store.LatestStateSample(ctx, 4663, false); s != nil {
 		t.Fatal("samples not pruned")
+	}
+	_ = store.SetState(ctx, 4663, db.StateBackfillCursor, `{"done":true}`)
+	if err := f.SlowTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Only the blocks whose timestamp equals now (1000..1005) may survive.
+	if bs, _ := store.RecentBlocks(ctx, 4663, 100); len(bs) > 6 {
+		t.Fatalf("blocks not pruned: %d", len(bs))
 	}
 	// Without any stored block the scan is a no-op.
 	delete(store.StateRows, "4663/"+db.StateBatchScanCursor)
@@ -253,7 +270,7 @@ func TestSlowTickErrors(t *testing.T) {
 	rpc := newFakeRPC(1000)
 	rpc.logs = fixtureLogs(t)[:2]
 	rpc.txCount = func(uint64) int { return 2 }
-	rpc.fullBlocks[995] = nitro.Block{Header: rpc.header(995), Txs: []nitro.Tx{
+	rpc.fullBlocks[1000] = nitro.Block{Header: rpc.header(1000), Txs: []nitro.Tx{
 		{Hash: "0x2", Type: nitro.InternalTxType, To: nitro.ArbosAddress, Input: nitro.EncodeBatchPostingReport(nitro.BatchPostingReport{Version: 2, L1BaseFee: big.NewInt(1)})},
 	}}
 	store := dbtest.New()
@@ -277,6 +294,9 @@ func TestSlowTickErrors(t *testing.T) {
 		fresh.FailOn[method] = true
 		ff := newTestFollower(t, rpc, fresh)
 		if method != "SetState" && method != "GetState" {
+			if method == "OldestBlock" {
+				delete(fresh.FailOn, method)
+			}
 			if err := ff.Tick(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -285,6 +305,7 @@ func TestSlowTickErrors(t *testing.T) {
 			// Only reached without a cursor and with stored blocks; the
 			// tick above stored blocks, the scan then asks for the oldest.
 			delete(fresh.StateRows, "4663/"+db.StateBatchScanCursor)
+			fresh.FailOn[method] = true
 		}
 		if err := ff.SlowTick(ctx); !errors.Is(err, dbtest.ErrInjected) {
 			t.Fatalf("%s: expected injected error, got %v", method, err)
@@ -297,13 +318,19 @@ func TestSlowTickErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "owner cursor") || !strings.Contains(err.Error(), "batch cursor") {
 		t.Fatalf("corrupt cursors: %v", err)
 	}
-	// Undecodable logs are skipped, not fatal.
+	// A malformed OwnerActs log fails the range: the cursor must not move
+	// past an event that was not understood.
 	_ = store.SetState(ctx, 4663, db.StateOwnerLogCursor, "0")
 	_ = store.SetState(ctx, 4663, db.StateBatchScanCursor, "1000")
 	rpc.logs = []nitro.Log{{Topics: []string{"0x1"}, BlockNumber: 5}}
-	if err := f.SlowTick(ctx); err != nil {
-		t.Fatal(err)
+	err = f.SlowTick(ctx)
+	if err == nil || !strings.Contains(err.Error(), "owner action in 1..1000") {
+		t.Fatalf("malformed log: %v", err)
 	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateOwnerLogCursor); v != "0" {
+		t.Fatalf("cursor advanced past a malformed log: %q", v)
+	}
+	rpc.logs = nil
 	// Canceled context stops the loop early.
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
@@ -355,7 +382,7 @@ func TestBatchReportOf(t *testing.T) {
 
 func TestScanBatchReportsUnlimited(t *testing.T) {
 	ctx := context.Background()
-	rpc := newFakeRPC(1000)
+	rpc := newFakeRPC(990)
 	// No block has exactly two transactions, so the budgeted prefilter
 	// would never look at block 995's report.
 	report := nitro.BatchPostingReport{Version: 2, BatchTimestamp: uint64(baseTime.Unix()), Poster: "0xdaa5260800000000000000000000000000000000", BatchNumber: 7, CalldataLen: 1, CalldataNonZeros: 1, ExtraGas: 1, L1BaseFee: big.NewInt(1)}
@@ -366,6 +393,10 @@ func TestScanBatchReportsUnlimited(t *testing.T) {
 	}}
 	store := dbtest.New()
 	budgeted := newTestFollower(t, rpc, store)
+	if err := budgeted.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.setHead(1000)
 	if err := budgeted.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}

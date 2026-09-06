@@ -19,6 +19,11 @@ type Bips int64
 // OneInBips is 100% expressed in basis points.
 const OneInBips Bips = 10_000
 
+// InitialMinimumBaseFeeWei is nitro's genesis minimum base fee (0.1 gwei,
+// arbos/l2pricing InitialMinimumBaseFeeWei), in force until the first
+// recorded setMinimumL2BaseFee owner action.
+const InitialMinimumBaseFeeWei = 100_000_000
+
 // Constraint is one gas pricing constraint: a gas target per second, an
 // adjustment window in seconds, and the current backlog in gas.
 type Constraint struct {
@@ -146,10 +151,17 @@ func (s *State) stepLegacy(dt uint64, minBaseFee *big.Int) (baseFee *big.Int, ex
 	}
 	l := s.Legacy
 	l.Backlog = SaturatingUSub(l.Backlog, SaturatingUMul(dt, l.SpeedLimit))
-	threshold := SaturatingUMul(l.Tolerance, l.SpeedLimit)
-	inertia := SaturatingUMul(l.Inertia, l.SpeedLimit)
-	if l.Backlog > threshold && inertia > 0 {
-		exponent = NaturalToBips(l.Backlog-threshold) / saturatingCastToBips(inertia)
+	// Mirrors nitro's updatePricingModelLegacy exactly: the tolerance
+	// threshold is a plain uint64 multiply (it wraps on overflow), the
+	// excess is cast to int64 saturating, and the inertia denominator is a
+	// saturating multiply cast to Bips saturating. Nitro would panic on a
+	// zero denominator; that case yields no exponent here.
+	threshold := l.Tolerance * l.SpeedLimit
+	if l.Backlog > threshold {
+		inertia := saturatingCastToBips(SaturatingUMul(l.Inertia, l.SpeedLimit))
+		if inertia > 0 {
+			exponent = NaturalToBips(l.Backlog-threshold) / inertia
+		}
 	}
 	return BaseFeeFromExponent(minBaseFee, exponent), exponent, []Bips{exponent}
 }

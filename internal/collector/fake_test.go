@@ -25,8 +25,13 @@ var (
 // fakeRPC is a deterministic chain: block n has timestamp base+n/10 (ten
 // blocks per second), gas 1M and a base fee derived from n.
 type fakeRPC struct {
-	mu          sync.Mutex
-	head        uint64
+	mu      sync.Mutex
+	head    uint64
+	chainID uint64
+	// forks reorganize the chain: every block at or above a fork's block
+	// carries that fork's tag in its hash (later forks override earlier
+	// ones), so stored hashes stop matching the node's.
+	forks       []fakeFork
 	constraints []nitro.Constraint
 	legacy      *nitro.LegacyParams
 	minFee      *big.Int
@@ -53,7 +58,8 @@ type fakeRPC struct {
 
 func newFakeRPC(head uint64) *fakeRPC {
 	return &fakeRPC{
-		head: head,
+		head:    head,
+		chainID: 4663,
 		constraints: []nitro.Constraint{
 			{Target: 60_000_000, Window: 15, Backlog: 3_111_506},
 			{Target: 40_000_000, Window: 86_400, Backlog: 11_194_391_810_886},
@@ -88,8 +94,41 @@ func feeFor(n uint64) *big.Int {
 	return big.NewInt(20_000_000 + int64(n%13))
 }
 
+type fakeFork struct {
+	at  uint64
+	tag string
+}
+
+// hashFor is the canonical hash of block n, or the hash of the latest fork
+// covering it.
+func (f *fakeRPC) hashFor(n uint64) string {
+	tag := ""
+	for _, fk := range f.forks {
+		if n >= fk.at {
+			tag = fk.tag
+		}
+	}
+	return fmt.Sprintf("0x%s%x", tag, n)
+}
+
+// fork reorganizes the chain from block at on.
+func (f *fakeRPC) fork(at uint64, tag string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forks = append(f.forks, fakeFork{at: at, tag: tag})
+}
+
 func (f *fakeRPC) header(n uint64) nitro.Header {
-	return nitro.Header{Number: n, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)]}
+	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: f.hashFor(n - 1), Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)]}
+}
+
+func (f *fakeRPC) ChainID(context.Context) (uint64, error) {
+	if err := f.fail("ChainID"); err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.chainID, nil
 }
 
 func (f *fakeRPC) FastSample(context.Context) (*nitro.Sample, error) {

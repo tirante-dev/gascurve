@@ -9,6 +9,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -34,6 +36,44 @@ type ServerConfig struct {
 	// RateLimitPerSecond is the per-IP request budget; RateLimitBurst the bucket size.
 	RateLimitPerSecond float64 `mapstructure:"rate_limit_per_second"`
 	RateLimitBurst     int     `mapstructure:"rate_limit_burst"`
+	// TrustedProxies lists the CIDRs (or single addresses) of reverse
+	// proxies whose X-Forwarded-For is believed. Empty means the peer
+	// address is always the client address.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
+	// WSMaxPerIP and WSMaxTotal cap concurrent WebSocket connections per
+	// client address and across the process.
+	WSMaxPerIP int `mapstructure:"ws_max_per_ip"`
+	WSMaxTotal int `mapstructure:"ws_max_total"`
+}
+
+// TrustedProxyNets parses TrustedProxies into networks. A bare address is
+// a /32 or /128.
+func (s ServerConfig) TrustedProxyNets() ([]*net.IPNet, error) {
+	out := make([]*net.IPNet, 0, len(s.TrustedProxies))
+	for _, raw := range s.TrustedProxies {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if !strings.Contains(raw, "/") {
+			ip := net.ParseIP(raw)
+			if ip == nil {
+				return nil, fmt.Errorf("server.trusted_proxies: %q is not an address or CIDR", raw)
+			}
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, n, err := net.ParseCIDR(raw)
+		if err != nil {
+			return nil, fmt.Errorf("server.trusted_proxies: %q: %w", raw, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // DatabaseConfig configures PostgreSQL access.
@@ -84,6 +124,7 @@ type NetworkConfig struct {
 	// batch. 0 means unlimited (a dedicated node): the pacer never waits,
 	// catch-up never skips blocks and the batch report scan reads every
 	// block. Batches stay capped at 100 items and 429 back-off still applies.
+	// Must be finite and at most MaxCallsPerSecond.
 	CallsPerSecond float64 `mapstructure:"calls_per_second"`
 	// Archive is true when the node serves historical eth_call. The backfill
 	// then anchors its replay to the real backlogs every
@@ -91,6 +132,10 @@ type NetworkConfig struct {
 	Archive bool `mapstructure:"archive"`
 	Enabled bool `mapstructure:"enabled"`
 }
+
+// MaxCallsPerSecond bounds calls_per_second; anything above it is a typo
+// rather than a budget (set 0 for a dedicated node).
+const MaxCallsPerSecond = 10_000
 
 // Unlimited reports whether the network has no call budget.
 func (n NetworkConfig) Unlimited() bool { return n.CallsPerSecond <= 0 }
@@ -160,6 +205,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.rate_limit_per_second", 20.0)
 	v.SetDefault("server.rate_limit_burst", 60)
+	v.SetDefault("server.ws_max_per_ip", 8)
+	v.SetDefault("server.ws_max_total", 2000)
 	v.SetDefault("database.max_open", 25)
 	v.SetDefault("database.max_idle", 10)
 	v.SetDefault("collector.tick_interval", "1s")
@@ -240,6 +287,12 @@ func (c *Config) Validate(requireRPC bool) error {
 	if c.Server.RateLimitPerSecond <= 0 || c.Server.RateLimitBurst <= 0 {
 		errs = append(errs, errors.New("server.rate_limit_per_second and rate_limit_burst must be positive"))
 	}
+	if c.Server.WSMaxPerIP <= 0 || c.Server.WSMaxTotal <= 0 {
+		errs = append(errs, errors.New("server.ws_max_per_ip and ws_max_total must be positive"))
+	}
+	if _, err := c.Server.TrustedProxyNets(); err != nil {
+		errs = append(errs, err)
+	}
 	if c.Database.URL == "" {
 		errs = append(errs, errors.New("database.url is required"))
 	}
@@ -281,8 +334,10 @@ func (c *Config) Validate(requireRPC bool) error {
 			errs = append(errs, fmt.Errorf("duplicate chain id %d", n.ChainID))
 		}
 		ids[n.ChainID] = true
-		if n.CallsPerSecond < 0 {
-			errs = append(errs, fmt.Errorf("network %s: calls_per_second must be zero (unlimited) or positive", n.Name))
+		if n.CallsPerSecond < 0 || math.IsNaN(n.CallsPerSecond) || math.IsInf(n.CallsPerSecond, 0) {
+			errs = append(errs, fmt.Errorf("network %s: calls_per_second must be zero (unlimited) or a finite positive number", n.Name))
+		} else if n.CallsPerSecond > MaxCallsPerSecond {
+			errs = append(errs, fmt.Errorf("network %s: calls_per_second %v exceeds %d (use 0 for a dedicated node)", n.Name, n.CallsPerSecond, MaxCallsPerSecond))
 		}
 		if n.WSURL != "" && !strings.HasPrefix(n.WSURL, "ws://") && !strings.HasPrefix(n.WSURL, "wss://") {
 			errs = append(errs, fmt.Errorf("network %s: ws_url %q must start with ws:// or wss://", n.Name, n.WSURL))

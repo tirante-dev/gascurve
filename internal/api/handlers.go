@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math/big"
@@ -71,10 +72,7 @@ func (s *Server) networkModel(ctx context.Context, n db.Network) (model.Network,
 	if n.HeadBlock.Valid {
 		out.HeadBlock = uint64(max(n.HeadBlock.Int64, 0))
 	}
-	if n.HeadAt.Valid {
-		out.HeadAt = n.HeadAt.Time.UTC().Format(time.RFC3339)
-		out.LagSeconds = max(int64(s.now().Sub(n.HeadAt.Time).Seconds()), 0)
-	}
+	out.HeadAt, out.LagSeconds = s.headTimes(n.HeadAt)
 	sample, err := s.store.LatestStateSample(ctx, n.ChainID, false)
 	if err != nil {
 		return out, err
@@ -83,6 +81,17 @@ func (s *Server) networkModel(ctx context.Context, n db.Network) (model.Network,
 		out.Model = sampleModel(sample)
 	}
 	return out, nil
+}
+
+// headTimes renders a nullable head time and the lag behind now; both are
+// nil until the collector has produced a head.
+func (s *Server) headTimes(t sql.NullTime) (headAt *string, lag *int64) {
+	if !t.Valid {
+		return nil, nil
+	}
+	at := t.Time.UTC().Format(time.RFC3339)
+	secs := max(int64(s.now().Sub(t.Time).Seconds()), 0)
+	return &at, &secs
 }
 
 func sampleModel(sample *db.StateSample) string {
@@ -127,7 +136,9 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cacheNetwork, m)
 }
 
-// buildLive assembles the LiveSnapshot from the latest sample and block.
+// buildLive assembles the LiveSnapshot from the latest sample and the
+// block that sample was taken at, so the snapshot is one coherent tick even
+// when the collector commits between the two reads.
 func (s *Server) buildLive(ctx context.Context, chainID uint64) (*model.LiveSnapshot, error) {
 	sample, err := s.store.LatestStateSample(ctx, chainID, false)
 	if err != nil {
@@ -142,7 +153,7 @@ func (s *Server) buildLive(ctx context.Context, chainID uint64) (*model.LiveSnap
 			return nil, err
 		}
 	}
-	block, err := s.store.LatestBlock(ctx, chainID)
+	block, err := s.store.BlockByNumber(ctx, chainID, sample.BlockNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +270,8 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rng.cache, series)
 }
 
+// handleConstraints returns the set history and, only while the latest
+// sample's model is the constraints model, the newest set as current.
 func (s *Server) handleConstraints(w http.ResponseWriter, r *http.Request) {
 	n, ok := s.resolveNetwork(w, r)
 	if !ok {
@@ -280,7 +293,14 @@ func (s *Server) handleConstraints(w http.ResponseWriter, r *http.Request) {
 	}
 	var current *model.ConstraintSet
 	if len(history) > 0 {
-		current = &history[0]
+		sample, err := s.store.LatestStateSample(r.Context(), n.ChainID, false)
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		if sample != nil && sampleModel(sample) == model.ModelConstraints {
+			current = &history[0]
+		}
 	}
 	writeJSON(w, http.StatusOK, cacheDay, map[string]any{"current": current, "history": history})
 }
@@ -314,12 +334,28 @@ func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	from, to := rng.window(s.now())
+	out := model.BatchSeries{Range: rng.name, Resolution: rng.batchResolution, Points: []model.BatchPoint{}}
+	if rng.batchStep == 0 {
+		// The batch resolution is exactly one point per report.
+		reports, err := s.store.BatchReports(r.Context(), n.ChainID, from, to)
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		for _, br := range reports {
+			out.Points = append(out.Points, model.BatchPoint{
+				T: br.BatchTS.Unix(), Batches: 1, GasSpent: br.GasSpent, WeiSpent: br.WeiSpent.String(),
+				L1BaseFeeAvg: br.L1BaseFee.String(), CalldataBytes: br.CalldataLen,
+			})
+		}
+		writeJSON(w, http.StatusOK, rng.cache, out)
+		return
+	}
 	rows, err := s.store.BatchBuckets(r.Context(), n.ChainID, from, to, rng.batchStep)
 	if err != nil {
 		s.internal(w, err)
 		return
 	}
-	out := model.BatchSeries{Range: rng.name, Resolution: rng.batchResolution, Points: make([]model.BatchPoint, 0, len(rows))}
 	for _, b := range rows {
 		out.Points = append(out.Points, model.BatchPoint{
 			T: b.T.Unix(), Batches: b.Batches, GasSpent: b.GasSpent, WeiSpent: b.WeiSpent.String(),
@@ -376,12 +412,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if n.HeadBlock.Valid {
 			ns.HeadBlock = uint64(max(n.HeadBlock.Int64, 0))
 		}
-		if n.HeadAt.Valid {
-			ns.HeadAt = n.HeadAt.Time.UTC().Format(time.RFC3339)
-			ns.LagSeconds = max(int64(s.now().Sub(n.HeadAt.Time).Seconds()), 0)
-		}
+		ns.HeadAt, ns.LagSeconds = s.headTimes(n.HeadAt)
 		if n.LastSampleAt.Valid {
-			ns.LastSampleAt = n.LastSampleAt.Time.UTC().Format(time.RFC3339)
+			at := n.LastSampleAt.Time.UTC().Format(time.RFC3339)
+			ns.LastSampleAt = &at
 		}
 		if n.LastError.Valid {
 			e := n.LastError.String
@@ -421,9 +455,14 @@ func intParam(r *http.Request, name string, def, lo, hi int) int {
 func blockPoint(b db.Block) model.BlockPoint {
 	return model.BlockPoint{
 		Number: b.Number, TS: uint64(b.TS.Unix()), GasUsed: b.GasUsed, BaseFee: b.BaseFee.String(),
-		PredictedBaseFee: b.PredictedBaseFee.String(), Backlogs: db.Uint64s(b.Backlogs),
-		ExponentBips: b.ExponentBips, Anchored: b.Anchored,
+		PredictedBaseFee: b.PredictedBaseFee.String(), Backlogs: b.Backlogs.Uint64s(), ConstraintBips: int64s(b.ConstraintBips),
+		ExponentBips: b.ExponentBips, MinBaseFee: b.MinBaseFee.String(), Anchored: b.Anchored,
 	}
+}
+
+// int64s returns a non-nil copy of a BIGINT[] (JSON arrays are never null).
+func int64s(v []int64) []int64 {
+	return append([]int64{}, v...)
 }
 
 func constraintSetModel(cs db.ConstraintSet) (model.ConstraintSet, error) {

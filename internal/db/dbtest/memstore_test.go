@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
-
 	"github.com/tirante-dev/gascurve/internal/db"
 )
 
@@ -91,11 +89,11 @@ func TestMemStore(t *testing.T) {
 		t.Fatal("prune blocks")
 	}
 
-	b1 := db.Bucket{ChainID: 1, Resolution: "1m", BucketStart: base, Blocks: 1, GasUsed: 10, FeesWei: db.WeiFromUint64(10), BaseFeeMin: db.WeiFromUint64(10), BaseFeeAvg: db.WeiFromUint64(10), BaseFeeMax: db.WeiFromUint64(10), ExponentEndBips: 1, BacklogsEnd: pq.Int64Array{1}, BacklogsMax: pq.Int64Array{1, 5}, ReplayErrorBips: 3, LastBlock: 5}
+	b1 := db.Bucket{ChainID: 1, Resolution: "1m", BucketStart: base, Blocks: 1, GasUsed: 10, FeesWei: db.WeiFromUint64(10), BaseFeeMin: db.WeiFromUint64(10), BaseFeeAvg: db.WeiFromUint64(10), BaseFeeMax: db.WeiFromUint64(10), ExponentEndBips: 1, BaseFeeSum: db.WeiFromUint64(10), BacklogsEnd: db.Uint64Array{1}, BacklogsMax: db.Uint64Array{1, 5}, ReplayErrorBips: 3, LastBlock: 5}
 	b2 := b1
 	b2.Blocks, b2.GasUsed, b2.FeesWei = 3, 30, db.WeiFromUint64(30)
-	b2.BaseFeeMin, b2.BaseFeeAvg, b2.BaseFeeMax = db.WeiFromUint64(2), db.WeiFromUint64(30), db.WeiFromUint64(40)
-	b2.ExponentEndBips, b2.BacklogsEnd, b2.BacklogsMax, b2.ReplayErrorBips, b2.LastBlock = 9, pq.Int64Array{7}, pq.Int64Array{3, 2, 8}, 1, 9
+	b2.BaseFeeMin, b2.BaseFeeAvg, b2.BaseFeeMax, b2.BaseFeeSum = db.WeiFromUint64(2), db.WeiFromUint64(30), db.WeiFromUint64(40), db.WeiFromUint64(90)
+	b2.ExponentEndBips, b2.BacklogsEnd, b2.BacklogsMax, b2.ReplayErrorBips, b2.LastBlock = 9, db.Uint64Array{7}, db.Uint64Array{3, 2, 8}, 1, 9
 	b2.ConstraintSetID.Valid, b2.ConstraintSetID.Int64 = true, 4
 	if err := m.FoldBuckets(ctx, []db.Bucket{b1, b2}); err != nil {
 		t.Fatal(err)
@@ -107,7 +105,7 @@ func TestMemStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	bk, _ := m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour))
-	if len(bk) != 1 || bk[0].Blocks != 5 || bk[0].GasUsed != 50 || bk[0].BaseFeeMin.Int64() != 2 || bk[0].BaseFeeMax.Int64() != 40 || bk[0].BaseFeeAvg.Int64() != 22 {
+	if len(bk) != 1 || bk[0].Blocks != 5 || bk[0].GasUsed != 50 || bk[0].BaseFeeMin.Int64() != 2 || bk[0].BaseFeeMax.Int64() != 40 || bk[0].BaseFeeAvg.Int64() != 22 || bk[0].BaseFeeSum.Int64() != 110 {
 		t.Fatalf("fold: %+v", bk)
 	}
 	if bk[0].ExponentEndBips != 9 || bk[0].BacklogsMax[2] != 8 || bk[0].BacklogsMax[1] != 5 || bk[0].ConstraintSetID.Int64 != 4 || bk[0].ReplayErrorBips != 3 || bk[0].LastBlock != 9 {
@@ -115,6 +113,33 @@ func TestMemStore(t *testing.T) {
 	}
 	if m.BucketCount(1, "1m") != 1 {
 		t.Fatal("bucket count")
+	}
+	// Rebuilding from rows replaces the bucket with the rows' aggregate
+	// (blocks 2..5 remain after the prune above), using the set in force
+	// at the last block; a window without rows loses its bucket.
+	_, _ = m.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 1, EffectiveBlock: 4, Source: "genesis"})
+	if err := m.RebuildBuckets(ctx, 1, "1m", []time.Time{base, base.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RebuildBuckets(ctx, 1, "2m", nil); err == nil {
+		t.Fatal("unknown resolution")
+	}
+	bk, _ = m.Buckets(ctx, 1, "1m", base, base.Add(2*time.Hour))
+	if len(bk) != 1 || bk[0].Blocks != 4 || bk[0].GasUsed != 14 || bk[0].LastBlock != 5 || bk[0].ConstraintSetID.Int64 != 1 {
+		t.Fatalf("rebuilt: %+v", bk)
+	}
+	if b, _ := m.BlockByNumber(ctx, 1, 5); b == nil || b.Number != 5 {
+		t.Fatal("BlockByNumber")
+	}
+	if b, _ := m.BlockByNumber(ctx, 1, 99); b != nil {
+		t.Fatal("BlockByNumber missing")
+	}
+	removed, _ := m.DeleteBlocksAfter(ctx, 1, 3)
+	if len(removed) != 2 || removed[0].Number != 4 {
+		t.Fatalf("DeleteBlocksAfter: %+v", removed)
+	}
+	if n, _ := m.DeleteBucketsBefore(ctx, 1, base.Add(time.Minute)); n != 1 || m.BucketCount(1, "1m") != 0 {
+		t.Fatal("DeleteBucketsBefore")
 	}
 
 	s := db.StateSample{ChainID: 1, SampledAt: base, L1: db.JSONB(`{}`)}
@@ -151,13 +176,19 @@ func TestMemStore(t *testing.T) {
 	if as, _ := m.OwnerActions(ctx, 1, base.Add(-time.Minute), base.Add(time.Minute), 1); len(as) != 1 || as[0].LogIndex != 0 {
 		t.Fatal("actions range")
 	}
+	if as, _ := m.OwnerActionsSince(ctx, 1, 5); len(as) != 2 || as[0].LogIndex != 0 || as[1].LogIndex != 1 {
+		t.Fatal("actions since")
+	}
+	if as, _ := m.OwnerActionsSince(ctx, 1, 6); len(as) != 0 {
+		t.Fatal("actions since beyond")
+	}
 	id, _ := m.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 1, EffectiveBlock: 1, Source: "genesis"})
 	id2, _ := m.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 1, EffectiveBlock: 1, Source: "genesis"})
 	id3, _ := m.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 1, EffectiveBlock: 0, Source: "observed"})
 	if id != id2 || id3 == id {
 		t.Fatal("constraint set ids")
 	}
-	if cs, _ := m.ConstraintSets(ctx, 1); len(cs) != 2 || cs[0].EffectiveBlock != 0 {
+	if cs, _ := m.ConstraintSets(ctx, 1); len(cs) != 3 || cs[0].EffectiveBlock != 0 || cs[2].EffectiveBlock != 4 {
 		t.Fatal("constraint sets")
 	}
 
@@ -169,6 +200,22 @@ func TestMemStore(t *testing.T) {
 	bb, _ := m.BatchBuckets(ctx, 1, base.Add(-time.Hour), base.Add(time.Hour), time.Minute)
 	if len(bb) != 1 || bb[0].Batches != 2 || bb[0].GasSpent != 30 || bb[0].WeiSpent.Int64() != 300 || bb[0].L1BaseFeeAvg.Int64() != 20 || bb[0].CalldataBytes != 10 {
 		t.Fatalf("batch buckets: %+v", bb)
+	}
+	if rs, _ := m.BatchReports(ctx, 1, base, base.Add(time.Hour)); len(rs) != 2 || rs[0].BlockNumber != 1 || rs[1].BlockNumber != 2 {
+		t.Fatalf("batch reports: %+v", rs)
+	}
+	// RewindAfter drops actions, sets and reports above a block.
+	if err := m.RewindAfter(ctx, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if as, _ := m.OwnerActions(ctx, 1, time.Time{}, time.Time{}, 0); len(as) != 0 {
+		t.Fatal("actions after rewind")
+	}
+	if cs, _ := m.ConstraintSets(ctx, 1); len(cs) != 2 || cs[1].EffectiveBlock != 1 {
+		t.Fatalf("sets after rewind: %+v", cs)
+	}
+	if rs, _ := m.BatchReports(ctx, 1, base, base.Add(time.Hour)); len(rs) != 1 {
+		t.Fatal("reports after rewind")
 	}
 
 	if _, ok, _ := m.GetState(ctx, 1, "k"); ok {
@@ -208,19 +255,29 @@ func TestMemStoreFailures(t *testing.T) {
 	if err := m.Ping(ctx); !errors.Is(err, ErrInjected) {
 		t.Fatal("ping")
 	}
-	names := []string{"WithTx", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasUsedBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
+	names := []string{"WithTx", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasUsedBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
 	for _, n := range names {
 		m.FailOn[n] = true
 	}
 	now := time.Now()
 	calls := map[string]func() error{
-		"WithTx":             func() error { return m.WithTx(ctx, func(db.Store) error { return nil }) },
-		"UpsertNetwork":      func() error { return m.UpsertNetwork(ctx, db.Network{}) },
-		"Networks":           func() error { _, err := m.Networks(ctx); return err },
-		"NetworkByRef":       func() error { _, err := m.NetworkByRef(ctx, ""); return err },
-		"UpdateNetworkHead":  func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
-		"SetNetworkError":    func() error { return m.SetNetworkError(ctx, 1, "") },
-		"UpsertBlocks":       func() error { return m.UpsertBlocks(ctx, nil) },
+		"WithTx":            func() error { return m.WithTx(ctx, func(db.Store) error { return nil }) },
+		"UpsertNetwork":     func() error { return m.UpsertNetwork(ctx, db.Network{}) },
+		"Networks":          func() error { _, err := m.Networks(ctx); return err },
+		"NetworkByRef":      func() error { _, err := m.NetworkByRef(ctx, ""); return err },
+		"UpdateNetworkHead": func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
+		"SetNetworkError":   func() error { return m.SetNetworkError(ctx, 1, "") },
+		"UpsertBlocks":      func() error { return m.UpsertBlocks(ctx, nil) },
+		"BlockByNumber":     func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
+		"DeleteBlocksAfter": func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
+		"RebuildBuckets":    func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
+		"DeleteBucketsBefore": func() error {
+			_, err := m.DeleteBucketsBefore(ctx, 1, now)
+			return err
+		},
+		"OwnerActionsSince":  func() error { _, err := m.OwnerActionsSince(ctx, 1, 1); return err },
+		"RewindAfter":        func() error { return m.RewindAfter(ctx, 1, 1) },
+		"BatchReports":       func() error { _, err := m.BatchReports(ctx, 1, now, now); return err },
 		"LatestBlock":        func() error { _, err := m.LatestBlock(ctx, 1); return err },
 		"OldestBlock":        func() error { _, err := m.OldestBlock(ctx, 1); return err },
 		"RecentBlocks":       func() error { _, err := m.RecentBlocks(ctx, 1, 1); return err },

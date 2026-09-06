@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -12,9 +13,14 @@ import (
 )
 
 // Run drives the fast loop, the slow loop and the backfill until ctx ends.
-// It returns early only when the follower cannot initialize.
+// It returns early when the follower cannot initialize or when the RPC
+// reports a different chain id than the one configured: nothing from the
+// wrong chain may be written under this network's identity.
 func (f *Follower) Run(ctx context.Context) error {
 	if err := f.ensureInit(ctx); err != nil {
+		return err
+	}
+	if err := f.verifyChainID(ctx); err != nil {
 		return err
 	}
 	var wg sync.WaitGroup
@@ -30,6 +36,24 @@ func (f *Follower) Run(ctx context.Context) error {
 	f.runFast(ctx)
 	wg.Wait()
 	return ctx.Err()
+}
+
+// verifyChainID refuses to run against an RPC whose eth_chainId differs
+// from the configured chain id, recording the mismatch on the network row.
+func (f *Follower) verifyChainID(ctx context.Context) error {
+	id, err := f.rpc.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("eth_chainId: %w", err)
+	}
+	if id != f.chainID {
+		err := fmt.Errorf("rpc reports chain id %d, configured %d: refusing to run", id, f.chainID)
+		f.log.Error("chain id mismatch", "rpcChainId", id, "configured", f.chainID)
+		if serr := f.store.SetNetworkError(ctx, f.chainID, err.Error()); serr != nil {
+			f.log.Warn("record error", "err", serr.Error())
+		}
+		return err
+	}
+	return nil
 }
 
 // runFast drives the fast loop: on the timer when polling, on newHeads

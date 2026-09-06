@@ -3,6 +3,7 @@
 package api
 
 import (
+	"container/list"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -26,7 +27,13 @@ const (
 	requestTimeout   = 30 * time.Second
 	defaultRateLimit = 20.0
 	defaultRateBurst = 60
-	maxRateEntries   = 10_000
+	// maxRateEntries is the hard cap on tracked client addresses; beyond
+	// it the least recently seen address is evicted.
+	maxRateEntries = 10_000
+	// rateEntryTTL is how long an idle address keeps its bucket.
+	rateEntryTTL = 10 * time.Minute
+	// rateSweepEvery bounds how often idle entries are expired.
+	rateSweepEvery = time.Minute
 )
 
 // Server holds the handlers' dependencies.
@@ -62,6 +69,7 @@ func New(store db.Store, cfg config.ServerConfig, hub *Hub, log *logger.Logger, 
 	if s.hub != nil {
 		s.hub.live = s.buildLive
 		s.hub.network = s.networkModel
+		s.hub.setLimits(cfg.WSMaxPerIP, cfg.WSMaxTotal)
 	}
 	s.router = s.routes()
 	return s
@@ -73,7 +81,12 @@ func (s *Server) Handler() http.Handler { return s.router }
 func (s *Server) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(realIP)
+	trusted, err := s.cfg.TrustedProxyNets()
+	if err != nil {
+		s.log.Warn("ignoring server.trusted_proxies", "err", err.Error())
+		trusted = nil
+	}
+	r.Use(realIP(trusted))
 	r.Use(requestLogger(s.log))
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
@@ -141,30 +154,53 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, "no-store", model.ErrorBody{Error: model.ErrorDetail{Code: code, Message: msg}})
 }
 
-// realIP replaces RemoteAddr with the client address a reverse proxy
-// forwarded, but only when the direct peer is a loopback or private address
-// (that is, the proxy itself). Requests arriving straight from the internet
-// cannot spoof their address through the headers.
-func realIP(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err == nil {
-			if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
-				if fwd := forwardedFor(r); fwd != "" {
-					r.RemoteAddr = net.JoinHostPort(fwd, "0")
+// realIP replaces RemoteAddr with the client address the configured
+// reverse proxies forwarded. Forwarding headers are believed only when the
+// direct peer is a trusted proxy; the X-Forwarded-For chain is then walked
+// from the right, past every trusted hop, to the first address a trusted
+// proxy did not vouch for. A private peer address proves nothing by
+// itself, and with no trusted proxies configured the peer is the client.
+func realIP(trusted []*net.IPNet) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if len(trusted) > 0 {
+				if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+					if peer := net.ParseIP(host); peer != nil && inNets(peer, trusted) {
+						if client := forwardedClient(r, trusted); client != "" {
+							r.RemoteAddr = net.JoinHostPort(client, "0")
+						}
+					}
 				}
 			}
-		}
-		next.ServeHTTP(w, r)
-	})
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
-// forwardedFor returns the first X-Forwarded-For entry or X-Real-IP.
-func forwardedFor(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
-			return ip.String()
+func inNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// forwardedClient walks X-Forwarded-For right to left and returns the first
+// hop that is not a trusted proxy (or the leftmost hop when every hop is
+// trusted), falling back to X-Real-IP. Empty when nothing usable is there.
+func forwardedClient(r *http.Request, trusted []*net.IPNet) string {
+	var hops []net.IP
+	for _, xff := range r.Header.Values("X-Forwarded-For") {
+		for _, part := range strings.Split(xff, ",") {
+			if ip := net.ParseIP(strings.TrimSpace(part)); ip != nil {
+				hops = append(hops, ip)
+			}
+		}
+	}
+	for i := len(hops) - 1; i >= 0; i-- {
+		if i == 0 || !inNets(hops[i], trusted) {
+			return hops[i].String()
 		}
 	}
 	if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); ip != nil {
@@ -190,53 +226,100 @@ func requestLogger(log *logger.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// rateLimiter keeps a token bucket per client IP.
+// rateLimiter keeps a token bucket per client IP in a bounded LRU: idle
+// entries expire after rateEntryTTL (swept at most every rateSweepEvery,
+// on any request, not only when a new address shows up) and the least
+// recently seen address is evicted when the hard cap is reached, so
+// memory and per-request work stay bounded whatever the addresses do.
 type rateLimiter struct {
-	mu      sync.Mutex
-	limit   rate.Limit
-	burst   int
-	clients map[string]*rateEntry
-	now     func() time.Time
+	mu        sync.Mutex
+	limit     rate.Limit
+	burst     int
+	maxEntry  int
+	ttl       time.Duration
+	clients   map[string]*list.Element
+	order     *list.List // most recently seen at the front
+	lastSweep time.Time
+	now       func() time.Time
 }
 
 type rateEntry struct {
+	ip      string
 	limiter *rate.Limiter
 	seen    time.Time
 }
 
 func newRateLimiter(perSecond float64, burst int) *rateLimiter {
-	return &rateLimiter{limit: rate.Limit(perSecond), burst: burst, clients: map[string]*rateEntry{}, now: time.Now}
+	return &rateLimiter{limit: rate.Limit(perSecond), burst: burst, maxEntry: maxRateEntries, ttl: rateEntryTTL, clients: map[string]*list.Element{}, order: list.New(), now: time.Now}
 }
 
 func (rl *rateLimiter) allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	now := rl.now()
-	e, ok := rl.clients[ip]
-	if !ok {
-		if len(rl.clients) >= maxRateEntries {
-			for k, v := range rl.clients {
-				if now.Sub(v.seen) > 10*time.Minute {
-					delete(rl.clients, k)
-				}
-			}
-		}
-		e = &rateEntry{limiter: rate.NewLimiter(rl.limit, rl.burst)}
-		rl.clients[ip] = e
+	if now.Sub(rl.lastSweep) >= rateSweepEvery {
+		rl.lastSweep = now
+		rl.sweepLocked(now)
 	}
+	el, ok := rl.clients[ip]
+	if !ok {
+		for rl.order.Len() >= rl.maxEntry {
+			rl.removeLocked(rl.order.Back())
+		}
+		el = rl.order.PushFront(&rateEntry{ip: ip, limiter: rate.NewLimiter(rl.limit, rl.burst)})
+		rl.clients[ip] = el
+	} else {
+		rl.order.MoveToFront(el)
+	}
+	e := entryOf(el)
 	e.seen = now
 	return e.limiter.AllowN(now, 1)
 }
 
+func entryOf(el *list.Element) *rateEntry {
+	e, _ := el.Value.(*rateEntry)
+	return e
+}
+
+// sweepLocked drops entries idle for longer than the TTL, walking from the
+// least recently seen end and stopping at the first live one.
+func (rl *rateLimiter) sweepLocked(now time.Time) {
+	for el := rl.order.Back(); el != nil; {
+		e := entryOf(el)
+		if now.Sub(e.seen) <= rl.ttl {
+			return
+		}
+		prev := el.Prev()
+		rl.removeLocked(el)
+		el = prev
+	}
+}
+
+func (rl *rateLimiter) removeLocked(el *list.Element) {
+	delete(rl.clients, entryOf(el).ip)
+	rl.order.Remove(el)
+}
+
+// size returns the number of tracked addresses.
+func (rl *rateLimiter) size() int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.order.Len()
+}
+
+// clientIP strips the port from a remote address.
+func clientIP(addr string) string {
+	if host, _, ok := strings.Cut(addr, ":"); ok && !strings.Contains(addr, "]") {
+		return host
+	} else if i := strings.LastIndex(addr, "]:"); i > 0 {
+		return addr[:i+1]
+	}
+	return addr
+}
+
 func (rl *rateLimiter) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := r.RemoteAddr
-		if host, _, ok := strings.Cut(ip, ":"); ok && !strings.Contains(ip, "]") {
-			ip = host
-		} else if i := strings.LastIndex(ip, "]:"); i > 0 {
-			ip = ip[:i+1]
-		}
-		if !rl.allow(ip) {
+		if !rl.allow(clientIP(r.RemoteAddr)) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 			return

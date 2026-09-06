@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +88,12 @@ func liveNotification(chainID uint64) db.Notification {
 	return db.Notification{Channel: db.ChannelLive, Payload: string(b)}
 }
 
+func ownerNotification(chainID, block, logIndex uint64, tx, method string) db.Notification {
+	n := model.OwnerActionNotification{ChainID: chainID, LogIndex: logIndex, Action: model.OwnerAction{Block: block, TxHash: tx, Method: method, Args: json.RawMessage(`{}`)}}
+	b, _ := json.Marshal(n)
+	return db.Notification{Channel: db.ChannelOwnerAction, Payload: string(b)}
+}
+
 func TestWebSocketFlow(t *testing.T) {
 	store := seed(t)
 	h := newWSHarness(t, store, time.Hour)
@@ -134,14 +142,21 @@ func TestWebSocketFlow(t *testing.T) {
 	// Ticks for other networks are not delivered.
 	h.hub.Handle(ctx, liveNotification(testnet))
 
-	// Owner actions are forwarded.
-	action := model.OwnerActionNotification{ChainID: robinhood, Action: model.OwnerAction{Block: 5, Method: "setSpeedLimit", Args: json.RawMessage(`{"limit":1}`)}}
+	// Owner actions are forwarded once, whatever the notification count.
+	action := model.OwnerActionNotification{ChainID: robinhood, LogIndex: 3, Action: model.OwnerAction{Block: 2000, TxHash: "0xnew", Method: "setSpeedLimit", Args: json.RawMessage(`{"limit":1}`)}}
 	payload, _ := json.Marshal(action)
+	h.hub.Handle(ctx, db.Notification{Channel: db.ChannelOwnerAction, Payload: string(payload)})
 	h.hub.Handle(ctx, db.Notification{Channel: db.ChannelOwnerAction, Payload: string(payload)})
 	typ, data = readMsg(t, conn)
 	var oa model.OwnerAction
 	if typ != "owner_action" || json.Unmarshal(data, &oa) != nil || oa.Method != "setSpeedLimit" {
 		t.Fatalf("owner action: %s %s", typ, data)
+	}
+	// Subscribing to the network already followed is a no-op.
+	send(t, conn, map[string]string{"type": "subscribe", "network": "4663"})
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	if typ, _ = readMsg(t, conn); typ != "tick" {
+		t.Fatalf("same-network subscribe must not send a hello: %s", typ)
 	}
 
 	// Switching networks yields a fresh hello and moves the subscription.
@@ -158,11 +173,24 @@ func TestWebSocketFlow(t *testing.T) {
 	if typ, _ = readMsg(t, conn); typ != "tick" {
 		t.Fatalf("testnet tick: %s", typ)
 	}
-	// Unknown networks produce an error message but keep the socket.
+	// Unknown networks produce an error message but keep the socket, and
+	// the lookup is cached: no store query for a repeated reference.
 	send(t, conn, map[string]string{"type": "subscribe", "network": "nope"})
 	if typ, _ = readMsg(t, conn); typ != "error" {
 		t.Fatalf("error message: %s", typ)
 	}
+	store.SetFailure("NetworkByRef", true)
+	send(t, conn, map[string]string{"type": "subscribe", "network": "nope"})
+	typ, raw := readMsg(t, conn)
+	if typ != "error" {
+		t.Fatalf("cached unknown network: %s %s", typ, raw)
+	}
+	// An uncached reference with a failing store is an internal error, not not_found.
+	send(t, conn, map[string]string{"type": "subscribe", "network": "other"})
+	if typ, raw = readMsg(t, conn); typ != "error" {
+		t.Fatalf("store failure on subscribe: %s %s", typ, raw)
+	}
+	store.SetFailure("NetworkByRef", false)
 	// Garbage and pongs are ignored.
 	if err := conn.Write(ctx, websocket.MessageText, []byte("not json")); err != nil {
 		t.Fatal(err)
@@ -218,42 +246,45 @@ func TestWebSocketPingPong(t *testing.T) {
 func TestWebSocketErrors(t *testing.T) {
 	store := seed(t)
 	h := newWSHarness(t, store, time.Hour)
+	upgrade := http.Header{"Upgrade": []string{"websocket"}, "Connection": []string{"Upgrade"}}
 	for _, tc := range []struct {
-		query  string
-		status int
+		name    string
+		query   string
+		headers http.Header
+		status  int
+		code    string
 	}{
-		{"", http.StatusBadRequest},
-		{"?network=nope", http.StatusNotFound},
+		{"missing network", "", upgrade, http.StatusBadRequest, "bad_request"},
+		{"unknown network", "?network=nope", upgrade, http.StatusNotFound, "not_found"},
+		{"not an upgrade", "?network=robinhood", nil, http.StatusBadRequest, "bad_request"},
+		{"bad origin", "?network=robinhood", http.Header{"Upgrade": []string{"websocket"}, "Origin": []string{"http://evil.example"}}, http.StatusForbidden, "forbidden"},
 	} {
-		resp, err := http.Get(h.ts.URL + "/api/v1/ws" + tc.query)
+		req, _ := http.NewRequest(http.MethodGet, h.ts.URL+"/api/v1/ws"+tc.query, http.NoBody)
+		req.Header = tc.headers
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
-		if resp.StatusCode != tc.status {
-			t.Fatalf("%q: status %d", tc.query, resp.StatusCode)
+		var e model.ErrorBody
+		decode(t, mustRead(t, resp), &e)
+		if resp.StatusCode != tc.status || e.Error.Code != tc.code {
+			t.Fatalf("%s: status %d code %q", tc.name, resp.StatusCode, e.Error.Code)
 		}
 	}
 	store.SetFailure("NetworkByRef", true)
-	resp, err := http.Get(h.ts.URL + "/api/v1/ws?network=robinhood")
+	req, _ := http.NewRequest(http.MethodGet, h.ts.URL+"/api/v1/ws?network=uncached", http.NoBody)
+	req.Header = upgrade
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("store failure: %d", resp.StatusCode)
+	var e model.ErrorBody
+	decode(t, mustRead(t, resp), &e)
+	if resp.StatusCode != http.StatusInternalServerError || e.Error.Code != "internal" {
+		t.Fatalf("store failure: %d %+v", resp.StatusCode, e)
 	}
 	store.SetFailure("NetworkByRef", false)
-	// A plain GET without the upgrade headers is rejected by the accept.
-	resp, err = http.Get(h.ts.URL + "/api/v1/ws?network=robinhood")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		t.Fatal("expected upgrade failure")
-	}
-	// Hello failures close the socket.
+	// Hello failures send a protocol error and close the socket.
 	store.SetFailure("LatestStateSample", true)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -265,11 +296,23 @@ func TestWebSocketErrors(t *testing.T) {
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
+	_, data, err := conn.Read(ctx)
+	if err != nil || !strings.Contains(string(data), `"type":"error"`) || !strings.Contains(string(data), `"internal"`) {
+		t.Fatalf("expected an error message before the close: %s %v", data, err)
+	}
 	if _, _, err := conn.Read(ctx); err == nil {
 		t.Fatal("expected close")
 	}
+	deadline := time.Now().Add(2 * time.Second)
+	for h.hub.Connections() != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if h.hub.Connections() != 0 {
+		t.Fatalf("connection slot leaked: %d", h.hub.Connections())
+	}
 	store.SetFailure("LatestStateSample", false)
-	// Subscribe hello failures are logged and ignored.
+	// A failed switch reports an internal error and keeps the old
+	// subscription.
 	conn = h.dial(t, "robinhood")
 	if typ, _ := readMsg(t, conn); typ != "hello" {
 		t.Fatal("hello")
@@ -277,6 +320,9 @@ func TestWebSocketErrors(t *testing.T) {
 	store.SetFailure("RecentBlocks", true)
 	store.SetFailure("BlocksAfter", true)
 	send(t, conn, map[string]string{"type": "subscribe", "network": "robinhood-testnet"})
+	if typ, _ := readMsg(t, conn); typ != "error" {
+		t.Fatalf("switch failure must be reported: %s", typ)
+	}
 	h.hub.Handle(ctx, liveNotification(robinhood))
 	if typ, _ := readMsg(t, conn); typ != "tick" {
 		t.Fatalf("still subscribed to robinhood: %s", typ)
@@ -304,6 +350,259 @@ func TestWebSocketErrors(t *testing.T) {
 		t.Fatal("slow consumer not closed")
 	}
 	slow.close() // idempotent
+}
+
+func mustRead(t *testing.T, resp *http.Response) []byte {
+	t.Helper()
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestWebSocketConnectionCaps: sockets are capped per address and in
+// total, slots are released on close, and a client that floods messages
+// gets one error and is disconnected.
+func TestWebSocketConnectionCaps(t *testing.T) {
+	store := seed(t)
+	hub := NewHub(store, logger.Nop(), WithPingInterval(time.Hour), WithOrigins(nil), WithConnectionLimits(2, 3))
+	cfg := config.ServerConfig{RateLimitPerSecond: 1000, RateLimitBurst: 1000, WSMaxPerIP: 2, WSMaxTotal: 3}
+	s := New(store, cfg, hub, logger.Nop(), WithClock(func() time.Time { return now }))
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	h := &wsHarness{store: store, hub: hub, ts: ts}
+	c1 := h.dial(t, "robinhood")
+	c2 := h.dial(t, "robinhood")
+	readMsg(t, c1)
+	readMsg(t, c2)
+	if hub.Connections() != 2 {
+		t.Fatalf("connections = %d", hub.Connections())
+	}
+	// Third socket from the same address: refused with the JSON envelope.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/ws?network=robinhood", http.NoBody)
+	req.Header.Set("Upgrade", "websocket")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var e model.ErrorBody
+	decode(t, mustRead(t, resp), &e)
+	if resp.StatusCode != http.StatusTooManyRequests || e.Error.Code != "rate_limited" || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("per-ip cap: %d %+v", resp.StatusCode, e)
+	}
+	// Another address is admitted until the total cap.
+	if ok, _ := hub.admit("other"); !ok {
+		t.Fatal("other address should be admitted")
+	}
+	if ok, reason := hub.admit("third"); ok || !strings.Contains(reason, "too many connections") {
+		t.Fatalf("total cap: %v %q", ok, reason)
+	}
+	hub.release("other")
+	// Closing a socket frees its slot.
+	_ = c2.Close(websocket.StatusNormalClosure, "bye")
+	deadline := time.Now().Add(2 * time.Second)
+	for hub.Connections() != 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if hub.Connections() != 1 {
+		t.Fatalf("slot not released: %d", hub.Connections())
+	}
+	// A message flood: the burst is answered, then one error and a close.
+	for range msgBurst + 5 {
+		send(t, c1, map[string]string{"type": "pong"})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sawError := false
+	for {
+		_, data, err := c1.Read(ctx)
+		if err != nil {
+			break
+		}
+		if strings.Contains(string(data), `"rate_limited"`) {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatal("flooding client must get a rate_limited error before the close")
+	}
+	hub.setLimits(0, 0)
+	if hub.maxPerIP != 2 || hub.maxTotal != 3 {
+		t.Fatal("zero limits keep the previous values")
+	}
+}
+
+// TestWebSocketHelloAtomic: a tick that lands while a hello is being
+// prepared is delivered after the hello, once, and never lost; concurrent
+// refreshes never duplicate blocks or move the ring head backwards.
+func TestWebSocketHelloAtomic(t *testing.T) {
+	store := seed(t)
+	hub := NewHub(store, logger.Nop(), WithPingInterval(time.Hour), WithOrigins(nil))
+	s := New(store, config.ServerConfig{RateLimitPerSecond: 1000, RateLimitBurst: 1000}, hub, logger.Nop(), WithClock(func() time.Time { return now }))
+	ctx := context.Background()
+	// Slow the network model so a tick can interleave with the hello.
+	gate := make(chan struct{})
+	hub.network = func(ctx context.Context, n db.Network) (model.Network, error) {
+		<-gate
+		return s.networkModel(ctx, n)
+	}
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	h := &wsHarness{store: store, hub: hub, ts: ts}
+	conn := h.dial(t, "robinhood")
+	// While the hello waits, a new block and a tick arrive.
+	time.Sleep(20 * time.Millisecond)
+	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}}); err != nil {
+		t.Fatal(err)
+	}
+	go hub.Handle(ctx, liveNotification(robinhood))
+	time.Sleep(20 * time.Millisecond)
+	close(gate)
+	typ, data := readMsg(t, conn)
+	if typ != "hello" {
+		t.Fatalf("first message %s", typ)
+	}
+	var hello struct {
+		RecentBlocks []model.BlockPoint `json:"recentBlocks"`
+	}
+	if err := json.Unmarshal(data, &hello); err != nil {
+		t.Fatal(err)
+	}
+	helloLast := hello.RecentBlocks[len(hello.RecentBlocks)-1].Number
+	// Whatever the interleaving, the client sees every block exactly once:
+	// either in the hello or in a following blocks message.
+	seen := map[uint64]int{}
+	for _, b := range hello.RecentBlocks {
+		seen[b.Number]++
+	}
+	hub.Handle(ctx, liveNotification(robinhood))
+	deadline := time.Now().Add(2 * time.Second)
+	for seen[1031] == 0 && time.Now().Before(deadline) {
+		typ, data := readMsg(t, conn)
+		if typ != "blocks" {
+			continue
+		}
+		var blocks []model.BlockPoint
+		if err := json.Unmarshal(data, &blocks); err != nil {
+			t.Fatal(err)
+		}
+		for _, b := range blocks {
+			if b.Number <= helloLast {
+				t.Fatalf("block %d delivered twice (hello ended at %d)", b.Number, helloLast)
+			}
+			seen[b.Number]++
+		}
+	}
+	if seen[1031] != 1 {
+		t.Fatalf("block 1031 seen %d times", seen[1031])
+	}
+	// Concurrent refreshes: the ring head only moves forward and no block
+	// is appended twice.
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				_ = store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1040 + uint64(i), TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}})
+			}
+			_, _ = hub.refreshBlocks(ctx, robinhood)
+		}(i)
+	}
+	wg.Wait()
+	hub.mu.Lock()
+	ring := append([]model.BlockPoint(nil), hub.networks[robinhood].blocks...)
+	last := hub.networks[robinhood].last
+	hub.mu.Unlock()
+	for i := 1; i < len(ring); i++ {
+		if ring[i].Number <= ring[i-1].Number {
+			t.Fatalf("ring not strictly ascending: %d after %d", ring[i].Number, ring[i-1].Number)
+		}
+	}
+	if last != ring[len(ring)-1].Number {
+		t.Fatalf("last %d vs ring end %d", last, ring[len(ring)-1].Number)
+	}
+}
+
+// TestHubReconcile: after the LISTEN connection reconnects, blocks stored
+// meanwhile are fanned out and owner actions since the per-network cursor
+// are delivered once, de-duplicated by (block, tx hash, log index).
+func TestHubReconcile(t *testing.T) {
+	store := seed(t)
+	h := newWSHarness(t, store, time.Hour)
+	conn := h.dial(t, "robinhood")
+	readMsg(t, conn)
+	ctx := context.Background()
+	// The cursor starts at the newest stored action (block 174150), so
+	// history is not replayed; a new action and a new block land while
+	// the listener is down.
+	if _, err := store.InsertOwnerActions(ctx, []db.OwnerAction{
+		{ChainID: robinhood, BlockNumber: 174151, TxHash: "0xcc", LogIndex: 0, TS: now, Method: "setSpeedLimit", Args: db.JSONB(`{"limit":2}`)},
+		{ChainID: robinhood, BlockNumber: 174151, TxHash: "0xcc", LogIndex: 1, TS: now, Method: "setL2GasPricingInertia", Args: db.JSONB(`{"sec":3}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}}); err != nil {
+		t.Fatal(err)
+	}
+	// One of the two was already delivered by NOTIFY before the outage.
+	h.hub.Handle(ctx, ownerNotification(robinhood, 174151, 0, "0xcc", "setSpeedLimit"))
+	if typ, _ := readMsg(t, conn); typ != "owner_action" {
+		t.Fatalf("notify: %s", typ)
+	}
+	h.hub.Handle(ctx, db.Notification{Reconnected: true})
+	got := map[string]int{}
+	for range 2 {
+		typ, data := readMsg(t, conn)
+		got[typ]++
+		if typ == "owner_action" && !strings.Contains(string(data), "setL2GasPricingInertia") {
+			t.Fatalf("the already delivered action must not repeat: %s", data)
+		}
+	}
+	if got["blocks"] != 1 || got["owner_action"] != 1 {
+		t.Fatalf("reconcile delivered %v", got)
+	}
+	// A second reconnect delivers nothing new.
+	h.hub.Handle(ctx, db.Notification{Reconnected: true})
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	if typ, _ := readMsg(t, conn); typ != "tick" {
+		t.Fatalf("second reconcile must be silent: %s", typ)
+	}
+	// Store failures during a reconcile are logged, not fatal; networks
+	// without clients are skipped.
+	store.SetFailure("OwnerActionsSince", true)
+	store.SetFailure("BlocksAfter", true)
+	h.hub.Handle(ctx, db.Notification{Reconnected: true})
+	store.SetFailure("OwnerActionsSince", false)
+	store.SetFailure("BlocksAfter", false)
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	if typ, _ := readMsg(t, conn); typ != "tick" {
+		t.Fatalf("after failed reconcile: %s", typ)
+	}
+	// The seen set is bounded.
+	st := h.hub.state(robinhood)
+	h.hub.mu.Lock()
+	for i := range seenActions + 10 {
+		st.markSeen(actionKey{block: uint64(i), txHash: "x"})
+	}
+	n := len(st.seen)
+	h.hub.mu.Unlock()
+	if n != seenActions {
+		t.Fatalf("seen set = %d", n)
+	}
+	// Cursor initialization tolerates a store failure.
+	empty := dbtest.New()
+	hub2 := NewHub(empty, nil)
+	empty.SetFailure("OwnerActions", true)
+	hub2.initOwnerCursor(ctx, 1)
+	hub2.mu.Lock()
+	init := hub2.state(1).ownerInit
+	hub2.mu.Unlock()
+	if init {
+		t.Fatal("cursor must not be marked initialized after a failure")
+	}
 }
 
 type fakeListener struct {

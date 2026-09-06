@@ -11,10 +11,13 @@ import (
 	"github.com/tirante-dev/gascurve/internal/logger"
 )
 
-// Notification is one LISTEN event.
+// Notification is one LISTEN event. Reconnected is set (with an empty
+// channel) when the connection was re-established: notifications sent
+// meanwhile were lost and the consumer has to reconcile from the tables.
 type Notification struct {
-	Channel string
-	Payload string
+	Channel     string
+	Payload     string
+	Reconnected bool
 }
 
 // Listener delivers NOTIFY payloads. The API hub consumes this interface so
@@ -80,12 +83,12 @@ func (pl *PQListener) pump() {
 			if !ok {
 				return
 			}
-			if n == nil {
-				// Reconnected: nothing to deliver.
-				continue
+			out := Notification{Reconnected: true}
+			if n != nil {
+				out = Notification{Channel: n.Channel, Payload: n.Extra}
 			}
 			select {
-			case pl.out <- Notification{Channel: n.Channel, Payload: n.Extra}:
+			case pl.out <- out:
 			case <-pl.done:
 				return
 			}

@@ -105,6 +105,90 @@ func TestRateLimitBackoff(t *testing.T) {
 	}
 }
 
+// TestCooldownSharedAcrossCallers: a 429 seen by one caller blocks every
+// caller on the network for the back-off, every retry pays the pacer again,
+// and the back-off only resets after a success sent past the cooldown.
+func TestCooldownSharedAcrossCallers(t *testing.T) {
+	f := newFakeRPC(t)
+	f.handlers["echo"] = echoHandler
+	f.script = []scriptStep{{status: http.StatusTooManyRequests}}
+	clock := newFakeClock()
+	// Four calls per second: a 10-item batch drains the burst of 8 and
+	// waits for two more tokens on every attempt.
+	p := NewPacer(4).withClock(clock.Now, clock.Sleep)
+	c := NewClient(f.server.URL, 4, WithPacer(p), withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()))
+	reqs := make([]Request, 10)
+	for i := range reqs {
+		reqs[i] = Request{Method: "echo", Params: []any{"a"}}
+	}
+	if _, err := c.Batch(context.Background(), reqs); err != nil {
+		t.Fatal(err)
+	}
+	// Attempt 1 pays 10 tokens against a burst of 8 (500 ms). The retry
+	// pays 10 tokens again: the bucket refilled 2 during the first sleep,
+	// so it waits 2.5 s, which already covers the 2 s cooldown.
+	sleeps := clock.Sleeps()
+	if len(sleeps) != 2 || sleeps[0] != 500*time.Millisecond || sleeps[1] != 2500*time.Millisecond {
+		t.Fatalf("sleeps = %v", sleeps)
+	}
+	if c.Stats().Backoff != minBackoff {
+		t.Fatal("back-off should reset after a success past the cooldown")
+	}
+	// A fresh 429 starts a cooldown that other callers observe through
+	// Available() and through their own send.
+	f.script = []scriptStep{{status: http.StatusTooManyRequests}}
+	c2 := NewClient(f.server.URL, 0, WithPacer(NewPacer(0).withClock(clock.Now, clock.Sleep)), withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()), WithMaxAttempts(1))
+	if _, err := c2.Call(context.Background(), "echo", "x"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected rate limit, got %v", err)
+	}
+	if c2.Available() != 0 || c2.cooldown() != 2*time.Second {
+		t.Fatalf("cooldown should hide availability: %d %v", c2.Available(), c2.cooldown())
+	}
+	before := len(clock.Sleeps())
+	if _, err := c2.Call(context.Background(), "echo", "y"); err != nil {
+		t.Fatal(err)
+	}
+	if s := clock.Sleeps()[before:]; len(s) != 1 || s[0] != 2*time.Second {
+		t.Fatalf("second caller must wait out the cooldown: %v", s)
+	}
+	if c2.Available() <= 0 {
+		t.Fatal("availability returns after the cooldown")
+	}
+	// A success whose request left before another caller's cooldown began
+	// does not reset the back-off.
+	c2.mu.Lock()
+	c2.backoff = 8 * time.Second
+	c2.blockedUntil = clock.Now().Add(time.Minute)
+	c2.mu.Unlock()
+	c2.resetBackoff(clock.Now())
+	if c2.Stats().Backoff != 8*time.Second {
+		t.Fatal("back-off must not reset for a request sent before the cooldown")
+	}
+	// The cooldown sleep honors cancellation.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, _, err := c2.send(ctx, []byte("[]"), 1); err == nil {
+		t.Fatal("expected context error")
+	}
+}
+
+func TestChainID(t *testing.T) {
+	f := newFakeRPC(t)
+	f.handlers["eth_chainId"] = func([]json.RawMessage) any { return "0x1237" }
+	c, _ := newTestClient(t, f, 100)
+	if id, err := c.ChainID(context.Background()); err != nil || id != 4663 {
+		t.Fatalf("ChainID = %d %v", id, err)
+	}
+	f.handlers["eth_chainId"] = func([]json.RawMessage) any { return 7 }
+	if _, err := c.ChainID(context.Background()); err == nil {
+		t.Fatal("decode error expected")
+	}
+	delete(f.handlers, "eth_chainId")
+	if _, err := c.ChainID(context.Background()); err == nil {
+		t.Fatal("rpc error expected")
+	}
+}
+
 func TestTransportErrors(t *testing.T) {
 	f := newFakeRPC(t)
 	f.handlers["echo"] = echoHandler
@@ -140,14 +224,34 @@ func TestTransportErrors(t *testing.T) {
 }
 
 func TestIsRevert(t *testing.T) {
-	if !IsRevert(&RPCError{Code: 3, Message: "execution reverted"}) || !IsRevert(&RPCError{Code: -32000, Message: "x"}) {
-		t.Fatal("revert codes")
+	if !IsRevert(&RPCError{Code: 3, Message: "execution reverted"}) || !IsRevert(&RPCError{Code: 3, Message: "x"}) {
+		t.Fatal("revert code")
 	}
-	if !IsRevert(&RPCError{Code: 1, Message: "VM Revert"}) {
+	if !IsRevert(&RPCError{Code: 1, Message: "VM Revert"}) || !IsRevert(&RPCError{Code: -32000, Message: "execution reverted"}) {
 		t.Fatal("revert message")
+	}
+	// Generic server codes are not reverts by number alone: nodes use them
+	// for missing state and proxy failures too.
+	if IsRevert(&RPCError{Code: -32000, Message: "missing trie node"}) || IsRevert(&RPCError{Code: -32015, Message: "header not found"}) {
+		t.Fatal("server codes misclassified as reverts")
 	}
 	if IsRevert(&RPCError{Code: 1, Message: "other"}) || IsRevert(errors.New("plain")) {
 		t.Fatal("non revert")
+	}
+	// Valid revert data (Error(string) or Panic(uint256)) is a revert
+	// whatever the code says; garbage data is not.
+	errSel := Selector("Error(string)")
+	panicSel := Selector("Panic(uint256)")
+	if !IsRevert(&RPCError{Code: -32000, Message: "x", Data: json.RawMessage(`"` + EncodeHex(append(errSel[:], 0, 0)) + `"`)}) {
+		t.Fatal("Error(string) data")
+	}
+	if !IsRevert(&RPCError{Code: -32000, Message: "x", Data: json.RawMessage(`{"data":"` + EncodeHex(panicSel[:]) + `"}`)}) {
+		t.Fatal("Panic(uint256) data in an object")
+	}
+	for _, d := range []string{`"0x"`, `"0x01020304"`, `"zz"`, `12`, `{"other":1}`, `{"data":""}`} {
+		if IsRevert(&RPCError{Code: -32000, Message: "x", Data: json.RawMessage(d)}) {
+			t.Fatalf("data %s is not revert data", d)
+		}
 	}
 	if (&RPCError{Code: 1, Message: "m"}).Error() != "rpc error 1: m" {
 		t.Fatal("Error()")

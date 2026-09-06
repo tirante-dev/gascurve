@@ -43,13 +43,48 @@ func (e *RPCError) Error() string {
 	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
 }
 
-// IsRevert reports whether err is an eth_call execution revert.
+// IsRevert reports whether err is an eth_call execution revert: the
+// standard revert code 3, an explicit revert message, or revert data
+// carrying an Error(string) or Panic(uint256) payload. Generic server codes
+// such as -32000 are not reverts by themselves: nodes use them for missing
+// state, unavailable headers and proxy failures.
 func IsRevert(err error) bool {
 	var rpcErr *RPCError
 	if !errors.As(err, &rpcErr) {
 		return false
 	}
-	return rpcErr.Code == 3 || rpcErr.Code == -32000 || rpcErr.Code == -32015 || containsFold(rpcErr.Message, "revert")
+	return rpcErr.Code == 3 || containsFold(rpcErr.Message, "revert") || isRevertData(rpcErr.Data)
+}
+
+// Revert payload selectors: Error(string) and Panic(uint256).
+var (
+	revertErrorSelector = Selector("Error(string)")
+	revertPanicSelector = Selector("Panic(uint256)")
+)
+
+// isRevertData reports whether a JSON-RPC error data member is valid revert
+// data: a hex string whose first four bytes are the Error or Panic selector.
+func isRevertData(data json.RawMessage) bool {
+	if len(data) == 0 {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		var obj struct {
+			Data string `json:"data"`
+		}
+		if err := json.Unmarshal(data, &obj); err != nil || obj.Data == "" {
+			return false
+		}
+		s = obj.Data
+	}
+	b, err := DecodeHex(s)
+	if err != nil || len(b) < 4 {
+		return false
+	}
+	var sel [4]byte
+	copy(sel[:], b[:4])
+	return sel == revertErrorSelector || sel == revertPanicSelector
 }
 
 // Request is one JSON-RPC call.
@@ -104,6 +139,9 @@ type Client struct {
 	rateLimitEvents uint64
 	last429         time.Time
 	backoff         time.Duration
+	// blockedUntil is the network-wide cooldown after a 429: no request is
+	// sent before it, whichever caller holds the send lock.
+	blockedUntil time.Time
 }
 
 // Option customizes a Client.
@@ -208,16 +246,15 @@ func (c *Client) Call(ctx context.Context, method string, params ...any) (json.R
 
 // Batch sends up to MaxBatch calls in one HTTP request and returns one
 // Result per request, in order. Throttling (HTTP 429 or a JSON-RPC 429 on
-// any item) retries the whole batch with exponential back-off.
+// any item) retries the whole batch with exponential back-off. Every
+// attempt pays for its calls at the pacer and honors the network-wide
+// cooldown, so a retry can never exceed the budget or race other callers.
 func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	if len(reqs) == 0 {
 		return nil, nil
 	}
 	if len(reqs) > MaxBatch {
 		return nil, fmt.Errorf("rpc: batch of %d exceeds %d items", len(reqs), MaxBatch)
-	}
-	if err := c.pacer.Wait(ctx, len(reqs)); err != nil {
-		return nil, err
 	}
 	ids := c.ids(len(reqs))
 	body := make([]rpcRequest, len(reqs))
@@ -234,31 +271,51 @@ func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	}
 
 	for attempt := 1; ; attempt++ {
-		c.recordCalls(len(reqs))
-		responses, limited, err := c.send(ctx, payload)
+		if err := c.pacer.Wait(ctx, len(reqs)); err != nil {
+			return nil, err
+		}
+		responses, limited, sentAt, err := c.send(ctx, payload, len(reqs))
 		if err != nil {
 			return nil, err
 		}
 		if !limited {
-			c.resetBackoff()
+			c.resetBackoff(sentAt)
 			return matchResults(ids, responses), nil
 		}
-		wait := c.noteRateLimit()
+		c.noteRateLimit()
 		if attempt >= c.maxAttempts {
 			return nil, fmt.Errorf("%w after %d attempts", ErrRateLimited, attempt)
-		}
-		if err := c.sleep(ctx, wait); err != nil {
-			return nil, err
 		}
 	}
 }
 
-// send performs one HTTP round trip. limited is true on HTTP 429 or when
-// any item carries a JSON-RPC 429 error.
-func (c *Client) send(ctx context.Context, payload []byte) (responses []rpcResponse, limited bool, err error) {
+// cooldown returns how long the network-wide 429 cooldown still has to run.
+func (c *Client) cooldown() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.blockedUntil.Sub(c.now())
+}
+
+// send performs one HTTP round trip under the per-network send lock,
+// sleeping through any active cooldown first so every caller respects a
+// 429 seen by any other. limited is true on HTTP 429 or when any item
+// carries a JSON-RPC 429 error; sentAt is when the request left.
+func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses []rpcResponse, limited bool, sentAt time.Time, err error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
+	if wait := c.cooldown(); wait > 0 {
+		if err := c.sleep(ctx, wait); err != nil {
+			return nil, false, time.Time{}, err
+		}
+	}
+	c.recordCalls(calls)
+	sentAt = c.now()
+	responses, limited, err = c.post(ctx, payload)
+	return responses, limited, sentAt, err
+}
 
+// post performs the HTTP request itself.
+func (c *Client) post(ctx context.Context, payload []byte) (responses []rpcResponse, limited bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, false, fmt.Errorf("rpc: build request: %w", err)
@@ -324,13 +381,16 @@ func matchResults(ids []uint64, responses []rpcResponse) []Result {
 	return out
 }
 
-func (c *Client) noteRateLimit() time.Duration {
+// noteRateLimit records a 429, starts the network-wide cooldown for the
+// current back-off and doubles it for the next one.
+func (c *Client) noteRateLimit() {
 	c.mu.Lock()
 	now := c.now()
 	c.trimCallsLocked(now)
 	c.rateLimitEvents++
 	c.last429 = now
 	wait := c.backoff
+	c.blockedUntil = now.Add(wait)
 	c.backoff *= 2
 	if c.backoff > maxBackoff {
 		c.backoff = maxBackoff
@@ -338,12 +398,16 @@ func (c *Client) noteRateLimit() time.Duration {
 	recent := len(c.callTimes)
 	c.mu.Unlock()
 	c.log.Warn("rpc rate limited", "url", c.url, "backoff", wait.String(), "callsLast10s", recent)
-	return wait
 }
 
-func (c *Client) resetBackoff() {
+// resetBackoff returns the back-off to its minimum after a request that was
+// sent past the cooldown succeeded. A success sent before a cooldown that
+// another caller started meanwhile proves nothing and keeps the back-off.
+func (c *Client) resetBackoff(sentAt time.Time) {
 	c.mu.Lock()
-	c.backoff = minBackoff
+	if !sentAt.Before(c.blockedUntil) {
+		c.backoff = minBackoff
+	}
 	c.mu.Unlock()
 }
 
@@ -358,5 +422,11 @@ func containsFold(s, sub string) bool {
 	return bytes.Contains(bytes.ToLower([]byte(s)), bytes.ToLower([]byte(sub)))
 }
 
-// Available returns how many calls can be made right now without waiting.
-func (c *Client) Available() int { return c.pacer.Available() }
+// Available returns how many calls can be made right now without waiting:
+// zero during a 429 cooldown, otherwise the pacer's spare tokens.
+func (c *Client) Available() int {
+	if c.cooldown() > 0 {
+		return 0
+	}
+	return c.pacer.Available()
+}

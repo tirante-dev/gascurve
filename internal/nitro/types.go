@@ -10,6 +10,7 @@ import (
 type Header struct {
 	Number        uint64
 	Hash          string
+	ParentHash    string
 	Timestamp     uint64
 	GasUsed       uint64
 	GasLimit      uint64
@@ -56,6 +57,7 @@ type rawTx struct {
 type rawBlock struct {
 	Number        string            `json:"number"`
 	Hash          string            `json:"hash"`
+	ParentHash    string            `json:"parentHash"`
 	Timestamp     string            `json:"timestamp"`
 	GasUsed       string            `json:"gasUsed"`
 	GasLimit      string            `json:"gasLimit"`
@@ -82,7 +84,7 @@ func parseHeader(raw json.RawMessage) (*Block, error) {
 	if err := json.Unmarshal(raw, &rb); err != nil {
 		return nil, fmt.Errorf("decode block: %w", err)
 	}
-	b := &Block{Header: Header{Hash: rb.Hash}}
+	b := &Block{Header: Header{Hash: rb.Hash, ParentHash: rb.ParentHash}}
 	var err error
 	if b.Number, err = HexUint64(rb.Number); err != nil {
 		return nil, fmt.Errorf("block number: %w", err)

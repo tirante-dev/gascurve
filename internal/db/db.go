@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -31,6 +33,13 @@ const (
 	StateRateLimitEvents = "rate_limit_events"
 	StateLast429At       = "last_429_at"
 	StateArbOSVersion    = "arbos_version"
+	// StateLiveStart records the first block the live loop stored
+	// ({"block":n,"ts":unix}); buckets from its hour on are rebuilt from
+	// block rows, older ones belong to the backfill alone.
+	StateLiveStart = "live_start"
+	// StateHoles is a JSON array of {from,to,at} block ranges the replay
+	// skipped (a catch-up gap over budget); no rows exist for them.
+	StateHoles = "holes"
 )
 
 // Open connects to Postgres and applies pool limits.
@@ -194,7 +203,70 @@ func (j JSONB) Unmarshal(v any) error {
 	return json.Unmarshal(j, v)
 }
 
-// Int64s converts unsigned backlogs into the BIGINT[] representation.
+// Uint64Array maps NUMERIC(20,0)[] columns to unsigned 64-bit values
+// exactly: backlogs saturate at 2^64-1 in the pricer, which BIGINT cannot
+// hold. It scans the array text form ("{1,2}") and renders the same.
+type Uint64Array []uint64
+
+// Value implements driver.Valuer.
+func (a Uint64Array) Value() (driver.Value, error) {
+	if len(a) == 0 {
+		return "{}", nil
+	}
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, v := range a {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatUint(v, 10))
+	}
+	b.WriteByte('}')
+	return b.String(), nil
+}
+
+// Scan implements sql.Scanner.
+func (a *Uint64Array) Scan(src any) error {
+	var s string
+	switch v := src.(type) {
+	case nil:
+		*a = Uint64Array{}
+		return nil
+	case []byte:
+		s = string(v)
+	case string:
+		s = v
+	default:
+		return fmt.Errorf("uint64 array: cannot scan %T", src)
+	}
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
+		return fmt.Errorf("uint64 array: invalid literal %q", s)
+	}
+	s = s[1 : len(s)-1]
+	if s == "" {
+		*a = Uint64Array{}
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make(Uint64Array, len(parts))
+	for i, p := range parts {
+		v, err := strconv.ParseUint(strings.Trim(strings.TrimSpace(p), `"`), 10, 64)
+		if err != nil {
+			return fmt.Errorf("uint64 array: element %d: %w", i, err)
+		}
+		out[i] = v
+	}
+	*a = out
+	return nil
+}
+
+// Uint64s returns a non-nil copy of the array (JSON arrays are never null).
+func (a Uint64Array) Uint64s() []uint64 {
+	return append([]uint64{}, a...)
+}
+
+// Int64s converts values into a BIGINT[] parameter (bips, never backlogs).
 func Int64s(v []uint64) []int64 {
 	out := make([]int64, len(v))
 	for i, x := range v {
@@ -203,7 +275,7 @@ func Int64s(v []uint64) []int64 {
 	return out
 }
 
-// Uint64s converts a BIGINT[] back into unsigned values (never nil).
+// Uint64s converts a BIGINT[] of non-negative values (never nil).
 func Uint64s(v []int64) []uint64 {
 	out := make([]uint64, len(v))
 	for i, x := range v {

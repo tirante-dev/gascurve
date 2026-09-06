@@ -90,6 +90,39 @@ func TestFollowerRunInitFailure(t *testing.T) {
 	}
 }
 
+// TestFollowerRunChainIDMismatch: a follower whose RPC reports another
+// chain refuses to run and records why, and an eth_chainId failure is
+// retried rather than trusted.
+func TestFollowerRunChainIDMismatch(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	rpc.chainID = 46630
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	err := f.Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "chain id 46630") {
+		t.Fatalf("expected chain id mismatch, got %v", err)
+	}
+	n, _ := store.NetworkByRef(ctx, "robinhood")
+	if n == nil || !n.LastError.Valid || !strings.Contains(n.LastError.String, "refusing to run") {
+		t.Fatalf("mismatch not recorded: %+v", n)
+	}
+	if rpc.calledTimes("FastSample") != 0 || len(store.BlockRows[4663]) != 0 {
+		t.Fatal("nothing may be sampled or written for the wrong chain")
+	}
+	rpc.chainID = 4663
+	rpc.errs["ChainID"] = errRPC
+	if err := f.Run(ctx); !errors.Is(err, errRPC) {
+		t.Fatalf("eth_chainId failure: %v", err)
+	}
+	delete(rpc.errs, "ChainID")
+	store.FailOn["SetNetworkError"] = true
+	rpc.chainID = 1
+	if err := f.Run(ctx); err == nil {
+		t.Fatal("mismatch must still fail when it cannot be recorded")
+	}
+}
+
 func TestRunManager(t *testing.T) {
 	cfg := &config.Config{
 		Collector: fastConfig(),
@@ -105,6 +138,7 @@ func TestRunManager(t *testing.T) {
 	rpcs := map[string]*fakeRPC{}
 	newRPC := func(n config.NetworkConfig) RPC {
 		r := newFakeRPC(50)
+		r.chainID = n.ChainID
 		rpcs[n.Name] = r
 		return r
 	}

@@ -140,25 +140,31 @@ func TestDecodeOwnerActsErrors(t *testing.T) {
 }
 
 func TestDecodeOwnerCalldata(t *testing.T) {
-	method, args, _, _ := DecodeOwnerCalldata([]byte{1, 2})
-	if method != "" || args["raw"] != "0x0102" {
-		t.Fatalf("short calldata: %s %v", method, args)
+	method, args, _, _, err := DecodeOwnerCalldata([]byte{1, 2})
+	if err != nil || method != "" || args["raw"] != "0x0102" {
+		t.Fatalf("short calldata: %s %v %v", method, args, err)
 	}
 	unknown := Selector("frobnicate(uint256)")
-	method, args, _, _ = DecodeOwnerCalldata(append(unknown[:], encodeUint64(1)...))
-	if method != "" || args["raw"] == nil {
-		t.Fatalf("unknown selector: %s %v", method, args)
+	method, args, _, _, err = DecodeOwnerCalldata(append(unknown[:], encodeUint64(1)...))
+	if err != nil || method != "" || args["raw"] == nil {
+		t.Fatalf("unknown selector: %s %v %v", method, args, err)
 	}
-	// Truncated arguments fall back to raw.
+	// Truncated arguments of a known selector are malformed, not raw: the
+	// event could change the pricer and must not be silently skipped.
 	sel := Selector("setSpeedLimit(uint64)")
-	method, args, _, _ = DecodeOwnerCalldata(sel[:])
-	if method != "" || args["raw"] == nil {
-		t.Fatalf("truncated: %s %v", method, args)
+	if _, _, _, _, err := DecodeOwnerCalldata(sel[:]); err == nil {
+		t.Fatal("truncated known selector should fail")
 	}
 	sel = Selector(SigSetGasPricingConstraints)
-	method, args, _, _ = DecodeOwnerCalldata(sel[:])
-	if method != "" || args["raw"] == nil {
-		t.Fatalf("truncated constraints: %s %v", method, args)
+	if _, _, _, _, err := DecodeOwnerCalldata(sel[:]); err == nil {
+		t.Fatal("truncated constraints should fail")
+	}
+	good := loadFixtureLogs(t)[0]
+	bad := good
+	bad.Data = append(encodeUint64(32), encodeUint64(4)...)
+	bad.Data = append(bad.Data, append(selSetGasPricingConstr[:], make([]byte, 28)...)...)
+	if _, err := DecodeOwnerActs(bad); err == nil {
+		t.Fatal("malformed known event should fail to decode")
 	}
 	// int64 argument.
 	neg := make([]byte, 32)
@@ -166,14 +172,14 @@ func TestDecodeOwnerCalldata(t *testing.T) {
 		neg[i] = 0xff
 	}
 	sel = Selector("setPerBatchGasCharge(int64)")
-	method, args, _, _ = DecodeOwnerCalldata(append(sel[:], neg...))
-	if method != "setPerBatchGasCharge" || args["cost"] != int64(-1) {
-		t.Fatalf("int64: %s %v", method, args)
+	method, args, _, _, err = DecodeOwnerCalldata(append(sel[:], neg...))
+	if err != nil || method != "setPerBatchGasCharge" || args["cost"] != int64(-1) {
+		t.Fatalf("int64: %s %v %v", method, args, err)
 	}
 	sel = Selector("setL1PricingEquilibrationUnits(uint256)")
-	method, args, _, mbf := DecodeOwnerCalldata(append(sel[:], encodeUint64(5)...))
-	if method != "setL1PricingEquilibrationUnits" || args["equilibrationUnits"] != "5" || mbf != nil {
-		t.Fatalf("uint256: %s %v %v", method, args, mbf)
+	method, args, _, mbf, err := DecodeOwnerCalldata(append(sel[:], encodeUint64(5)...))
+	if err != nil || method != "setL1PricingEquilibrationUnits" || args["equilibrationUnits"] != "5" || mbf != nil {
+		t.Fatalf("uint256: %s %v %v %v", method, args, mbf, err)
 	}
 	// Unknown selector data in a log yields the selector as the method name.
 	l := Log{Topics: []string{

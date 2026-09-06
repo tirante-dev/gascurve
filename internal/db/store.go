@@ -22,18 +22,24 @@ type Network struct {
 	UpdatedAt    time.Time      `db:"updated_at"`
 }
 
-// Block is a row of the blocks table.
+// Block is a row of the blocks table. Backlogs are the end-of-block
+// values, ConstraintBips the start-of-block per-constraint exponents and
+// MinBaseFee the floor in force at the block.
 type Block struct {
 	ChainID          uint64        `db:"chain_id"`
 	Number           uint64        `db:"number"`
+	Hash             string        `db:"hash"`
+	ParentHash       string        `db:"parent_hash"`
 	TS               time.Time     `db:"ts"`
 	GasUsed          uint64        `db:"gas_used"`
 	BaseFee          Wei           `db:"base_fee"`
 	L1Block          uint64        `db:"l1_block"`
 	TxCount          int           `db:"tx_count"`
-	Backlogs         pq.Int64Array `db:"backlogs"`
+	Backlogs         Uint64Array   `db:"backlogs"`
+	ConstraintBips   pq.Int64Array `db:"constraint_bips"`
 	ExponentBips     int64         `db:"exponent_bips"`
 	PredictedBaseFee Wei           `db:"predicted_base_fee"`
+	MinBaseFee       Wei           `db:"min_base_fee"`
 	Anchored         bool          `db:"anchored"`
 }
 
@@ -52,23 +58,30 @@ var Resolutions = map[string]time.Duration{
 }
 
 // Bucket is a row of the buckets table. FoldBuckets merges a Bucket into
-// the stored row: counters add, min/max combine, the average is weighted by
-// block count, and the *_end fields are replaced.
+// the stored row: counters and sums add, min/max combine, the average is
+// derived from the exact sum, and the *_end fields are replaced.
+// RebuildBuckets instead recomputes a row from the block rows in its
+// window.
 type Bucket struct {
-	ChainID         uint64        `db:"chain_id"`
-	Resolution      string        `db:"resolution"`
-	BucketStart     time.Time     `db:"bucket_start"`
-	Blocks          int64         `db:"blocks"`
-	GasUsed         uint64        `db:"gas_used"`
-	FeesWei         Wei           `db:"fees_wei"`
-	BaseFeeMin      Wei           `db:"base_fee_min"`
-	BaseFeeAvg      Wei           `db:"base_fee_avg"`
-	BaseFeeMax      Wei           `db:"base_fee_max"`
-	ExponentEndBips int64         `db:"exponent_end_bips"`
-	BacklogsEnd     pq.Int64Array `db:"backlogs_end"`
-	BacklogsMax     pq.Int64Array `db:"backlogs_max"`
-	ConstraintSetID sql.NullInt64 `db:"constraint_set_id"`
-	ReplayErrorBips int64         `db:"replay_error_bips"`
+	ChainID           uint64        `db:"chain_id"`
+	Resolution        string        `db:"resolution"`
+	BucketStart       time.Time     `db:"bucket_start"`
+	Blocks            int64         `db:"blocks"`
+	GasUsed           uint64        `db:"gas_used"`
+	FeesWei           Wei           `db:"fees_wei"`
+	BaseFeeMin        Wei           `db:"base_fee_min"`
+	BaseFeeAvg        Wei           `db:"base_fee_avg"`
+	BaseFeeMax        Wei           `db:"base_fee_max"`
+	BaseFeeSum        Wei           `db:"base_fee_sum"`
+	ExponentEndBips   int64         `db:"exponent_end_bips"`
+	BacklogsEnd       Uint64Array   `db:"backlogs_end"`
+	BacklogsMax       Uint64Array   `db:"backlogs_max"`
+	ConstraintBipsEnd pq.Int64Array `db:"constraint_bips_end"`
+	MinBaseFee        Wei           `db:"min_base_fee"`
+	FloorFeesWei      Wei           `db:"floor_fees_wei"`
+	SurplusFeesWei    Wei           `db:"surplus_fees_wei"`
+	ConstraintSetID   sql.NullInt64 `db:"constraint_set_id"`
+	ReplayErrorBips   int64         `db:"replay_error_bips"`
 	// LastBlock is the highest block folded into the bucket; *_end fields
 	// and the constraint set are only replaced by folds with a higher one.
 	LastBlock uint64 `db:"last_block"`
@@ -153,6 +166,8 @@ type Store interface {
 	SetNetworkError(ctx context.Context, chainID uint64, msg string) error
 
 	UpsertBlocks(ctx context.Context, blocks []Block) error
+	// BlockByNumber returns one block or nil.
+	BlockByNumber(ctx context.Context, chainID, number uint64) (*Block, error)
 	// LatestBlock returns the highest stored block or nil.
 	LatestBlock(ctx context.Context, chainID uint64) (*Block, error)
 	// OldestBlock returns the lowest stored block or nil.
@@ -168,8 +183,17 @@ type Store interface {
 	// TwoTxBlocks lists block numbers > after with exactly two transactions.
 	TwoTxBlocks(ctx context.Context, chainID, after uint64, limit int) ([]uint64, error)
 	PruneBlocks(ctx context.Context, chainID uint64, before time.Time) (int64, error)
+	// DeleteBlocksAfter removes blocks with number > after (a reorg rewind)
+	// and returns the removed rows, ascending.
+	DeleteBlocksAfter(ctx context.Context, chainID, after uint64) ([]Block, error)
 
+	// FoldBuckets adds partial buckets into the stored rows.
 	FoldBuckets(ctx context.Context, buckets []Bucket) error
+	// RebuildBuckets recomputes the buckets starting at starts from the
+	// block rows inside their windows; a window without rows loses its row.
+	RebuildBuckets(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error
+	// DeleteBucketsBefore drops every resolution's buckets starting before t.
+	DeleteBucketsBefore(ctx context.Context, chainID uint64, before time.Time) (int64, error)
 	// Buckets returns buckets with from <= bucket_start < to, ascending.
 	Buckets(ctx context.Context, chainID uint64, resolution string, from, to time.Time) ([]Bucket, error)
 
@@ -186,6 +210,12 @@ type Store interface {
 	InsertOwnerActions(ctx context.Context, actions []OwnerAction) (int, error)
 	// OwnerActions lists actions newest first; zero from/to means unbounded.
 	OwnerActions(ctx context.Context, chainID uint64, from, to time.Time, limit int) ([]OwnerAction, error)
+	// OwnerActionsSince lists actions with block_number >= block, ascending
+	// by block and log index.
+	OwnerActionsSince(ctx context.Context, chainID, block uint64) ([]OwnerAction, error)
+	// RewindAfter deletes owner actions, constraint sets and batch reports
+	// above block (a reorg rewind).
+	RewindAfter(ctx context.Context, chainID, block uint64) error
 
 	// InsertConstraintSet upserts on (chain, block, source) and returns the id.
 	InsertConstraintSet(ctx context.Context, cs ConstraintSet) (int64, error)
@@ -193,6 +223,9 @@ type Store interface {
 	ConstraintSets(ctx context.Context, chainID uint64) ([]ConstraintSet, error)
 
 	UpsertBatchReports(ctx context.Context, reports []BatchReport) error
+	// BatchReports lists reports with from <= batch_ts < to ordered by
+	// batch_ts then block_number (one point per report, never grouped).
+	BatchReports(ctx context.Context, chainID uint64, from, to time.Time) ([]BatchReport, error)
 	// BatchBuckets aggregates reports by batch_ts over [from, to) in steps.
 	BatchBuckets(ctx context.Context, chainID uint64, from, to time.Time, step time.Duration) ([]BatchBucket, error)
 

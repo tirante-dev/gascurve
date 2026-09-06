@@ -113,6 +113,9 @@ func TestTypedCalls(t *testing.T) {
 	if err != nil || h.Number != 100 || h.GasUsed != 100_000_000 || h.BaseFee.Int64() != 20_000_000 || h.L1BlockNumber != 50 || h.TxCount != 2 || h.TxHashes[1] != "0xbb" || h.Timestamp != 1_700_000_010 {
 		t.Fatalf("HeaderByNumber: %+v %v", h, err)
 	}
+	if h.Hash != "0xabc" || h.ParentHash != "0xparent" {
+		t.Fatalf("hashes: %+v", h)
+	}
 	if _, err := c.HeaderByNumber(ctx, 5); err == nil {
 		t.Fatal("missing block should error")
 	}
@@ -300,13 +303,21 @@ func TestFastSampleAt(t *testing.T) {
 	if _, err := c.FastSampleAt(ctx, 5); err == nil {
 		t.Fatal("missing block should error")
 	}
-	// The plain FastSample still asks for latest.
+	// The plain FastSample resolves the head first and pins every call to
+	// it, so a batch can never mix two "latest" heights.
 	f.callTags = nil
-	if _, err := c.FastSample(ctx); err != nil {
-		t.Fatal(err)
+	s, err = c.FastSample(ctx)
+	if err != nil || s.Header.Number != 320 {
+		t.Fatalf("FastSample: %+v %v", s, err)
 	}
-	if f.callTags[0] != latestTag {
-		t.Fatalf("FastSample tag = %v", f.callTags)
+	for _, tag := range f.callTags {
+		if tag != blockTag(320) {
+			t.Fatalf("FastSample must pin state calls to the resolved head: %v", f.callTags)
+		}
+	}
+	f.handlers["eth_blockNumber"] = func([]json.RawMessage) any { return &RPCError{Code: 1, Message: "x"} }
+	if _, err := c.FastSample(ctx); err == nil {
+		t.Fatal("head resolution error should propagate")
 	}
 }
 

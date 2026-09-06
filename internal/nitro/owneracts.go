@@ -115,7 +115,10 @@ func DecodeOwnerActs(l Log) (*OwnerAction, error) {
 		Owner:       owner,
 		Selector:    EncodeHex(methodTopic[:4]),
 	}
-	a.Method, a.Args, a.Constraints, a.MinBaseFee = DecodeOwnerCalldata(calldata)
+	a.Method, a.Args, a.Constraints, a.MinBaseFee, err = DecodeOwnerCalldata(calldata)
+	if err != nil {
+		return nil, fmt.Errorf("log %s/%d: %w", l.TxHash, l.LogIndex, err)
+	}
 	if a.Method == "" {
 		a.Method = a.Selector
 	}
@@ -131,11 +134,13 @@ func mustDecode(s string) []byte {
 }
 
 // DecodeOwnerCalldata decodes an ArbOwner call. Unknown selectors yield an
-// empty method name and {"raw": calldata}.
-func DecodeOwnerCalldata(calldata []byte) (method string, args map[string]any, constraints []ConstraintParam, minBaseFee *big.Int) {
+// empty method name and {"raw": calldata}. A known selector whose
+// arguments do not decode is an error: such an event may change the
+// pricer and must not be stored as an opaque raw action.
+func DecodeOwnerCalldata(calldata []byte) (method string, args map[string]any, constraints []ConstraintParam, minBaseFee *big.Int, err error) {
 	raw := map[string]any{"raw": EncodeHex(calldata)}
 	if len(calldata) < 4 {
-		return "", raw, nil, nil
+		return "", raw, nil, nil, nil
 	}
 	var sel [4]byte
 	copy(sel[:], calldata[:4])
@@ -144,18 +149,18 @@ func DecodeOwnerCalldata(calldata []byte) (method string, args map[string]any, c
 	if sel == selSetGasPricingConstr {
 		triples, err := uint64Triples(body)
 		if err != nil {
-			return "", raw, nil, nil
+			return "", nil, nil, nil, fmt.Errorf("setGasPricingConstraints: %w", err)
 		}
 		constraints = make([]ConstraintParam, len(triples))
 		for i, t := range triples {
 			constraints[i] = ConstraintParam{GasTargetPerSecond: t[0], AdjustmentWindowSeconds: t[1], StartingBacklog: t[2]}
 		}
-		return "setGasPricingConstraints", map[string]any{"constraints": constraints}, constraints, nil
+		return "setGasPricingConstraints", map[string]any{"constraints": constraints}, constraints, nil, nil
 	}
 
 	m, ok := ownerMethodsBySelector[sel]
 	if !ok {
-		return "", raw, nil, nil
+		return "", raw, nil, nil, nil
 	}
 	args = make(map[string]any, len(m.params))
 	for i, kind := range m.kinds {
@@ -181,11 +186,11 @@ func DecodeOwnerCalldata(calldata []byte) (method string, args map[string]any, c
 			}
 		}
 		if err != nil {
-			return "", raw, nil, nil
+			return "", nil, nil, nil, fmt.Errorf("%s argument %s: %w", m.name, m.params[i], err)
 		}
 		args[m.params[i]] = v
 	}
-	return m.name, args, nil, minBaseFee
+	return m.name, args, nil, minBaseFee, nil
 }
 
 // EncodeSetGasPricingConstraints builds the calldata for

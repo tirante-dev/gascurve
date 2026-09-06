@@ -182,6 +182,29 @@ func TestSaturation(t *testing.T) {
 	}
 }
 
+// TestLegacyOverflowConformance pins the legacy arithmetic to nitro's: the
+// tolerance threshold wraps (2 * 2^63 = 0), the excess saturates to
+// MaxInt64 and the inertia denominator saturates to MaxInt64, so the
+// exponent is exactly 1 bip rather than 0.
+func TestLegacyOverflowConformance(t *testing.T) {
+	s := &State{Legacy: &Legacy{SpeedLimit: 1 << 63, Inertia: 1, Tolerance: 2, Backlog: math.MaxUint64}, MinBaseFee: big.NewInt(10_000)}
+	fee, exp, per := s.Step(0)
+	if exp != 1 || per[0] != 1 {
+		t.Fatalf("exponent = %d per=%v, want 1", exp, per)
+	}
+	if fee.Int64() != 10_001 {
+		t.Fatalf("fee = %s, want 10001", fee)
+	}
+	// A saturating denominator with a huge excess yields MaxInt64/MaxInt64.
+	s2 := &State{Legacy: &Legacy{SpeedLimit: math.MaxUint64, Inertia: 2, Tolerance: 0, Backlog: math.MaxUint64}, MinBaseFee: big.NewInt(1)}
+	if _, exp, _ := s2.Step(0); exp != 1 {
+		t.Fatalf("saturated denominator exponent = %d", exp)
+	}
+	if InitialMinimumBaseFeeWei != 100_000_000 {
+		t.Fatal("genesis minimum base fee is 0.1 gwei")
+	}
+}
+
 func TestClone(t *testing.T) {
 	s := robinhoodState()
 	s.Legacy = &Legacy{SpeedLimit: 1}

@@ -2,6 +2,7 @@ package db
 
 import (
 	"encoding/json"
+	"math"
 	"math/big"
 	"testing"
 	"time"
@@ -104,6 +105,47 @@ func TestJSONB(t *testing.T) {
 	}
 }
 
+func TestUint64Array(t *testing.T) {
+	v, err := Uint64Array{1, math.MaxUint64}.Value()
+	if err != nil || v != "{1,18446744073709551615}" {
+		t.Fatalf("Value: %v %v", v, err)
+	}
+	if v, _ := (Uint64Array{}).Value(); v != "{}" {
+		t.Fatalf("empty Value: %v", v)
+	}
+	var a Uint64Array
+	for _, src := range []any{nil, []byte("{}"), "{ 1 , 2 }", []byte(`{"3",18446744073709551615}`)} {
+		if err := a.Scan(src); err != nil {
+			t.Fatalf("Scan(%v): %v", src, err)
+		}
+	}
+	if len(a) != 2 || a[0] != 3 || a[1] != math.MaxUint64 {
+		t.Fatalf("scanned %v", a)
+	}
+	if err := a.Scan("{}"); err != nil || len(a) != 0 || a == nil {
+		t.Fatalf("empty scan: %v %v", a, err)
+	}
+	for _, src := range []any{3, "1,2", "{-1}", "{x}", "{18446744073709551616}"} {
+		if err := a.Scan(src); err == nil {
+			t.Fatalf("Scan(%v) should fail", src)
+		}
+	}
+}
+
+func TestChainIDRef(t *testing.T) {
+	if id, ok := ChainIDRef("4663"); !ok || id != 4663 {
+		t.Fatal("decimal")
+	}
+	for _, ref := range []string{"robinhood", "9223372036854775808", "-1", "+1", "01", "", "1.0"} {
+		if _, ok := ChainIDRef(ref); ok {
+			t.Fatalf("%q is not a chain id", ref)
+		}
+	}
+	if _, ok := ChainIDRef("9223372036854775807"); !ok {
+		t.Fatal("MaxInt64 is a chain id")
+	}
+}
+
 func TestConversions(t *testing.T) {
 	if got := Int64s([]uint64{1, 2}); len(got) != 2 || got[1] != 2 {
 		t.Fatal("Int64s")
@@ -114,8 +156,10 @@ func TestConversions(t *testing.T) {
 	if got := Uint64s(nil); got == nil || len(got) != 0 {
 		t.Fatal("Uint64s(nil) should be empty, not nil")
 	}
-	if PQArray([]uint64{5})[0] != 5 {
-		t.Fatal("PQArray")
+	five := Uint64Array{5}
+	var none Uint64Array
+	if five.Uint64s()[0] != 5 || none.Uint64s() == nil {
+		t.Fatal("Uint64s")
 	}
 	if NullTime(time.Time{}).Valid || !NullTime(time.Now()).Valid {
 		t.Fatal("NullTime")
