@@ -108,13 +108,21 @@ collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))  
 
 ## 5. Collector (`internal/collector`)
 
-One `Follower` per network, all sharing one `*sqlx.DB`.
+One `Follower` per network, all sharing one `*sqlx.DB`. At startup each follower calls `eth_chainId` and refuses to run (logs and marks `networks.last_error`) if it differs from the configured `chain_id`.
+
+Correctness rules the follower must keep:
+
+- **Replay only forward from a known state.** On a fresh database persist the sampled head only and replay the blocks after it; never seed earlier blocks from a later sample. Catch-up ranges are split at owner-action boundaries. After a skipped gap, persist the sampled head only and record the hole in `collector_state`.
+- **Nothing advances in memory before the commit.** The pricer state is cloned for the replay; head, previous timestamp, state and last result are published only after the transaction commits. After a commit error the follower reloads head and state from the database (the last stored block row carries the backlogs) so a retry is idempotent.
+- **Bucket folds are idempotent.** The fold and the head checkpoint commit in one transaction, and a bucket's additive fields are recomputed from the block rows inside the fold window when those rows exist; buckets store `base_fee_sum` (exact) rather than a running average.
+- **Reorgs are detected.** Blocks store `hash` and `parent_hash`; a head whose parent hash does not match the stored head triggers a rewind to the common ancestor (blocks, bucket contributions, owner-action and batch cursors) in one transaction.
+- **Minimum base fee history.** The fee in force at a block comes from recorded `setMinimumL2BaseFee` actions, with nitro's genesis default (0.1 gwei, `InitialMinimumBaseFeeWei`) before the first recorded change, never the live value.
 
 Fast loop, every `collector.tick_interval` (1 s), or on every `newHeads` event when `ws_url` is configured (then state calls are made at that head's block number so samples align exactly with headers):
 
 With `ws_url` the follower starts on the timer, pauses timer sampling once the `newHeads` subscription is up, and resumes it the moment the subscription drops (the subscriber reconnects on its own with 1 s to 30 s back-off and a 15 s ping watchdog). Heads arriving mid-tick collapse into one tick at the newest head; catch-up fetches the rest.
 
-1. One JSON-RPC batch: `eth_getBlockByNumber("latest", false)`, `getGasPricingConstraints()`, `getPricesInWei()`, `getMinimumGasPrice()`. If the constraints call reverts or returns empty, also `getGasBacklog()`, `getPricingInertia()`, `getGasBacklogTolerance()`, `getGasAccountingParams()` (legacy model).
+1. Resolve the head number first (`eth_blockNumber`), then one JSON-RPC batch at that exact block tag: `eth_getBlockByNumber(n, false)`, `getGasPricingConstraints()`, `getPricesInWei()`, `getMinimumGasPrice()`, so a sample never mixes two blocks. If the constraints call reverts or returns empty, also `getGasBacklog()`, `getPricingInertia()`, `getGasBacklogTolerance()`, `getGasAccountingParams()` (legacy model).
 2. Fetch headers for every block between the stored head and the new head, in batches of `header_batch_size`, respecting the per-network budget. On a paced network (`calls_per_second > 0`) a gap larger than `max_catch_up_batches` × `header_batch_size` blocks is skipped (logged) and the replay restarts from the sampled backlogs, because a 4 calls/s budget cannot follow a ~10 blocks/s chain block by block; unlimited (dedicated node) networks always fetch every block.
 3. Replay each block through the pricer. When the sampled state's block number equals a replayed block, overwrite the backlogs with the sampled values (`anchored = true`) so drift never accumulates.
 4. Upsert `blocks`, fold into `buckets` (1m, 15m, 1h), insert `state_samples`, update `networks.head_block`, `NOTIFY`.
@@ -127,7 +135,7 @@ Rate limiting: a token bucket per network, `calls_per_second` tokens/s, burst 2�
 
 ## 6. API (`internal/api`, chi, prefix `/api/v1`)
 
-Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_origins`, rate limited per IP, request ID header. Wei values are decimal strings. Gas, bips, block numbers and unix timestamps are JSON numbers. Timestamps named `*At` are RFC 3339 UTC. Errors: `{ "error": { "code": "not_found", "message": "..." } }`.
+Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_origins`, rate limited per IP (the client IP is taken from `X-Forwarded-For` only when the peer is in `server.trusted_proxies`, a list of CIDRs, walking the chain right to left past trusted hops), request ID header. WebSocket connections are capped per IP and globally (`server.ws_max_per_ip`, `server.ws_max_total`) and messages are rate limited per connection. Wei values are decimal strings. Gas, bips, block numbers and unix timestamps are JSON numbers. Timestamps named `*At` are RFC 3339 UTC. Errors: `{ "error": { "code": "not_found", "message": "..." } }`.
 
 `{network}` accepts the name (`robinhood`) or chain id (`4663`).
 
@@ -139,11 +147,11 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 | `GET /networks/{network}/live` | `LiveSnapshot` (same as WS `tick`), `Cache-Control: no-store` |
 | `GET /networks/{network}/blocks?limit=120` | `BlockPoint[]` newest first, max 1000 |
 | `GET /networks/{network}/series?range=1h\|24h\|30d\|all` | `Series` (see below) |
-| `GET /networks/{network}/constraints` | `{ current: ConstraintSet \| null, history: ConstraintSet[] }` (`null` on legacy chains or before any set is known) |
+| `GET /networks/{network}/constraints` | `{ current: ConstraintSet \| null, history: ConstraintSet[] }` (`null` whenever the latest state sample's model is not `constraints`, or before any set is known; `history` is still returned) |
 | `GET /networks/{network}/owner-actions` | `OwnerAction[]` newest first |
 | `GET /networks/{network}/batches?range=…` | `BatchSeries` (L1 cost per bucket, batch cadence) |
 | `GET /networks/{network}/l1?range=…` | `L1Series` (pricer getters over time, from state samples) |
-| `GET /status` | `{ version, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion }] }` |
+| `GET /status` | `{ version, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion }] }` (`headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion` are nullable) |
 | `GET /ws?network=…` | WebSocket, see §7 |
 
 Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applied server-side if more than 2000 points), `24h` → `1m` buckets, `30d` → `15m`, `all` → `1h`. `/live` returns 404 until the collector has produced a sample. Arrays are never `null` in responses. `L1Series` reaches back at most `collector.sample_retention`.
@@ -152,7 +160,7 @@ Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applie
 type Network = {
   name: string; displayName: string; chainId: number; explorerUrl: string;
   model: 'constraints' | 'legacy' | 'unknown';
-  headBlock: number; headAt: string; lagSeconds: number; enabled: boolean;
+  headBlock: number; headAt: string | null; lagSeconds: number | null; enabled: boolean;   // null until the collector has produced a head
 }
 
 type Constraint = { target: number; window: number; backlog: number; exponentBips: number }
@@ -181,7 +189,9 @@ type Account = { address: string; balance: string }
 
 type BlockPoint = {
   number: number; ts: number; gasUsed: number; baseFee: string; predictedBaseFee: string;
-  backlogs: number[]; exponentBips: number; anchored: boolean;
+  backlogs: number[];        // end-of-block backlogs (after AddGas)
+  constraintBips: number[];  // start-of-block per-constraint exponent, the values that priced this block; sums to exponentBips
+  exponentBips: number; minBaseFee: string; anchored: boolean;
 }
 
 type Series = {
@@ -194,7 +204,10 @@ type SeriesPoint = {
   t: number;                               // unix seconds, bucket start
   blocks: number; gasUsed: number; gasPerSecond: number; feesWei: string;
   baseFeeMin: string; baseFeeAvg: string; baseFeeMax: string;
-  exponentBips: number; backlogs: number[]; backlogsMax: number[];
+  exponentBips: number; constraintBips: number[];   // start-of-block values of the bucket's last block
+  backlogs: number[]; backlogsMax: number[];
+  minBaseFee: string;                               // floor in force at the bucket's last block
+  floorFeesWei: string; surplusFeesWei: string;     // Σ gasUsed × minBaseFee and feesWei minus that, per block, exact
   constraintSetId: number; replayErrorBips: number;
 }
 
@@ -203,7 +216,7 @@ type OwnerAction = {
   args: Record<string, unknown>;           // decoded when the selector is known, else { raw: '0x…' }
 }
 
-type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; /* 'batch' = one point per report, used for 1h */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
+type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; /* 'batch' = exactly one point per report, never grouped, used for 1h */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
 type L1Series = { range: string; points: { t: number; baseFeeEstimate: string; surplus: string; feesAvailable: string; unitsSinceUpdate: number }[] }
 ```
 
