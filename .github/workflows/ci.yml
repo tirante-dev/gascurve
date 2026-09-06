@@ -1,0 +1,293 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go-format:
+    name: Go Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          GOFMT_FILES="$(gofmt -l -s .)"
+          GOIMPORTS_FILES="$("$(go env GOPATH)/bin/goimports" -l -local github.com/tirante-dev/gascurve .)"
+          if [ -n "$GOFMT_FILES" ] || [ -n "$GOIMPORTS_FILES" ]; then
+            echo "::error::Formatting issues detected. Run 'make fmt' to fix them."
+            echo "gofmt:"; echo "$GOFMT_FILES"
+            echo "goimports:"; echo "$GOIMPORTS_FILES"
+            exit 1
+          fi
+
+  go-lint:
+    name: Go Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+  go-vet:
+    name: Go Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+
+  go-staticcheck:
+    name: Staticcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+      - run: "$(go env GOPATH)/bin/staticcheck" ./...
+
+  go-test:
+    name: Go Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Run tests with coverage
+        run: go test -v -coverprofile=coverage.out -covermode=atomic ./internal/...
+      - name: Display coverage summary
+        run: go tool cover -func=coverage.out
+      - name: Enforce coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          THRESHOLD=90
+          echo "Total coverage: ${COVERAGE}%"
+          if awk -v cov="${COVERAGE}" -v threshold="${THRESHOLD}" 'BEGIN {exit !(cov < threshold)}'; then
+            echo "::error::Coverage ${COVERAGE}% is below the ${THRESHOLD}% threshold"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: go-coverage
+          path: coverage.out
+          retention-days: 7
+
+  go-race:
+    name: Race Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./...
+
+  go-integration:
+    name: Integration (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: gascurve_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DB_URL: postgres://postgres:postgres@127.0.0.1:5432/gascurve_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test -tags integration -count=1 -v ./internal/db/... ./internal/collector/... ./internal/api/...
+
+  go-security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  go-mod:
+    name: Module Verify and Tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Verify and tidy
+        run: |
+          go mod download
+          go mod verify
+          go mod tidy
+          if [ -n "$(git diff -- go.mod go.sum)" ]; then
+            echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit the changes."
+            git diff -- go.mod go.sum
+            exit 1
+          fi
+
+  go-build:
+    name: Go Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(github.event_name == 'pull_request' && '{"include":[{"goos":"linux","goarch":"amd64"}]}' || '{"include":[{"goos":"linux","goarch":"amd64"},{"goos":"linux","goarch":"arm64"},{"goos":"darwin","goarch":"arm64"}]}') }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -o gascurve-collector-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/collector
+          go build -o gascurve-api-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/api
+          go build -o gascurve-migrate-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/migrate
+
+  web-lint:
+    name: Web Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+
+  web-typecheck:
+    name: Web Typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+
+  web-test:
+    name: Web Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Run tests with coverage
+        run: npm run test-coverage
+      - name: Enforce coverage threshold
+        run: |
+          COVERAGE=$(node -e "const s=require('./coverage/coverage-summary.json').total.lines.pct; console.log(s);")
+          THRESHOLD=90
+          echo "Total coverage: ${COVERAGE}%"
+          if awk -v cov="${COVERAGE}" -v threshold="${THRESHOLD}" 'BEGIN {exit !(cov < threshold)}'; then
+            echo "::error::Coverage ${COVERAGE}% is below the ${THRESHOLD}% threshold"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-coverage
+          path: web/coverage
+          retention-days: 7
+
+  web-build:
+    name: Web Build
+    runs-on: ubuntu-latest
+    needs: [web-lint, web-typecheck, web-test]
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-please--'))
+    strategy:
+      matrix:
+        include:
+          - image: gascurve-collector
+            dockerfile: Dockerfile.collector
+          - image: gascurve-api
+            dockerfile: Dockerfile.api
+          - image: gascurve-web
+            dockerfile: Dockerfile.web
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build image
+        run: docker build -f ${{ matrix.dockerfile }} -t ${{ matrix.image }}:test .
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}:test
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true

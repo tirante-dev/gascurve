@@ -1,0 +1,29 @@
+# Binaries and build output
+/gascurve-api
+/gascurve-collector
+/gascurve-migrate
+/dist/
+/coverage/
+coverage.out
+*.test
+
+# Web (Next.js)
+web/node_modules/
+web/.next/
+web/out/
+web/coverage/
+web/*.tsbuildinfo
+web/next-env.d.ts
+
+# Env and editor
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Local tooling
+.golangci-cache/
+.eslintcache

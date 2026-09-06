@@ -1,0 +1,54 @@
+# gascurve configuration. Environment variables override these values; see
+# .env.example and internal/config for the full list.
+server:
+  port: 8080
+  cors_origins:
+    - http://localhost:3000
+  dev_mode: false
+
+database:
+  url: postgres://postgres:postgres@127.0.0.1:5432/gascurve?sslmode=disable
+  max_open: 25
+  max_idle: 10
+  run_migrations: false
+
+collector:
+  tick_interval: 1s          # live sample cadence per network
+  slow_interval: 60s         # L1 pricer, balances, owner-action log scan
+  header_batch_size: 100     # blocks per JSON-RPC batch when catching up
+  block_retention: 48h       # per-block rows kept before pruning to buckets
+  sample_retention: 168h     # raw state samples kept
+  backfill_depth: 720h       # how far back the resumable backfill reaches (30d)
+
+# Every network is an Arbitrum Nitro chain. calls_per_second is the budget for
+# the public endpoint and counts JSON-RPC calls, including items inside a
+# batch request, because that is how the Robinhood public RPC meters.
+networks:
+  - name: robinhood
+    display_name: Robinhood Chain
+    chain_id: 4663
+    rpc_url: https://rpc.mainnet.chain.robinhood.com
+    explorer_url: https://robinhoodchain.blockscout.com
+    calls_per_second: 4
+    enabled: true
+  - name: robinhood-testnet
+    display_name: Robinhood Chain Testnet
+    chain_id: 46630
+    rpc_url: https://rpc.testnet.chain.robinhood.com
+    explorer_url: https://testnet.robinhoodchain.blockscout.com
+    calls_per_second: 4
+    enabled: true
+  - name: arbitrum-one
+    display_name: Arbitrum One
+    chain_id: 42161
+    rpc_url: https://arb1.arbitrum.io/rpc
+    explorer_url: https://arbiscan.io
+    calls_per_second: 4
+    enabled: true
+  - name: arbitrum-sepolia
+    display_name: Arbitrum Sepolia
+    chain_id: 421614
+    rpc_url: https://sepolia-rollup.arbitrum.io/rpc
+    explorer_url: https://sepolia.arbiscan.io
+    calls_per_second: 4
+    enabled: true

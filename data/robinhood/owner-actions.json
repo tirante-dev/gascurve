@@ -1,0 +1,227 @@
+{
+ "source": "eth_getLogs address=0x70 topic0=OwnerActs(bytes4,address,bytes)",
+ "fetchedAt": "2026-09-06T07:40:00Z",
+ "events": [
+  {
+   "block": 11,
+   "timestamp": null,
+   "tx": "0xebdd98acc2d635ba1f2e44c62f3414e285b3ee3fa90744e47f3e9b51704f4771",
+   "method": "addChainOwner",
+   "selector": "0x481f8dbf",
+   "address": "0x2a153c6a1b66dbc930a8d7017230ab0253005c09"
+  },
+  {
+   "block": 12,
+   "timestamp": null,
+   "tx": "0x48f0c64387378d0afa301345a3500cfd70e3a8c01c07c1bb4568ea337d3cbcb8",
+   "method": "removeChainOwner",
+   "selector": "0x8792701a",
+   "address": "0xc8451c5de260e7ea1b879e7994967077e71230ca"
+  },
+  {
+   "block": 17,
+   "timestamp": null,
+   "tx": "0xc24f2129da28bfe905e06eec93b789302156fc4910f589e6a8093b9706e26b75",
+   "method": "setInfraFeeAccount",
+   "selector": "0x57f585db",
+   "address": "0xe6cf1072ca3cf06622713840a87e17210f7e5ffa"
+  },
+  {
+   "block": 22,
+   "timestamp": null,
+   "tx": "0x2185a4181a2df002715200b20ac5dabebcc85c2cb9d1e0343672aaac8f3a41d2",
+   "method": "setInfraFeeAccount",
+   "selector": "0x57f585db",
+   "address": "0x5a2b80a9b7effc06129bd5462d77bc20a8a59be7"
+  },
+  {
+   "block": 23,
+   "timestamp": null,
+   "tx": "0x7d9b52d13081d780bcce2972cad2442e2f1aa579bde1d3fb4f4841c34165867a",
+   "method": "setNetworkFeeAccount",
+   "selector": "0xfcdde2b4",
+   "address": "0xbc5c3a7adecf54d34169fd90dbd1b7d3142df067"
+  },
+  {
+   "block": 24,
+   "timestamp": null,
+   "tx": "0xdcd6e040a7e11157668f2addf27bf24094131ff85b1a48e92d0aad20c16305f7",
+   "method": "setL1PricingRewardRecipient",
+   "selector": "0x934be07d",
+   "address": "0x8f516b9921021522d74d08b94b9f1c22b4af82ea"
+  },
+  {
+   "block": 28,
+   "timestamp": "2026-04-30T20:37:23Z",
+   "tx": "0x3399de8f6cf57957acbbe0a1141cfc013eab25095b4a9f5af5d3f9c9b7ecb53f",
+   "method": "setGasPricingConstraints",
+   "selector": "0xcc0d556a",
+   "constraints": [
+    {
+     "gasTargetPerSecond": 60000000,
+     "adjustmentWindowSeconds": 9,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 41000000,
+     "adjustmentWindowSeconds": 52,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 29000000,
+     "adjustmentWindowSeconds": 329,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 20000000,
+     "adjustmentWindowSeconds": 2105,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 14000000,
+     "adjustmentWindowSeconds": 13485,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 10000000,
+     "adjustmentWindowSeconds": 86400,
+     "startingBacklog": 0
+    }
+   ]
+  },
+  {
+   "block": 64714,
+   "timestamp": "2026-06-16T22:19:41Z",
+   "tx": "0x1cd8d6b2f77c0964a341e7bdda6ac334a7b84e90a7e8e12b910c5742fb185304",
+   "method": "scheduleArbOSUpgrade",
+   "selector": "0xe388b381",
+   "args": [
+    61,
+    0
+   ]
+  },
+  {
+   "block": 64947,
+   "timestamp": null,
+   "tx": "0xd2ce5f21a1779fcbb11625e16a2e7ad3451795b3722e8288fd062c3cf2fbb463",
+   "method": "setTransactionFilteringFrom",
+   "selector": "0x46066e45",
+   "args": [
+    1782295200
+   ]
+  },
+  {
+   "block": 174150,
+   "timestamp": "2026-06-24T20:28:34Z",
+   "tx": "0x8c443e69cfcd34655d4851aa532496fb7d122c727ec52b70f01c4848faa93ef0",
+   "method": "setMinimumL2BaseFee",
+   "selector": "0xa0188cdb",
+   "args": [
+    20000000
+   ]
+  },
+  {
+   "block": 494554,
+   "timestamp": null,
+   "tx": "0x6f1d68eaff00e7f517e042bfc6a809163fe6a49a9a25457e4d93a4ce56bfc305",
+   "method": "addTransactionFilterer",
+   "selector": "0x59c87acc",
+   "address": "0xebdc18a1f5c42fc25552ea233facf4054df224b7"
+  },
+  {
+   "block": 6322119,
+   "timestamp": "2026-07-10T19:12:45Z",
+   "tx": "0xfea7e34bba61824898ed3084f62d2dceee976c3146cbc49d14faca80eecc8307",
+   "method": "setGasPricingConstraints",
+   "selector": "0xcc0d556a",
+   "constraints": [
+    {
+     "gasTargetPerSecond": 60000000,
+     "adjustmentWindowSeconds": 15,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 15000000,
+     "adjustmentWindowSeconds": 86400,
+     "startingBacklog": 1106014350357
+    }
+   ]
+  },
+  {
+   "block": 18424412,
+   "timestamp": "2026-07-24T20:08:38Z",
+   "tx": "0xef9f5aa60cf09ef820ef25cca965d6cb04af82142fe67d01010990d2388b74d3",
+   "method": "setGasPricingConstraints",
+   "selector": "0xcc0d556a",
+   "constraints": [
+    {
+     "gasTargetPerSecond": 60000000,
+     "adjustmentWindowSeconds": 15,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 20000000,
+     "adjustmentWindowSeconds": 86400,
+     "startingBacklog": 2969833914824
+    }
+   ]
+  },
+  {
+   "block": 41739400,
+   "timestamp": "2026-08-20T21:21:18Z",
+   "tx": "0x40530a5f1355f98c97d2605fceb5d5a03006de49728b20033132b5bf1ab00775",
+   "method": "setGasPricingConstraints",
+   "selector": "0xcc0d556a",
+   "constraints": [
+    {
+     "gasTargetPerSecond": 60000000,
+     "adjustmentWindowSeconds": 15,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 18000000,
+     "adjustmentWindowSeconds": 86400,
+     "startingBacklog": 0
+    }
+   ]
+  },
+  {
+   "block": 51865079,
+   "timestamp": "2026-09-01T16:33:29Z",
+   "tx": "0xae52c9fd8e4e0bf1db53c1058876246342ebd3d387fa328f14de91b3ca1c91fa",
+   "method": "setGasPricingConstraints",
+   "selector": "0xcc0d556a",
+   "constraints": [
+    {
+     "gasTargetPerSecond": 60000000,
+     "adjustmentWindowSeconds": 15,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 30000000,
+     "adjustmentWindowSeconds": 86400,
+     "startingBacklog": 7491916800000
+    }
+   ]
+  },
+  {
+   "block": 53578754,
+   "timestamp": "2026-09-03T17:08:18Z",
+   "tx": "0xf7fb13105d87efee6e474a1510795dc7531ed4489d1304f6c7dd18c81c12276b",
+   "method": "setGasPricingConstraints",
+   "selector": "0xcc0d556a",
+   "constraints": [
+    {
+     "gasTargetPerSecond": 60000000,
+     "adjustmentWindowSeconds": 15,
+     "startingBacklog": 0
+    },
+    {
+     "gasTargetPerSecond": 40000000,
+     "adjustmentWindowSeconds": 86400,
+     "startingBacklog": 9989222400000
+    }
+   ]
+  }
+ ]
+}
