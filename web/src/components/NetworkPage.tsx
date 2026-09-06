@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useApi } from "@/hooks/useApi";
 import { useLive } from "@/hooks/useLive";
 import { useNetwork } from "@/hooks/useNetwork";
@@ -10,6 +10,7 @@ import { useTicker } from "@/hooks/useTicker";
 import { getOwnerActions } from "@/lib/api/constraints";
 import { getStatus, listNetworks } from "@/lib/api/networks";
 import type { OwnerAction, SeriesRange } from "@/types";
+import { canonicalNetworkName, findNetwork, isUnknownNetwork } from "@/utils/network";
 import { ConstraintCards } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
 import { Explainer } from "./Explainer";
@@ -32,7 +33,7 @@ function mergeActions(fetched: OwnerAction[] | null, live: OwnerAction[]): Owner
 }
 
 export function NetworkPage({ network: routeNetwork }: { network: string }) {
-  const { network, setNetwork } = useNetwork();
+  const { network, setNetwork, replaceNetwork } = useNetwork();
   const name = network || routeNetwork;
   const [range, setRange] = useState<SeriesRange>("24h");
   const live = useLive(name);
@@ -42,8 +43,14 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
   const ownerActions = useApi(`${name}:owner-actions`, useCallback((signal: AbortSignal) => getOwnerActions(name, { signal }), [name]));
   const now = useTicker(1000);
   const actions = useMemo(() => mergeActions(ownerActions.data, live.ownerActions), [ownerActions.data, live.ownerActions]);
-  const info = live.networkInfo ?? networks.data?.find((n) => n.name === name) ?? null;
-  const unknown = networks.data !== null && !networks.data.some((n) => n.name === name);
+  const info = live.networkInfo ?? (networks.data ? findNetwork(networks.data, name) : undefined) ?? null;
+  const unknown = isUnknownNetwork(networks.data, name);
+
+  // A chain-id route (/4663) is valid; once the server confirms the network, move to its name.
+  const canonical = canonicalNetworkName(name, live.networkInfo);
+  useEffect(() => {
+    if (canonical) replaceNetwork(canonical);
+  }, [canonical, replaceNetwork]);
 
   return (
     <div className="mx-auto max-w-[1200px] px-4 pb-12 sm:px-6">
@@ -86,14 +93,14 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         <Section
           id="history"
           title="History"
-          lede="Base fee, the split of x across constraints, gas per second against targets, and the backlogs. Hover for exact values; owner actions are marked."
+          lede="Base fee, the split of x across constraints, gas per second against targets, and the backlogs. Hover or use the point inspector for exact values; owner actions are marked and each constraint set is drawn as its own series."
           aside={<HistoryTabs range={range} onChange={setRange} loading={series.loading} />}
         >
           {series.error ? <p className="mb-3 text-sm text-critical">Could not load history: {series.error}</p> : null}
-          <SeriesCharts series={series.data} floorWei={live.snapshot?.minBaseFee ?? null} loading={series.loading} />
+          <SeriesCharts series={series.data} loading={series.loading} />
         </Section>
 
-        <Section id="fees" title="Fee flows" lede="The floor goes to the infra account, everything above it to the network account.">
+        <Section id="fees" title="Fee flows" lede="The floor in force at each block goes to the infra account, everything above it to the network account.">
           <FeeFlows snapshot={live.snapshot} series={series.data} explorerUrl={info?.explorerUrl} />
         </Section>
 

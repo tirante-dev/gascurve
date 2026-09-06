@@ -1,45 +1,91 @@
-// A TypeScript mirror of nitro's arbos/l2pricing/model.go, in integer basis
-// points with BigInt so results match the Go pricer bit for bit. Never
-// "simplify" this file to floating point.
+// A TypeScript mirror of nitro's arbos/l2pricing/model.go and of
+// internal/pricer/pricer.go, in integer basis points with BigInt so results
+// match the Go pricer bit for bit, including the uint64 and int64 saturation.
+// Never "simplify" this file to floating point.
 
 import type { Constraint, LegacyParams } from "@/types";
 
 export const ONE_IN_BIPS = 10_000n;
+export const MAX_UINT64 = (1n << 64n) - 1n;
+export const MAX_INT64 = (1n << 63n) - 1n;
+export const MIN_INT64 = -(1n << 63n);
+
+/** Go SaturatingUAdd: a + b for uint64, saturating at MaxUint64. */
+export function saturatingUAdd(a: bigint, b: bigint): bigint {
+  const sum = a + b;
+  return sum > MAX_UINT64 ? MAX_UINT64 : sum;
+}
+
+/** Go SaturatingUSub: a - b for uint64, floored at zero. */
+export function saturatingUSub(a: bigint, b: bigint): bigint {
+  return b >= a ? 0n : a - b;
+}
+
+/** Go SaturatingUMul: a * b for uint64, saturating at MaxUint64. */
+export function saturatingUMul(a: bigint, b: bigint): bigint {
+  if (a === 0n || b === 0n) return 0n;
+  const product = a * b;
+  return product > MAX_UINT64 ? MAX_UINT64 : product;
+}
+
+/** Go saturatingCastToBips: a uint64 into int64 basis points, capped at MaxInt64. */
+export function saturatingCastToBips(v: bigint): bigint {
+  return v > MAX_INT64 ? MAX_INT64 : v;
+}
+
+/** Go NaturalToBips: v * 10_000 with saturating multiplication and cast. */
+export function naturalToBips(v: bigint): bigint {
+  return saturatingCastToBips(saturatingUMul(v, ONE_IN_BIPS));
+}
+
+/** Go SaturatingAddBips: int64 addition saturating at both bounds. */
+export function saturatingAddBips(a: bigint, b: bigint): bigint {
+  const sum = a + b;
+  if (sum > MAX_INT64) return MAX_INT64;
+  if (sum < MIN_INT64) return MIN_INT64;
+  return sum;
+}
 
 /**
  * nitro ApproxExpBasisPoints: the degree `accuracy` Taylor polynomial of e^x,
- * evaluated with integer division at every step.
+ * evaluated with saturating unsigned arithmetic and integer division at every
+ * step. Negative x takes the reciprocal branch, accuracy 0 is exactly 1.
  *   res = b + x/accuracy
  *   for i = accuracy-1 .. 1: res = b + res*x/(i*b)
  */
 export function approxExpBips(x: bigint, accuracy = 4): bigint {
-  const b = ONE_IN_BIPS;
+  if (accuracy === 0) return ONE_IN_BIPS;
+  const negative = x < 0n;
+  // Go negates in int64 and casts to uint64; -MinInt64 wraps to 2^63.
+  const input = BigInt.asUintN(64, negative ? -x : x);
   const acc = BigInt(accuracy);
-  let res = b + x / acc;
-  for (let i = accuracy - 1; i >= 1; i--) {
-    res = b + (res * x) / (BigInt(i) * b);
+  const b = ONE_IN_BIPS;
+  let res = b + input / acc;
+  for (let i = acc - 1n; i > 0n; i--) {
+    res = saturatingUAdd(b, saturatingUMul(res, input) / (i * b));
   }
-  return res;
+  if (negative) return saturatingCastToBips((b * b) / res);
+  return saturatingCastToBips(res);
 }
 
 export type ConstraintState = { target: bigint; window: bigint; backlog: bigint };
 
-/** One constraint's exponent contribution in bips: backlog / (window * target). */
+/** One constraint's exponent contribution in bips: NaturalToBips(backlog) / bips(window * target), as Go Step does. */
 export function constraintExponentBips(c: ConstraintState): bigint {
   if (c.backlog <= 0n) return 0n;
-  const denominator = c.window * c.target;
-  if (denominator <= 0n) return 0n;
-  return (c.backlog * ONE_IN_BIPS) / denominator;
+  const divisor = saturatingUMul(c.window, c.target);
+  if (divisor === 0n) return 0n;
+  return naturalToBips(c.backlog) / saturatingCastToBips(divisor);
 }
 
-/** Sum of per-constraint contributions, each an integer division as in nitro. */
+/** Sum of per-constraint contributions, each an integer division as in nitro, saturating. */
 export function exponentBips(constraints: readonly ConstraintState[]): bigint {
   let total = 0n;
-  for (const c of constraints) total += constraintExponentBips(c);
+  for (const c of constraints) total = saturatingAddBips(total, constraintExponentBips(c));
   return total;
 }
 
-/** Base fee for an exponent: minBaseFee * P4(exponent) / 10000, or the floor when x = 0. */
+/** Base fee for an exponent: minBaseFee * P4(exponent) / 10000, or the floor when x <= 0. */
 export function baseFeeFromExponent(minBaseFee: bigint, exponent: bigint): bigint {
   if (exponent <= 0n) return minBaseFee;
   return (minBaseFee * approxExpBips(exponent)) / ONE_IN_BIPS;
@@ -61,13 +107,16 @@ export function p4Multiplier(x: number): number {
   return Number(multiplierBips(bips)) / 10_000;
 }
 
+/** A JSON number into a uint64: truncated, floored at zero, capped at MaxUint64. */
+export function toUint64(value: number): bigint {
+  if (!Number.isFinite(value) || value <= 0) return 0n;
+  const v = BigInt(Math.trunc(value));
+  return v > MAX_UINT64 ? MAX_UINT64 : v;
+}
+
 /** API constraints (numbers) to pricer state (bigint). */
 export function toState(constraints: readonly Pick<Constraint, "target" | "window" | "backlog">[]): ConstraintState[] {
-  return constraints.map((c) => ({
-    target: BigInt(Math.trunc(c.target)),
-    window: BigInt(Math.trunc(c.window)),
-    backlog: BigInt(Math.trunc(Math.max(0, c.backlog))),
-  }));
+  return constraints.map((c) => ({ target: toUint64(c.target), window: toUint64(c.window), backlog: toUint64(c.backlog) }));
 }
 
 /**
@@ -79,7 +128,7 @@ export function stepBacklogs(constraints: readonly Pick<Constraint, "target" | "
   return constraints.map((c) => Math.max(0, c.backlog - c.target * dt));
 }
 
-/** Exponent contributions per constraint for a list of API constraints. */
+/** Exponent contributions per constraint (integer bips) for a list of API constraints. */
 export function contributionsBips(constraints: readonly Pick<Constraint, "target" | "window" | "backlog">[]): number[] {
   return toState(constraints).map((c) => Number(constraintExponentBips(c)));
 }
@@ -96,48 +145,45 @@ export function step(
   const contributions: bigint[] = [];
   let exponent = 0n;
   for (const c of constraints) {
-    const drained = dtSeconds * c.target;
-    c.backlog = c.backlog > drained ? c.backlog - drained : 0n;
+    c.backlog = saturatingUSub(c.backlog, saturatingUMul(dtSeconds, c.target));
     const x = constraintExponentBips(c);
     contributions.push(x);
-    exponent += x;
+    exponent = saturatingAddBips(exponent, x);
   }
   return { baseFee: baseFeeFromExponent(minBaseFee, exponent), exponent, contributions };
 }
 
-/** nitro AddGas: every constraint absorbs every unit of gas. Mutates `constraints`. */
+/** nitro AddGas: every constraint absorbs every unit of gas, saturating. Mutates `constraints`. */
 export function addGas(constraints: ConstraintState[], gasUsed: bigint): void {
-  for (const c of constraints) c.backlog += gasUsed;
+  for (const c of constraints) c.backlog = saturatingUAdd(c.backlog, gasUsed);
 }
 
 export type LegacyState = { speedLimit: bigint; inertia: bigint; tolerance: bigint; backlog: bigint };
 
 export function toLegacyState(legacy: Pick<LegacyParams, "speedLimit" | "inertia" | "tolerance" | "backlog">): LegacyState {
   return {
-    speedLimit: BigInt(Math.trunc(legacy.speedLimit)),
-    inertia: BigInt(Math.trunc(legacy.inertia)),
-    tolerance: BigInt(Math.trunc(legacy.tolerance)),
-    backlog: BigInt(Math.trunc(Math.max(0, legacy.backlog))),
+    speedLimit: toUint64(legacy.speedLimit),
+    inertia: toUint64(legacy.inertia),
+    tolerance: toUint64(legacy.tolerance),
+    backlog: toUint64(legacy.backlog),
   };
 }
 
 /** Legacy exponent: bips(backlog - tolerance*speedLimit) / (inertia*speedLimit) when above tolerance. */
 export function legacyExponentBips(s: LegacyState): bigint {
-  const toleranceGas = s.tolerance * s.speedLimit;
-  if (s.backlog <= toleranceGas) return 0n;
-  const denominator = s.inertia * s.speedLimit;
-  if (denominator <= 0n) return 0n;
-  return ((s.backlog - toleranceGas) * ONE_IN_BIPS) / denominator;
+  const threshold = saturatingUMul(s.tolerance, s.speedLimit);
+  const inertia = saturatingUMul(s.inertia, s.speedLimit);
+  if (s.backlog <= threshold || inertia === 0n) return 0n;
+  return naturalToBips(s.backlog - threshold) / saturatingCastToBips(inertia);
 }
 
 /** Legacy Step: drain by dt * speedLimit, then price. Mutates `s`. */
 export function legacyStep(s: LegacyState, dtSeconds: bigint, minBaseFee: bigint): { baseFee: bigint; exponent: bigint } {
-  const drained = dtSeconds * s.speedLimit;
-  s.backlog = s.backlog > drained ? s.backlog - drained : 0n;
+  s.backlog = saturatingUSub(s.backlog, saturatingUMul(dtSeconds, s.speedLimit));
   const exponent = legacyExponentBips(s);
   return { baseFee: baseFeeFromExponent(minBaseFee, exponent), exponent };
 }
 
 export function legacyAddGas(s: LegacyState, gasUsed: bigint): void {
-  s.backlog += gasUsed;
+  s.backlog = saturatingUAdd(s.backlog, gasUsed);
 }

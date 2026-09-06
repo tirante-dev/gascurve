@@ -3,7 +3,6 @@
 
 const WEI_PER_GWEI = 1_000_000_000n;
 const WEI_PER_ETH = 1_000_000_000_000_000_000n;
-const WEI_PER_MICROETH = 1_000_000_000_000n;
 
 export function toBigInt(value: string | number | bigint): bigint {
   if (typeof value === "bigint") return value;
@@ -30,10 +29,16 @@ export function weiToGweiNumber(wei: string | bigint): number {
   return Number(whole) + Number(frac) / 1e9;
 }
 
-/** ETH as a float with microether resolution. Division happens in BigInt. */
+/**
+ * ETH as a float. The whole ether part and the wei remainder are converted
+ * separately, so amounts below one microether keep their value (a 500 Gwei
+ * batch is 5e-7 ETH, not 0) and only float rounding is lost.
+ */
 export function weiToEthNumber(wei: string | bigint): number {
   const w = toBigInt(wei);
-  return Number(w / WEI_PER_MICROETH) / 1e6;
+  const whole = w / WEI_PER_ETH;
+  const frac = w % WEI_PER_ETH;
+  return Number(whole) + Number(frac) / 1e18;
 }
 
 /** Formats a float with `sig` significant digits, without exponent notation. */
@@ -186,11 +191,44 @@ export function formatTime(value: string | number | Date): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-/** Local date and time, YYYY-MM-DD HH:MM. */
+/** Numeric offset of the local zone at `d`, like UTC-05:00. */
+export function formatUtcOffset(d: Date): string {
+  const offset = -d.getTimezoneOffset();
+  const sign = offset < 0 ? "-" : "+";
+  const abs = Math.abs(offset);
+  return `UTC${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
+/**
+ * Short zone label for the local zone at `d`: the abbreviation when Intl has
+ * one (CDT, CST, GMT+2), otherwise the numeric offset. Two instants that
+ * share a wall-clock time across a daylight-saving change get different labels.
+ */
+export function formatZone(d: Date, formatter: Intl.DateTimeFormat | null = zoneFormatter()): string {
+  if (formatter) {
+    try {
+      const part = formatter.formatToParts(d).find((p) => p.type === "timeZoneName");
+      if (part && part.value.trim() !== "") return part.value;
+    } catch {
+      // Fall through to the numeric offset.
+    }
+  }
+  return formatUtcOffset(d);
+}
+
+function zoneFormatter(): Intl.DateTimeFormat | null {
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZoneName: "short" });
+  } catch {
+    return null;
+  }
+}
+
+/** Local date and time with the zone, YYYY-MM-DD HH:MM CDT, so timestamps stay unambiguous across daylight-saving changes. */
 export function formatDateTime(value: string | number | Date): string {
   const d = toDate(value);
   if (Number.isNaN(d.getTime())) return "n/a";
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())} ${formatZone(d)}`;
 }
 
 /** UTC date and time, for values that must match block explorers. */

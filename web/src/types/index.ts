@@ -16,8 +16,9 @@ export type Network = {
   explorerUrl: string;
   model: PricerModel;
   headBlock: number;
-  headAt: string;
-  lagSeconds: number;
+  /** Null until the collector has produced a head. */
+  headAt: string | null;
+  lagSeconds: number | null;
   enabled: boolean;
 };
 
@@ -95,8 +96,12 @@ export type BlockPoint = {
   gasUsed: number;
   baseFee: string;
   predictedBaseFee: string;
+  /** End-of-block backlogs (after AddGas). */
   backlogs: number[];
+  /** Start-of-block per-constraint exponent, the values that priced this block; sums to exponentBips. */
+  constraintBips: number[];
   exponentBips: number;
+  minBaseFee: string;
   anchored: boolean;
 };
 
@@ -110,8 +115,16 @@ export type SeriesPoint = {
   baseFeeAvg: string;
   baseFeeMax: string;
   exponentBips: number;
+  /** Start-of-block values of the bucket's last block. */
+  constraintBips: number[];
   backlogs: number[];
   backlogsMax: number[];
+  /** Floor in force at the bucket's last block. */
+  minBaseFee: string;
+  /** Sum of gasUsed times minBaseFee per block, exact. */
+  floorFeesWei: string;
+  /** feesWei minus floorFeesWei, exact. */
+  surplusFeesWei: string;
   constraintSetId: number;
   replayErrorBips: number;
 };
@@ -162,9 +175,9 @@ export type NetworkStatus = {
   name: string;
   chainId: number;
   headBlock: number;
-  headAt: string;
-  lagSeconds: number;
-  lastSampleAt: string;
+  headAt: string | null;
+  lagSeconds: number | null;
+  lastSampleAt: string | null;
   lastError: string | null;
   rateLimitEvents: number;
   enabled?: boolean;

@@ -8,7 +8,14 @@ export type TooltipRow = {
   color?: string;
   kind?: "rect" | "line";
   value: (row: Record<string, unknown>) => string;
+  /** Rows that do not apply to the hovered point (another constraint set) are hidden. */
+  when?: (row: Record<string, unknown>) => boolean;
 };
+
+/** The rows that apply to `row`. */
+export function applicableRows(rows: readonly TooltipRow[], row: Record<string, unknown>): TooltipRow[] {
+  return rows.filter((r) => r.when === undefined || r.when(row));
+}
 
 /**
  * One tooltip, every series: values lead in the mono face, series names follow.
@@ -24,7 +31,7 @@ export function ChartTooltip({ active, payload, label, rows, title, note }: Part
       <div className="mb-1 text-ink-3">{title(Number(label))}</div>
       <table className="border-separate border-spacing-y-0.5">
         <tbody>
-          {rows.map((r) => (
+          {applicableRows(rows, row).map((r) => (
             <tr key={r.label}>
               <td className="num pr-3 text-right font-medium text-ink">{r.value(row)}</td>
               <td className="text-ink-2">

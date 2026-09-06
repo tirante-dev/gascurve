@@ -29,8 +29,12 @@ export function storeNetwork(name: string): void {
   }
 }
 
-/** The network from the route, persisted as the last choice. */
-export function useNetwork(): { network: string; setNetwork: (name: string) => void } {
+/**
+ * The network from the route, persisted as the last choice. `setNetwork`
+ * pushes a history entry; `replaceNetwork` swaps the current one, for
+ * redirecting a chain-id route to its canonical name.
+ */
+export function useNetwork(): { network: string; setNetwork: (name: string) => void; replaceNetwork: (name: string) => void } {
   const params = useParams<{ network?: string | string[] }>();
   const router = useRouter();
   const raw = Array.isArray(params?.network) ? params.network[0] : params?.network;
@@ -49,5 +53,14 @@ export function useNetwork(): { network: string; setNetwork: (name: string) => v
     [network, router],
   );
 
-  return { network, setNetwork };
+  const replaceNetwork = useCallback(
+    (name: string) => {
+      if (!isValidNetworkName(name) || name === network) return;
+      storeNetwork(name);
+      router.replace(`/${encodeURIComponent(name)}`);
+    },
+    [network, router],
+  );
+
+  return { network, setNetwork, replaceNetwork };
 }

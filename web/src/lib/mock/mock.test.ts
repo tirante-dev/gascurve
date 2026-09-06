@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api/core";
-import { baseFeeFromExponent, contributionsBips } from "@/lib/pricer";
+import { baseFeeFromExponent, constraintExponentBips, contributionsBips } from "@/lib/pricer";
 import type { BlockPoint, ConstraintsResponse, LiveSnapshot, Network, OwnerAction, Series, StatusResponse } from "@/types";
 import { findMockDef, findMockWorld, MOCK_NETWORKS, MockWebSocket, mockNow, mockRequest, resetMockWorlds } from "./index";
 import { Demand, hash01, isoToUnix, MockWorld } from "./world";
@@ -63,6 +63,19 @@ describe("mock world", () => {
     expect(blocks[blocks.length - 1].ts).toBe(mockNow() - 1);
     expect(blocks.some((b) => b.anchored)).toBe(true);
     expect(blocks[0].backlogs).toHaveLength(2);
+    // Every block carries the floor in force and the start-of-block split that priced it.
+    const set = ROBINHOOD.constraintSets[ROBINHOOD.constraintSets.length - 1].constraints;
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      expect(b.minBaseFee).toBe("20000000");
+      expect(b.constraintBips).toHaveLength(2);
+      expect(b.constraintBips.reduce((sum, x) => sum + x, 0)).toBe(b.exponentBips);
+      if (i > 0 && b.ts === blocks[i - 1].ts) {
+        // Same second, dt = 0: the split is the pricer's view of the previous block's end backlogs, before this block's gas.
+        const expected = set.map((c, j) => Number(constraintExponentBips({ target: BigInt(c.target), window: BigInt(c.window), backlog: BigInt(blocks[i - 1].backlogs[j]) })));
+        expect(b.constraintBips).toEqual(expected);
+      }
+    }
     expect(world.headBlock).toBe(blocks[blocks.length - 1].number);
     expect(world.blocksAfter(blocks[blocks.length - 3].number)).toEqual(blocks.slice(-2));
     expect(world.blocksAfter(blocks[blocks.length - 1].number)).toEqual([]);
@@ -107,6 +120,16 @@ describe("mock world", () => {
     expect(last.constraintSetId).toBe(6);
     expect(last.gasPerSecond).toBeGreaterThan(0);
     expect(BigInt(last.feesWei)).toBeGreaterThan(0n);
+    // The bucket's split is the start-of-block split of its last block, and the fee destinations are exact.
+    const lastBlock = world.recentBlocks(1)[0];
+    expect(last.constraintBips).toEqual(lastBlock.constraintBips);
+    expect(last.minBaseFee).toBe("20000000");
+    for (const p of hour.points) {
+      expect(p.constraintBips.reduce((sum, x) => sum + x, 0)).toBe(p.exponentBips);
+      expect(BigInt(p.floorFeesWei) + BigInt(p.surplusFeesWei)).toBe(BigInt(p.feesWei));
+      expect(BigInt(p.floorFeesWei)).toBe(BigInt(p.gasUsed) * BigInt(p.minBaseFee));
+      expect(BigInt(p.surplusFeesWei)).toBeGreaterThanOrEqual(0n);
+    }
 
     const day = world.series("24h", now);
     expect(day.resolution).toBe("1m");
@@ -215,6 +238,18 @@ describe("mock world", () => {
     expect(series.constraintSets).toEqual([]);
     expect(series.points[0].backlogs).toHaveLength(1);
     expect(series.points[0].constraintSetId).toBe(0);
+    // The legacy model reports one split element, as the Go pricer does.
+    for (const p of series.points) expect(p.constraintBips).toEqual([p.exponentBips]);
+    // The floor changed on July 15: earlier buckets carry the old floor and fee split.
+    const all = world.series("all", now);
+    const change = isoToUnix("2026-07-15T10:00:00Z");
+    const before = all.points.filter((p) => p.t < change - 3600).pop();
+    const after = all.points.find((p) => p.t >= change);
+    expect(before?.minBaseFee).toBe("100000000");
+    expect(after?.minBaseFee).toBe("10000000");
+    if (before) expect(BigInt(before.floorFeesWei)).toBe(BigInt(before.gasUsed) * 100_000_000n);
+    if (after) expect(BigInt(after.floorFeesWei)).toBe(BigInt(after.gasUsed) * 10_000_000n);
+    for (const p of all.points) expect(BigInt(p.floorFeesWei) + BigInt(p.surplusFeesWei)).toBe(BigInt(p.feesWei));
     // Bursts push the backlog over tolerance and the fee off the floor at least once a day.
     expect(series.points.some((p) => BigInt(p.baseFeeMax) > 10_000_000n)).toBe(true);
     expect(series.points.some((p) => BigInt(p.baseFeeMin) === 10_000_000n)).toBe(true);

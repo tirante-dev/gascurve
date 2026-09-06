@@ -4,10 +4,11 @@ import type { BlockPoint, LiveSnapshot, Series } from "@/types";
 import { SOCKET_OPEN, type SocketLike } from "@/lib/api/ws";
 
 const pushMock = vi.fn();
+const replaceMock = vi.fn();
 let routeParams: { network?: string | string[] } = { network: "robinhood" };
 vi.mock("next/navigation", () => ({
   useParams: () => routeParams,
-  useRouter: () => ({ push: pushMock }),
+  useRouter: () => ({ push: pushMock, replace: replaceMock }),
 }));
 
 class FakeSocket implements SocketLike {
@@ -37,6 +38,9 @@ class FakeSocket implements SocketLike {
   serverMessage(payload: unknown): void {
     this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(payload) }));
   }
+  serverHello(name: string, chainId: number, snapshotBlock: number | null, recentBlocks: BlockPoint[] = []): void {
+    this.serverMessage({ type: "hello", data: { network: { name, chainId }, snapshot: snapshotBlock === null ? null : snapshot(snapshotBlock, chainId), recentBlocks } });
+  }
   serverDrop(): void {
     this.readyState = 3;
     this.onclose?.(new CloseEvent("close"));
@@ -62,7 +66,7 @@ vi.mock("@/lib/api/series", async (importOriginal) => {
   return { ...original, getSeries: (...args: unknown[]) => getSeriesMock(...args) };
 });
 
-import { appendBlocks, useLive } from "./useLive";
+import { appendBlocks, isNewerSnapshot, useLive } from "./useLive";
 import { useApi } from "./useApi";
 import { refetchIntervalFor, useSeries } from "./useSeries";
 import { DEFAULT_NETWORK, isValidNetworkName, NETWORK_STORAGE_KEY, readStoredNetwork, storeNetwork, useNetwork } from "./useNetwork";
@@ -70,13 +74,13 @@ import { useDocumentVisible } from "./useDocumentVisible";
 import { useAnimatedBacklogs } from "./useAnimatedBacklogs";
 
 function block(number: number): BlockPoint {
-  return { number, ts: 1, gasUsed: 1, baseFee: "1", predictedBaseFee: "1", backlogs: [], exponentBips: 0, anchored: false };
+  return { number, ts: 1, gasUsed: 1, baseFee: "1", predictedBaseFee: "1", backlogs: [], constraintBips: [], exponentBips: 0, minBaseFee: "1", anchored: false };
 }
 
-function snapshot(n: number): LiveSnapshot {
+function snapshot(n: number, chainId = 4663, sampledAt = "2026-09-06T07:20:00Z"): LiveSnapshot {
   return {
-    chainId: 4663,
-    sampledAt: "2026-09-06T07:20:00Z",
+    chainId,
+    sampledAt,
     block: { number: n, ts: 1, gasUsed: 1, baseFee: "1", txCount: 1 },
     baseFee: "1",
     minBaseFee: "1",
@@ -114,6 +118,18 @@ describe("appendBlocks", () => {
   });
 });
 
+describe("isNewerSnapshot", () => {
+  it("accepts a higher block, or the same block sampled later", () => {
+    expect(isNewerSnapshot(null, snapshot(1))).toBe(true);
+    expect(isNewerSnapshot(snapshot(10), snapshot(11))).toBe(true);
+    expect(isNewerSnapshot(snapshot(10), snapshot(9))).toBe(false);
+    expect(isNewerSnapshot(snapshot(10), snapshot(10, 4663, "2026-09-06T07:20:01Z"))).toBe(true);
+    expect(isNewerSnapshot(snapshot(10, 4663, "2026-09-06T07:20:01Z"), snapshot(10))).toBe(false);
+    expect(isNewerSnapshot(snapshot(10), snapshot(10))).toBe(false);
+    expect(isNewerSnapshot(snapshot(10, 4663, "garbage"), snapshot(10))).toBe(false);
+  });
+});
+
 describe("useLive", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -136,12 +152,7 @@ describe("useLive", () => {
     expect(socket.url).toBe("ws://localhost:8080/api/v1/ws?network=robinhood");
     act(() => socket.serverOpen());
     expect(result.current.status).toBe("open");
-    act(() =>
-      socket.serverMessage({
-        type: "hello",
-        data: { network: { name: "robinhood" }, snapshot: snapshot(10), recentBlocks: [block(9), block(10)] },
-      }),
-    );
+    act(() => socket.serverHello("robinhood", 4663, 10, [block(9), block(10)]));
     expect(result.current.snapshot?.block.number).toBe(10);
     expect(result.current.recentBlocks.map((b) => b.number)).toEqual([9, 10]);
     expect(result.current.networkInfo?.name).toBe("robinhood");
@@ -180,12 +191,32 @@ describe("useLive", () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(getLiveMock).toHaveBeenCalledTimes(2);
+    act(() => latest().serverHello("robinhood", 4663, 21));
+    expect(result.current.snapshot?.block.number).toBe(21);
 
     // Switching network subscribes on the same socket and clears state.
     rerender({ network: "arbitrum-one" });
     expect(latest().sent).toContain(JSON.stringify({ type: "subscribe", network: "arbitrum-one" }));
     expect(result.current.snapshot).toBeNull();
     expect(result.current.recentBlocks).toEqual([]);
+    // Robinhood messages queued behind the subscribe never show up as Arbitrum One.
+    act(() => latest().serverMessage({ type: "tick", data: snapshot(22) }));
+    act(() => latest().serverMessage({ type: "blocks", data: [block(22)] }));
+    act(() => latest().serverMessage({ type: "owner_action", data: { block: 2, method: "setSpeedLimit" } }));
+    expect(result.current.snapshot).toBeNull();
+    expect(result.current.recentBlocks).toEqual([]);
+    expect(result.current.ownerActions).toEqual([]);
+    act(() => latest().serverHello("arbitrum-one", 42161, 500, [block(500)]));
+    expect(result.current.snapshot?.chainId).toBe(42161);
+    expect(result.current.networkInfo?.name).toBe("arbitrum-one");
+    act(() => latest().serverMessage({ type: "tick", data: snapshot(23, 4663) }));
+    expect(result.current.snapshot?.block.number).toBe(500);
+    act(() => latest().serverMessage({ type: "tick", data: snapshot(501, 42161) }));
+    expect(result.current.snapshot?.block.number).toBe(501);
+    act(() => latest().serverMessage({ type: "blocks", data: [block(501)] }));
+    expect(result.current.recentBlocks.map((b) => b.number)).toEqual([500, 501]);
+    act(() => latest().serverMessage({ type: "owner_action", data: { block: 3, method: "setSpeedLimit" } }));
+    expect(result.current.ownerActions).toHaveLength(1);
 
     // Hiding the tab suspends the socket; showing it resumes.
     act(() => setHidden(true));
@@ -199,19 +230,75 @@ describe("useLive", () => {
     expect(latest().readyState).toBe(3);
   });
 
-  it("does not poll while hidden", async () => {
-    setHidden(true);
-    getLiveMock.mockResolvedValue(snapshot(1));
+  it("polls one request at a time and never lets a stale response overwrite a newer one", async () => {
+    const pending: { block: number; resolve: (s: LiveSnapshot) => void }[] = [];
+    getLiveMock.mockImplementation(() => new Promise<LiveSnapshot>((resolve) => pending.push({ block: pending.length, resolve })));
     const { result, unmount } = renderHook(() => useLive("robinhood"));
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
+    await flush();
     act(() => latest().serverDrop());
     expect(result.current.status).toBe("reconnecting");
+    await flush();
+    expect(getLiveMock).toHaveBeenCalledTimes(1);
+    // Ten seconds pass with the first request still in flight: no second request is started.
+    await flush(10_000);
+    expect(getLiveMock).toHaveBeenCalledTimes(1);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5000);
+      pending[0].resolve(snapshot(30));
+      await vi.advanceTimersByTimeAsync(0);
     });
-    expect(getLiveMock).not.toHaveBeenCalled();
+    expect(result.current.snapshot?.block.number).toBe(30);
+    // The next poll starts 2 s after the previous one settled.
+    await flush(1999);
+    expect(getLiveMock).toHaveBeenCalledTimes(1);
+    await flush(1);
+    expect(getLiveMock).toHaveBeenCalledTimes(2);
+    // An older snapshot (the server answered from a lagging replica) is rejected.
+    await act(async () => {
+      pending[1].resolve(snapshot(29));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.snapshot?.block.number).toBe(30);
+    await flush(2000);
+    // The same block sampled later is accepted.
+    await act(async () => {
+      pending[2].resolve(snapshot(30, 4663, "2026-09-06T07:20:05Z"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.snapshot?.sampledAt).toBe("2026-09-06T07:20:05Z");
+    unmount();
+    // No poll is scheduled after unmount.
+    await flush(10_000);
+    expect(getLiveMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not open a socket while the tab is hidden at mount, and connects once it becomes visible", async () => {
+    setHidden(true);
+    const { result, unmount } = renderHook(() => useLive("robinhood"));
+    await flush();
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(result.current.status).toBe("connecting");
+    await flush(5000);
+    expect(FakeSocket.instances).toHaveLength(0);
+    act(() => setHidden(false));
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(latest().url).toContain("network=robinhood");
+    act(() => setHidden(true));
+    expect(latest().readyState).toBe(3);
+    unmount();
+  });
+
+  it("does not poll while hidden", async () => {
+    getLiveMock.mockResolvedValue(snapshot(1));
+    const { result, unmount } = renderHook(() => useLive("robinhood"));
+    await flush();
+    act(() => latest().serverDrop());
+    expect(result.current.status).toBe("reconnecting");
+    await flush();
+    expect(getLiveMock).toHaveBeenCalledTimes(1);
+    act(() => setHidden(true));
+    await flush(10_000);
+    expect(getLiveMock).toHaveBeenCalledTimes(1);
+    expect(FakeSocket.instances).toHaveLength(1);
     unmount();
   });
 
@@ -330,6 +417,20 @@ describe("useNetwork", () => {
     act(() => result.current.setNetwork("robinhood"));
     act(() => result.current.setNetwork("Bad Name!"));
     expect(pushMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces a chain-id route with the canonical name without a history entry", () => {
+    replaceMock.mockReset();
+    routeParams = { network: "4663" };
+    const { result } = renderHook(() => useNetwork());
+    expect(result.current.network).toBe("4663");
+    act(() => result.current.replaceNetwork("robinhood"));
+    expect(replaceMock).toHaveBeenCalledWith("/robinhood");
+    expect(pushMock).not.toHaveBeenCalled();
+    expect(readStoredNetwork()).toBe("robinhood");
+    act(() => result.current.replaceNetwork("4663"));
+    act(() => result.current.replaceNetwork("Bad Name!"));
+    expect(replaceMock).toHaveBeenCalledTimes(1);
   });
 
   it("falls back to the default for missing or invalid params", () => {

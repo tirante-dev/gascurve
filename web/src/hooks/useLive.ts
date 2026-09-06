@@ -41,10 +41,26 @@ export function appendBlocks(ring: BlockPoint[], incoming: BlockPoint[], size = 
 }
 
 /**
+ * True when `next` is newer than `prev`: a higher block number, or the same
+ * block sampled later. A missing `prev` accepts anything. Out-of-order poll
+ * responses are rejected with this.
+ */
+export function isNewerSnapshot(prev: LiveSnapshot | null, next: LiveSnapshot): boolean {
+  if (!prev) return true;
+  if (next.block.number !== prev.block.number) return next.block.number > prev.block.number;
+  const prevAt = Date.parse(prev.sampledAt);
+  const nextAt = Date.parse(next.sampledAt);
+  if (Number.isNaN(prevAt) || Number.isNaN(nextAt)) return false;
+  return nextAt > prevAt;
+}
+
+/**
  * Live data for one network: the latest snapshot, a ring of recent blocks and
  * the connection status. Uses the WebSocket, polls /live every 2 s while the
  * socket is down, and stops everything while the tab is hidden. State is keyed
- * by network, so switching shows an empty feed until the new hello arrives.
+ * by the network the server confirmed with a hello, so switching shows an
+ * empty feed until the new hello arrives and a late message for the previous
+ * network is never shown under the new one.
  */
 export function useLive(network: string): LiveState {
   const [feed, setFeed] = useState<Feed>(() => emptyFeed(network));
@@ -53,6 +69,10 @@ export function useLive(network: string): LiveState {
   const visible = useDocumentVisible();
   const clientRef = useRef<LiveClient | null>(null);
   const wantedNetwork = useRef(network);
+  const visibleRef = useRef(visible);
+  useEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
 
   // One socket for the life of the hook; network changes use subscribe.
   useEffect(() => {
@@ -64,23 +84,23 @@ export function useLive(network: string): LiveState {
         url: resolveWsUrl(),
         network: wantedNetwork.current,
         socketFactory,
-        onHello: (hello) => {
-          setFeed({ network: created.activeNetwork, snapshot: hello.snapshot, recentBlocks: appendBlocks([], hello.recentBlocks), networkInfo: hello.network, ownerActions: [] });
+        onHello: (hello, confirmed) => {
+          setFeed({ network: confirmed, snapshot: hello.snapshot, recentBlocks: appendBlocks([], hello.recentBlocks), networkInfo: hello.network, ownerActions: [] });
           setError(null);
         },
-        onTick: (tick) => {
-          setFeed((prev) => ({ ...(prev.network === created.activeNetwork ? prev : emptyFeed(created.activeNetwork)), snapshot: tick }));
+        onTick: (tick, confirmed) => {
+          setFeed((prev) => ({ ...(prev.network === confirmed ? prev : emptyFeed(confirmed)), snapshot: tick }));
           setError(null);
         },
-        onBlocks: (blocks) => {
+        onBlocks: (blocks, confirmed) => {
           setFeed((prev) => {
-            const base = prev.network === created.activeNetwork ? prev : emptyFeed(created.activeNetwork);
+            const base = prev.network === confirmed ? prev : emptyFeed(confirmed);
             return { ...base, recentBlocks: appendBlocks(base.recentBlocks, blocks) };
           });
         },
-        onOwnerAction: (action) => {
+        onOwnerAction: (action, confirmed) => {
           setFeed((prev) => {
-            const base = prev.network === created.activeNetwork ? prev : emptyFeed(created.activeNetwork);
+            const base = prev.network === confirmed ? prev : emptyFeed(confirmed);
             return { ...base, ownerActions: [action, ...base.ownerActions] };
           });
         },
@@ -88,8 +108,10 @@ export function useLive(network: string): LiveState {
       });
       client = created;
       clientRef.current = created;
-      created.connect();
-      created.subscribe(wantedNetwork.current);
+      // The factory resolves asynchronously; the tab may have been hidden
+      // since mount, in which case the client waits for the next visibility change.
+      if (visibleRef.current) created.connect();
+      else created.suspend();
     });
     return () => {
       cancelled = true;
@@ -114,25 +136,31 @@ export function useLive(network: string): LiveState {
   useEffect(() => {
     if (!polling) return;
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
-    const poll = () => {
-      getLive(network, { signal: controller.signal, retries: 0 })
-        .then((next) => {
-          if (!active) return;
-          setFeed((prev) => ({ ...(prev.network === network ? prev : emptyFeed(network)), snapshot: next }));
-          setError(null);
-        })
-        .catch((err: unknown) => {
-          if (!active || controller.signal.aborted) return;
-          setError(err instanceof Error ? err.message : String(err));
+    // One request in flight at a time: the next poll is scheduled only after
+    // the previous one settled, and a result is applied only when it is newer
+    // than what is already shown.
+    const poll = async () => {
+      try {
+        const next = await getLive(network, { signal: controller.signal, retries: 0 });
+        if (!active) return;
+        setFeed((prev) => {
+          const base = prev.network === network ? prev : emptyFeed(network);
+          return isNewerSnapshot(base.snapshot, next) ? { ...base, snapshot: next } : base;
         });
+        setError(null);
+      } catch (err: unknown) {
+        if (!active || controller.signal.aborted) return;
+        setError(err instanceof Error ? err.message : String(err));
+      }
+      if (active) timer = setTimeout(() => void poll(), LIVE_POLL_MS);
     };
-    poll();
-    const timer = setInterval(poll, LIVE_POLL_MS);
+    void poll();
     return () => {
       active = false;
       controller.abort();
-      clearInterval(timer);
+      if (timer !== null) clearTimeout(timer);
     };
   }, [polling, network]);
 

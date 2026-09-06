@@ -11,8 +11,10 @@ import { formatDateTime, formatDuration, formatEth, formatGas, formatGwei, forma
 import { ChartTooltip } from "./ChartTooltip";
 import { Card, ChartFrame, Legend, Stat } from "./primitives";
 
-// "batch" is one point per posting report (every 12 to 24 s on Robinhood); L2 fees are joined on 15 s buckets for it.
-const RESOLUTION_SECONDS: Record<string, number> = { batch: 15, "1m": 60, "15m": 900, "1h": 3600 };
+// "batch" is exactly one point per posting report (every 12 to 24 s on Robinhood).
+// Both reports and L2 fees are grouped into 15 s buckets before the join, so a
+// bucket that holds two reports counts its L2 fees once.
+export const RESOLUTION_SECONDS: Record<string, number> = { batch: 15, "1m": 60, "15m": 900, "1h": 3600 };
 
 /** L1 pricer values and what the chain pays Ethereum against what users pay. Collapsed by default. */
 export function L1Section({ network, range, snapshot, series }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null }) {
@@ -36,6 +38,7 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
   }, [rows, span]);
   const domain = useMemo(() => logDomain(rows.flatMap((r) => [r.l1Eth, r.l2Eth])), [rows]);
   const l1State = snapshot?.l1;
+  const [tableOpen, setTableOpen] = useState(false);
 
   return (
     <details
@@ -108,6 +111,36 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
           ) : (
             <Card className="text-sm text-ink-2">{batches.loading ? "Loading batch reports." : "No batch reports in this range."}</Card>
           )}
+          {rows.length > 0 ? (
+            <details className="mt-2 text-xs text-ink-2" onToggle={(e) => setTableOpen((e.currentTarget as HTMLDetailsElement).open)}>
+              <summary className="cursor-pointer select-none">Data table ({formatInteger(rows.length)} buckets)</summary>
+              {tableOpen ? (
+                <div className="mt-2 max-h-[320px] overflow-auto">
+                  <table className="num w-full min-w-[520px] text-left">
+                    <caption className="sr-only">L2 fees paid by users and L1 posting cost per bucket</caption>
+                    <thead className="sticky top-0 bg-surface text-ink-3">
+                      <tr>
+                        <th scope="col" className="py-1 pr-3 font-medium">bucket</th>
+                        <th scope="col" className="py-1 pr-3 font-medium">L2 fees (ETH)</th>
+                        <th scope="col" className="py-1 pr-3 font-medium">L1 posting cost (ETH)</th>
+                        <th scope="col" className="py-1 pr-3 font-medium">batches</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((r) => (
+                        <tr key={r.t} className="border-t border-hairline">
+                          <th scope="row" className="py-1 pr-3 font-normal">{formatDateTime(r.t)}</th>
+                          <td className="py-1 pr-3">{formatSignificant(r.l2Eth, 4)}</td>
+                          <td className="py-1 pr-3">{formatSignificant(r.l1Eth, 4)}</td>
+                          <td className="py-1 pr-3">{formatInteger(r.batches)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </details>
+          ) : null}
           {l1.data && l1.data.points.length > 0 ? (
             <p className="mt-2 text-xs text-ink-3">
               {formatInteger(l1.data.points.length)} L1 pricer samples in range; price per unit moved between {formatGwei(l1.data.points.reduce((m, p) => (BigInt(p.baseFeeEstimate) < BigInt(m) ? p.baseFeeEstimate : m), l1.data.points[0].baseFeeEstimate))} and{" "}

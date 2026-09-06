@@ -42,7 +42,7 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
             <dt className="text-ink-3">last sample</dt>
             <dd>{snapshot ? `${formatDateTime(snapshot.sampledAt)} (${formatAgo(sampledAgo ?? 0)})` : "n/a"}</dd>
             <dt className="text-ink-3">head</dt>
-            <dd>{networkInfo ? `${formatInteger(networkInfo.headBlock)}, lag ${networkInfo.lagSeconds} s` : "n/a"}</dd>
+            <dd>{networkInfo ? `${formatInteger(networkInfo.headBlock)}, ${networkInfo.lagSeconds === null ? "no head yet" : `lag ${networkInfo.lagSeconds} s`}` : "n/a"}</dd>
             <dt className="text-ink-3">rate limits</dt>
             <dd>{networkStatus ? `${formatInteger(networkStatus.rateLimitEvents)} events` : "n/a"}</dd>
             <dt className="text-ink-3">last error</dt>
@@ -56,7 +56,7 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
         </div>
       </div>
       <p className="mt-6 text-ink-3">
-        gascurve reads the gascurve api only; the browser never calls an RPC. Times are shown in your local zone; owner actions in UTC.
+        gascurve reads the gascurve api only; the browser never calls an RPC. Times are shown in your local zone with its abbreviation; owner actions in UTC.
       </p>
     </footer>
   );

@@ -25,8 +25,8 @@ export default defineConfig({
       include: ["src/lib/**/*.ts", "src/hooks/**/*.ts", "src/utils/**/*.ts"],
       exclude: ["**/*.test.ts", "**/*.test.tsx", "**/*.d.ts"],
       thresholds: {
-        lines: 90,
-        statements: 90,
+        lines: 95,
+        statements: 95,
       },
     },
   },

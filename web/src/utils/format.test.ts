@@ -16,6 +16,8 @@ import {
   formatTick,
   formatTime,
   formatUtc,
+  formatUtcOffset,
+  formatZone,
   formatX,
   secondsOfTarget,
   shortAddress,
@@ -135,6 +137,16 @@ describe("wei conversions", () => {
     expect(weiToEthNumber("1500000000000000000")).toBeCloseTo(1.5);
     expect(weiToEthNumber("123456789012345678901234")).toBeCloseTo(123456.789012);
   });
+  it("keeps values below one microether", () => {
+    // A 500 Gwei batch is 5e-7 ETH, not zero.
+    expect(weiToEthNumber("500000000000")).toBeCloseTo(5e-7, 12);
+    expect(weiToEthNumber(1n)).toBeCloseTo(1e-18, 24);
+    expect(weiToEthNumber("0")).toBe(0);
+    let sum = 0;
+    for (let i = 0; i < 200; i++) sum += weiToEthNumber("500000000000");
+    expect(sum).toBeCloseTo(0.0001, 9);
+    expect(weiToEthNumber("-500000000000")).toBeCloseTo(-5e-7, 12);
+  });
   it("computes cost in wei", () => {
     expect(costWei(21000, "399726000")).toBe("8394246000000");
   });
@@ -157,11 +169,34 @@ describe("time formatting (TZ pinned to America/Chicago)", () => {
     expect(formatTime("2026-09-06T07:20:00Z")).toBe("02:20:00");
     expect(formatTime(1788679200)).toBe("02:20:00");
     expect(formatTime(new Date("2026-09-06T07:20:00Z"))).toBe("02:20:00");
-    expect(formatDateTime("2026-09-06T07:20:00Z")).toBe("2026-09-06 02:20");
+    expect(formatDateTime("2026-09-06T07:20:00Z")).toBe("2026-09-06 02:20 CDT");
     expect(formatUtc("2026-09-06T07:20:00Z")).toBe("2026-09-06 07:20 UTC");
     expect(formatTime("garbage")).toBe("n/a");
     expect(formatDateTime("garbage")).toBe("n/a");
     expect(formatUtc("garbage")).toBe("n/a");
+  });
+  it("disambiguates the repeated hour at the daylight-saving change with the zone", () => {
+    // 01:30 happens twice on 2026-11-01 in Chicago: first in CDT, then in CST.
+    const first = formatDateTime("2026-11-01T06:30:00Z");
+    const second = formatDateTime("2026-11-01T07:30:00Z");
+    expect(first).toBe("2026-11-01 01:30 CDT");
+    expect(second).toBe("2026-11-01 01:30 CST");
+    expect(first).not.toBe(second);
+  });
+  it("falls back to a numeric offset when Intl has no zone name", () => {
+    const d = new Date("2026-09-06T07:20:00Z");
+    expect(formatUtcOffset(d)).toBe("UTC-05:00");
+    expect(formatUtcOffset(new Date("2026-01-06T07:20:00Z"))).toBe("UTC-06:00");
+    expect(formatZone(d, null)).toBe("UTC-05:00");
+    const blank = { formatToParts: () => [{ type: "timeZoneName", value: " " }] } as unknown as Intl.DateTimeFormat;
+    expect(formatZone(d, blank)).toBe("UTC-05:00");
+    const throwing = {
+      formatToParts: () => {
+        throw new Error("no ICU");
+      },
+    } as unknown as Intl.DateTimeFormat;
+    expect(formatZone(d, throwing)).toBe("UTC-05:00");
+    expect(formatZone(d)).toBe("CDT");
   });
   it("formats axis ticks by span", () => {
     expect(formatTick(1788679200, 3600)).toBe("02:20");

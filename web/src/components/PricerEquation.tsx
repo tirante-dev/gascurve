@@ -64,7 +64,7 @@ export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) 
           </div>
           {snapshot && live ? (
             <div className="num mt-4 flex min-w-max flex-wrap items-start gap-x-2 gap-y-3 border-t border-hairline pt-4 text-base text-ink-2 sm:text-lg">
-              <Term label="predicted">{formatGwei(live.predicted)} gwei</Term>
+              <Term label="implied, dt = 0">{formatGwei(live.predicted)} gwei</Term>
               <Op>=</Op>
               <Term label="floor">{formatGwei(snapshot.minBaseFee)} gwei</Term>
               <Op>×</Op>
@@ -90,8 +90,9 @@ export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) 
         </div>
         {snapshot ? (
           <p className="mt-3 max-w-[65ch] text-sm text-ink-2">
-            The chain priced block {formatInteger(snapshot.block.number)} at <span className="num text-ink">{formatGwei(snapshot.baseFee)} gwei</span>. The sampled backlogs already include that block&apos;s gas, so the
-            prediction from them is the fee the next block will open with; the two differ by the gas of one block. True e<sup>x</sup> at this x would give{" "}
+            The chain priced block {formatInteger(snapshot.block.number)} at <span className="num text-ink">{formatGwei(snapshot.baseFee)} gwei</span>. The sampled backlogs already include that block&apos;s gas; the
+            value above is the fee they imply with dt = 0, that is if the next block carried the same timestamp. When the next header&apos;s timestamp advances, every backlog is first paid down by
+            dt × target, so the fee the next block actually opens with can be lower and is not known until that timestamp is. True e<sup>x</sup> at this x would give{" "}
             <span className="num text-ink">{trueExpMultiplier(x).toFixed(1)}×</span> instead of <span className="num text-ink">{live?.multiplier.toFixed(2)}×</span>.
           </p>
         ) : null}

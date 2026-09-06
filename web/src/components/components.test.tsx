@@ -92,7 +92,7 @@ describe("HistoryTabs", () => {
 
 describe("NetworkSwitcher", () => {
   const networks: Network[] = [
-    { name: "robinhood", displayName: "Robinhood Chain", chainId: 4663, explorerUrl: "", model: "constraints", headBlock: 1, headAt: "", lagSeconds: 0, enabled: true },
+    { name: "robinhood", displayName: "Robinhood Chain", chainId: 4663, explorerUrl: "", model: "constraints", headBlock: 1, headAt: null, lagSeconds: null, enabled: true },
     { name: "arbitrum-one", displayName: "Arbitrum One", chainId: 42161, explorerUrl: "", model: "constraints", headBlock: 1, headAt: "", lagSeconds: 0, enabled: false },
   ];
   it("lists networks and changes selection", async () => {

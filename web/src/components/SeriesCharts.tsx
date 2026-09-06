@@ -1,11 +1,27 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { OwnerAction, Series } from "@/types";
-import { buildChartPoints, latestSet, logDomain, seriesColor, seriesCount, seriesLabel, shortConstraintLabel, spanSeconds, type ChartPoint } from "@/utils/chart";
-import { formatDateTime, formatGas, formatGwei, formatInteger, formatSignificant, formatTick, weiToGweiNumber } from "@/utils/format";
-import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
+import {
+  buildChartPoints,
+  hasUnknownSets,
+  logDomain,
+  segmentsFor,
+  seriesColor,
+  seriesCount,
+  shortConstraintLabel,
+  slotLabel,
+  spanSeconds,
+  targetKey,
+  UNKNOWN_COLOR,
+  UNKNOWN_KEY,
+  UNKNOWN_LABEL,
+  type ChartPoint,
+  type Segment,
+} from "@/utils/chart";
+import { formatDateTime, formatGas, formatGwei, formatInteger, formatSignificant, formatTick } from "@/utils/format";
+import { ChartTooltip, applicableRows, type TooltipRow } from "./ChartTooltip";
 import { ChartFrame, Legend } from "./primitives";
 
 const SYNC_ID = "history";
@@ -35,6 +51,18 @@ function describeAction(a: OwnerAction): string {
   return a.method;
 }
 
+/** True when segment `s` is the one in force for the hovered or selected row. */
+function inForce(s: Segment): (row: Record<string, unknown>) => boolean {
+  return (row) => Number(row.constraintSetId) === s.setId;
+}
+
+/** "C1 0.0034 · C2 3.2391" for the set in force at the point, or the unknown-split note. */
+export function describeSplit(row: ChartPoint, segments: readonly Segment[]): string {
+  if (!row.setKnown) return `${UNKNOWN_LABEL}: ${row.x.toFixed(4)}`;
+  const own = segments.filter((s) => s.setId === row.constraintSetId);
+  return own.map((s) => `C${s.index + 1} ${(row[s.key] ?? 0).toFixed(4)}`).join(" · ");
+}
+
 function ChartBlock({ title, legend, children, height, label }: { title: string; legend?: { label: string; color: string; kind?: "rect" | "line" }[]; children: React.ReactNode; height: number; label: string }) {
   return (
     <div className="rounded-md border border-hairline bg-surface p-3">
@@ -49,17 +77,48 @@ function ChartBlock({ title, legend, children, height, label }: { title: string;
   );
 }
 
-export function SeriesCharts({ series, floorWei, loading }: { series: Series | null; floorWei: string | null; loading: boolean }) {
+/**
+ * Keyboard access to every point: a slider picks a bucket and the same rows
+ * the tooltips show are read out in a live region.
+ */
+function PointInspector({ points, groups, note }: { points: ChartPoint[]; groups: { title: string; rows: TooltipRow[] }[]; note: (row: Record<string, unknown>) => string | null }) {
+  const [index, setIndex] = useState(points.length - 1);
+  const clamped = Math.max(0, Math.min(points.length - 1, index));
+  const row = points[clamped] as unknown as Record<string, unknown>;
+  const extra = note(row);
+  return (
+    <div className="rounded-md border border-hairline bg-surface p-3 text-xs text-ink-2">
+      <label className="flex flex-wrap items-center gap-3">
+        <span className="font-semibold text-ink">Point inspector</span>
+        <input type="range" min={0} max={points.length - 1} value={clamped} onChange={(e) => setIndex(Number(e.target.value))} aria-label="Select a bucket to read its values" className="min-w-[160px] flex-1" />
+        <span className="num text-ink">{formatDateTime(points[clamped].t)}</span>
+      </label>
+      <dl className="num mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5" aria-live="polite">
+        {groups.flatMap((g) =>
+          applicableRows(g.rows, row).map((r) => (
+            <div key={`${g.title}-${r.label}`} className="contents">
+              <dt className="text-ink-3">{r.label}</dt>
+              <dd className="text-ink">{r.value(row)}</dd>
+            </div>
+          )),
+        )}
+      </dl>
+      {extra ? <p className="mt-1 border-t border-hairline pt-1">{extra}</p> : null}
+    </div>
+  );
+}
+
+export function SeriesCharts({ series, loading }: { series: Series | null; loading: boolean }) {
   const points = useMemo(() => (series ? buildChartPoints(series) : []), [series]);
   const markers = useMemo(() => (series ? markersFor(series) : []), [series]);
+  const segments = useMemo(() => (series ? segmentsFor(series) : []), [series]);
+  const unknown = series ? hasUnknownSets(series) : false;
   const count = series ? seriesCount(series) : 0;
-  const set = series ? latestSet(series) : undefined;
   const span = spanSeconds(points);
   const bucketSeconds = points.length > 1 ? points[1].t - points[0].t : 60;
-  const floor = floorWei ? weiToGweiNumber(floorWei) : undefined;
-  const feeDomain = useMemo(() => logDomain(points.flatMap((p) => [p.feeMin, p.feeMax]), floor), [points, floor]);
+  const feeDomain = useMemo(() => logDomain(points.flatMap((p) => [p.feeMin, p.feeMax, p.floor])), [points]);
   const indices = Array.from({ length: count }, (_, i) => i);
-  const constraintLegend = series ? indices.map((i) => ({ label: seriesLabel(series, i), color: seriesColor(i) })) : [];
+  const [tableOpen, setTableOpen] = useState(false);
   const tickFormatter = (t: number) => formatTick(t, span);
   const title = (t: number) => formatDateTime(t);
   const note = (row: Record<string, unknown>) => {
@@ -81,20 +140,25 @@ export function SeriesCharts({ series, floorWei, loading }: { series: Series | n
   const feeRows: TooltipRow[] = [
     { label: "base fee, average", color: "var(--series-1)", value: (r) => `${formatSignificant(Number(r.feeAvg), 4)} gwei` },
     { label: "min to max in bucket", value: (r) => `${formatSignificant(Number(r.feeMin), 3)} to ${formatSignificant(Number(r.feeMax), 3)} gwei` },
+    { label: "floor in force", color: "var(--ink-3)", value: (r) => `${formatSignificant(Number(r.floor), 3)} gwei` },
     { label: "x", value: (r) => Number(r.x).toFixed(4) },
     { label: "blocks", value: (r) => formatInteger(Number(r.blocks)) },
   ];
-  const contributionRows: TooltipRow[] = indices.map((i) => ({
-    label: seriesLabel(series, i),
-    color: seriesColor(i),
+  const contributionRows: TooltipRow[] = segments.map((s) => ({
+    label: s.label,
+    color: s.color,
     kind: "rect",
-    value: (r) => Number(r[`c${i}`] ?? 0).toFixed(4),
+    value: (r) => Number(r[s.key] ?? 0).toFixed(4),
+    when: inForce(s),
   }));
+  if (unknown) contributionRows.push({ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => Number(r[UNKNOWN_KEY] ?? 0).toFixed(4), when: (r) => r.setKnown === false });
   contributionRows.push({ label: "x total", value: (r) => Number(r.x).toFixed(4) });
   const gasRows: TooltipRow[] = [{ label: "gas per second", color: "var(--series-1)", value: (r) => `${formatGas(Number(r.gps))} gas/s` }];
-  if (set) {
-    set.constraints.forEach((c, i) => gasRows.push({ label: `target C${i + 1}`, color: seriesColor(i), value: () => `${formatGas(c.target)} gas/s` }));
-  }
+  indices.forEach((i) => gasRows.push({ label: `target C${i + 1} in force`, color: seriesColor(i), value: (r) => `${formatGas(Number(r[targetKey(i)]))} gas/s`, when: (r) => typeof r[targetKey(i)] === "number" }));
+  const backlogRows: TooltipRow[] = segments.map((s) => ({ label: `backlog ${s.label}`, color: s.color, value: (r) => `${formatGas(Number(r[s.backlogKey] ?? 0))} gas`, when: inForce(s) }));
+  const contributionLegend = [...segments.map((s) => ({ label: s.label, color: s.color })), ...(unknown ? [{ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR }] : [])];
+  const hasTargets = segments.some((s) => s.constraint !== null);
+  const gasLegend = [{ label: "gas/s", color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
   // Markers carry their chronological number; the list under the charts decodes them.
   const markerLines = markers.map((m, i) => (
     <ReferenceLine key={`${m.t}-${m.action.txHash}`} x={m.t} stroke="var(--ink-2)" strokeWidth={1} label={{ value: String(i + 1), position: "insideTopLeft", fill: "var(--ink-2)", fontSize: 10 }} />
@@ -104,7 +168,7 @@ export function SeriesCharts({ series, floorWei, loading }: { series: Series | n
 
   return (
     <div className="flex flex-col gap-4" style={{ opacity: loading ? 0.7 : 1, transition: "opacity 200ms" }}>
-      <ChartBlock title="Base fee (gwei, log scale)" height={260} label="Base fee over time on a log scale with the floor marked">
+      <ChartBlock title="Base fee (gwei, log scale)" legend={[{ label: "base fee", color: "var(--series-1)", kind: "line" }, { label: "floor in force (stepped)", color: "var(--ink-3)", kind: "line" }]} height={260} label="Base fee over time on a log scale with the floor in force drawn as a stepped line">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={points} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
@@ -114,33 +178,29 @@ export function SeriesCharts({ series, floorWei, loading }: { series: Series | n
             <Area type="monotone" dataKey="feeMax" stroke="none" fill="var(--series-1)" fillOpacity={0.12} isAnimationActive={false} activeDot={false} />
             <Area type="monotone" dataKey="feeMin" stroke="none" fill="var(--surface)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
             <Line type="monotone" dataKey="feeAvg" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} />
-            {floor ? <ReferenceLine y={floor} stroke="var(--ink-3)" label={{ value: `floor ${formatSignificant(floor, 2)} gwei`, position: "insideBottomRight", fill: "var(--ink-3)", fontSize: 10 }} /> : null}
+            <Line type="stepAfter" dataKey="floor" stroke="var(--ink-3)" strokeWidth={1} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
             {markerLines}
           </ComposedChart>
         </ResponsiveContainer>
       </ChartBlock>
 
-      <ChartBlock title="Contribution to x per constraint" legend={constraintLegend} height={220} label="Stacked per-constraint contribution to the exponent">
+      <ChartBlock title="Contribution to x per constraint" legend={contributionLegend} height={220} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={points} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
             {xAxis}
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={title} rows={contributionRows} note={note} />} />
-            {indices.map((i) => (
-              <Area key={i} type="monotone" dataKey={`c${i}`} stackId="x" stroke="var(--surface)" strokeWidth={1} fill={seriesColor(i)} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
+            {segments.map((s) => (
+              <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" stroke="var(--surface)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
             ))}
+            {unknown ? <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" stroke="var(--surface)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} /> : null}
             {markerLines}
           </AreaChart>
         </ResponsiveContainer>
       </ChartBlock>
 
-      <ChartBlock
-        title="Gas per second against each target"
-        legend={[{ label: "gas/s", color: "var(--series-1)", kind: "line" }, ...(set ? set.constraints.map((c, i) => ({ label: `target C${i + 1} ${formatGas(c.target)}`, color: seriesColor(i), kind: "line" as const })) : [])]}
-        height={220}
-        label="Gas used per second with each constraint target as a horizontal line"
-      >
+      <ChartBlock title="Gas per second against each target" legend={gasLegend} height={220} label="Gas used per second with each constraint target in force drawn as a stepped line">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={points} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
@@ -148,7 +208,7 @@ export function SeriesCharts({ series, floorWei, loading }: { series: Series | n
             <YAxis tickFormatter={(v: number) => formatGas(v)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={title} rows={gasRows} note={note} />} />
             <Area type="monotone" dataKey="gps" stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
-            {set ? set.constraints.map((c, i) => <ReferenceLine key={i} y={c.target} stroke={seriesColor(i)} strokeDasharray="4 3" />) : null}
+            {hasTargets ? indices.map((i) => <Line key={i} type="stepAfter" dataKey={targetKey(i)} stroke={seriesColor(i)} strokeDasharray="4 3" dot={false} isAnimationActive={false} />) : null}
           </ComposedChart>
         </ResponsiveContainer>
       </ChartBlock>
@@ -156,28 +216,27 @@ export function SeriesCharts({ series, floorWei, loading }: { series: Series | n
       <div className="rounded-md border border-hairline bg-surface p-3">
         <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
           <h3 className="text-sm font-semibold text-ink">Backlog per constraint (gas)</h3>
-          <span className="text-xs text-ink-3">one panel per constraint, each on its own scale</span>
+          <span className="text-xs text-ink-3">one panel per slot, each on its own scale; a replaced constraint starts a new series</span>
         </div>
         <div className={`grid gap-3 ${count > 2 ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
           {indices.map((i) => (
             <div key={i}>
               <div className="mb-1 flex items-center gap-1.5 text-xs text-ink-2">
                 <span className="inline-block h-2.5 w-2.5 rounded-[2px]" style={{ background: seriesColor(i) }} aria-hidden="true" />
-                {seriesLabel(series, i)}
+                {slotLabel(series, i)}
               </div>
-              <ChartFrame height={140} minWidth={260} label={`Backlog of ${seriesLabel(series, i)} over time`}>
+              <ChartFrame height={140} minWidth={260} label={`Backlog of ${slotLabel(series, i)} over time`}>
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={points} syncId={SYNC_ID} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
                     <CartesianGrid vertical={false} />
                     {xAxis}
                     <YAxis tickFormatter={(v: number) => formatGas(v)} tickLine={false} axisLine={false} width={48} />
-                    <Tooltip
-                      isAnimationActive={false}
-                      content={(props) => (
-                        <ChartTooltip {...props} title={title} rows={[{ label: "backlog", color: seriesColor(i), value: (r) => `${formatGas(Number(r[`b${i}`] ?? 0))} gas` }]} note={note} />
-                      )}
-                    />
-                    <Area type="monotone" dataKey={`b${i}`} stroke={seriesColor(i)} strokeWidth={2} fill={seriesColor(i)} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+                    <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={title} rows={backlogRows.filter((_, k) => segments[k].index === i)} note={note} />} />
+                    {segments
+                      .filter((s) => s.index === i)
+                      .map((s) => (
+                        <Area key={s.backlogKey} type="monotone" dataKey={s.backlogKey} stroke={s.color} strokeWidth={2} fill={s.color} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+                      ))}
                   </AreaChart>
                 </ResponsiveContainer>
               </ChartFrame>
@@ -197,44 +256,76 @@ export function SeriesCharts({ series, floorWei, loading }: { series: Series | n
         </ol>
       ) : null}
 
-      <details className="text-xs text-ink-2">
-        <summary className="cursor-pointer select-none">Table view (latest 24 buckets)</summary>
-        <div className="mt-2 overflow-x-auto">
-          <table className="num w-full min-w-[640px] text-left">
-            <thead className="text-ink-3">
-              <tr>
-                <th className="py-1 pr-3 font-medium">bucket</th>
-                <th className="py-1 pr-3 font-medium">fee avg (gwei)</th>
-                <th className="py-1 pr-3 font-medium">min</th>
-                <th className="py-1 pr-3 font-medium">max</th>
-                <th className="py-1 pr-3 font-medium">x</th>
-                <th className="py-1 pr-3 font-medium">gas/s</th>
-                {indices.map((i) => (
-                  <th key={i} className="py-1 pr-3 font-medium">
-                    backlog C{i + 1}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {points.slice(-24).map((p: ChartPoint) => (
-                <tr key={p.t} className="border-t border-hairline">
-                  <td className="py-1 pr-3">{formatDateTime(p.t)}</td>
-                  <td className="py-1 pr-3">{formatSignificant(p.feeAvg, 4)}</td>
-                  <td className="py-1 pr-3">{formatSignificant(p.feeMin, 3)}</td>
-                  <td className="py-1 pr-3">{formatSignificant(p.feeMax, 3)}</td>
-                  <td className="py-1 pr-3">{p.x.toFixed(4)}</td>
-                  <td className="py-1 pr-3">{formatGas(p.gps)}</td>
+      <PointInspector
+        points={points}
+        groups={[
+          { title: "fee", rows: feeRows },
+          { title: "split", rows: contributionRows },
+          { title: "gas", rows: gasRows },
+          { title: "backlog", rows: backlogRows },
+        ]}
+        note={note}
+      />
+
+      <details className="text-xs text-ink-2" onToggle={(e) => setTableOpen((e.currentTarget as HTMLDetailsElement).open)}>
+        <summary className="cursor-pointer select-none">Data table ({formatInteger(points.length)} buckets, every value the charts draw)</summary>
+        {tableOpen ? (
+          <div className="mt-2 max-h-[480px] overflow-auto">
+            <table className="num w-full min-w-[960px] text-left">
+              <caption className="sr-only">History buckets with base fee, floor, exponent split, gas per second, backlogs and fee destinations</caption>
+              <thead className="sticky top-0 bg-surface text-ink-3">
+                <tr>
+                  <th scope="col" className="py-1 pr-3 font-medium">bucket</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">fee avg (gwei)</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">min</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">max</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">floor</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">x</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">split (set)</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">gas/s</th>
                   {indices.map((i) => (
-                    <td key={i} className="py-1 pr-3">
-                      {formatGas(Number(p[`b${i}`] ?? 0))}
-                    </td>
+                    <th key={i} scope="col" className="py-1 pr-3 font-medium">
+                      backlog C{i + 1}
+                    </th>
                   ))}
+                  <th scope="col" className="py-1 pr-3 font-medium">fees (ETH)</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">floor fees</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">surplus fees</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">blocks</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {points.map((p: ChartPoint) => (
+                  <tr key={p.t} className="border-t border-hairline">
+                    <th scope="row" className="py-1 pr-3 font-normal">{formatDateTime(p.t)}</th>
+                    <td className="py-1 pr-3">{formatSignificant(p.feeAvg, 4)}</td>
+                    <td className="py-1 pr-3">{formatSignificant(p.feeMin, 3)}</td>
+                    <td className="py-1 pr-3">{formatSignificant(p.feeMax, 3)}</td>
+                    <td className="py-1 pr-3">{formatSignificant(p.floor, 3)}</td>
+                    <td className="py-1 pr-3">{p.x.toFixed(4)}</td>
+                    <td className="py-1 pr-3">
+                      {describeSplit(p, segments)} ({p.setKnown ? `set ${p.constraintSetId}` : "unknown set"})
+                    </td>
+                    <td className="py-1 pr-3">{formatGas(p.gps)}</td>
+                    {indices.map((i) => {
+                      const s = segments.find((seg) => seg.setId === p.constraintSetId && seg.index === i);
+                      const v = s ? p[s.backlogKey] : undefined;
+                      return (
+                        <td key={i} className="py-1 pr-3">
+                          {typeof v === "number" ? formatGas(v) : "n/a"}
+                        </td>
+                      );
+                    })}
+                    <td className="py-1 pr-3">{formatSignificant(p.feesEth, 4)}</td>
+                    <td className="py-1 pr-3">{formatSignificant(p.floorFeesEth, 4)}</td>
+                    <td className="py-1 pr-3">{formatSignificant(p.surplusFeesEth, 4)}</td>
+                    <td className="py-1 pr-3">{formatInteger(p.blocks)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
       </details>
     </div>
   );

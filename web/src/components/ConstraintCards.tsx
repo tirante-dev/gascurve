@@ -2,8 +2,9 @@
 
 import { useMemo } from "react";
 import { useAnimatedBacklogs } from "@/hooks/useAnimatedBacklogs";
+import { contributionsBips, legacyExponentBips, toLegacyState } from "@/lib/pricer";
 import type { Constraint, LegacyParams, LiveSnapshot } from "@/types";
-import { contributionRampStep, seriesColor } from "@/utils/chart";
+import { contributionRampStep, seriesColor, sharesOf } from "@/utils/chart";
 import { formatDuration, formatGas, formatPercent, formatSecondsOfTarget } from "@/utils/format";
 import { Card, Label, Swatch } from "./primitives";
 
@@ -20,7 +21,19 @@ export function Gauge({ fraction, step, label, marks = [] }: { fraction: number;
   );
 }
 
-function ConstraintCard({ c, index, backlog, share }: { c: Constraint; index: number; backlog: number; share: number }) {
+/**
+ * Card values derived from the backlogs on screen, so the exponent, the share
+ * of x and the ramp colour agree with the animated gauge: integer bips through
+ * the pricer, shares from those bips.
+ */
+export function cardValues(constraints: readonly Constraint[], backlogs: readonly number[]): { bips: number[]; shares: number[]; projected: boolean } {
+  const shown = constraints.map((c, i) => ({ target: c.target, window: c.window, backlog: backlogs[i] ?? c.backlog }));
+  const bips = contributionsBips(shown);
+  const projected = shown.some((s, i) => s.backlog !== constraints[i].backlog);
+  return { bips, shares: sharesOf(bips), projected };
+}
+
+function ConstraintCard({ c, index, backlog, bips, share, projected }: { c: Constraint; index: number; backlog: number; bips: number; share: number; projected: boolean }) {
   const denominator = c.target * c.window;
   const x = denominator > 0 ? backlog / denominator : 0;
   const scale = Math.max(1, Math.ceil(x));
@@ -46,18 +59,21 @@ function ConstraintCard({ c, index, backlog, share }: { c: Constraint; index: nu
           <dd className="num mt-0.5 text-ink">{formatDuration(c.window)}</dd>
         </div>
         <div>
-          <Label>Backlog</Label>
+          <Label>Backlog{projected ? " (projected)" : ""}</Label>
           <dd className="num mt-0.5 text-ink">{formatGas(backlog)}</dd>
           <dd className="num text-xs text-ink-3">{formatSecondsOfTarget(backlog, c.target)} of target</dd>
         </div>
         <div>
-          <Label>x{index + 1}</Label>
-          <dd className="num mt-0.5 text-ink">{(c.exponentBips / 10_000).toFixed(4)}</dd>
-          <dd className="num text-xs text-ink-3">backlog / (target × window)</dd>
+          <Label>
+            x{index + 1}
+            {projected ? " (projected)" : ""}
+          </Label>
+          <dd className="num mt-0.5 text-ink">{(bips / 10_000).toFixed(4)}</dd>
+          <dd className="num text-xs text-ink-3">backlog / (target × window), {bips.toLocaleString("en-US")} bips</dd>
         </div>
       </dl>
       <div className="mt-4">
-        <Gauge fraction={x / scale} step={contributionRampStep(c.exponentBips)} label={`Constraint ${index + 1} backlog as a fraction of ${scale} window${scale > 1 ? "s" : ""} of target`} marks={marks} />
+        <Gauge fraction={x / scale} step={contributionRampStep(bips)} label={`Constraint ${index + 1} backlog as a fraction of ${scale} window${scale > 1 ? "s" : ""} of target`} marks={marks} />
         <div className="num mt-1 flex justify-between text-[11px] text-ink-3">
           <span>0</span>
           <span>
@@ -69,10 +85,11 @@ function ConstraintCard({ c, index, backlog, share }: { c: Constraint; index: nu
   );
 }
 
-function LegacyCard({ legacy, backlog }: { legacy: LegacyParams; backlog: number }) {
+function LegacyCard({ legacy, backlog, projected }: { legacy: LegacyParams; backlog: number; projected: boolean }) {
   const tolerance = legacy.tolerance * legacy.speedLimit;
   const inertia = legacy.inertia * legacy.speedLimit;
-  const x = backlog > tolerance ? (backlog - tolerance) / inertia : 0;
+  const bips = Number(legacyExponentBips(toLegacyState({ ...legacy, backlog })));
+  const x = inertia > 0 ? bips / 10_000 : 0;
   const scale = Math.max(2, Math.ceil(backlog / tolerance) + 1);
   return (
     <Card>
@@ -97,13 +114,13 @@ function LegacyCard({ legacy, backlog }: { legacy: LegacyParams; backlog: number
           <dd className="num text-xs text-ink-3">{formatGas(tolerance)} gas free</dd>
         </div>
         <div>
-          <Label>Backlog</Label>
+          <Label>Backlog{projected ? " (projected)" : ""}</Label>
           <dd className="num mt-0.5 text-ink">{formatGas(backlog)}</dd>
           <dd className="num text-xs text-ink-3">{formatSecondsOfTarget(backlog, legacy.speedLimit)} of speed limit · x = {x.toFixed(4)}</dd>
         </div>
       </dl>
       <div className="mt-4">
-        <Gauge fraction={backlog / (tolerance * scale)} step={contributionRampStep(x * 10_000)} label="Legacy backlog against the tolerance threshold" marks={[1 / scale]} />
+        <Gauge fraction={backlog / (tolerance * scale)} step={contributionRampStep(bips)} label="Legacy backlog against the tolerance threshold" marks={[1 / scale]} />
         <div className="num mt-1 flex justify-between text-[11px] text-ink-3">
           <span>0</span>
           <span>tolerance at {formatGas(tolerance)}</span>
@@ -113,6 +130,8 @@ function LegacyCard({ legacy, backlog }: { legacy: LegacyParams; backlog: number
     </Card>
   );
 }
+
+const PROJECTION_NOTE = "Between samples the backlogs are a projection: they drain at each target rate and x is recomputed from them, so the numbers, shares and colours stay consistent with the gauges. Every tick snaps back to the sampled state.";
 
 /** One card per constraint, backlogs draining at the target rate between ticks. */
 export function ConstraintCards({ snapshot }: { snapshot: LiveSnapshot | null }) {
@@ -126,15 +145,24 @@ export function ConstraintCards({ snapshot }: { snapshot: LiveSnapshot | null })
   const backlogs = useAnimatedBacklogs(constraints, snapshot?.sampledAt ?? "");
   if (!snapshot) return <p className="text-sm text-ink-2">Waiting for the first sample.</p>;
   if (snapshot.model === "legacy" && snapshot.legacy) {
-    return <LegacyCard legacy={snapshot.legacy} backlog={backlogs[0] ?? snapshot.legacy.backlog} />;
+    const backlog = backlogs[0] ?? snapshot.legacy.backlog;
+    return (
+      <div>
+        <LegacyCard legacy={snapshot.legacy} backlog={backlog} projected={backlog !== snapshot.legacy.backlog} />
+        <p className="mt-2 text-xs text-ink-3">{PROJECTION_NOTE}</p>
+      </div>
+    );
   }
-  const total = constraints.reduce((sum, c) => sum + c.exponentBips, 0);
+  const values = cardValues(constraints, backlogs);
   const cols = constraints.length >= 4 ? "lg:grid-cols-3" : "lg:grid-cols-2";
   return (
-    <div className={`grid gap-4 sm:grid-cols-2 ${cols}`}>
-      {constraints.map((c, i) => (
-        <ConstraintCard key={`${c.target}-${c.window}-${i}`} c={c} index={i} backlog={backlogs[i] ?? c.backlog} share={total > 0 ? c.exponentBips / total : 0} />
-      ))}
+    <div>
+      <div className={`grid gap-4 sm:grid-cols-2 ${cols}`}>
+        {constraints.map((c, i) => (
+          <ConstraintCard key={`${c.target}-${c.window}-${i}`} c={c} index={i} backlog={backlogs[i] ?? c.backlog} bips={values.bips[i]} share={values.shares[i]} projected={values.projected} />
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-ink-3">{PROJECTION_NOTE}</p>
     </div>
   );
 }

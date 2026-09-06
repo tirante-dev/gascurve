@@ -45,9 +45,16 @@ export type WorldRecord = {
   /** Sum of block base fees, so the bucket average is weighted by block count. */
   feeSum: bigint;
   feesWei: bigint;
+  /** Start-of-block exponent of the record's last block, and its per-constraint split. */
   exponent: number;
+  constraintBips: number[];
   backlogs: number[];
   backlogsMax: number[];
+  /** Floor in force at the record's last block. */
+  minFee: bigint;
+  /** Σ gasUsed × minBaseFee per block, and feesWei minus that, exact. */
+  floorFeesWei: bigint;
+  surplusFeesWei: bigint;
   setId: number;
   replayErrorBips: number;
 };
@@ -168,6 +175,7 @@ export class MockWorld {
   private minFeeIndex = -1;
   private lastFee = 0n;
   private lastExponent = 0;
+  private lastContributions: number[] = [];
   private lastReplayError = 0;
   private accumulatedInfra = 0n;
   private accumulatedNetwork = 0n;
@@ -194,6 +202,7 @@ export class MockWorld {
     this.minFeeIndex = -1;
     this.lastFee = 0n;
     this.lastExponent = 0;
+    this.lastContributions = [];
     this.lastReplayError = 0;
     this.accumulatedInfra = 0n;
     this.accumulatedNetwork = 0n;
@@ -278,10 +287,15 @@ export class MockWorld {
     return this.legacy ? 0 : this.setIndex + 1;
   }
 
-  /** The fee and exponent implied by the current backlogs, without draining. */
-  private priceCurrent(): { fee: bigint; exponent: number } {
-    const exponent = this.legacy ? legacyExponentBips(this.legacy) : this.constraints.reduce((sum, c) => sum + constraintExponentBips(c), 0n);
-    return { fee: baseFeeFromExponent(this.minFee, exponent), exponent: Number(exponent) };
+  /** The fee, exponent and per-constraint split implied by the current backlogs, without draining (the Go legacy model reports one element). */
+  private priceCurrent(): { fee: bigint; exponent: number; contributions: number[] } {
+    if (this.legacy) {
+      const exponent = legacyExponentBips(this.legacy);
+      return { fee: baseFeeFromExponent(this.minFee, exponent), exponent: Number(exponent), contributions: [Number(exponent)] };
+    }
+    const contributions = this.constraints.map((c) => constraintExponentBips(c));
+    const exponent = contributions.reduce((sum, c) => sum + c, 0n);
+    return { fee: baseFeeFromExponent(this.minFee, exponent), exponent: Number(exponent), contributions: contributions.map((c) => Number(c)) };
   }
 
   /**
@@ -303,15 +317,15 @@ export class MockWorld {
   }
 
   /** One exact pricer step for a single block: drain by dt, price, then absorb the block's gas. */
-  private blockStep(dt: bigint, gas: bigint): { fee: bigint; exponent: number } {
+  private blockStep(dt: bigint, gas: bigint): { fee: bigint; exponent: number; contributions: number[] } {
     if (this.legacy) {
       const r = legacyStep(this.legacy, dt, this.minFee);
       legacyAddGas(this.legacy, gas);
-      return { fee: r.baseFee, exponent: Number(r.exponent) };
+      return { fee: r.baseFee, exponent: Number(r.exponent), contributions: [Number(r.exponent)] };
     }
     const r = step(this.constraints, dt, this.minFee);
     addGas(this.constraints, gas);
-    return { fee: r.baseFee, exponent: Number(r.exponent) };
+    return { fee: r.baseFee, exponent: Number(r.exponent), contributions: r.contributions.map((c) => Number(c)) };
   }
 
   /** A step of many blocks at once, priced from the state at its start and updated as a fluid. */
@@ -319,9 +333,11 @@ export class MockWorld {
     this.applyParamsAt(t);
     const gas = Math.round(this.demand.average(t, dt) * dt);
     const blocks = this.blockAt(t + dt) - this.blockAt(t);
-    const { fee, exponent } = this.priceCurrent();
+    const { fee, exponent, contributions } = this.priceCurrent();
     this.fluidUpdate(BigInt(dt), BigInt(gas));
     const backlogs = this.currentBacklogs();
+    const feesWei = BigInt(gas) * fee;
+    const floorFeesWei = BigInt(gas) * this.minFee;
     this.records.push({
       t,
       dt,
@@ -330,15 +346,20 @@ export class MockWorld {
       feeMin: fee,
       feeMax: fee,
       feeSum: fee * BigInt(blocks),
-      feesWei: BigInt(gas) * fee,
+      feesWei,
       exponent,
+      constraintBips: contributions,
       backlogs,
       backlogsMax: backlogs,
+      minFee: this.minFee,
+      floorFeesWei,
+      surplusFeesWei: feesWei - floorFeesWei,
       setId: this.currentSetId(),
       replayErrorBips: 0,
     });
     this.lastFee = fee;
     this.lastExponent = exponent;
+    this.lastContributions = contributions;
     this.lastReplayError = 0;
     this.time = t + dt;
   }
@@ -361,12 +382,13 @@ export class MockWorld {
     let feeMax = 0n;
     let feeSum = 0n;
     let feesWei = 0n;
+    let floorFeesWei = 0n;
     let gasTotal = 0;
     const before = this.currentBacklogs();
     let backlogsMax = before;
     for (let k = 0; k < count; k++) {
       const gas = Math.round((total * weights[k]) / weightSum);
-      const { fee, exponent } = this.blockStep(k === 0 ? 1n : 0n, BigInt(gas));
+      const { fee, exponent, contributions } = this.blockStep(k === 0 ? 1n : 0n, BigInt(gas));
       const number = first + k;
       const err = Math.floor(hash01(this.def.demand.seed + 5, number) * 6);
       const predicted = (fee * (ONE_IN_BIPS - BigInt(err))) / ONE_IN_BIPS;
@@ -379,18 +401,22 @@ export class MockWorld {
         baseFee: fee.toString(),
         predictedBaseFee: predicted.toString(),
         backlogs,
+        constraintBips: contributions,
         exponentBips: exponent,
+        minBaseFee: this.minFee.toString(),
         anchored: k === 0,
       });
       feeMin = k === 0 ? fee : minBigInt(feeMin, fee);
       feeMax = maxBigInt(feeMax, fee);
       feeSum += fee;
       feesWei += BigInt(gas) * fee;
+      floorFeesWei += BigInt(gas) * this.minFee;
       gasTotal += gas;
       this.accumulatedInfra += BigInt(gas) * this.minFee;
       this.accumulatedNetwork += BigInt(gas) * (fee > this.minFee ? fee - this.minFee : 0n);
       this.lastFee = fee;
       this.lastExponent = exponent;
+      this.lastContributions = contributions;
       this.lastReplayError = err;
     }
     if (this.blocks.length > RING_SIZE) this.blocks.splice(0, this.blocks.length - RING_SIZE);
@@ -404,8 +430,12 @@ export class MockWorld {
       feeSum,
       feesWei,
       exponent: this.lastExponent,
+      constraintBips: this.lastContributions,
       backlogs: this.currentBacklogs(),
       backlogsMax,
+      minFee: this.minFee,
+      floorFeesWei,
+      surplusFeesWei: feesWei - floorFeesWei,
       setId: this.currentSetId(),
       replayErrorBips: this.lastReplayError,
     });
@@ -631,10 +661,11 @@ export class MockWorld {
       const start = alignDown(r.t, spec.seconds);
       const acc = buckets.get(start);
       if (!acc) {
-        buckets.set(start, { ...r, t: start, duration: r.dt, backlogs: [...r.backlogs], backlogsMax: [...r.backlogsMax] });
+        buckets.set(start, { ...r, t: start, duration: r.dt, backlogs: [...r.backlogs], backlogsMax: [...r.backlogsMax], constraintBips: [...r.constraintBips] });
         continue;
       }
-      // Records are visited newest first, so the first one seen carries the end-of-bucket state.
+      // Records are visited newest first, so the first one seen carries the
+      // end-of-bucket state (backlogs, constraintBips, minFee); sums accumulate.
       acc.duration += r.dt;
       acc.blocks += r.blocks;
       acc.gas += r.gas;
@@ -642,6 +673,8 @@ export class MockWorld {
       acc.feeMax = maxBigInt(acc.feeMax, r.feeMax);
       acc.feeSum += r.feeSum;
       acc.feesWei += r.feesWei;
+      acc.floorFeesWei += r.floorFeesWei;
+      acc.surplusFeesWei += r.surplusFeesWei;
       acc.backlogsMax = acc.backlogsMax.map((v, j) => Math.max(v, r.backlogsMax[j] ?? 0));
       acc.replayErrorBips = Math.max(acc.replayErrorBips, r.replayErrorBips);
     }
@@ -657,8 +690,12 @@ export class MockWorld {
         baseFeeAvg: (b.blocks > 0 ? b.feeSum / BigInt(b.blocks) : b.feeMin).toString(),
         baseFeeMax: b.feeMax.toString(),
         exponentBips: b.exponent,
+        constraintBips: b.constraintBips,
         backlogs: b.backlogs,
         backlogsMax: b.backlogsMax,
+        minBaseFee: b.minFee.toString(),
+        floorFeesWei: b.floorFeesWei.toString(),
+        surplusFeesWei: b.surplusFeesWei.toString(),
         constraintSetId: b.setId,
         replayErrorBips: b.replayErrorBips,
       }));
