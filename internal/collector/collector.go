@@ -9,9 +9,12 @@ package collector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,17 +56,29 @@ type ArchiveRPC interface {
 
 // EndpointPool is what a nitro.Pool adds to RPC: chain id verification of
 // every endpoint, capability routing (the endpoint serving newHeads, the
-// one serving historical state) and the routing state for /status.
+// one serving historical state), the active endpoint's call policy and the
+// routing state for /status. Capability routing is managed: only verified
+// endpoints are used, and both paths move to the next capable endpoint
+// when the one they used fails.
 type EndpointPool interface {
 	RPC
 	Verify(ctx context.Context) error
-	WS() *nitro.Endpoint
-	Archive() *nitro.Endpoint
+	// HasWS reports whether any endpoint is configured with a ws_url.
+	HasWS() bool
+	// WSURL resolves the WebSocket endpoint to dial next, verifying it
+	// first, so a subscriber rebinds when its endpoint is disabled.
+	WSURL(ctx context.Context) (string, error)
+	// Archive returns the managed historical-state path, nil when no
+	// endpoint serves it.
+	Archive() *nitro.ArchivePool
 	Status() nitro.PoolStatus
+	// Policy is the active endpoint's call policy.
+	Policy() nitro.Policy
 }
 
 var (
 	_ EndpointPool = (*nitro.Pool)(nil)
+	_ ArchiveRPC   = (*nitro.ArchivePool)(nil)
 	_ ArchiveRPC   = (*nitro.Endpoint)(nil)
 )
 
@@ -181,10 +196,15 @@ type Follower struct {
 	ownerScanThrough uint64
 	// scanOrigin is the owner_scan_origin checkpoint, nil for a chain
 	// scanned from genesis.
-	scanOrigin    *scanOrigin
-	l1            *model.L1
-	accounts      *model.Accounts
-	slowPending   bool
+	scanOrigin *scanOrigin
+	l1         *model.L1
+	accounts   *model.Accounts
+	// slowGen counts the slow samples taken and slowSaved the newest one a
+	// tick has persisted. A tick clears only the generation it wrote, so a
+	// sample published while its transaction ran is still persisted by the
+	// next tick.
+	slowGen       uint64
+	slowSaved     uint64
 	cursorChecked bool
 	snapshot      *model.LiveSnapshot
 }
@@ -227,15 +247,35 @@ type hole struct {
 }
 
 // scanOrigin is where a deliberately truncated owner scan began
-// (collector_state owner_scan_origin). With Archive the minimum base fee in
-// force at Block was sampled there and a constraint set was recorded, so
-// history from Block on is reconstructable; without it nothing before
+// (collector_state owner_scan_origin). With Archive the complete pricer
+// state in force at the end of Block was sampled there: the minimum base
+// fee, and either a constraint set recorded at Block+1 with the sampled
+// backlogs or, on a legacy chain, Legacy. History from Block+1 on then
+// replays from real values. Without an archive endpoint nothing before
 // Block can be priced and the range is recorded as a hole.
 type scanOrigin struct {
 	Block      uint64 `json:"block"`
 	MinBaseFee string `json:"minBaseFee,omitempty"`
 	Archive    bool   `json:"archive"`
+	// Legacy is the sampled legacy pricer state at the end of Block
+	// (parameters and backlog), nil on a constraints chain or without an
+	// archive endpoint.
+	Legacy *model.LegacyParams `json:"legacy,omitempty"`
 }
+
+// replayFrom is the first block a replay may start at: the origin sample
+// is end-of-block state for Block, whose gas is already counted in it, so
+// the block after it is the first one to replay.
+func (o *scanOrigin) replayFrom() uint64 {
+	if o == nil {
+		return 0
+	}
+	return o.Block + 1
+}
+
+// fullState reports whether the origin carries a complete pricer state, so
+// history above it can be replayed rather than guessed.
+func (o *scanOrigin) fullState() bool { return o != nil && o.Archive && o.MinBaseFee != "" }
 
 // fee returns the sampled minimum base fee, nil when none was sampled.
 func (o *scanOrigin) fee() *big.Int {
@@ -301,19 +341,18 @@ func NewFollower(o Options) *Follower {
 // TickInterval returns the fast loop's cadence for this network.
 func (f *Follower) TickInterval() time.Duration { return f.tickInterval }
 
-// unlimited reports whether the network has no call budget, which turns
-// off gap skipping and the two-transaction batch report prefilter.
-func (f *Follower) unlimited() bool { return f.net.Unlimited() }
-
-// bindPool routes capabilities once the pool's endpoints are verified:
-// heads come from the first usable endpoint with a ws_url, anchors from
-// the first with archive: true. Explicit Options win and a binding is
-// made only once, so a restarted follower keeps its subscriber.
+// bindPool routes capabilities once the pool's endpoints are verified.
+// Neither binding names an endpoint: the head subscriber asks the pool for
+// a verified WebSocket endpoint before every connection attempt, so it
+// rebinds when the one it followed is disabled or stops verifying, and the
+// archive path picks and verifies its endpoint per call, failing over to
+// the next one that serves historical state. Explicit Options win and a
+// binding is made only once, so a restarted follower keeps its subscriber.
 func (f *Follower) bindPool() {
 	if f.heads == nil {
-		if ws := f.pool.WS(); ws != nil {
-			f.heads = nitro.NewHeadSubscriber(ws.WSURL(), nitro.WithHeadLogger(f.log.With("endpoint", ws.Index())))
-			f.log.Info("newHeads routed to endpoint", "endpoint", ws.Index())
+		if f.pool.HasWS() {
+			f.heads = nitro.NewHeadSubscriber("", nitro.WithHeadLogger(f.log), nitro.WithHeadURL(f.pool.WSURL))
+			f.log.Info("newHeads routed to the pool's verified WebSocket endpoints")
 		} else {
 			f.log.Info("no endpoint has a ws_url, polling on the timer")
 		}
@@ -321,20 +360,58 @@ func (f *Follower) bindPool() {
 	if f.archive == nil {
 		if ar := f.pool.Archive(); ar != nil {
 			f.archive = ar
-			f.log.Info("backfill anchors routed to archive endpoint", "endpoint", ar.Index())
+			f.log.Info("backfill anchors routed to the pool's archive endpoints")
 		} else {
 			f.log.Info("no archive endpoint, backfill is a pure replay")
 		}
 	}
 }
 
-// endpointsStatus renders the pool's routing state for /status.
+// endpointsStatus renders the pool's routing state for /status. A disabled
+// endpoint carries the sanitized reason it was disabled for; nothing here
+// is derived from a URL.
 func endpointsStatus(st nitro.PoolStatus) model.EndpointsStatus {
 	out := model.EndpointsStatus{ActiveEndpoint: st.Active, Failovers: st.Failovers, Endpoints: make([]model.EndpointStatus, len(st.Endpoints))}
 	for i, e := range st.Endpoints {
 		out.Endpoints[i] = model.EndpointStatus{Index: e.Index, WS: e.WS, Archive: e.Archive, Disabled: e.Disabled}
+		if e.Error != "" {
+			msg := e.Error
+			out.Endpoints[i].Error = &msg
+		}
 	}
 	return out
+}
+
+// endpointError summarizes the disabled endpoints of a pool for
+// networks.last_error, so a network that keeps running on a fallback still
+// reports the mismatch as an error. It names indexes and reasons only,
+// never a URL.
+func endpointError(st nitro.PoolStatus) string {
+	var parts []string
+	for _, e := range st.Endpoints {
+		if e.Disabled {
+			parts = append(parts, fmt.Sprintf("endpoint %d disabled: %s", e.Index, e.Error))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// policy is the call policy one operation works to: taken once from the
+// active endpoint, so a tick, a scan or a backfill step never mixes two
+// endpoints' budgets halfway through.
+type policy struct {
+	unlimited bool
+	rate      float64
+}
+
+// policy snapshots the active endpoint's policy, falling back to the
+// network's own configuration for a plain client.
+func (f *Follower) policy() policy {
+	if f.pool != nil {
+		p := f.pool.Policy()
+		return policy{unlimited: p.Unlimited, rate: p.Rate}
+	}
+	return policy{unlimited: f.net.Unlimited(), rate: f.net.CallsPerSecond}
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
@@ -395,7 +472,8 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 
 // reloadHeadLocked reads the last committed block from the database and
 // forgets the in-memory replay state, so the next tick rebuilds it from
-// the stored row. Used at start and after a failed commit.
+// the stored row. Used at start, after a failed commit and after a rewind
+// (which also clears the sample and snapshot, see clearHeadStateLocked).
 func (f *Follower) reloadHeadLocked(ctx context.Context) error {
 	last, err := f.store.LatestBlock(ctx, f.chainID)
 	if err != nil {
@@ -408,6 +486,14 @@ func (f *Follower) reloadHeadLocked(ctx context.Context) error {
 		f.prevTs = uint64(last.TS.Unix())
 	}
 	return nil
+}
+
+// clearHeadStateLocked drops everything in memory that describes the head
+// a rewind orphaned: the last sample and the published snapshot as well as
+// the replay state. Only the tick that commits the replacement head
+// publishes them again, so nothing reads state from a fork that is gone.
+func (f *Follower) clearHeadStateLocked() {
+	f.lastSample, f.snapshot = nil, nil
 }
 
 // loadScanStateLocked loads the owner scan checkpoints: how far the
@@ -653,13 +739,18 @@ func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
 }
 
 // legacyAt returns base with every recorded legacy change at or before
-// number applied (the latest per parameter wins); base is the live sample's
-// parameters, which stand in for what was never recorded.
+// number applied (the latest per parameter wins). At and above a scan
+// origin that sampled the legacy state, that sample is the base instead of
+// the caller's, so history is replayed from what was really in force
+// rather than from the current parameters.
 func (tl *timeline) legacyAt(number uint64, base *pricer.Legacy) *pricer.Legacy {
 	if base == nil {
 		return nil
 	}
 	out := *base
+	if o := tl.origin; o != nil && o.Legacy != nil && number >= o.Block {
+		out.SpeedLimit, out.Inertia, out.Tolerance = o.Legacy.SpeedLimit, o.Legacy.Inertia, o.Legacy.Tolerance
+	}
 	for _, c := range tl.legacy {
 		if c.block <= number {
 			applyLegacy(&out, c)
@@ -869,4 +960,52 @@ func entriesJSON(entries []model.ConstraintSetEntry) db.JSONB {
 	}
 	b, _ := json.Marshal(entries)
 	return db.JSONB(b)
+}
+
+// errStaleGeneration marks work that was fetched from the chain before a
+// rewind and must not be committed on top of the canonical chain.
+var errStaleGeneration = errors.New("chain rewound while fetching, discarding the work")
+
+// generation reads the chain's rewind counter (collector_state
+// generation), 0 before the first rewind.
+func (f *Follower) generation(ctx context.Context, s db.Store) (uint64, error) {
+	raw, ok, err := s.GetState(ctx, f.chainID, db.StateGeneration)
+	if err != nil || !ok {
+		return 0, err
+	}
+	gen, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("generation %q: %w", raw, err)
+	}
+	return gen, nil
+}
+
+// bumpGeneration increments the rewind counter inside the rewind's own
+// transaction, so every writer that captured the old value aborts.
+func (f *Follower) bumpGeneration(ctx context.Context, s db.Store) error {
+	gen, err := f.generation(ctx, s)
+	if err != nil {
+		return err
+	}
+	return s.SetState(ctx, f.chainID, db.StateGeneration, strconv.FormatUint(gen+1, 10))
+}
+
+// withGeneration runs fn in the chain transaction, but only when the chain
+// has not been rewound since gen was captured. A writer captures the
+// generation before its network calls and commits under this check, so
+// work fetched from a fork that has since been rewound is discarded and
+// retried instead of being written back on top of the canonical chain.
+// Holding the lock across the network calls instead would block the fast
+// loop for as long as the RPC takes.
+func (f *Follower) withGeneration(ctx context.Context, gen uint64, fn func(db.Store) error) error {
+	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		cur, err := f.generation(ctx, s)
+		if err != nil {
+			return err
+		}
+		if cur != gen {
+			return fmt.Errorf("%w (generation %d, now %d)", errStaleGeneration, gen, cur)
+		}
+		return fn(s)
+	})
 }

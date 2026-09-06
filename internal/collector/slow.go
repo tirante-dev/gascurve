@@ -70,7 +70,10 @@ func (f *Follower) sampleSlow(ctx context.Context) error {
 		Network:  model.Account{Address: accounts.Network.Address, Balance: weiString(accounts.Network.Balance)},
 		L1Reward: model.Account{Address: accounts.L1Reward.Address, Balance: weiString(accounts.L1Reward.Balance)},
 	}
-	f.slowPending = true
+	// A generation, not a flag: the tick that persists this sample clears
+	// exactly this generation, so a newer sample taken while that
+	// transaction runs still gets stored by the next tick.
+	f.slowGen++
 	f.mu.Unlock()
 	return nil
 }
@@ -100,6 +103,10 @@ func (f *Follower) checkArbOSVersion(ctx context.Context) error {
 // Once a pass reaches the head it started from, owner_scan_through records
 // that the timeline is complete through it.
 func (f *Follower) scanOwnerActions(ctx context.Context) error {
+	gen, err := f.generation(ctx, f.store)
+	if err != nil {
+		return err
+	}
 	head, err := f.currentHead(ctx)
 	if err != nil {
 		return err
@@ -117,7 +124,7 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 		from = last + 1
 	} else if head >= smallChainBlocks {
 		from = head - largeChainLookback
-		if err := f.establishOrigin(ctx, from); err != nil {
+		if err := f.establishOrigin(ctx, from, gen); err != nil {
 			return err
 		}
 	}
@@ -126,7 +133,7 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 			return ctx.Err()
 		}
 		to := min(from+ownerLogChunk-1, head)
-		if err := f.scanOwnerRange(ctx, from, to); err != nil {
+		if err := f.scanOwnerRange(ctx, from, to, gen); err != nil {
 			return err
 		}
 		from = to + 1
@@ -136,23 +143,33 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	if err := f.reloadSetsLocked(ctx); err != nil {
 		return err
 	}
-	if head > f.ownerScanThrough {
-		if err := f.store.SetState(ctx, f.chainID, db.StateOwnerScanThrough, strconv.FormatUint(head, 10)); err != nil {
-			return err
-		}
-		f.ownerScanThrough = head
+	if head <= f.ownerScanThrough {
+		return nil
 	}
+	// The readiness checkpoint is a cursor like any other: it commits under
+	// the generation check, so a rewind that lowered it cannot be undone by
+	// a pass that started on the old fork.
+	if err := f.withGeneration(ctx, gen, func(s db.Store) error {
+		return s.SetState(ctx, f.chainID, db.StateOwnerScanThrough, strconv.FormatUint(head, 10))
+	}); err != nil {
+		return err
+	}
+	f.ownerScanThrough = head
 	return nil
 }
 
-// establishOrigin records the pricing state in force at the block a
-// truncated owner scan starts from, once. With an archive endpoint the
-// state is sampled there: the minimum base fee becomes the baseline for
-// every later block and the constraints an observed set at the cutoff, so
-// history from the cutoff on replays from real values. Without one nothing
-// before the cutoff can be priced: the range is recorded as a hole and the
-// backfill never enters it, rather than guessing the fee in force.
-func (f *Follower) establishOrigin(ctx context.Context, cutoff uint64) error {
+// establishOrigin records the complete pricing state in force at the block
+// a truncated owner scan starts from, once. With an archive endpoint the
+// whole state is sampled there: the minimum base fee, the constraints and
+// their backlogs, or, on a legacy chain, the speed limit, inertia,
+// tolerance and backlog. The sample is end-of-block state for the cutoff,
+// whose own gas it already contains, so the constraint set is recorded as
+// effective at the block after it and the replay starts there; adding the
+// cutoff's gas again would inflate every backlog and price from the origin
+// until the next anchor. Without an archive endpoint nothing before the
+// cutoff can be priced: the range is recorded as a hole and the backfill
+// never enters it, rather than guessing the state in force.
+func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64) error {
 	f.mu.Lock()
 	known := f.scanOrigin != nil
 	f.mu.Unlock()
@@ -168,13 +185,23 @@ func (f *Follower) establishOrigin(ctx context.Context, cutoff uint64) error {
 		}
 		origin.Archive = true
 		origin.MinBaseFee = bigOrZero(sample.MinBaseFee).String()
-		if !sample.IsLegacy() {
+		switch {
+		case sample.IsLegacy():
+			if sample.Legacy == nil {
+				return fmt.Errorf("origin state at %d: legacy chain without parameters", cutoff)
+			}
+			origin.Legacy = &model.LegacyParams{
+				SpeedLimit: sample.Legacy.SpeedLimit, Inertia: sample.Legacy.Inertia,
+				Tolerance: sample.Legacy.Tolerance, Backlog: sample.Legacy.Backlog,
+			}
+		default:
 			set = &db.ConstraintSet{
-				ChainID: f.chainID, EffectiveBlock: cutoff, EffectiveAt: time.Unix(int64(sample.Header.Timestamp), 0).UTC(),
+				ChainID: f.chainID, EffectiveBlock: origin.replayFrom(), EffectiveAt: time.Unix(int64(sample.Header.Timestamp), 0).UTC(),
 				Constraints: entriesJSON(entriesFromSample(sample)), Source: model.SourceObserved,
 			}
 		}
-		f.log.Info("owner scan starts at a cutoff, pricing state sampled from the archive", "block", cutoff, "minBaseFee", origin.MinBaseFee)
+		f.log.Info("owner scan starts at a cutoff, the whole pricing state was sampled from the archive",
+			"block", cutoff, "replayFrom", origin.replayFrom(), "minBaseFee", origin.MinBaseFee, "legacy", origin.Legacy != nil)
 	} else {
 		f.log.Warn("owner scan starts at a cutoff without an archive endpoint, history before it cannot be reconstructed", "block", cutoff)
 	}
@@ -182,7 +209,7 @@ func (f *Follower) establishOrigin(ctx context.Context, cutoff uint64) error {
 	if err != nil {
 		return err
 	}
-	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+	err = f.withGeneration(ctx, gen, func(s db.Store) error {
 		if set != nil {
 			if _, err := s.InsertConstraintSet(ctx, *set); err != nil {
 				return err
@@ -205,20 +232,39 @@ func (f *Follower) establishOrigin(ctx context.Context, cutoff uint64) error {
 }
 
 // scanOwnerRange records the actions in [from, to] and advances the
-// cursor in the same chain-locked transaction. A malformed OwnerActs event
-// fails the range so the cursor never moves past an event that was not
-// understood.
-func (f *Follower) scanOwnerRange(ctx context.Context, from, to uint64) error {
+// cursor in the same chain-locked transaction, but only when the chain has
+// not been rewound since gen was read: logs fetched from a fork the fast
+// loop has meanwhile replaced must not be written back, nor may their
+// cursor restore a checkpoint the rewind lowered. A malformed OwnerActs
+// event fails the range so the cursor never moves past an event that was
+// not understood.
+func (f *Follower) scanOwnerRange(ctx context.Context, from, to, gen uint64) error {
 	actions, err := f.fetchOwnerActions(ctx, from, to)
 	if err != nil {
 		return err
 	}
-	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+	return f.withGeneration(ctx, gen, func(s db.Store) error {
 		if _, err := f.storeOwnerActions(ctx, s, actions); err != nil {
 			return err
 		}
 		return s.SetState(ctx, f.chainID, db.StateOwnerLogCursor, strconv.FormatUint(to, 10))
 	})
+}
+
+// fetchOwnerRange reads the owner actions over [from, to] in chunks of at
+// most ownerLogChunk blocks, so a range wider than an endpoint accepts in
+// one eth_getLogs is still covered.
+func (f *Follower) fetchOwnerRange(ctx context.Context, from, to uint64) ([]*nitro.OwnerAction, error) {
+	var out []*nitro.OwnerAction
+	for start := from; start <= to; start += ownerLogChunk {
+		end := min(start+ownerLogChunk-1, to)
+		actions, err := f.fetchOwnerActions(ctx, start, end)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, actions...)
+	}
+	return out, nil
 }
 
 // fetchOwnerActions reads and decodes the OwnerActs logs in [from, to].
@@ -353,11 +399,18 @@ func (f *Follower) currentHead(ctx context.Context) (uint64, error) {
 }
 
 // scanBatchReports inspects new blocks for batch posting reports and
-// stores the decoded cost. A budgeted network only looks at
-// two-transaction blocks (the shape of a report block) and at most
-// batchScanLimit of them per slow tick; an unlimited one reads every block
-// with full transactions until it has caught up.
+// stores the decoded cost. The policy is the active endpoint's, taken once
+// for the whole scan: a budgeted endpoint only looks at two-transaction
+// blocks (the shape of a report block) and at most batchScanLimit of them
+// per slow tick; an unlimited one reads every block with full transactions
+// until it has caught up. The cursor commits under the generation check,
+// so blocks read from a fork the fast loop has rewound are discarded.
 func (f *Follower) scanBatchReports(ctx context.Context) error {
+	pol := f.policy()
+	gen, err := f.generation(ctx, f.store)
+	if err != nil {
+		return err
+	}
 	cursor, ok, err := f.store.GetState(ctx, f.chainID, db.StateBatchScanCursor)
 	if err != nil {
 		return err
@@ -378,11 +431,11 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 		after = oldest.Number - 1
 	}
 	chunk := batchFetchChunk
-	if f.unlimited() {
+	if pol.unlimited {
 		chunk = nitro.MaxBatch
 	}
 	for {
-		nums, err := f.batchCandidates(ctx, after)
+		nums, err := f.batchCandidates(ctx, after, pol)
 		if err != nil {
 			return err
 		}
@@ -403,7 +456,7 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 			}
 		}
 		after = nums[len(nums)-1]
-		err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		err = f.withGeneration(ctx, gen, func(s db.Store) error {
 			if len(reports) > 0 {
 				if err := s.UpsertBatchReports(ctx, reports); err != nil {
 					return err
@@ -414,7 +467,7 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if !f.unlimited() || len(nums) < batchScanLimit {
+		if !pol.unlimited || len(nums) < batchScanLimit {
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -424,10 +477,10 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 }
 
 // batchCandidates lists the next blocks to inspect after the cursor: every
-// block on an unlimited network, only two-transaction blocks on a budgeted
-// one.
-func (f *Follower) batchCandidates(ctx context.Context, after uint64) ([]uint64, error) {
-	if !f.unlimited() {
+// block on an unlimited endpoint, only two-transaction blocks on a
+// budgeted one.
+func (f *Follower) batchCandidates(ctx context.Context, after uint64, pol policy) ([]uint64, error) {
+	if !pol.unlimited {
 		return f.store.TwoTxBlocks(ctx, f.chainID, after, batchScanLimit)
 	}
 	blocks, err := f.store.BlocksAfter(ctx, f.chainID, after, batchScanLimit)
@@ -509,12 +562,20 @@ func (f *Follower) persistStats(ctx context.Context) error {
 		return err
 	}
 	if f.pool != nil {
-		b, err := json.Marshal(endpointsStatus(f.pool.Status()))
+		status := f.pool.Status()
+		b, err := json.Marshal(endpointsStatus(status))
 		if err != nil {
 			return fmt.Errorf("encode endpoints: %w", err)
 		}
 		if err := f.store.SetState(ctx, f.chainID, db.StateEndpoints, string(b)); err != nil {
 			return err
+		}
+		// A disabled endpoint is an error the operator must see even though
+		// the network keeps running on another one.
+		if msg := endpointError(status); msg != "" {
+			if err := f.store.SetNetworkError(ctx, f.chainID, msg); err != nil {
+				return err
+			}
 		}
 	}
 	if st.Last429At.IsZero() {

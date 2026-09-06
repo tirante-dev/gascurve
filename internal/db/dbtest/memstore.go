@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -38,6 +39,9 @@ type MemStore struct {
 
 	// FailOn makes the named method return ErrInjected.
 	FailOn map[string]bool
+	// Hooks run just before the named method does its work, so a test can
+	// change state while a transaction the store opened is still running.
+	Hooks map[string]func()
 	// PingErr is returned by Ping when set.
 	PingErr error
 	nextSet int64
@@ -56,7 +60,19 @@ func New() *MemStore {
 		ReportRows:  map[string]db.BatchReport{},
 		StateRows:   map[string]string{},
 		FailOn:      map[string]bool{},
+		Hooks:       map[string]func(){},
 		chainMu:     map[uint64]*sync.Mutex{},
+	}
+}
+
+// hook runs the test hook of a method, outside the store lock so it may
+// call back into the follower.
+func (m *MemStore) hook(method string) {
+	m.mu.Lock()
+	fn := m.Hooks[method]
+	m.mu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 
@@ -97,15 +113,24 @@ func (m *MemStore) WithTx(_ context.Context, fn func(db.Store) error) error {
 	return fn(m)
 }
 
-// WithChainTx runs fn holding the chain's mutex; the store passed to fn
-// treats nested chain and plain transactions as part of the same one.
-func (m *MemStore) WithChainTx(_ context.Context, chainID uint64, fn func(db.Store) error) error {
+// WithChainTx runs fn holding the chain's mutex, mirroring the advisory
+// lock: nested calls for the same chain reuse the transaction, one for a
+// higher chain id adds its lock, and the incompatible combinations fail
+// exactly as Postgres refuses them.
+func (m *MemStore) WithChainTx(ctx context.Context, chainID uint64, fn func(db.Store) error) error {
 	m.mu.Lock()
 	err := m.fail("WithChainTx")
 	m.mu.Unlock()
 	if err != nil {
 		return err
 	}
+	unlock := m.lockChain(chainID)
+	defer unlock()
+	return fn(&chainTx{MemStore: m, locks: []uint64{chainID}})
+}
+
+// lockChain takes a chain's mutex and returns its release.
+func (m *MemStore) lockChain(chainID uint64) func() {
 	m.chainLocks.Lock()
 	mu, ok := m.chainMu[chainID]
 	if !ok {
@@ -114,8 +139,7 @@ func (m *MemStore) WithChainTx(_ context.Context, chainID uint64, fn func(db.Sto
 	}
 	m.chainLocks.Unlock()
 	mu.Lock()
-	defer mu.Unlock()
-	return fn(&chainTx{MemStore: m})
+	return mu.Unlock
 }
 
 // WithSnapshotTx runs fn against the same store.
@@ -129,18 +153,38 @@ func (m *MemStore) WithSnapshotTx(_ context.Context, fn func(db.Store) error) er
 	return fn(m)
 }
 
-// chainTx is the store bound to an open chain transaction: nested
-// transactions reuse it instead of taking the chain mutex again.
+// chainTx is the store bound to an open chain transaction, carrying the
+// chain locks it holds so nested calls can be checked the way Postgres
+// checks them.
 type chainTx struct {
 	*MemStore
+	locks []uint64
 }
 
 // WithTx reuses the open transaction.
 func (c *chainTx) WithTx(_ context.Context, fn func(db.Store) error) error { return fn(c) }
 
-// WithChainTx reuses the open transaction.
-func (c *chainTx) WithChainTx(_ context.Context, _ uint64, fn func(db.Store) error) error {
-	return fn(c)
+// WithChainTx reuses the open transaction for a chain it already locks,
+// adds a missing lock in ascending order, and refuses one that would
+// invert that order.
+func (c *chainTx) WithChainTx(_ context.Context, chainID uint64, fn func(db.Store) error) error {
+	for _, held := range c.locks {
+		if held == chainID {
+			return fn(c)
+		}
+	}
+	if highest := slices.Max(c.locks); chainID < highest {
+		return fmt.Errorf("%w: chain %d after %d", db.ErrLockOrder, chainID, highest)
+	}
+	unlock := c.lockChain(chainID)
+	defer unlock()
+	return fn(&chainTx{MemStore: c.MemStore, locks: append(append([]uint64(nil), c.locks...), chainID)})
+}
+
+// WithSnapshotTx refuses to run inside a writing transaction: the caller
+// would read its own uncommitted rows instead of one database moment.
+func (c *chainTx) WithSnapshotTx(context.Context, func(db.Store) error) error {
+	return db.ErrNestedSnapshot
 }
 
 // UpsertNetwork stores static fields, keeping head data.
@@ -519,6 +563,7 @@ func (m *MemStore) Buckets(_ context.Context, chainID uint64, resolution string,
 
 // InsertStateSample stores a sample.
 func (m *MemStore) InsertStateSample(_ context.Context, s db.StateSample) error {
+	m.hook("InsertStateSample")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.fail("InsertStateSample"); err != nil {

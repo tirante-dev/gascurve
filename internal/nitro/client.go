@@ -39,6 +39,12 @@ const (
 // retry attempts.
 var ErrRateLimited = errors.New("rpc: rate limited")
 
+// ErrStaleEndpoint is returned when the endpoint a call had selected is no
+// longer the one ordinary calls go to: another caller failed over while
+// this one queued for the send lock. Nothing was sent and the tokens were
+// refunded, so the pool simply picks again and retries.
+var ErrStaleEndpoint = errors.New("rpc: endpoint no longer active")
+
 // rateLimitMessage matches the messages providers put on a throttling
 // error whatever code they choose ("50/second request limit reached",
 // "limit exceeded", "too many requests").
@@ -186,6 +192,16 @@ type Client struct {
 	// carried and whether the endpoint answered 429. An Endpoint adapts
 	// its batch cap from it.
 	observe func(items int, limited bool)
+	// chunk splits a request list of any length into HTTP batches. It is
+	// batchCapped by default; an Endpoint replaces it with its own, which
+	// also honors the adaptive batch cap, so every typed call (the fast
+	// sample, the legacy parameters, the L1 getters, the fee accounts and
+	// the owner-log reads) is chunked the same way the header batches are.
+	chunk batcher
+	// preSend, when set, is the last check before the request leaves,
+	// under the send lock: it rejects a call whose endpoint is no longer
+	// the pool's active one.
+	preSend func(context.Context) error
 
 	sendMu sync.Mutex // one in-flight HTTP request per network
 
@@ -221,6 +237,11 @@ func withBatchObserver(fn func(items int, limited bool)) Option {
 	return func(c *Client) { c.observe = fn }
 }
 
+// withBatcher replaces how a request list is split into HTTP batches.
+func withBatcher(fn batcher) Option {
+	return func(c *Client) { c.chunk = fn }
+}
+
 // withClock replaces the clock and sleeper, for tests.
 func withClock(now func() time.Time, sleep func(context.Context, time.Duration) error) Option {
 	return func(c *Client) {
@@ -249,6 +270,9 @@ func NewClient(url string, callsPerSecond float64, opts ...Option) *Client {
 	}
 	if c.pacer.now == nil {
 		c.pacer.now = c.now
+	}
+	if c.chunk == nil {
+		c.chunk = c.batchCapped
 	}
 	return c
 }
@@ -382,18 +406,36 @@ func (c *Client) cooldown() time.Duration {
 	return c.blockedUntil.Sub(c.now())
 }
 
-// send performs one HTTP round trip under the per-endpoint send lock,
-// sleeping through any active cooldown first so every caller respects a
-// 429 seen by any other. limited is true on HTTP 429 or when any item
-// carries a JSON-RPC rate limit error; the cooldown it starts is
-// published before the lock is released, so a caller waiting for the lock
-// observes it instead of sending into the throttle. sentAt is when the
-// request left.
+// send performs one HTTP round trip under the per-endpoint send lock.
+// The tokens were taken before the caller queued for that lock, so the
+// reservation is revalidated once it holds it: a cooldown another caller
+// started meanwhile invalidates it, so the tokens are refunded, the
+// cooldown is waited out and they are paid for again, which is what keeps
+// a queue of waiters from bursting through the moment the lock opens.
+// preSend then rejects a call whose endpoint is no longer the active one,
+// refunding it too. limited is true on HTTP 429 or when any item carries a
+// JSON-RPC rate limit error; the cooldown it starts is published before
+// the lock is released, so a caller waiting for the lock observes it
+// instead of sending into the throttle. sentAt is when the request left.
 func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses []rpcResponse, limited bool, sentAt time.Time, err error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	if wait := c.cooldown(); wait > 0 {
+	for {
+		wait := c.cooldown()
+		if wait <= 0 {
+			break
+		}
+		c.pacer.Refund(calls)
 		if err := c.sleep(ctx, wait); err != nil {
+			return nil, false, time.Time{}, err
+		}
+		if err := c.pacer.Wait(ctx, calls); err != nil {
+			return nil, false, time.Time{}, err
+		}
+	}
+	if c.preSend != nil {
+		if err := c.preSend(ctx); err != nil {
+			c.pacer.Refund(calls)
 			return nil, false, time.Time{}, err
 		}
 	}

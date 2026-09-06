@@ -22,10 +22,22 @@ type Network struct {
 	UpdatedAt    time.Time      `db:"updated_at"`
 }
 
+// PricingVersion values of a blocks or buckets row (migration 000007).
+const (
+	// PricingUnknown marks history written before the pricing breakdown
+	// existed: no per-constraint exponents, no floor in force, so no exact
+	// fee split can be derived from it.
+	PricingUnknown int16 = 0
+	// PricingFull marks a row written with the whole breakdown.
+	PricingFull int16 = 1
+)
+
 // Block is a row of the blocks table. Backlogs are the end-of-block
 // values, ConstraintBips the start-of-block per-constraint exponents (nil
 // for rows written before they were recorded, an empty array for a legacy
-// block) and MinBaseFee the floor in force at the block.
+// block) and MinBaseFee the floor in force at the block, unknown (NULL)
+// for that same history. PricingVersion says which: PricingUnknown for
+// history without a breakdown, PricingFull for rows written with one.
 type Block struct {
 	ChainID          uint64        `db:"chain_id"`
 	Number           uint64        `db:"number"`
@@ -40,9 +52,14 @@ type Block struct {
 	ConstraintBips   pq.Int64Array `db:"constraint_bips"`
 	ExponentBips     int64         `db:"exponent_bips"`
 	PredictedBaseFee Wei           `db:"predicted_base_fee"`
-	MinBaseFee       Wei           `db:"min_base_fee"`
+	MinBaseFee       NullWei       `db:"min_base_fee"`
 	Anchored         bool          `db:"anchored"`
+	PricingVersion   int16         `db:"pricing_version"`
 }
+
+// Known reports whether the block carries the full pricing breakdown, so
+// its floor and fee split are exact rather than unknown history.
+func (b Block) Known() bool { return b.PricingVersion >= PricingFull && b.MinBaseFee.Valid }
 
 // Bucket resolutions.
 const (
@@ -62,9 +79,10 @@ var Resolutions = map[string]time.Duration{
 // the stored row: counters and sums add, min/max combine, the average is
 // derived from the exact sum, and the *_end fields are replaced.
 // RebuildBuckets instead recomputes a row from the block rows in its
-// window. BaseFeeSum, ConstraintBipsEnd, FloorFeesWei and SurplusFeesWei
-// are unknown (NULL, nil) for rows written before they were recorded;
-// a fold into such a row keeps them unknown.
+// window. BaseFeeSum, ConstraintBipsEnd, MinBaseFee, FloorFeesWei and
+// SurplusFeesWei are unknown (NULL, nil) for rows written before they were
+// recorded and for any window holding one such block; a fold into such a
+// row keeps them unknown.
 type Bucket struct {
 	ChainID           uint64        `db:"chain_id"`
 	Resolution        string        `db:"resolution"`
@@ -80,7 +98,7 @@ type Bucket struct {
 	BacklogsEnd       Uint64Array   `db:"backlogs_end"`
 	BacklogsMax       Uint64Array   `db:"backlogs_max"`
 	ConstraintBipsEnd pq.Int64Array `db:"constraint_bips_end"`
-	MinBaseFee        Wei           `db:"min_base_fee"`
+	MinBaseFee        NullWei       `db:"min_base_fee"`
 	FloorFeesWei      NullWei       `db:"floor_fees_wei"`
 	SurplusFeesWei    NullWei       `db:"surplus_fees_wei"`
 	ConstraintSetID   sql.NullInt64 `db:"constraint_set_id"`
@@ -88,6 +106,10 @@ type Bucket struct {
 	// LastBlock is the highest block folded into the bucket; *_end fields
 	// and the constraint set are only replaced by folds with a higher one.
 	LastBlock uint64 `db:"last_block"`
+	// PricingVersion is the lowest version of the blocks folded in:
+	// PricingUnknown as soon as one of them lacks the breakdown, which is
+	// what makes the fee split unknown for the whole bucket.
+	PricingVersion int16 `db:"pricing_version"`
 }
 
 // StateSample is a row of the state_samples table.

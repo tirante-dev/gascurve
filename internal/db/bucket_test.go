@@ -12,7 +12,7 @@ import (
 
 func mkBlock(n uint64, ts time.Time, fee int64, gas uint64, minFee int64, backlogs ...uint64) Block {
 	return Block{ChainID: 1, Number: n, TS: ts, GasUsed: gas, BaseFee: WeiFromUint64(uint64(fee)), PredictedBaseFee: WeiFromUint64(uint64(fee + 1)),
-		MinBaseFee: WeiFromUint64(uint64(minFee)), Backlogs: Uint64Array(backlogs), ConstraintBips: pq.Int64Array{int64(n), 1}, ExponentBips: int64(n)}
+		MinBaseFee: NullWeiFromUint64(uint64(minFee)), PricingVersion: PricingFull, Backlogs: Uint64Array(backlogs), ConstraintBips: pq.Int64Array{int64(n), 1}, ExponentBips: int64(n)}
 }
 
 func TestFoldBlocks(t *testing.T) {
@@ -34,7 +34,7 @@ func TestFoldBlocks(t *testing.T) {
 	if first.FeesWei.Int64() != 100*10+300*20 || first.ExponentEndBips != 2 || first.BacklogsEnd[0] != 9 || first.BacklogsMax[0] != 9 || first.BacklogsMax[1] != 50 || first.LastBlock != 2 {
 		t.Fatalf("first bucket aggregates: %+v", first)
 	}
-	if first.FloorFeesWei.Wei.Int64() != 40*10+40*20 || first.SurplusFeesWei.Wei.Int64() != 100*10+300*20-40*30 || !first.SurplusFeesWei.Valid || first.MinBaseFee.Int64() != 40 || first.ConstraintBipsEnd[0] != 2 {
+	if first.FloorFeesWei.Wei.Int64() != 40*10+40*20 || first.SurplusFeesWei.Wei.Int64() != 100*10+300*20-40*30 || !first.SurplusFeesWei.Valid || first.MinBaseFee.Wei.Int64() != 40 || first.ConstraintBipsEnd[0] != 2 {
 		t.Fatalf("first bucket fee split: %+v", first)
 	}
 	if !first.ConstraintSetID.Valid || first.ConstraintSetID.Int64 != 20 {
@@ -44,7 +44,7 @@ func TestFoldBlocks(t *testing.T) {
 		t.Fatalf("replay error: %d", first.ReplayErrorBips)
 	}
 	second := buckets[1]
-	if second.Blocks != 1 || !second.BucketStart.Equal(t0.Add(3*time.Second).Truncate(time.Minute)) || second.ConstraintSetID.Int64 != 30 || second.MinBaseFee.Int64() != 50 {
+	if second.Blocks != 1 || !second.BucketStart.Equal(t0.Add(3*time.Second).Truncate(time.Minute)) || second.ConstraintSetID.Int64 != 30 || second.MinBaseFee.Wei.Int64() != 50 {
 		t.Fatalf("second bucket: %+v", second)
 	}
 	hour := buckets[5]
@@ -93,7 +93,7 @@ func TestMergeBucketsExactAverage(t *testing.T) {
 	if m.Blocks != 3 || m.BaseFeeSum.Wei.Int64() != 6 || m.BaseFeeAvg.Int64() != 2 || m.BaseFeeMin.Int64() != 1 || m.BaseFeeMax.Int64() != 3 {
 		t.Fatalf("merged: %+v", m)
 	}
-	if m.LastBlock != 3 || m.BacklogsEnd[0] != 3 || m.BacklogsMax[0] != 3 || m.ConstraintSetID.Int64 != 4 || m.MinBaseFee.Int64() != 0 || m.ConstraintBipsEnd[0] != 3 {
+	if m.LastBlock != 3 || m.BacklogsEnd[0] != 3 || m.BacklogsMax[0] != 3 || m.ConstraintSetID.Int64 != 4 || m.MinBaseFee.Wei.Int64() != 0 || m.ConstraintBipsEnd[0] != 3 {
 		t.Fatalf("merged end fields: %+v", m)
 	}
 	// An older fold keeps the newer end fields; an empty stored bucket takes
@@ -134,5 +134,52 @@ func TestMergeBucketsUnknown(t *testing.T) {
 	}
 	if got := addNullWei(NewNullWei(big.NewInt(1)), NewNullWei(big.NewInt(2))); !got.Valid || got.Wei.Int64() != 3 {
 		t.Fatal("addNullWei")
+	}
+}
+
+// TestBucketPricingVersion: a window holding one block whose pricing
+// breakdown was never recorded reports no floor, no fee split and no
+// exponents at all, instead of summing the placeholder zeros that
+// migration 000005 left and presenting the result as exact.
+func TestBucketPricingVersion(t *testing.T) {
+	t0 := time.Date(2026, 9, 6, 8, 0, 0, 0, time.UTC)
+	known := mkBlock(1, t0, 100, 10, 40, 5)
+	unknown := mkBlock(2, t0.Add(time.Second), 300, 20, 0, 9)
+	unknown.PricingVersion, unknown.MinBaseFee, unknown.ConstraintBips = PricingUnknown, NullWei{}, nil
+	if !known.Known() || unknown.Known() {
+		t.Fatal("Known follows the pricing version and the recorded floor")
+	}
+	setID := func(uint64) sql.NullInt64 { return sql.NullInt64{} }
+	mixed := FoldBlocks([]Block{known, unknown}, setID)[0]
+	if mixed.PricingVersion != PricingUnknown {
+		t.Fatalf("one unknown block makes the bucket unknown: %+v", mixed)
+	}
+	if mixed.FloorFeesWei.Valid || mixed.SurplusFeesWei.Valid || mixed.MinBaseFee.Valid || mixed.ConstraintBipsEnd != nil {
+		t.Fatalf("no split may be reported for a window with unknown history: %+v", mixed)
+	}
+	// The additive fields are still exact: only the breakdown is unknown.
+	if mixed.Blocks != 2 || mixed.GasUsed != 30 || !mixed.BaseFeeSum.Valid || mixed.BaseFeeSum.Wei.Int64() != 400 {
+		t.Fatalf("additive fields stay exact: %+v", mixed)
+	}
+	// A window of known blocks alone keeps its split.
+	full := FoldBlocks([]Block{known}, setID)[0]
+	if full.PricingVersion != PricingFull || !full.FloorFeesWei.Valid || full.MinBaseFee.Wei.Int64() != 40 {
+		t.Fatalf("known window: %+v", full)
+	}
+	// Merging a known partial bucket into an unknown stored one keeps the
+	// whole row unknown, whichever side the unknown block came from.
+	merged := MergeBuckets(mixed, full)
+	if merged.PricingVersion != PricingUnknown || merged.FloorFeesWei.Valid || merged.MinBaseFee.Valid || merged.ConstraintBipsEnd != nil {
+		t.Fatalf("a fold into unknown history stays unknown: %+v", merged)
+	}
+	if merged.Blocks != 3 || merged.GasUsed != 40 {
+		t.Fatalf("merged counters: %+v", merged)
+	}
+	if back := MergeBuckets(full, mixed); back.PricingVersion != PricingUnknown || back.FloorFeesWei.Valid {
+		t.Fatalf("unknown history folded into a known row: %+v", back)
+	}
+	// Two known buckets keep their split.
+	if both := MergeBuckets(full, full); both.PricingVersion != PricingFull || !both.FloorFeesWei.Valid || both.FloorFeesWei.Wei.Int64() != 800 {
+		t.Fatalf("known merge: %+v", both)
 	}
 }

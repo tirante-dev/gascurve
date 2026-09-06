@@ -339,3 +339,70 @@ func TestParseHeadNotification(t *testing.T) {
 		t.Fatal("defaults")
 	}
 }
+
+// TestHeadSubscriberRebinds: the subscriber asks its resolver for an
+// endpoint before every connection attempt, so it moves to another one the
+// moment the endpoint it followed stops being usable, and it keeps
+// retrying with its back-off while none is.
+func TestHeadSubscriberRebinds(t *testing.T) {
+	first := newFakeWS(t, func(_ int, conn *websocket.Conn) {
+		if err := ackSubscribe(conn); err != nil {
+			return
+		}
+		_ = send(conn, headMsg(fakeSubID, 100))
+		_ = conn.Close(websocket.StatusGoingAway, "endpoint disabled")
+	})
+	second := newFakeWS(t, func(_ int, conn *websocket.Conn) {
+		if err := ackSubscribe(conn); err != nil {
+			return
+		}
+		_ = send(conn, headMsg(fakeSubID, 200))
+		readUntilClosed(conn)
+	})
+	var mu sync.Mutex
+	state := 0 // 0: first endpoint, 1: nothing usable, 2: second endpoint
+	resolve := func(context.Context) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch state {
+		case 0:
+			state = 1
+			return first.url(), nil
+		case 1:
+			state = 2
+			return "", ErrNoEndpoint
+		default:
+			return second.url(), nil
+		}
+	}
+	sleeper := &recordingSleeper{}
+	s := NewHeadSubscriber("", WithHeadLogger(logger.Nop()), WithHeadURL(resolve),
+		WithHeadBackoff(testMinBackoff, testMaxBackoff), WithHeadPingInterval(testPing),
+		withHeadSleep(sleeper.sleep), WithHeadHTTPClient(&http.Client{Timeout: 2 * time.Second}))
+	got := make(chan Head, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan struct{})
+	go func() {
+		s.Run(ctx, func(h Head) { got <- h })
+		close(finished)
+	}()
+	if h := waitHead(t, got); h.Number != 100 {
+		t.Fatalf("first endpoint: %+v", h)
+	}
+	// The endpoint is disabled: the resolver reports nothing usable, which
+	// is retried rather than fatal, and the next attempt binds the other
+	// endpoint.
+	if h := waitHead(t, got); h.Number != 200 {
+		t.Fatalf("rebound endpoint: %+v", h)
+	}
+	if first.acceptCount() != 1 || second.acceptCount() != 1 {
+		t.Fatalf("accepts: first %d second %d", first.acceptCount(), second.acceptCount())
+	}
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}

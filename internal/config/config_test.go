@@ -278,34 +278,38 @@ func TestValidate(t *testing.T) {
 		t.Fatalf("unlimited archive network rejected: %v", err)
 	}
 	cases := map[string]func(*Config){
-		"port":            func(c *Config) { c.Server.Port = 0 },
-		"port high":       func(c *Config) { c.Server.Port = 70000 },
-		"rate limit":      func(c *Config) { c.Server.RateLimitBurst = 0 },
-		"db url":          func(c *Config) { c.Database.URL = "" },
-		"tick":            func(c *Config) { c.Collector.TickInterval = 0 },
-		"batch size":      func(c *Config) { c.Collector.HeaderBatchSize = 101 },
-		"empty name":      func(c *Config) { c.Networks[0].Name = "" },
-		"dup name":        func(c *Config) { c.Networks = append(c.Networks, c.Networks[0]) },
-		"zero chain":      func(c *Config) { c.Networks[0].ChainID = 0 },
-		"dup chain":       func(c *Config) { n := c.Networks[0]; n.Name = "b"; c.Networks = append(c.Networks, n) },
-		"calls":           func(c *Config) { c.Networks[0].CallsPerSecond = -4 },
-		"calls nan":       func(c *Config) { c.Networks[0].CallsPerSecond = math.NaN() },
-		"calls inf":       func(c *Config) { c.Networks[0].CallsPerSecond = math.Inf(1) },
-		"calls huge":      func(c *Config) { c.Networks[0].CallsPerSecond = MaxCallsPerSecond + 1 },
-		"ws per ip":       func(c *Config) { c.Server.WSMaxPerIP = 0 },
-		"ws total":        func(c *Config) { c.Server.WSMaxTotal = 0 },
-		"proxy cidr":      func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/33"} },
-		"proxy ip":        func(c *Config) { c.Server.TrustedProxies = []string{"not-an-ip"} },
-		"ws url scheme":   func(c *Config) { c.Networks[0].WSURL = "http://x" },
-		"anchor interval": func(c *Config) { c.Collector.BackfillAnchorInterval = 0 },
-		"catch up":        func(c *Config) { c.Collector.MaxCatchUpBatches = 0 },
-		"missing rpc url": func(c *Config) { c.Networks[0].RPCURL = "" },
-		"cooldown":        func(c *Config) { c.Collector.FailoverCooldown = 0 },
-		"fallback calls":  func(c *Config) { c.Networks[0].Fallbacks[0].CallsPerSecond = math.Inf(1) },
-		"fallback huge":   func(c *Config) { c.Networks[0].Fallbacks[0].CallsPerSecond = MaxCallsPerSecond + 1 },
-		"fallback ws":     func(c *Config) { c.Networks[0].Fallbacks[0].WSURL = "http://y" },
-		"fallback rpc":    func(c *Config) { c.Networks[0].Fallbacks[0].RPCURL = "" },
-		"network tick":    func(c *Config) { c.Networks[0].TickInterval = -time.Second },
+		"port":       func(c *Config) { c.Server.Port = 0 },
+		"port high":  func(c *Config) { c.Server.Port = 70000 },
+		"rate limit": func(c *Config) { c.Server.RateLimitBurst = 0 },
+		"db url":     func(c *Config) { c.Database.URL = "" },
+		"tick":       func(c *Config) { c.Collector.TickInterval = 0 },
+		"batch size": func(c *Config) { c.Collector.HeaderBatchSize = 101 },
+		"empty name": func(c *Config) { c.Networks[0].Name = "" },
+		"dup name":   func(c *Config) { c.Networks = append(c.Networks, c.Networks[0]) },
+		"zero chain": func(c *Config) { c.Networks[0].ChainID = 0 },
+		"dup chain":  func(c *Config) { n := c.Networks[0]; n.Name = "b"; c.Networks = append(c.Networks, n) },
+		"calls":      func(c *Config) { c.Networks[0].CallsPerSecond = -4 },
+		"calls nan":  func(c *Config) { c.Networks[0].CallsPerSecond = math.NaN() },
+		"calls inf":  func(c *Config) { c.Networks[0].CallsPerSecond = math.Inf(1) },
+		"calls huge": func(c *Config) { c.Networks[0].CallsPerSecond = MaxCallsPerSecond + 1 },
+		// Below one call every ten seconds a token takes longer than any
+		// request timeout: that is a mistake, not a budget (use 0).
+		"calls tiny":          func(c *Config) { c.Networks[0].CallsPerSecond = MinCallsPerSecond / 2 },
+		"fallback calls tiny": func(c *Config) { c.Networks[0].Fallbacks[0].CallsPerSecond = 0.01 },
+		"ws per ip":           func(c *Config) { c.Server.WSMaxPerIP = 0 },
+		"ws total":            func(c *Config) { c.Server.WSMaxTotal = 0 },
+		"proxy cidr":          func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/33"} },
+		"proxy ip":            func(c *Config) { c.Server.TrustedProxies = []string{"not-an-ip"} },
+		"ws url scheme":       func(c *Config) { c.Networks[0].WSURL = "http://x" },
+		"anchor interval":     func(c *Config) { c.Collector.BackfillAnchorInterval = 0 },
+		"catch up":            func(c *Config) { c.Collector.MaxCatchUpBatches = 0 },
+		"missing rpc url":     func(c *Config) { c.Networks[0].RPCURL = "" },
+		"cooldown":            func(c *Config) { c.Collector.FailoverCooldown = 0 },
+		"fallback calls":      func(c *Config) { c.Networks[0].Fallbacks[0].CallsPerSecond = math.Inf(1) },
+		"fallback huge":       func(c *Config) { c.Networks[0].Fallbacks[0].CallsPerSecond = MaxCallsPerSecond + 1 },
+		"fallback ws":         func(c *Config) { c.Networks[0].Fallbacks[0].WSURL = "http://y" },
+		"fallback rpc":        func(c *Config) { c.Networks[0].Fallbacks[0].RPCURL = "" },
+		"network tick":        func(c *Config) { c.Networks[0].TickInterval = -time.Second },
 	}
 	for name, mutate := range cases {
 		c := base()
@@ -313,6 +317,12 @@ func TestValidate(t *testing.T) {
 		if err := c.Validate(true); err == nil {
 			t.Errorf("%s: expected validation error", name)
 		}
+	}
+	// The minimum itself is accepted.
+	c := base()
+	c.Networks[0].CallsPerSecond = MinCallsPerSecond
+	if err := c.Validate(true); err != nil {
+		t.Errorf("the minimum budget must be accepted: %v", err)
 	}
 }
 

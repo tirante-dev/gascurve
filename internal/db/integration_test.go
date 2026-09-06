@@ -68,14 +68,15 @@ func TestIntegrationMigrator(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, dirty, err := m.Version()
-	if err != nil || dirty || v != 6 {
+	if err != nil || dirty || v != 7 {
 		t.Fatalf("version = %d dirty=%v err=%v", v, dirty, err)
 	}
 	// Every migration rolls back and re-applies; the unsigned backlog
-	// migration recovers values that an int64 cast wrapped, and 000006
-	// marks the placeholders 000004 and 000005 filled in as unknown.
+	// migration recovers values that an int64 cast wrapped, 000006 marks
+	// the placeholders 000004 and 000005 filled in as unknown, and 000007
+	// records which rows carry the full pricing breakdown.
 	ctx := context.Background()
-	if err := m.Down(5); err != nil {
+	if err := m.Down(6); err != nil {
 		t.Fatal(err)
 	}
 	if v, _, err := m.Version(); err != nil || v != 1 {
@@ -107,6 +108,15 @@ func TestIntegrationMigrator(t *testing.T) {
 	if bk[0].BaseFeeSum.Valid || bk[0].FloorFeesWei.Valid || bk[0].SurplusFeesWei.Valid || bk[0].ConstraintBipsEnd != nil || bk[0].BaseFeeAvg.Int64() != 7 {
 		t.Fatalf("placeholders must be unknown after 000006: %+v", bk[0])
 	}
+	// 000007 marks that history: no breakdown, and the zero floor 000005
+	// filled in becomes unknown rather than an authoritative floor of
+	// nothing. Rows written from now on carry version 1.
+	if bk[0].PricingVersion != PricingUnknown || bk[0].MinBaseFee.Valid {
+		t.Fatalf("unknown history must carry pricing version 0 and no floor: %+v", bk[0])
+	}
+	if b.PricingVersion != PricingUnknown || b.MinBaseFee.Valid || b.Known() {
+		t.Fatalf("unknown block history: %+v", b)
+	}
 	one, _ := p.Buckets(ctx, 1, Resolution15m, time.Unix(0, 0), time.Now().Add(time.Hour))
 	if len(one) != 1 || !one[0].BaseFeeSum.Valid || one[0].BaseFeeSum.Wei.Int64() != 7 {
 		t.Fatalf("a single-block sum is exact: %+v", one)
@@ -115,7 +125,7 @@ func TestIntegrationMigrator(t *testing.T) {
 	// derives the average from the reconstruction: (7*3 + 13) / 4 = 8.
 	if err := p.FoldBuckets(ctx, []Bucket{{ChainID: 1, Resolution: Resolution1m, BucketStart: bk[0].BucketStart, Blocks: 1, GasUsed: 1, FeesWei: WeiFromUint64(13),
 		BaseFeeMin: WeiFromUint64(13), BaseFeeAvg: WeiFromUint64(13), BaseFeeMax: WeiFromUint64(13), BaseFeeSum: NullWeiFromUint64(13), BacklogsEnd: Uint64Array{1}, BacklogsMax: Uint64Array{1},
-		ConstraintBipsEnd: pq.Int64Array{1}, MinBaseFee: WeiFromUint64(1), FloorFeesWei: NullWeiFromUint64(1), SurplusFeesWei: NullWeiFromUint64(12), LastBlock: 9}}); err != nil {
+		ConstraintBipsEnd: pq.Int64Array{1}, MinBaseFee: NullWeiFromUint64(1), FloorFeesWei: NullWeiFromUint64(1), SurplusFeesWei: NullWeiFromUint64(12), LastBlock: 9}}); err != nil {
 		t.Fatal(err)
 	}
 	bk, _ = p.Buckets(ctx, 1, Resolution1m, time.Unix(0, 0), time.Now().Add(time.Hour))
@@ -123,7 +133,7 @@ func TestIntegrationMigrator(t *testing.T) {
 		t.Fatalf("fold into an unknown bucket: %+v", bk[0])
 	}
 	// Down restores the placeholders and clamps values above the BIGINT range.
-	if err := m.Down(4); err != nil {
+	if err := m.Down(5); err != nil {
 		t.Fatal(err)
 	}
 	var clamped string
@@ -136,6 +146,19 @@ func TestIntegrationMigrator(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
+	// Down 000007 restores the zero floor placeholder and drops the
+	// provenance column.
+	var floors string
+	if err := p.DB().QueryRowContext(ctx, `SELECT min_base_fee::TEXT FROM buckets WHERE chain_id = 1 AND resolution = '1m'`).Scan(&floors); err != nil || floors != "0" {
+		t.Fatalf("down 000007 restores the zero floor: %q %v", floors, err)
+	}
+	var cols int
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'buckets' AND column_name = 'pricing_version'`).Scan(&cols); err != nil || cols != 0 {
+		t.Fatalf("pricing_version must be dropped: %d %v", cols, err)
+	}
+	if err := m.Down(1); err != nil {
+		t.Fatal(err)
+	}
 	var restored string
 	if err := p.DB().QueryRowContext(ctx, `SELECT base_fee_sum::TEXT || '/' || floor_fees_wei::TEXT || '/' || constraint_bips_end::TEXT FROM buckets WHERE chain_id = 1 AND resolution = '1m'`).Scan(&restored); err != nil || restored != "32/0/{}" {
 		t.Fatalf("down 000006 restores placeholders: %q %v", restored, err)
@@ -143,7 +166,7 @@ func TestIntegrationMigrator(t *testing.T) {
 	if err := m.Up(); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Down(6); err != nil {
+	if err := m.Down(7); err != nil {
 		t.Fatal(err)
 	}
 	if v, _, err := m.Version(); err != nil || v != 0 {
@@ -220,7 +243,7 @@ func TestIntegrationStore(t *testing.T) {
 			ChainID: testChain, Number: 100 + i, Hash: fmt.Sprintf("0x%x", 100+i), ParentHash: fmt.Sprintf("0x%x", 99+i),
 			TS: base.Add(time.Duration(i) * time.Second), GasUsed: 1_000_000 * (i + 1),
 			BaseFee: WeiFromUint64(20_000_000 + i), L1Block: 50, TxCount: txs, Backlogs: Uint64Array{i, math.MaxUint64 - i},
-			ConstraintBips: pq.Int64Array{int64(i), 1}, MinBaseFee: WeiFromUint64(10_000_000),
+			ConstraintBips: pq.Int64Array{int64(i), 1}, MinBaseFee: NullWeiFromUint64(10_000_000), PricingVersion: PricingFull,
 			ExponentBips: int64(i), PredictedBaseFee: WeiFromUint64(20_000_000), Anchored: i == 10,
 		})
 	}
@@ -235,7 +258,7 @@ func TestIntegrationStore(t *testing.T) {
 	if err != nil || latest.Number != 110 || latest.GasUsed != 99 || !latest.Anchored || latest.Backlogs[1] != math.MaxUint64-10 {
 		t.Fatalf("LatestBlock: %+v %v", latest, err)
 	}
-	if latest.Hash != "0x6e" || latest.ParentHash != "0x6d" || latest.ConstraintBips[0] != 10 || latest.MinBaseFee.Int64() != 10_000_000 {
+	if latest.Hash != "0x6e" || latest.ParentHash != "0x6d" || latest.ConstraintBips[0] != 10 || latest.MinBaseFee.Wei.Int64() != 10_000_000 {
 		t.Fatalf("LatestBlock new columns: %+v", latest)
 	}
 	if b, err := p.BlockByNumber(ctx, testChain, 105); err != nil || b == nil || b.Number != 105 || b.Backlogs[1] != math.MaxUint64-5 {
@@ -271,7 +294,7 @@ func TestIntegrationStore(t *testing.T) {
 	fstart := base.Add(-24 * time.Hour)
 	b1 := Bucket{ChainID: testChain, Resolution: Resolution1m, BucketStart: fstart, Blocks: 2, GasUsed: 100, FeesWei: WeiFromUint64(1000),
 		BaseFeeMin: WeiFromUint64(10), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(30), BaseFeeSum: NullWeiFromUint64(3), ExponentEndBips: 5,
-		BacklogsEnd: Uint64Array{1, math.MaxUint64}, BacklogsMax: Uint64Array{5, math.MaxUint64}, ConstraintBipsEnd: pq.Int64Array{5, 0}, MinBaseFee: WeiFromUint64(2),
+		BacklogsEnd: Uint64Array{1, math.MaxUint64}, BacklogsMax: Uint64Array{5, math.MaxUint64}, ConstraintBipsEnd: pq.Int64Array{5, 0}, MinBaseFee: NullWeiFromUint64(2), PricingVersion: PricingFull,
 		FloorFeesWei: NullWeiFromUint64(200), SurplusFeesWei: NullWeiFromUint64(800), ReplayErrorBips: 10, LastBlock: 200}
 	if err := p.FoldBuckets(ctx, []Bucket{b1}); err != nil {
 		t.Fatal(err)
@@ -288,7 +311,7 @@ func TestIntegrationStore(t *testing.T) {
 	b2.BacklogsEnd = Uint64Array{7, 8}
 	b2.BacklogsMax = Uint64Array{3, 9}
 	b2.ConstraintBipsEnd = pq.Int64Array{9, 0}
-	b2.MinBaseFee = WeiFromUint64(4)
+	b2.MinBaseFee = NullWeiFromUint64(4)
 	b2.FloorFeesWei = NullWeiFromUint64(100)
 	b2.SurplusFeesWei = NullWeiFromUint64(400)
 	b2.ReplayErrorBips = 4
@@ -305,7 +328,7 @@ func TestIntegrationStore(t *testing.T) {
 	if got.Blocks != 3 || got.GasUsed != 150 || got.FeesWei.Int64() != 1500 || got.BaseFeeMin.Int64() != 5 || got.BaseFeeMax.Int64() != 30 || got.BaseFeeSum.Wei.Int64() != 6 || got.BaseFeeAvg.Int64() != 2 {
 		t.Fatalf("fold counters: %+v", got)
 	}
-	if got.FloorFeesWei.Wei.Int64() != 300 || got.SurplusFeesWei.Wei.Int64() != 1200 || got.MinBaseFee.Int64() != 2 || got.ConstraintBipsEnd[0] != 5 {
+	if got.FloorFeesWei.Wei.Int64() != 300 || got.SurplusFeesWei.Wei.Int64() != 1200 || got.MinBaseFee.Wei.Int64() != 2 || got.ConstraintBipsEnd[0] != 5 {
 		t.Fatalf("fold fee split: %+v", got)
 	}
 	if got.ExponentEndBips != 5 || got.BacklogsEnd[0] != 1 || got.BacklogsEnd[1] != math.MaxUint64 || got.BacklogsMax[0] != 5 || got.BacklogsMax[1] != math.MaxUint64 || got.ReplayErrorBips != 10 || got.LastBlock != 200 {
@@ -319,7 +342,7 @@ func TestIntegrationStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	bk, _ = p.Buckets(ctx, testChain, Resolution1m, fstart, fstart.Add(time.Minute))
-	if bk[0].ExponentEndBips != 9 || bk[0].BacklogsEnd[1] != 8 || bk[0].ConstraintSetID.Int64 != 1 || bk[0].LastBlock != 300 || bk[0].MinBaseFee.Int64() != 4 || bk[0].ConstraintBipsEnd[0] != 9 {
+	if bk[0].ExponentEndBips != 9 || bk[0].BacklogsEnd[1] != 8 || bk[0].ConstraintSetID.Int64 != 1 || bk[0].LastBlock != 300 || bk[0].MinBaseFee.Wei.Int64() != 4 || bk[0].ConstraintBipsEnd[0] != 9 {
 		t.Fatalf("newer fold should replace end fields: %+v", bk[0])
 	}
 
@@ -357,12 +380,57 @@ func TestIntegrationStore(t *testing.T) {
 		r.BaseFeeAvg.String() != want.BaseFeeAvg.String() || r.BaseFeeMin.String() != want.BaseFeeMin.String() || r.BaseFeeMax.String() != want.BaseFeeMax.String() {
 		t.Fatalf("rebuilt counters: %+v\nwant %+v", r, want)
 	}
-	if r.FloorFeesWei.Wei.String() != want.FloorFeesWei.Wei.String() || r.SurplusFeesWei.Wei.String() != want.SurplusFeesWei.Wei.String() || !r.SurplusFeesWei.Valid || r.MinBaseFee.String() != want.MinBaseFee.String() {
+	if r.FloorFeesWei.Wei.String() != want.FloorFeesWei.Wei.String() || r.SurplusFeesWei.Wei.String() != want.SurplusFeesWei.Wei.String() || !r.SurplusFeesWei.Valid || r.MinBaseFee.Wei.String() != want.MinBaseFee.Wei.String() {
 		t.Fatalf("rebuilt fee split: %+v\nwant %+v", r, want)
 	}
 	if r.LastBlock != 110 || r.ExponentEndBips != 10 || r.BacklogsEnd[1] != math.MaxUint64-10 || r.BacklogsMax[0] != 10 || r.BacklogsMax[1] != math.MaxUint64 ||
 		r.ConstraintBipsEnd[0] != 10 || r.ConstraintSetID.Int64 != setID || r.ReplayErrorBips != want.ReplayErrorBips {
 		t.Fatalf("rebuilt end fields: %+v\nwant %+v", r, want)
+	}
+	if r.PricingVersion != PricingFull || r.PricingVersion != want.PricingVersion {
+		t.Fatalf("rebuilt pricing version: %d want %d", r.PricingVersion, want.PricingVersion)
+	}
+	// One source block from before the breakdown existed makes the whole
+	// window unknown: the rebuild must not sum its placeholder zero floor
+	// and present the result as an exact split.
+	if _, err := p.DB().ExecContext(ctx, `UPDATE blocks SET pricing_version = 0, min_base_fee = NULL, constraint_bips = NULL WHERE chain_id = $1 AND number = $2`, testChain, 103); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RebuildBuckets(ctx, testChain, Resolution1m, []time.Time{base}); err != nil {
+		t.Fatal(err)
+	}
+	mixed, _ := p.Buckets(ctx, testChain, Resolution1m, base, base.Add(time.Minute))
+	if len(mixed) != 1 || mixed[0].PricingVersion != PricingUnknown {
+		t.Fatalf("a window with unknown history must be unknown: %+v", mixed)
+	}
+	if mixed[0].FloorFeesWei.Valid || mixed[0].SurplusFeesWei.Valid || mixed[0].MinBaseFee.Valid || mixed[0].ConstraintBipsEnd != nil {
+		t.Fatalf("no exact split may be rebuilt from unknown history: %+v", mixed[0])
+	}
+	if mixed[0].Blocks != want.Blocks || mixed[0].GasUsed != want.GasUsed || !mixed[0].BaseFeeSum.Valid {
+		t.Fatalf("the additive fields stay exact: %+v", mixed[0])
+	}
+	// The Go builder agrees with the SQL rebuild on the same rows.
+	mixedRows, _ := p.BlocksBetween(ctx, testChain, base, base.Add(time.Minute))
+	if built := FoldBlocks(mixedRows, func(uint64) sql.NullInt64 { return sql.NullInt64{} })[0]; built.PricingVersion != PricingUnknown || built.FloorFeesWei.Valid || built.MinBaseFee.Valid {
+		t.Fatalf("builder and rebuild disagree: %+v", built)
+	}
+	// A fold into that bucket keeps it unknown.
+	if err := p.FoldBuckets(ctx, []Bucket{{ChainID: testChain, Resolution: Resolution1m, BucketStart: base, Blocks: 1, GasUsed: 1, FeesWei: WeiFromUint64(1),
+		BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1), BaseFeeSum: NullWeiFromUint64(1),
+		BacklogsEnd: Uint64Array{1}, BacklogsMax: Uint64Array{1}, ConstraintBipsEnd: pq.Int64Array{1}, MinBaseFee: NullWeiFromUint64(1),
+		FloorFeesWei: NullWeiFromUint64(1), SurplusFeesWei: NullWeiFromUint64(0), LastBlock: 999, PricingVersion: PricingFull}}); err != nil {
+		t.Fatal(err)
+	}
+	folded, _ := p.Buckets(ctx, testChain, Resolution1m, base, base.Add(time.Minute))
+	if folded[0].PricingVersion != PricingUnknown || folded[0].FloorFeesWei.Valid || folded[0].MinBaseFee.Valid || folded[0].ConstraintBipsEnd != nil {
+		t.Fatalf("a fold into unknown history stays unknown: %+v", folded[0])
+	}
+	// Restore the block so the rest of the test sees the full breakdown.
+	if _, err := p.DB().ExecContext(ctx, `UPDATE blocks SET pricing_version = 1, min_base_fee = 10000000, constraint_bips = '{3}' WHERE chain_id = $1 AND number = $2`, testChain, 103); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RebuildBuckets(ctx, testChain, Resolution1m, []time.Time{base}); err != nil {
+		t.Fatal(err)
 	}
 	// Reorg helpers: rows above a block go, their buckets follow.
 	removed, err := p.DeleteBlocksAfter(ctx, testChain, 108)

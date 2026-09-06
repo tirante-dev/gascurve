@@ -61,8 +61,7 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 		// the head is persisted alone and replay starts after it.
 		return f.seed(ctx, sample, nil, nil)
 	case head < stored:
-		f.log.Warn("head behind the stored head, skipping tick", "head", head, "stored", stored)
-		return nil
+		return f.headBehind(ctx, sample, stored)
 	case head == stored && !hashMismatch(storedHash, sample.Header.Hash):
 		return f.sampleOnly(ctx, sample)
 	}
@@ -76,7 +75,7 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 			return f.fail(ctx, err)
 		}
 	}
-	headers, err := f.catchUp(ctx, sample, stored)
+	headers, err := f.catchUp(ctx, sample, stored, f.policy())
 	if err != nil {
 		return f.fail(ctx, err)
 	}
@@ -89,7 +88,7 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 		if err != nil {
 			return f.fail(ctx, err)
 		}
-		if headers, err = f.catchUp(ctx, sample, ancestor); err != nil {
+		if headers, err = f.catchUp(ctx, sample, ancestor, f.policy()); err != nil {
 			return f.fail(ctx, err)
 		}
 		if headers == nil {
@@ -100,6 +99,31 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 		return f.fail(ctx, err)
 	}
 	return f.process(ctx, sample, headers)
+}
+
+// headBehind handles a reported head below the stored one. An endpoint
+// that has simply not caught up still reports the same hashes for the
+// blocks it does have, so the stored row at the reported head is compared
+// with the header the node reports there (the sample carries it): only a
+// hash that differs proves the stored chain is off-chain. A confirmed
+// rollback is rewound like any other reorg; a lagging endpoint is skipped.
+func (f *Follower) headBehind(ctx context.Context, sample *nitro.Sample, stored uint64) error {
+	head := sample.Header.Number
+	row, err := f.store.BlockByNumber(ctx, f.chainID, head)
+	if err != nil {
+		return f.fail(ctx, fmt.Errorf("block %d: %w", head, err))
+	}
+	if row == nil || !hashMismatch(row.Hash, sample.Header.Hash) {
+		f.log.Warn("head behind the stored head, endpoint is lagging, skipping tick", "head", head, "stored", stored)
+		return nil
+	}
+	f.log.Warn("head behind the stored head and its hash differs, rewinding the rollback", "head", head, "stored", stored)
+	f.catchingUp.Store(true)
+	defer f.catchingUp.Store(false)
+	if _, err := f.rewindToAncestor(ctx, head); err != nil {
+		return f.fail(ctx, err)
+	}
+	return nil
 }
 
 // headHashOf returns the stored hash of the current head when it is number.
@@ -130,19 +154,27 @@ func verifyChain(headers []nitro.Header) error {
 }
 
 // catchUp fetches the headers after stored up to the sampled head and
-// appends the sampled header. On a paced network a gap over budget is
-// skipped: the head is seeded alone, the hole recorded, and nil returned.
-func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uint64) ([]nitro.Header, error) {
+// appends the sampled header. On a paced network (pol is the active
+// endpoint's policy, taken once for the whole tick) a gap over budget is
+// skipped: the owner actions the gap crosses are still fetched and
+// committed with the seed, so the pricing timeline stays complete and the
+// notifications are not held back until the slow scan; the head is seeded
+// alone, the hole recorded, and nil returned.
+func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uint64, pol policy) ([]nitro.Header, error) {
 	head := sample.Header.Number
 	if stored == 0 {
 		return nil, f.seed(ctx, sample, nil, nil)
 	}
 	from := stored + 1
 	maxGap := uint64(f.cfg.HeaderBatchSize) * uint64(f.cfg.MaxCatchUpBatches)
-	if gap := head - stored; !f.unlimited() && gap > maxGap {
+	if gap := head - stored; !pol.unlimited && gap > maxGap {
 		h := hole{From: from, To: head - 1}
 		f.log.Warn("catch-up gap exceeds budget, skipping blocks and restarting from the sampled head", "from", h.From, "to", h.To)
-		return nil, f.seed(ctx, sample, &h, nil)
+		pending, err := f.fetchOwnerRange(ctx, from, head)
+		if err != nil {
+			return nil, err
+		}
+		return nil, f.seed(ctx, sample, &h, pending)
 	}
 	headers, err := f.fetchHeaders(ctx, from, head-1)
 	if err != nil {
@@ -193,6 +225,11 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 	f.mu.Unlock()
 	clearedStart := false
 	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		// Every writer that fetched from the old fork compares this counter
+		// inside its own transaction and discards its work.
+		if err := f.bumpGeneration(ctx, s); err != nil {
+			return err
+		}
 		removed, err := s.DeleteBlocksAfter(ctx, f.chainID, ancestor)
 		if err != nil {
 			return fmt.Errorf("delete blocks: %w", err)
@@ -223,6 +260,12 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 				return fmt.Errorf("live start: %w", err)
 			}
 		}
+		// The network row moves to the surviving ancestor in the same
+		// transaction, so /status never shows the orphaned head after a
+		// rewind whose replacement fetch or persistence then fails.
+		if err := f.rewindNetworkHead(ctx, s, ancestor); err != nil {
+			return err
+		}
 		return s.SetState(ctx, f.chainID, db.StateHead, fmt.Sprint(ancestor))
 	})
 	if err != nil {
@@ -234,6 +277,7 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 		f.liveStart = nil
 	}
 	f.ownerScanThrough = min(f.ownerScanThrough, ancestor)
+	f.clearHeadStateLocked()
 	if err := f.reloadHeadLocked(ctx); err != nil {
 		return 0, err
 	}
@@ -241,6 +285,26 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 		return 0, err
 	}
 	return f.head, nil
+}
+
+// rewindNetworkHead moves networks.head_block and head_at down to the
+// surviving ancestor inside the rewind transaction. An ancestor with no
+// row left (everything was orphaned) leaves the head at zero.
+func (f *Follower) rewindNetworkHead(ctx context.Context, s db.Store, ancestor uint64) error {
+	at := time.Unix(0, 0).UTC()
+	if ancestor > 0 {
+		row, err := s.BlockByNumber(ctx, f.chainID, ancestor)
+		if err != nil {
+			return fmt.Errorf("ancestor block %d: %w", ancestor, err)
+		}
+		if row != nil {
+			at = row.TS
+		}
+	}
+	if err := s.UpdateNetworkHead(ctx, f.chainID, ancestor, at, f.now().UTC()); err != nil {
+		return fmt.Errorf("network head: %w", err)
+	}
+	return nil
 }
 
 // rewindBackfill resets the backfill to a safe checkpoint when its range
@@ -467,8 +531,8 @@ func (f *Follower) replayStateLocked(ctx context.Context, sample *nitro.Sample) 
 	switch {
 	case tl.minFeeChangeBlock(last.Number) == 0:
 		st.MinBaseFee = bigOrZero(sample.MinBaseFee)
-	case last.MinBaseFee.BigInt().Sign() > 0:
-		st.MinBaseFee = new(big.Int).Set(last.MinBaseFee.BigInt())
+	case last.MinBaseFee.Valid && last.MinBaseFee.Wei.BigInt().Sign() > 0:
+		st.MinBaseFee = new(big.Int).Set(last.MinBaseFee.Wei.BigInt())
 	default:
 		st.MinBaseFee = tl.minFeeAt(last.Number)
 	}
@@ -585,9 +649,12 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 	head := sample.Header.Number
 	headAt := time.Unix(int64(sample.Header.Timestamp), 0).UTC()
 	f.mu.Lock()
-	l1, accounts, includeSlow, ls := f.l1, f.accounts, f.slowPending, f.liveStart
+	l1, accounts, ls := f.l1, f.accounts, f.liveStart
+	slowGen := f.slowGen
+	includeSlow := slowGen > f.slowSaved
 	observed := f.observedSetLocked(sample, pending)
 	f.mu.Unlock()
+	lastErr := f.endpointErrorNow()
 
 	var snapshot *model.LiveSnapshot
 	reload := false
@@ -634,6 +701,14 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 		if err := s.UpdateNetworkHead(ctx, f.chainID, head, headAt, sample.SampledAt); err != nil {
 			return fmt.Errorf("network head: %w", err)
 		}
+		// A tick clears networks.last_error; a disabled endpoint is a
+		// standing error even while the network keeps running on another
+		// one, so it is written back in the same transaction.
+		if lastErr != "" {
+			if err := s.SetNetworkError(ctx, f.chainID, lastErr); err != nil {
+				return fmt.Errorf("endpoint error: %w", err)
+			}
+		}
 		if err := s.SetState(ctx, f.chainID, db.StateHead, fmt.Sprint(head)); err != nil {
 			return fmt.Errorf("head checkpoint: %w", err)
 		}
@@ -660,7 +735,10 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 	defer f.mu.Unlock()
 	f.snapshot = snapshot
 	if includeSlow {
-		f.slowPending = false
+		// Only the generation this transaction actually wrote is cleared: a
+		// slow sample published while it ran keeps its own claim on the
+		// next tick.
+		f.slowSaved = max(f.slowSaved, slowGen)
 	}
 	if reload {
 		if err := f.reloadSetsLocked(ctx); err != nil {
@@ -691,8 +769,18 @@ func (f *Follower) fail(ctx context.Context, err error) error {
 	return err
 }
 
+// endpointErrorNow summarizes the pool's disabled endpoints, "" without a
+// pool or while every endpoint is usable.
+func (f *Follower) endpointErrorNow() string {
+	if f.pool == nil {
+		return ""
+	}
+	return endpointError(f.pool.Status())
+}
+
 // blockRows joins headers with replay results. minFee gives the minimum
-// base fee in force at each block.
+// base fee in force at each block. Rows written here always carry the full
+// pricing breakdown, so their fee split is exact.
 func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, minFee func(uint64) *big.Int) []db.Block {
 	rows := make([]db.Block, len(headers))
 	for i, h := range headers {
@@ -715,8 +803,9 @@ func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, 
 			ConstraintBips:   bips,
 			ExponentBips:     int64(r.Exponent),
 			PredictedBaseFee: db.NewWei(r.Predicted),
-			MinBaseFee:       db.NewWei(minFee(h.Number)),
+			MinBaseFee:       db.NewNullWei(minFee(h.Number)),
 			Anchored:         r.Anchored,
+			PricingVersion:   db.PricingFull,
 		}
 	}
 	return rows

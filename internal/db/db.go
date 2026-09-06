@@ -48,6 +48,12 @@ const (
 	// reached the head it started from, never per chunk. The backfill
 	// starts a segment only when it covers the block before live_start.
 	StateOwnerScanThrough = "owner_scan_through"
+	// StateGeneration counts the canonical rewinds of a chain: every reorg
+	// rewind bumps it inside its own transaction. A writer captures it
+	// before its network calls and compares it inside its chain
+	// transaction, so work fetched from a fork that has since been rewound
+	// is discarded instead of committed on top of the canonical chain.
+	StateGeneration = "generation"
 	// StateOwnerScanOrigin describes where a deliberately truncated owner
 	// scan began ({"block":n,"minBaseFee":"…","archive":bool}): the pricing
 	// state in force there when an archive endpoint could sample it, or a

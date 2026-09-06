@@ -73,7 +73,7 @@ func (c *Client) HeaderByNumber(ctx context.Context, number uint64) (*Header, er
 
 // HeadersByNumbers fetches headers in batches of at most MaxBatch, in order.
 func (c *Client) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
-	blocks, err := blocksByNumbers(ctx, numbers, false, c.batchCapped)
+	blocks, err := blocksByNumbers(ctx, numbers, false, c.chunk)
 	if err != nil {
 		return nil, err
 	}
@@ -96,24 +96,27 @@ func (c *Client) BlockWithTxs(ctx context.Context, number uint64) (*Block, error
 // BlocksWithTxs fetches several blocks with full transactions in one batch
 // per MaxBatch items.
 func (c *Client) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, error) {
-	return blocksByNumbers(ctx, numbers, true, c.batchCapped)
+	return blocksByNumbers(ctx, numbers, true, c.chunk)
 }
 
 // batcher sends a request list of any length, splitting it into HTTP
 // batches as it sees fit, and returns one Result per request in order.
 type batcher func(ctx context.Context, reqs []Request) ([]Result, error)
 
-// batchCapped is the Client's batcher: fixed batches of at most the pacer's
-// MaxBatch items.
+// batchCapped is the Client's batcher: batches of at most what the pacer
+// can hold at once for the calling class, so a typed request list longer
+// than the budget is split instead of overdrawing the bucket.
 func (c *Client) batchCapped(ctx context.Context, reqs []Request) ([]Result, error) {
 	out := make([]Result, 0, len(reqs))
-	size := c.pacer.MaxBatch()
-	for start := 0; start < len(reqs); start += size {
-		results, err := c.Batch(ctx, reqs[start:min(start+size, len(reqs))])
+	class := ClassOf(ctx)
+	for start := 0; start < len(reqs); {
+		size := chunkSize(c.pacer.MaxBatchFor(class), len(reqs)-start)
+		results, err := c.Batch(ctx, reqs[start:start+size])
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, results...)
+		start += size
 	}
 	return out, nil
 }
@@ -177,7 +180,7 @@ func (c *Client) Balance(ctx context.Context, address string) (*big.Int, error) 
 // returns the raw return data.
 func (c *Client) CallContract(ctx context.Context, to string, data []byte) ([]byte, error) {
 	r := CallRequest(to, data)
-	results, err := c.Batch(ctx, []Request{r})
+	results, err := c.chunk(ctx, []Request{r})
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +226,7 @@ func (c *Client) FastSampleAt(ctx context.Context, number uint64) (*Sample, erro
 }
 
 func (c *Client) sampleAt(ctx context.Context, tag string) (*Sample, error) {
-	results, err := c.Batch(ctx, []Request{
+	results, err := c.chunk(ctx, []Request{
 		{Method: methodGetBlockByNumber, Params: []any{tag, false}},
 		SelectorCallAt(ArbGasInfoAddress, SigGetGasPricingConstraints, tag),
 		SelectorCallAt(ArbGasInfoAddress, SigGetPricesInWei, tag),
@@ -289,7 +292,7 @@ func (c *Client) LegacyParams(ctx context.Context) (*LegacyParams, error) {
 }
 
 func (c *Client) legacyParamsAt(ctx context.Context, tag string) (*LegacyParams, error) {
-	results, err := c.Batch(ctx, []Request{
+	results, err := c.chunk(ctx, []Request{
 		SelectorCallAt(ArbGasInfoAddress, SigGetGasBacklog, tag),
 		SelectorCallAt(ArbGasInfoAddress, SigGetPricingInertia, tag),
 		SelectorCallAt(ArbGasInfoAddress, SigGetGasBacklogTolerance, tag),
@@ -331,7 +334,7 @@ func (c *Client) L1Sample(ctx context.Context) (*L1Sample, error) {
 	for i, sig := range sigs {
 		reqs[i] = SelectorCall(ArbGasInfoAddress, sig)
 	}
-	results, err := c.Batch(ctx, reqs)
+	results, err := c.chunk(ctx, reqs)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +375,7 @@ func (c *Client) L1Sample(ctx context.Context) (*L1Sample, error) {
 // FeeAccounts reads the infra, network and L1 reward accounts and their
 // balances (two batches: addresses, then balances).
 func (c *Client) FeeAccounts(ctx context.Context) (*FeeAccounts, error) {
-	results, err := c.Batch(ctx, []Request{
+	results, err := c.chunk(ctx, []Request{
 		SelectorCall(ArbOwnerPublicAddress, SigGetInfraFeeAccount),
 		SelectorCall(ArbOwnerPublicAddress, SigGetNetworkFeeAccount),
 		SelectorCall(ArbGasInfoAddress, SigGetL1RewardRecipient),
@@ -395,7 +398,7 @@ func (c *Client) FeeAccounts(ctx context.Context) (*FeeAccounts, error) {
 	for i, a := range addrs {
 		balReqs[i] = Request{Method: "eth_getBalance", Params: []any{a, latestTag}}
 	}
-	balResults, err := c.Batch(ctx, balReqs)
+	balResults, err := c.chunk(ctx, balReqs)
 	if err != nil {
 		return nil, err
 	}

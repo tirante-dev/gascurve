@@ -32,7 +32,7 @@ Configured in `config.yaml` (`networks:`), overridable by `NETWORK_<NAME>_*` env
 
 All four report ArbOS 61 (`ArbSys.arbOSVersion()` = 116).
 
-Per-network optional settings: `calls_per_second` (0 = unlimited, for dedicated nodes; the public defaults stay at 4), `ws_url` (subscribe to `newHeads` and sample state at each head instead of polling), `archive` (historical `eth_call` works, so the backfill anchors replay to real backlogs every `collector.backfill_anchor_interval` blocks). Production runs on dedicated nodes; the public-RPC pacing exists for development and for anyone running the collector without one.
+Per-network optional settings: `calls_per_second` (0 = unlimited, otherwise at least 0.1, for dedicated nodes; the public defaults stay at 4), `ws_url` (subscribe to `newHeads` and sample state at each head instead of polling), `archive` (historical `eth_call` works, so the backfill anchors replay to real backlogs every `collector.backfill_anchor_interval` blocks). Production runs on dedicated nodes; the public-RPC pacing exists for development and for anyone running the collector without one.
 
 ### Multiple endpoints per network
 
@@ -90,7 +90,7 @@ All tables are keyed by `chain_id` first. Wei values are `NUMERIC(40,0)`. Gas va
 
 ```sql
 networks            (chain_id PK, name, display_name, explorer_url, enabled, head_block, head_at, last_sample_at, last_error, updated_at)
-blocks              (chain_id, number, ts, gas_used, base_fee NUMERIC, l1_block, tx_count,
+blocks              (chain_id, number, hash, parent_hash, ts, gas_used, base_fee NUMERIC, l1_block, tx_count, pricing_version SMALLINT /* 1 = full breakdown, 0 = unknown history */,
                      backlogs BIGINT[], exponent_bips BIGINT, predicted_base_fee NUMERIC, anchored BOOL,
                      PK(chain_id, number))                       -- rolling, pruned after collector.block_retention
 buckets             (chain_id, resolution TEXT /* '1m'|'15m'|'1h' */, bucket_start TIMESTAMPTZ,
@@ -110,7 +110,7 @@ owner_actions       (chain_id, block_number, tx_hash, log_index, ts, method, sel
 constraint_sets     (id SERIAL PK, chain_id, effective_block, effective_at, constraints JSONB, source TEXT /* 'genesis'|'owner_action'|'observed' */)
 batch_reports       (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero,
                      extra_gas, l1_base_fee NUMERIC, gas_spent BIGINT, wei_spent NUMERIC, PK(chain_id, block_number))
-collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, holes, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor, endpoints
+collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, holes, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor, endpoints, generation (bumped by every rewind; writers that fetched outside the lock re-check it before committing), eth_usd
 ```
 
 `NOTIFY gascurve_live, '<json>'` is issued by the collector after each tick with the `LiveSnapshot` below (payloads stay under 8 kB; `recentBlocks` is not included in the notify payload, the API keeps its own ring buffer from `blocks` rows).
@@ -127,6 +127,7 @@ Correctness rules the follower must keep:
 - **Nothing advances in memory before the commit.** The pricer state is cloned for the replay; head, previous timestamp, state and last result are published only after the transaction commits. After a commit error the follower reloads head and state from the database (the last stored block row carries the backlogs) so a retry is idempotent.
 - **Bucket folds are idempotent.** The fold and the head checkpoint commit in one transaction, and a bucket's additive fields are recomputed from the block rows inside the fold window when those rows exist; buckets store `base_fee_sum` (exact) rather than a running average.
 - **Reorgs are detected.** Blocks store `hash` and `parent_hash`; a head whose parent hash does not match the stored head triggers a rewind to the common ancestor (blocks, bucket contributions, owner-action and batch cursors) in one transaction.
+- **Capability endpoints are verified before use.** Archive calls go through a managed archive pool with its own failover; the `newHeads` subscriber re-resolves its endpoint at every connection attempt. A range with no independently known pricer state is recorded as a hole, never replayed from the live model.
 - **Minimum base fee history.** The fee in force at a block comes from recorded `setMinimumL2BaseFee` actions, with nitro's genesis default (0.1 gwei, `InitialMinimumBaseFeeWei`) before the first recorded change, never the live value.
 
 Fast loop, every `collector.tick_interval` (1 s), or on every `newHeads` event when `ws_url` is configured (then state calls are made at that head's block number so samples align exactly with headers):
@@ -162,7 +163,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 | `GET /networks/{network}/owner-actions` | `OwnerAction[]` newest first |
 | `GET /networks/{network}/batches?range=…` | `BatchSeries` (L1 cost per bucket, batch cadence) |
 | `GET /networks/{network}/l1?range=…` | `L1Series` (pricer getters over time, from state samples) |
-| `GET /status` | `{ version, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion, activeEndpoint, failovers, endpoints: [{ index, ws, archive, disabled }] }] }` (`headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion` are nullable; `endpoints` is `[]` when unknown; endpoint URLs are never exposed) |
+| `GET /status` | `{ version, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion, activeEndpoint, failovers, endpoints: [{ index, ws, archive, disabled, error: string | null }] }] }` (`headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion` are nullable; `endpoints` is `[]` when unknown; endpoint URLs are never exposed) |
 | `GET /ws?network=…` | WebSocket, see §7 |
 
 Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applied server-side if more than 2000 points), `24h` → `1m` buckets, `30d` → `15m`, `all` → `1h`. `/live` returns 404 until the collector has produced a sample. Arrays are never `null` in responses. `L1Series` reaches back at most `collector.sample_retention`.
@@ -203,7 +204,7 @@ type BlockPoint = {
   number: number; ts: number; gasUsed: number; baseFee: string; predictedBaseFee: string;
   backlogs: number[];        // end-of-block backlogs (after AddGas)
   constraintBips: number[] | null;  // start-of-block per-constraint exponent, the values that priced this block; sums to exponentBips; null only for rows written before migration 000006
-  exponentBips: number; minBaseFee: string; anchored: boolean;
+  exponentBips: number; minBaseFee: string | null; anchored: boolean;   // minBaseFee null for pricing version 0 (history without the breakdown)
 }
 
 type Series = {
@@ -218,8 +219,8 @@ type SeriesPoint = {
   baseFeeMin: string; baseFeeAvg: string; baseFeeMax: string;
   exponentBips: number; constraintBips: number[] | null;   // start-of-block values of the bucket's last block; null for pre-000006 history
   backlogs: number[]; backlogsMax: number[];
-  minBaseFee: string;                               // floor in force at the bucket's last block
-  floorFeesWei: string | null; surplusFeesWei: string | null;     // Σ gasUsed × minBaseFee and feesWei minus that, per block, exact; null for pre-000006 history
+  minBaseFee: string | null;                        // floor in force at the bucket's last block; null when any block in the bucket has pricing version 0
+  floorFeesWei: string | null; surplusFeesWei: string | null;     // Σ gasUsed × minBaseFee and feesWei minus that, per block, exact; null when any block in the bucket has pricing version 0
   constraintSetId: number; replayErrorBips: number;
 }
 

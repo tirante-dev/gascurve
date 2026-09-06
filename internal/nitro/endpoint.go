@@ -58,10 +58,15 @@ func newEndpoint(index int, cfg config.EndpointConfig, batchSize int, log *logge
 		maxBatchCap: batchSize,
 		minBatchCap: min(minBatchCap, batchSize),
 	}
-	opts = append(append([]Option{WithLogger(e.log)}, opts...), withBatchObserver(e.observe))
+	opts = append(append([]Option{WithLogger(e.log)}, opts...), withBatchObserver(e.observe), withBatcher(e.batch))
 	e.Client = NewClient(cfg.RPCURL, cfg.CallsPerSecond, opts...)
 	return e
 }
+
+// setPreSend installs the check the pool makes under the send lock, so a
+// call that selected this endpoint before another caller failed over is
+// rejected before it reaches the wire.
+func (e *Endpoint) setPreSend(fn func(context.Context) error) { e.preSend = fn }
 
 // Index is the endpoint's position: 0 is the primary.
 func (e *Endpoint) Index() int { return e.index }
@@ -141,17 +146,20 @@ func (e *Endpoint) observe(items int, limited bool) {
 }
 
 // batch sends reqs in chunks of at most the current cap, itself bounded by
-// what the endpoint's token bucket can hold at once (a budgeted endpoint
-// never sends a batch it has not paid for in full). A throttled chunk is
-// retried after the back-off at whatever the cap has become, so an
-// oversized batch shrinks instead of being resent as is; the attempt
-// budget is the client's.
+// what the endpoint's token bucket can hold at once for the calling class
+// (a budgeted endpoint never sends a batch it has not paid for in full).
+// Every typed call goes through it, not only the header batches, so an
+// eight-call L1 sample on a four calls per second budget is split rather
+// than eating the fast reserve. A throttled chunk is retried after the
+// back-off at whatever the cap has become, so an oversized batch shrinks
+// instead of being resent as is; the attempt budget is the client's.
 func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	out := make([]Result, 0, len(reqs))
 	attempts := 0
+	class := ClassOf(ctx)
 	for start := 0; start < len(reqs); {
-		size := min(e.BatchCap(), e.pacer.MaxBatch())
-		chunk := reqs[start:min(start+size, len(reqs))]
+		size := chunkSize(min(e.BatchCap(), e.pacer.MaxBatchFor(class)), len(reqs)-start)
+		chunk := reqs[start : start+size]
 		results, limited, err := e.attempt(ctx, chunk)
 		if err != nil {
 			return nil, err

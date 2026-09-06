@@ -71,7 +71,7 @@ func TestTickFreshStartAndCatchUp(t *testing.T) {
 	if !head.Anchored || head.Backlogs[1] != 11_194_391_810_886 || head.Backlogs[0] != 3_111_506 {
 		t.Fatalf("head not anchored to the sample: %+v", head)
 	}
-	if head.Hash != "0x3e8" || head.ParentHash != "0x3e7" || head.MinBaseFee.Int64() != 20_000_000 || len(head.ConstraintBips) != 2 {
+	if head.Hash != "0x3e8" || head.ParentHash != "0x3e7" || head.MinBaseFee.Wei.Int64() != 20_000_000 || len(head.ConstraintBips) != 2 {
 		t.Fatalf("head row fields: %+v", head)
 	}
 	if head.PredictedBaseFee.Cmp(head.BaseFee.BigInt()) != 0 || db.ReplayErrorBips(head) != 0 {
@@ -100,7 +100,7 @@ func TestTickFreshStartAndCatchUp(t *testing.T) {
 	if bk[0].Blocks != 1 || bk[0].LastBlock != 1000 || bk[0].BacklogsEnd[1] != 11_194_391_810_886 || bk[0].FeesWei.Sign() <= 0 {
 		t.Fatalf("bucket: %+v", bk[0])
 	}
-	if bk[0].MinBaseFee.Int64() != 20_000_000 || bk[0].FloorFeesWei.Wei.Int64() != 20_000_000*int64(gasFor(1000)) || bk[0].SurplusFeesWei.Wei.Int64() != (feeFor(1000).Int64()-20_000_000)*int64(gasFor(1000)) || !bk[0].BaseFeeSum.Valid {
+	if bk[0].MinBaseFee.Wei.Int64() != 20_000_000 || bk[0].FloorFeesWei.Wei.Int64() != 20_000_000*int64(gasFor(1000)) || bk[0].SurplusFeesWei.Wei.Int64() != (feeFor(1000).Int64()-20_000_000)*int64(gasFor(1000)) || !bk[0].BaseFeeSum.Valid {
 		t.Fatalf("bucket fee split: %+v", bk[0])
 	}
 	sample, _ := store.LatestStateSample(ctx, 4663, false)
@@ -224,8 +224,15 @@ func TestTickGapSkipAndParameterChange(t *testing.T) {
 	if holes := holesOf(t, store); len(holes) != 2 || holes[1].From != 1151 || holes[1].To != 1151 {
 		t.Fatalf("second hole: %+v", holes)
 	}
-	if rpc.calledTimes("OwnerActsLogs") != 1 {
-		t.Fatalf("a shape change must look for the owner action: %d log calls", rpc.calledTimes("OwnerActsLogs"))
+	// Two log reads: the skipped gap is scanned for owner actions before
+	// the head is seeded (nothing may be delayed to the slow loop just
+	// because the blocks between were not replayed), and the shape change
+	// looks for the action that explains it.
+	if rpc.calledTimes("OwnerActsLogs") != 2 {
+		t.Fatalf("a skipped gap and a shape change must both look for owner actions: %d log calls", rpc.calledTimes("OwnerActsLogs"))
+	}
+	if got := rpc.logRanges[0]; got != [2]uint64{1001, 1150} {
+		t.Fatalf("the skipped interval must be scanned for owner actions: %v", rpc.logRanges)
 	}
 	// A change at the head itself (same height) re-anchors without a hole.
 	rpc.mu.Lock()
@@ -303,8 +310,8 @@ func TestTickSplitsAtOwnerAction(t *testing.T) {
 	}
 	b1011, _ := store.BlockByNumber(ctx, 4663, 1011)
 	b1012, _ := store.BlockByNumber(ctx, 4663, 1012)
-	if b1011.MinBaseFee.Int64() != 20_000_000 || b1012.MinBaseFee.Int64() != 30_000_000 {
-		t.Fatalf("min fee split: %s then %s", b1011.MinBaseFee, b1012.MinBaseFee)
+	if b1011.MinBaseFee.Wei.Int64() != 20_000_000 || b1012.MinBaseFee.Wei.Int64() != 30_000_000 {
+		t.Fatalf("min fee split: %s then %s", b1011.MinBaseFee.Wei, b1012.MinBaseFee.Wei)
 	}
 	if f.minFeeAt(1011).Int64() != pricer.InitialMinimumBaseFeeWei || f.minFeeAt(1012).Int64() != 30_000_000 {
 		t.Fatalf("minFeeAt: %s %s", f.minFeeAt(1011), f.minFeeAt(1012))
@@ -364,8 +371,8 @@ func TestTickCatchUpBoundaries(t *testing.T) {
 	if len(b(1004).Backlogs) != 2 || len(b(1005).Backlogs) != 1 || len(b(1006).Backlogs) != 1 || len(b(1007).Backlogs) != 2 || b(1007).Backlogs[0] != 11+gasFor(1007) {
 		t.Fatalf("change and change back: %v %v %v %v", b(1004).Backlogs, b(1005).Backlogs, b(1006).Backlogs, b(1007).Backlogs)
 	}
-	if b(1007).MinBaseFee.Int64() != 20_000_000 || b(1008).MinBaseFee.Int64() != 30_000_000 || b(1009).MinBaseFee.Int64() != 20_000_000 || b(1010).MinBaseFee.Int64() != 20_000_000 {
-		t.Fatalf("fee change and change back: %s %s %s", b(1007).MinBaseFee, b(1008).MinBaseFee, b(1009).MinBaseFee)
+	if b(1007).MinBaseFee.Wei.Int64() != 20_000_000 || b(1008).MinBaseFee.Wei.Int64() != 30_000_000 || b(1009).MinBaseFee.Wei.Int64() != 20_000_000 || b(1010).MinBaseFee.Wei.Int64() != 20_000_000 {
+		t.Fatalf("fee change and change back: %s %s %s", b(1007).MinBaseFee.Wei, b(1008).MinBaseFee.Wei, b(1009).MinBaseFee.Wei)
 	}
 	sets, _ := store.ConstraintSets(ctx, 4663)
 	if len(sets) != 4 || sets[1].EffectiveBlock != 1003 || sets[3].EffectiveBlock != 1007 {
@@ -399,7 +406,7 @@ func TestTickCatchUpBoundaries(t *testing.T) {
 		t.Fatalf("retry records the action: %d actions, fee %s", len(acts), f.minFeeAt(1012))
 	}
 	b1012, _ := store.BlockByNumber(ctx, 4663, 1012)
-	if b1012.MinBaseFee.Int64() != 25_000_000 {
+	if b1012.MinBaseFee.Wei.Int64() != 25_000_000 {
 		t.Fatalf("fee split on the retry: %+v", b1012)
 	}
 	// A fee change nothing explains (no action in the interval) is a hole,
@@ -506,6 +513,9 @@ func TestTickReorgResetsBackfill(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
+	// The backfill only replays from a known constraint set, so the sets
+	// are recorded before it starts filling rows below the live start.
+	seedSets(t, store)
 	f := newTestFollower(t, rpc, store)
 	f.cfg.BackfillDepth = 30 * time.Second // block 700
 	if err := f.Tick(ctx); err != nil {
@@ -1200,7 +1210,7 @@ func TestTickUnlimitedNeverSkips(t *testing.T) {
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
 	f.net.CallsPerSecond = 0
-	if !f.unlimited() {
+	if !f.policy().unlimited {
 		t.Fatal("calls_per_second 0 is unlimited")
 	}
 	if err := f.Tick(ctx); err != nil {
@@ -1319,14 +1329,14 @@ func TestTickRestartRebuildsState(t *testing.T) {
 		t.Fatal(err)
 	}
 	b1001, _ := store.BlockByNumber(ctx, 4663, 1001)
-	if b1001 == nil || b1001.Backlogs[0] != 3_111_506+gasFor(1001) || b1001.MinBaseFee.Int64() != 20_000_000 {
+	if b1001 == nil || b1001.Backlogs[0] != 3_111_506+gasFor(1001) || b1001.MinBaseFee.Wei.Int64() != 20_000_000 {
 		t.Fatalf("restart replay: %+v", b1001)
 	}
 	// A stored head whose backlog count does not match any known shape
 	// (say the model changed while the collector was down) is seeded.
 	row, _ := store.BlockByNumber(ctx, 4663, 1003)
 	row.Backlogs = db.Uint64Array{1, 2, 3}
-	row.MinBaseFee = db.NewWei(nil)
+	row.MinBaseFee = db.NewNullWei(nil)
 	_ = store.UpsertBlocks(ctx, []db.Block{*row})
 	rpc.setHead(1005)
 	f3 := newTestFollower(t, rpc, store)

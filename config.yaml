@@ -32,11 +32,15 @@ collector:
 # Every network is an Arbitrum Nitro chain. calls_per_second is the budget for
 # a public endpoint and counts JSON-RPC calls, including items inside a batch
 # request, because that is how the Robinhood public RPC meters. Set it to 0 for
-# a dedicated node (unlimited). A quarter of the budget (at least one call per
-# second) is reserved for the head sample, so bulk work (catch-up headers, log
-# scans, the backfill) never delays that share; what a tick wants beyond it
-# queues first come, first served with the bulk work, so a demanding tick
-# slows the backfill down rather than stopping it. A QuickNode endpoint
+# a dedicated node (unlimited); anything positive below 0.1 (one call every ten
+# seconds) is rejected, since a single token would then take longer than any
+# request timeout. A quarter of the budget (at least one call per second) is
+# reserved for the head sample, so bulk work (catch-up headers, log scans, the
+# backfill) never delays that share; what a tick wants beyond it queues first
+# come, first served with the bulk work, so a demanding tick slows the backfill
+# down rather than stopping it. Below one call per second a whole-token reserve
+# is the whole burst, so the two lanes take turns on it instead and a batch
+# carries one call at a time. A QuickNode endpoint
 # enforces 50 requests per second, counting every item inside a batch, and
 # reports the excess as a JSON-RPC error (-32007 "50/second request limit
 # reached") rather than an HTTP 429; give it calls_per_second: 40 so the

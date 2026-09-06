@@ -41,7 +41,7 @@ type Head struct {
 // to polling while the socket is down. The URL is never logged: it can
 // carry a key.
 type HeadSubscriber struct {
-	url          string
+	url          func(context.Context) (string, error)
 	userAgent    string
 	log          *logger.Logger
 	httpClient   *http.Client
@@ -58,6 +58,14 @@ type HeadOption func(*HeadSubscriber)
 
 // WithHeadLogger sets the logger.
 func WithHeadLogger(l *logger.Logger) HeadOption { return func(s *HeadSubscriber) { s.log = l } }
+
+// WithHeadURL replaces the fixed URL with a resolver called before every
+// connection attempt, so a subscriber rebinds to another endpoint the
+// moment the one it followed is disabled or fails verification. An error
+// keeps it retrying with its back-off.
+func WithHeadURL(fn func(context.Context) (string, error)) HeadOption {
+	return func(s *HeadSubscriber) { s.url = fn }
+}
 
 // WithHeadHTTPClient sets the HTTP client used for the WebSocket handshake.
 // Its Timeout bounds the handshake.
@@ -82,9 +90,10 @@ func withHeadSleep(sleep func(context.Context, time.Duration) error) HeadOption 
 }
 
 // NewHeadSubscriber creates a subscriber for a ws:// or wss:// endpoint.
+// WithHeadURL replaces the fixed endpoint with a resolver.
 func NewHeadSubscriber(url string, opts ...HeadOption) *HeadSubscriber {
 	s := &HeadSubscriber{
-		url:          url,
+		url:          func(context.Context) (string, error) { return url, nil },
 		userAgent:    version.UserAgent(),
 		log:          logger.Nop(),
 		httpClient:   &http.Client{Timeout: headsHandshakeLimit},
@@ -129,7 +138,11 @@ func (s *HeadSubscriber) Run(ctx context.Context, fn func(Head)) {
 // runOnce dials, subscribes and delivers heads until the connection ends.
 // subscribed reports whether the subscription was acknowledged.
 func (s *HeadSubscriber) runOnce(ctx context.Context, fn func(Head)) (subscribed bool, err error) {
-	conn, resp, err := websocket.Dial(ctx, s.url, &websocket.DialOptions{
+	url, err := s.url(ctx)
+	if err != nil {
+		return false, fmt.Errorf("resolve endpoint: %w", err)
+	}
+	conn, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{
 		HTTPClient: s.httpClient,
 		HTTPHeader: http.Header{"User-Agent": {s.userAgent}},
 	})

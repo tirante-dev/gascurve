@@ -43,6 +43,10 @@ type fakeRPC struct {
 	available   int
 	stats       nitro.Stats
 	errs        map[string]error
+	// hooks run when the named method is called, before it answers, so a
+	// test can change the database (commit a rewind, say) while a fetch is
+	// in flight.
+	hooks       map[string]func()
 	calls       map[string]int
 	logRanges   [][2]uint64
 	headerCalls [][]uint64
@@ -77,6 +81,7 @@ func newFakeRPC(head uint64) *fakeRPC {
 		fullBlocks: map[uint64]nitro.Block{},
 		available:  1000,
 		errs:       map[string]error{},
+		hooks:      map[string]func(){},
 		calls:      map[string]int{},
 		classes:    map[string]nitro.Class{},
 		txCount:    func(uint64) int { return 3 },
@@ -86,9 +91,13 @@ func newFakeRPC(head uint64) *fakeRPC {
 
 func (f *fakeRPC) fail(method string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls[method]++
-	return f.errs[method]
+	err, hook := f.errs[method], f.hooks[method]
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return err
 }
 
 // note records the pacer class a call carried.

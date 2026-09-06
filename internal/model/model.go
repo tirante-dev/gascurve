@@ -140,7 +140,8 @@ type LiveSnapshot struct {
 // ConstraintBips the start-of-block per-constraint exponents that priced
 // the block (they sum to ExponentBips; null for a block stored before they
 // were recorded, an empty array for a legacy block) and MinBaseFee the
-// floor in force.
+// floor in force, null for that same history (pricing version 0), where
+// the floor was never recorded.
 type BlockPoint struct {
 	Number           uint64   `json:"number"`
 	TS               uint64   `json:"ts"`
@@ -150,16 +151,18 @@ type BlockPoint struct {
 	Backlogs         []uint64 `json:"backlogs"`
 	ConstraintBips   []int64  `json:"constraintBips"`
 	ExponentBips     int64    `json:"exponentBips"`
-	MinBaseFee       string   `json:"minBaseFee"`
+	MinBaseFee       *string  `json:"minBaseFee"`
 	Anchored         bool     `json:"anchored"`
 }
 
 // SeriesPoint is one bucket of a Series. ExponentBips, ConstraintBips,
 // Backlogs and MinBaseFee describe the bucket's last block; FloorFeesWei
 // is the sum of gasUsed times the minimum base fee per block and
-// SurplusFeesWei is FeesWei minus that. ConstraintBips, FloorFeesWei and
-// SurplusFeesWei are null for buckets written before they were recorded
-// (history that predates migration 000006); they are never null otherwise.
+// SurplusFeesWei is FeesWei minus that. ConstraintBips, MinBaseFee,
+// FloorFeesWei and SurplusFeesWei are null for history whose pricing
+// breakdown was never recorded (pricing version 0, see migration 000007),
+// including a bucket any of whose source blocks is such history; they are
+// never null otherwise.
 type SeriesPoint struct {
 	T               int64    `json:"t"`
 	Blocks          int64    `json:"blocks"`
@@ -173,7 +176,7 @@ type SeriesPoint struct {
 	ConstraintBips  []int64  `json:"constraintBips"`
 	Backlogs        []uint64 `json:"backlogs"`
 	BacklogsMax     []uint64 `json:"backlogsMax"`
-	MinBaseFee      string   `json:"minBaseFee"`
+	MinBaseFee      *string  `json:"minBaseFee"`
 	FloorFeesWei    *string  `json:"floorFeesWei"`
 	SurplusFeesWei  *string  `json:"surplusFeesWei"`
 	ConstraintSetID int64    `json:"constraintSetId"`
@@ -243,12 +246,15 @@ type L1Series struct {
 
 // EndpointStatus describes one RPC endpoint of a network in /status.
 // Index 0 is the primary; URLs are never exposed because they can carry
-// keys.
+// keys. Error is why a disabled endpoint was disabled, sanitized the same
+// way (chain ids, never a URL or a credential), and null while the
+// endpoint is usable.
 type EndpointStatus struct {
-	Index    int  `json:"index"`
-	WS       bool `json:"ws"`
-	Archive  bool `json:"archive"`
-	Disabled bool `json:"disabled"`
+	Index    int     `json:"index"`
+	WS       bool    `json:"ws"`
+	Archive  bool    `json:"archive"`
+	Disabled bool    `json:"disabled"`
+	Error    *string `json:"error"`
 }
 
 // EndpointsStatus is the routing state of a network's endpoint pool: the

@@ -173,15 +173,15 @@ func bucketPoint(b db.Bucket, width time.Duration) model.SeriesPoint {
 		T: b.BucketStart.Unix(), Blocks: b.Blocks, GasUsed: b.GasUsed, GasPerSecond: b.GasUsed / secs,
 		FeesWei: b.FeesWei.String(), BaseFeeMin: b.BaseFeeMin.String(), BaseFeeAvg: avg, BaseFeeMax: b.BaseFeeMax.String(),
 		ExponentBips: b.ExponentEndBips, ConstraintBips: int64s(b.ConstraintBipsEnd), Backlogs: b.BacklogsEnd.Uint64s(), BacklogsMax: b.BacklogsMax.Uint64s(),
-		MinBaseFee: b.MinBaseFee.String(), FloorFeesWei: b.FloorFeesWei.StringPtr(), SurplusFeesWei: b.SurplusFeesWei.StringPtr(),
+		MinBaseFee: b.MinBaseFee.StringPtr(), FloorFeesWei: b.FloorFeesWei.StringPtr(), SurplusFeesWei: b.SurplusFeesWei.StringPtr(),
 		ConstraintSetID: setID, ReplayErrorBips: b.ReplayErrorBips,
 	}
 }
 
 // blockPoints renders one point per block. gasPerSecond is the total gas of
 // all blocks sharing the block's timestamp second. A block stored before
-// its exponents and floor were recorded (nil ConstraintBips) has no known
-// fee split.
+// its exponents and floor were recorded (pricing version 0) has no known
+// floor and therefore no known fee split.
 func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint {
 	perSecond := map[int64]uint64{}
 	for _, b := range blocks {
@@ -195,10 +195,10 @@ func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint
 			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, GasPerSecond: perSecond[b.TS.Unix()],
 			FeesWei: fees.String(), BaseFeeMin: b.BaseFee.String(), BaseFeeAvg: b.BaseFee.String(), BaseFeeMax: b.BaseFee.String(),
 			ExponentBips: b.ExponentBips, ConstraintBips: int64s(b.ConstraintBips), Backlogs: b.Backlogs.Uint64s(), BacklogsMax: b.Backlogs.Uint64s(),
-			MinBaseFee: b.MinBaseFee.String(), ConstraintSetID: setIDAt(sets, b.Number, len(b.Backlogs)), ReplayErrorBips: replayError(b),
+			MinBaseFee: b.MinBaseFee.StringPtr(), ConstraintSetID: setIDAt(sets, b.Number, len(b.Backlogs)), ReplayErrorBips: replayError(b),
 		}
-		if b.ConstraintBips != nil {
-			floor := new(big.Int).Mul(b.MinBaseFee.BigInt(), gas)
+		if b.Known() {
+			floor := new(big.Int).Mul(b.MinBaseFee.Wei.BigInt(), gas)
 			p.FloorFeesWei, p.SurplusFeesWei = stringPtr(floor), stringPtr(new(big.Int).Sub(fees, floor))
 		}
 		out = append(out, p)
@@ -245,7 +245,7 @@ type acc struct {
 	constraintBips []int64
 	backlogs       []uint64
 	maxBacklog     []uint64
-	minBaseFee     string
+	minBaseFee     *string
 	setID          int64
 	errBips        int64
 }
@@ -263,11 +263,11 @@ func (a *acc) add(b db.Block, setID int64) {
 	a.sum.Add(a.sum, fee)
 	gas := new(big.Int).SetUint64(b.GasUsed)
 	a.fees.Add(a.fees, new(big.Int).Mul(fee, gas))
-	a.floor.Add(a.floor, new(big.Int).Mul(b.MinBaseFee.BigInt(), gas))
-	a.unknownFloor = a.unknownFloor || b.ConstraintBips == nil
+	a.floor.Add(a.floor, new(big.Int).Mul(b.MinBaseFee.Wei.BigInt(), gas))
+	a.unknownFloor = a.unknownFloor || !b.Known()
 	a.exponent = b.ExponentBips
 	a.constraintBips = int64s(b.ConstraintBips)
-	a.minBaseFee = b.MinBaseFee.String()
+	a.minBaseFee = b.MinBaseFee.StringPtr()
 	a.backlogs = b.Backlogs.Uint64s()
 	for i, v := range a.backlogs {
 		if i >= len(a.maxBacklog) {
@@ -288,9 +288,6 @@ func (a *acc) point(secs int64) model.SeriesPoint {
 	if a.backlogs == nil {
 		a.backlogs = []uint64{}
 	}
-	if a.minBaseFee == "" {
-		a.minBaseFee = "0"
-	}
 	if a.floor == nil {
 		a.floor = new(big.Int)
 	}
@@ -300,7 +297,11 @@ func (a *acc) point(secs int64) model.SeriesPoint {
 		ExponentBips: a.exponent, ConstraintBips: a.constraintBips, Backlogs: a.backlogs, BacklogsMax: a.maxBacklog,
 		MinBaseFee: a.minBaseFee, ConstraintSetID: a.setID, ReplayErrorBips: a.errBips,
 	}
-	if !a.unknownFloor {
+	if a.unknownFloor {
+		// One block of history without a recorded floor makes the whole
+		// step's floor, split and exponents unknown.
+		p.MinBaseFee, p.ConstraintBips = nil, nil
+	} else {
 		p.FloorFeesWei, p.SurplusFeesWei = stringPtr(a.floor), stringPtr(new(big.Int).Sub(a.fees, a.floor))
 	}
 	return p

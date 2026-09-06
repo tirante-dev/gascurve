@@ -857,3 +857,152 @@ func TestHubRun(t *testing.T) {
 		t.Fatalf("ring size = %d", n)
 	}
 }
+
+// TestHubHelloBroadcastsItsRefresh: a hello that finds the ring empty
+// fills it through the one path that also delivers what the refresh found,
+// so a client already connected to the network still receives every block,
+// where a preparation that consumed the delta and dropped it would have
+// swallowed them.
+func TestHubHelloBroadcastsItsRefresh(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	h := newWSHarness(t, store, time.Hour)
+	// Client A connects while the table is empty, so its hello carries no
+	// blocks and the hub's ring stays empty.
+	first := h.dial(t, "robinhood")
+	if typ, _ := readMsg(t, first); typ != "hello" {
+		t.Fatalf("hello: %s", typ)
+	}
+	blocks := make([]db.Block, 0, 3)
+	for n := uint64(200); n < 203; n++ {
+		blocks = append(blocks, db.Block{ChainID: robinhood, Number: n, Hash: "0x" + strconv.FormatUint(n, 10),
+			TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.WeiFromUint64(n)})
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	// Client B's hello fills the ring. The blocks it found are broadcast,
+	// so A sees them even though no notification has arrived yet.
+	second := h.dial(t, "robinhood")
+	if typ, _ := readMsg(t, second); typ != "hello" {
+		t.Fatalf("second hello: %s", typ)
+	}
+	typ, data := readMsg(t, first)
+	var got []model.BlockPoint
+	if typ != "blocks" || json.Unmarshal(data, &got) != nil || len(got) != 3 || got[2].Number != 202 {
+		t.Fatalf("the refresh a hello made must be broadcast: %s %s", typ, data)
+	}
+}
+
+// TestHubRefreshPagesToTheTip: one tick can advance the chain by more than
+// a single page, so the refresh keeps reading until the table's tip
+// instead of leaving the ring behind until another notification arrives.
+func TestHubRefreshPagesToTheTip(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	h := newWSHarness(t, store, time.Hour)
+	mk := func(n uint64) db.Block {
+		return db.Block{ChainID: robinhood, Number: n, Hash: "0x" + strconv.FormatUint(n, 10),
+			TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.WeiFromUint64(n)}
+	}
+	if err := store.UpsertBlocks(ctx, []db.Block{mk(1)}); err != nil {
+		t.Fatal(err)
+	}
+	conn := h.dial(t, "robinhood")
+	if typ, _ := readMsg(t, conn); typ != "hello" {
+		t.Fatalf("hello: %s", typ)
+	}
+	// More than one page of blocks lands between two notifications.
+	rows := make([]db.Block, 0, ringSize+50)
+	for n := uint64(2); n <= ringSize+51; n++ {
+		rows = append(rows, mk(n))
+	}
+	if err := store.UpsertBlocks(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	h.hub.mu.Lock()
+	last := h.hub.networks[robinhood].last
+	h.hub.mu.Unlock()
+	if last != ringSize+51 {
+		t.Fatalf("the ring must reach the table's tip in one refresh: last %d", last)
+	}
+}
+
+// TestHubReorgRewindsOwnerCursor: a reorg lowers the owner-action cursor
+// to the ancestor and forgets the actions above it, so a replacement
+// action on the canonical chain is delivered even when its notification
+// was lost during a LISTEN reconnect.
+func TestHubReorgRewindsOwnerCursor(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(n uint64, tag string) db.Block {
+		return db.Block{ChainID: robinhood, Number: n, Hash: "0x" + tag + strconv.FormatUint(n, 10),
+			TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.WeiFromUint64(n)}
+	}
+	var blocks []db.Block
+	for n := uint64(50); n <= 55; n++ {
+		blocks = append(blocks, mk(n, "a"))
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	h := newWSHarness(t, store, time.Hour)
+	conn := h.dial(t, "robinhood")
+	if typ, _ := readMsg(t, conn); typ != "hello" {
+		t.Fatalf("hello: %s", typ)
+	}
+	// An owner action at block 54 is delivered, which advances the cursor.
+	h.hub.Handle(ctx, ownerNotification(robinhood, 54, 0, "0xold", "setMinimumL2BaseFee"))
+	if typ, _ := readMsg(t, conn); typ != "owner_action" {
+		t.Fatalf("owner action: %s", typ)
+	}
+	h.hub.mu.Lock()
+	since := h.hub.networks[robinhood].ownerSince
+	h.hub.mu.Unlock()
+	if since != 54 {
+		t.Fatalf("cursor after delivery: %d", since)
+	}
+	// A reorg replaces 53 upwards, and the replacement action lands at 53
+	// with a different transaction; its notification is lost.
+	if _, err := store.DeleteBlocksAfter(ctx, robinhood, 52); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertBlocks(ctx, []db.Block{mk(53, "b"), mk(54, "b"), mk(55, "b")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertOwnerActions(ctx, []db.OwnerAction{{ChainID: robinhood, BlockNumber: 53, TxHash: "0xnew", LogIndex: 0,
+		TS: now, Method: "setMinimumL2BaseFee", Args: db.JSONB(`{}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	h.hub.Handle(ctx, liveNotification(robinhood))
+	if typ, _ := readMsg(t, conn); typ != "reorg" {
+		t.Fatalf("reorg: %s", typ)
+	}
+	if typ, _ := readMsg(t, conn); typ != "tick" {
+		t.Fatalf("tick after reorg: %s", typ)
+	}
+	h.hub.mu.Lock()
+	since = h.hub.networks[robinhood].ownerSince
+	_, stillSeen := h.hub.networks[robinhood].seen[actionKey{block: 54, txHash: "0xold"}]
+	h.hub.mu.Unlock()
+	if since != 52 || stillSeen {
+		t.Fatalf("the owner cursor must follow the chain down: since %d seen %v", since, stillSeen)
+	}
+	// Reconciliation after the LISTEN reconnect now finds the replacement.
+	h.hub.Handle(ctx, db.Notification{Reconnected: true})
+	typ, data := readMsg(t, conn)
+	var action model.OwnerAction
+	if typ != "owner_action" || json.Unmarshal(data, &action) != nil || action.TxHash != "0xnew" || action.Block != 53 {
+		t.Fatalf("the replacement action must be delivered: %s %s", typ, data)
+	}
+}

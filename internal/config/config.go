@@ -177,6 +177,12 @@ type NetworkConfig struct {
 // rather than a budget (set 0 for a dedicated node).
 const MaxCallsPerSecond = 10_000
 
+// MinCallsPerSecond is the smallest accepted budget, one call every ten
+// seconds. Below it a single token takes longer than any request timeout
+// and the pacer's waits stop being meaningful, so such a value is a
+// mistake rather than a budget: set 0 for a dedicated node instead.
+const MinCallsPerSecond = 0.1
+
 // Unlimited reports whether the network has no call budget.
 func (n NetworkConfig) Unlimited() bool { return n.CallsPerSecond <= 0 }
 
@@ -491,9 +497,12 @@ func (c *Config) Validate(requireRPC bool) error {
 // validateEndpoint checks an endpoint's budget and ws_url scheme.
 func validateEndpoint(where string, e EndpointConfig) []error {
 	var errs []error
-	if e.CallsPerSecond < 0 || math.IsNaN(e.CallsPerSecond) || math.IsInf(e.CallsPerSecond, 0) {
+	switch {
+	case e.CallsPerSecond < 0 || math.IsNaN(e.CallsPerSecond) || math.IsInf(e.CallsPerSecond, 0):
 		errs = append(errs, fmt.Errorf("%s: calls_per_second must be zero (unlimited) or a finite positive number", where))
-	} else if e.CallsPerSecond > MaxCallsPerSecond {
+	case e.CallsPerSecond > 0 && e.CallsPerSecond < MinCallsPerSecond:
+		errs = append(errs, fmt.Errorf("%s: calls_per_second %v is below the minimum of %v (use 0 for a dedicated node)", where, e.CallsPerSecond, MinCallsPerSecond))
+	case e.CallsPerSecond > MaxCallsPerSecond:
 		errs = append(errs, fmt.Errorf("%s: calls_per_second %v exceeds %d (use 0 for a dedicated node)", where, e.CallsPerSecond, MaxCallsPerSecond))
 	}
 	if e.WSURL != "" && !strings.HasPrefix(e.WSURL, "ws://") && !strings.HasPrefix(e.WSURL, "wss://") {

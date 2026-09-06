@@ -51,12 +51,15 @@ func withPoolClock(now func() time.Time, sleep func(context.Context, time.Durati
 }
 
 // EndpointStatus describes one endpoint for /status. URLs are never
-// included: they can carry keys.
+// included: they can carry keys. Error is why the endpoint was disabled,
+// empty while it is usable; it is built from the chain ids alone, so it
+// carries no URL or credential either.
 type EndpointStatus struct {
 	Index    int
 	WS       bool
 	Archive  bool
 	Disabled bool
+	Error    string
 }
 
 // PoolStatus is the pool's routing state for /status.
@@ -83,6 +86,10 @@ type Pool struct {
 	now        func() time.Time
 	sleep      func(context.Context, time.Duration) error
 	clientOpts []Option
+	// archive is the managed historical-state path, built once so callers
+	// (and their failover state) share one binding; nil when no endpoint
+	// serves historical state.
+	archive *ArchivePool
 
 	mu            sync.Mutex
 	active        int
@@ -94,7 +101,10 @@ type Pool struct {
 // NewPool builds the endpoints of cfg. Nothing is contacted until Verify
 // or the first call.
 func NewPool(cfg PoolConfig, opts ...PoolOption) *Pool {
-	p := &Pool{chainID: cfg.ChainID, cooldown: cfg.Cooldown, log: logger.Nop()}
+	// The clock is set before the options so that production construction,
+	// which passes none, still has one: failover and primary probing call
+	// it on the first endpoint failure.
+	p := &Pool{chainID: cfg.ChainID, cooldown: cfg.Cooldown, log: logger.Nop(), now: time.Now, sleep: sleepContext}
 	for _, o := range opts {
 		o(p)
 	}
@@ -104,19 +114,53 @@ func NewPool(cfg PoolConfig, opts ...PoolOption) *Pool {
 	for i, ec := range cfg.Endpoints {
 		p.endpoints = append(p.endpoints, p.newEndpoint(i, ec, cfg.BatchSize))
 	}
+	for _, e := range p.endpoints {
+		e.setPreSend(p.stillActive(e))
+		if e.archive && p.archive == nil {
+			p.archive = &ArchivePool{pool: p}
+		}
+	}
 	return p
 }
 
 func (p *Pool) newEndpoint(i int, ec config.EndpointConfig, batchSize int) *Endpoint {
-	now := p.now
-	if now == nil {
-		now = time.Now
-	}
 	opts := append([]Option(nil), p.clientOpts...)
-	if p.now != nil {
-		opts = append(opts, WithPacer(NewPacer(ec.CallsPerSecond).withClock(p.now, p.sleep)), withClock(p.now, p.sleep))
+	opts = append(opts, WithPacer(NewPacer(ec.CallsPerSecond).withClock(p.now, p.sleep)), withClock(p.now, p.sleep))
+	return newEndpoint(i, ec, batchSize, p.log, p.now, opts...)
+}
+
+// stillActive builds the check the endpoint makes under its send lock: an
+// ordinary call that selected this endpoint before another caller failed
+// over must not reach the wire. Capability calls (the archive path) select
+// their endpoint themselves and are exempt.
+func (p *Pool) stillActive(e *Endpoint) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if capabilityCall(ctx) {
+			return nil
+		}
+		p.mu.Lock()
+		active := p.endpoints[p.active]
+		p.mu.Unlock()
+		if active == e {
+			return nil
+		}
+		return &EndpointError{Err: fmt.Errorf("%w: endpoint %d, ordinary calls now go to %d", ErrStaleEndpoint, e.index, active.index)}
 	}
-	return newEndpoint(i, ec, batchSize, p.log, now, opts...)
+}
+
+// capabilityKey marks a context whose calls are routed by capability
+// rather than by the active endpoint.
+type capabilityKey struct{}
+
+// withCapability marks ctx as a capability call (historical state), which
+// picks its own endpoint and is not bound to the active one.
+func withCapability(ctx context.Context) context.Context {
+	return context.WithValue(ctx, capabilityKey{}, true)
+}
+
+func capabilityCall(ctx context.Context) bool {
+	v, _ := ctx.Value(capabilityKey{}).(bool)
+	return v
 }
 
 // Endpoints returns every endpoint, primary first.
@@ -143,30 +187,137 @@ func (p *Pool) Status() PoolStatus {
 	st := PoolStatus{Active: p.active, Failovers: p.failovers, Endpoints: make([]EndpointStatus, len(p.endpoints))}
 	p.mu.Unlock()
 	for i, e := range p.endpoints {
-		st.Endpoints[i] = EndpointStatus{Index: i, WS: e.wsURL != "", Archive: e.archive, Disabled: e.Disabled()}
+		st.Endpoints[i] = EndpointStatus{Index: i, WS: e.wsURL != "", Archive: e.archive, Disabled: e.Disabled(), Error: e.Reason()}
 	}
 	return st
 }
 
-// WS returns the first usable endpoint with a WebSocket URL, or nil.
-func (p *Pool) WS() *Endpoint {
+// WS returns the first verified endpoint with a WebSocket URL, or nil. An
+// endpoint that could not be reached during Verify is not verified and is
+// never bound: it would otherwise be followed for ever, and, if it later
+// answered on another chain, its heads would be written under this chain
+// id.
+func (p *Pool) WS() *Endpoint { return p.capable(func(e *Endpoint) bool { return e.wsURL != "" }) }
+
+// capable returns the first verified, usable endpoint matching want.
+func (p *Pool) capable(want func(*Endpoint) bool) *Endpoint {
 	for _, e := range p.endpoints {
-		if e.wsURL != "" && !e.Disabled() {
+		if want(e) && !e.Disabled() && e.Verified() {
 			return e
 		}
 	}
 	return nil
 }
 
-// Archive returns the first usable endpoint serving historical state, or
-// nil.
-func (p *Pool) Archive() *Endpoint {
+// HasWS reports whether any endpoint is configured with a ws_url, whatever
+// its verification state: the follower builds its subscriber from that and
+// lets WSURL choose an endpoint at every connection attempt.
+func (p *Pool) HasWS() bool {
 	for _, e := range p.endpoints {
-		if e.archive && !e.Disabled() {
+		if e.wsURL != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// WSURL resolves the WebSocket endpoint to dial next: the first usable one
+// with a ws_url, verified now when it has not been verified yet. A
+// HeadSubscriber calls it before every connection attempt, so a subscriber
+// rebinds to the next endpoint as soon as the one it followed is disabled
+// or fails verification, and comes back to the primary once it verifies.
+func (p *Pool) WSURL(ctx context.Context) (string, error) {
+	var errs []error
+	for _, e := range p.endpoints {
+		if e.wsURL == "" || e.Disabled() {
+			continue
+		}
+		if err := p.verify(withCapability(ctx), e); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		return e.wsURL, nil
+	}
+	if len(errs) == 0 {
+		return "", ErrNoEndpoint
+	}
+	return "", fmt.Errorf("%w: %w", ErrNoEndpoint, errors.Join(errs...))
+}
+
+// ArchivePool routes historical state calls across the endpoints that
+// serve them. It is independent of the active endpoint (a capability is
+// routed by capability, not by order): it verifies the endpoint it picks,
+// fails over to the next archive endpoint on an endpoint error, and stays
+// there, so a dead archive endpoint is left behind instead of retried for
+// ever.
+type ArchivePool struct {
+	pool *Pool
+	mu   sync.Mutex
+	at   int
+}
+
+// Archive returns the managed archive path, or nil when no endpoint is
+// configured to serve historical state. The same path is returned every
+// time, so its binding and failover state are shared by every caller.
+func (p *Pool) Archive() *ArchivePool { return p.archive }
+
+// Endpoint returns the archive endpoint calls currently go to, or nil when
+// none is usable.
+func (a *ArchivePool) Endpoint() *Endpoint {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.nextLocked()
+}
+
+// nextLocked returns the first usable archive endpoint at or after the
+// current one.
+func (a *ArchivePool) nextLocked() *Endpoint {
+	for i := a.at; i < len(a.pool.endpoints); i++ {
+		if e := a.pool.endpoints[i]; e.archive && !e.Disabled() {
+			a.at = i
 			return e
 		}
 	}
 	return nil
+}
+
+// failed moves past an endpoint that could not serve historical state.
+func (a *ArchivePool) failed(e *Endpoint) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.at == e.index {
+		a.at = e.index + 1
+	}
+}
+
+// FastSampleAt reads the pricer state at a block from an archive endpoint,
+// verifying it first and moving to the next one on an endpoint error.
+func (a *ArchivePool) FastSampleAt(ctx context.Context, number uint64) (*Sample, error) {
+	ctx = withCapability(ctx)
+	var errs []error
+	for range a.pool.endpoints {
+		e := a.Endpoint()
+		if e == nil {
+			break
+		}
+		err := a.pool.verify(ctx, e)
+		if err == nil {
+			var s *Sample
+			if s, err = e.FastSampleAt(ctx, number); err == nil {
+				return s, nil
+			}
+		}
+		if ctx.Err() != nil || !IsEndpointError(err) {
+			return nil, err
+		}
+		a.pool.log.Warn("archive endpoint failed, moving to the next one", "endpoint", e.index, "err", err.Error())
+		errs = append(errs, err)
+		a.failed(e)
+	}
+	if len(errs) == 0 {
+		return nil, ErrNoEndpoint
+	}
+	return nil, fmt.Errorf("%w: %w", ErrNoEndpoint, errors.Join(errs...))
 }
 
 // Verify checks every endpoint's eth_chainId against the configured chain
@@ -203,7 +354,9 @@ func (p *Pool) Verify(ctx context.Context) error {
 // check asks the endpoint for its chain id: a match marks it verified, a
 // mismatch disables it. Both failures are EndpointErrors.
 func (p *Pool) check(ctx context.Context, e *Endpoint) error {
-	id, err := e.ChainID(ctx)
+	// Verification addresses one endpoint by name, so it is exempt from the
+	// active-endpoint check the ordinary path makes under the send lock.
+	id, err := e.ChainID(withCapability(ctx))
 	if err != nil {
 		p.log.Warn("endpoint unverified, eth_chainId failed", "endpoint", e.index, "err", err.Error())
 		return endpointErrorf("endpoint %d: eth_chainId: %w", e.index, err)
@@ -323,7 +476,8 @@ func (p *Pool) pick(ctx context.Context) (*Endpoint, error) {
 // on an EndpointError, fails over and retries on the next one, at most once
 // per endpoint. Context cancellation and node answers are returned as is.
 func (p *Pool) do(ctx context.Context, fn func(*Endpoint) error) error {
-	for attempt := 1; ; attempt++ {
+	tried, stale := 0, 0
+	for {
 		e, err := p.pick(ctx)
 		if err != nil {
 			return err
@@ -334,7 +488,18 @@ func (p *Pool) do(ctx context.Context, fn func(*Endpoint) error) error {
 		if err == nil || ctx.Err() != nil || !IsEndpointError(err) {
 			return err
 		}
-		if attempt >= len(p.endpoints) || !p.failOver(e, err) {
+		if errors.Is(err, ErrStaleEndpoint) {
+			// Another caller failed over while this one queued for the send
+			// lock: nothing was sent, so pick again rather than fail over.
+			// The bound keeps a pathological hand-off from looping.
+			stale++
+			if stale > len(p.endpoints) {
+				return err
+			}
+			continue
+		}
+		tried++
+		if tried >= len(p.endpoints) || !p.failOver(e, err) {
 			return err
 		}
 	}
@@ -433,6 +598,28 @@ func (p *Pool) Stats() Stats {
 		}
 	}
 	return out
+}
+
+// Policy is the call policy of the endpoint ordinary calls go to right
+// now: its budget in calls per second and whether it has none. Gap
+// skipping and the batch-report prefilter follow the active endpoint, not
+// the primary's configuration, so a paced primary with an unlimited
+// fallback stops skipping gaps while the fallback serves the network.
+type Policy struct {
+	Unlimited bool
+	Rate      float64
+}
+
+// Policy returns the active endpoint's policy; a pool with nothing usable
+// reports the paced policy, which is the safe one.
+func (p *Pool) Policy() Policy {
+	p.mu.Lock()
+	e := p.currentLocked()
+	p.mu.Unlock()
+	if e == nil {
+		return Policy{}
+	}
+	return Policy{Unlimited: e.pacer.Unlimited(), Rate: e.pacer.Rate()}
 }
 
 // Available returns how many calls the active endpoint can make right now

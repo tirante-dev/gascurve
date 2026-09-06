@@ -397,3 +397,54 @@ func TestMemStoreFailures(t *testing.T) {
 		}
 	}
 }
+
+// TestMemStoreNesting: the in-memory store mirrors the Postgres nesting
+// rules, so a unit test that nests transactions fails the same way
+// production would rather than silently getting the outer one.
+func TestMemStoreNesting(t *testing.T) {
+	ctx := context.Background()
+	m := New()
+	// The same chain reuses, a higher one adds its lock, and both are then
+	// reused.
+	err := m.WithChainTx(ctx, 10, func(s db.Store) error {
+		if err := s.WithChainTx(ctx, 10, func(inner db.Store) error { return inner.SetState(ctx, 10, "a", "1") }); err != nil {
+			return err
+		}
+		return s.WithChainTx(ctx, 20, func(inner db.Store) error {
+			return inner.WithChainTx(ctx, 10, func(x db.Store) error { return x.SetState(ctx, 20, "b", "2") })
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := m.GetState(ctx, 20, "b"); v != "2" {
+		t.Fatalf("nested write: %q", v)
+	}
+	// A lower chain id after a higher one inverts the lock order.
+	err = m.WithChainTx(ctx, 20, func(s db.Store) error {
+		return s.WithChainTx(ctx, 10, func(db.Store) error { return nil })
+	})
+	if !errors.Is(err, db.ErrLockOrder) {
+		t.Fatalf("lock order: %v", err)
+	}
+	// A snapshot inside a writing transaction is refused.
+	err = m.WithChainTx(ctx, 10, func(s db.Store) error {
+		return s.WithSnapshotTx(ctx, func(db.Store) error { return nil })
+	})
+	if !errors.Is(err, db.ErrNestedSnapshot) {
+		t.Fatalf("nested snapshot: %v", err)
+	}
+	// A plain transaction inside a chain one reuses it.
+	if err := m.WithChainTx(ctx, 10, func(s db.Store) error {
+		return s.WithTx(ctx, func(inner db.Store) error { return inner.SetState(ctx, 10, "c", "3") })
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := m.GetState(ctx, 10, "c"); v != "3" {
+		t.Fatalf("nested plain write: %q", v)
+	}
+	// A top-level snapshot still runs.
+	if err := m.WithSnapshotTx(ctx, func(s db.Store) error { _, _, err := s.GetState(ctx, 10, "c"); return err }); err != nil {
+		t.Fatal(err)
+	}
+}

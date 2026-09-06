@@ -130,7 +130,7 @@ func TestBackfillSegments(t *testing.T) {
 	// 300, the recorded change from there.
 	b299, _ := store.BlockByNumber(ctx, 4663, 299)
 	b300, _ := store.BlockByNumber(ctx, 4663, 300)
-	if b299 == nil || b300 == nil || b299.MinBaseFee.Int64() != pricer.InitialMinimumBaseFeeWei || b300.MinBaseFee.Int64() != 30_000_000 {
+	if b299 == nil || b300 == nil || b299.MinBaseFee.Wei.Int64() != pricer.InitialMinimumBaseFeeWei || b300.MinBaseFee.Wei.Int64() != 30_000_000 {
 		t.Fatalf("backfill rows and fees: %+v %+v", b299, b300)
 	}
 	if b299.PredictedBaseFee.Cmp(b300.PredictedBaseFee.BigInt()) <= 0 {
@@ -166,6 +166,12 @@ func TestBackfillAdditiveBeyondBoundary(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(40_000) // ts base + 4000 s
 	store := dbtest.New()
+	// The backfill replays only from a known constraint set; this one
+	// covers everything from the depth boundary on.
+	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 4663, EffectiveBlock: 30_000, EffectiveAt: baseTime.Add(3000 * time.Second), Source: model.SourceOwnerAction,
+		Constraints: entriesJSON([]model.ConstraintSetEntry{{Target: 60_000_000, Window: 15}, {Target: 40_000_000, Window: 86_400}})}); err != nil {
+		t.Fatal(err)
+	}
 	f := newTestFollower(t, rpc, store)
 	f.now = func() time.Time { return baseTime.Add(4000 * time.Second) }
 	f.cfg.BackfillDepth = 1000 * time.Second // block 30000, an hour before the live start's hour
@@ -229,7 +235,7 @@ func TestBackfillAdditiveBeyondBoundary(t *testing.T) {
 	f.mu.Lock()
 	f.cursorChecked = false
 	f.mu.Unlock()
-	c.Verified = false
+	c.Verified, c.SetID = false, 0
 	_ = f.saveCursor(ctx, store, c)
 	store.FailOn["DeleteBucketsBefore"] = true
 	if _, err := f.BackfillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
@@ -271,7 +277,9 @@ func TestBackfillStopsAtScanOrigin(t *testing.T) {
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 4663, EffectiveBlock: 500, EffectiveAt: baseTime.Add(50 * time.Second), Source: model.SourceObserved,
+	// The origin sample is end-of-block state for block 500, so the set it
+	// establishes is effective at 501.
+	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 4663, EffectiveBlock: 501, EffectiveAt: baseTime.Add(50 * time.Second), Source: model.SourceObserved,
 		Constraints: entriesJSON([]model.ConstraintSetEntry{{Target: 60_000_000, Window: 15}, {Target: 40_000_000, Window: 86_400, StartingBacklog: 7}})}); err != nil {
 		t.Fatal(err)
 	}
@@ -286,15 +294,19 @@ func TestBackfillStopsAtScanOrigin(t *testing.T) {
 	f2.cfg.BackfillDepth = 70 * time.Second
 	runBackfill(t, f2, 200)
 	c, _ := f2.loadCursor(ctx)
-	if !c.Done || c.DepthStart != 500 {
-		t.Fatalf("depth clamped to the origin: %+v", c)
+	if !c.Done || c.DepthStart != 501 {
+		t.Fatalf("depth clamped to the block after the origin: %+v", c)
 	}
-	if b, _ := store.BlockByNumber(ctx, 4663, 499); b != nil {
-		t.Fatal("nothing below the origin may be priced")
+	// The origin block itself is not replayed: its gas is already in the
+	// sampled backlogs, so adding it again would inflate every price above.
+	for _, n := range []uint64{499, 500} {
+		if b, _ := store.BlockByNumber(ctx, 4663, n); b != nil {
+			t.Fatalf("block %d is at or below the origin and must not be priced: %+v", n, b)
+		}
 	}
-	b500, _ := store.BlockByNumber(ctx, 4663, 500)
-	if b500 == nil || b500.MinBaseFee.Int64() != 30_000_000 || b500.Backlogs[1] != 7+gasFor(500) {
-		t.Fatalf("origin block replays from the sampled state: %+v", b500)
+	b501, _ := store.BlockByNumber(ctx, 4663, 501)
+	if b501 == nil || b501.MinBaseFee.Wei.Int64() != 30_000_000 || b501.Backlogs[1] != 7+gasFor(501) {
+		t.Fatalf("replay starts at the block after the origin: %+v", b501)
 	}
 	// A corrupt origin checkpoint fails initialization.
 	bad := dbtest.New()
@@ -312,7 +324,11 @@ func TestBackfillStopsAtScanOrigin(t *testing.T) {
 	}
 }
 
-func TestBackfillWithoutSets(t *testing.T) {
+// TestBackfillWithoutKnownState: with no constraint set covering the
+// range and no sampled origin state, the backfill records the range as a
+// hole and stops instead of replaying the current model with empty
+// backlogs, which would present invented history as replayed.
+func TestBackfillWithoutKnownState(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
@@ -326,25 +342,22 @@ func TestBackfillWithoutSets(t *testing.T) {
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	steps := runBackfill(t, f, 100)
-	if steps < 29 {
-		t.Fatalf("steps = %d", steps)
+	if steps := runBackfill(t, f, 100); steps != 1 {
+		t.Fatalf("nothing can be replayed, so one step finishes it: %d", steps)
 	}
-	// Backfilled buckets carry no set (none is in force before the seed's
-	// observed set at 1000); only the live bucket, whose last block is the
-	// seed, is tagged with it.
-	for _, b := range store.BucketRows {
-		if b.Resolution == db.Resolution1h && b.ConstraintSetID.Valid != (b.LastBlock == 1000) {
-			t.Fatalf("set id on backfilled bucket: %+v", b)
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].From != 700 || holes[0].To != 999 {
+		t.Fatalf("the unreconstructable range must be a hole: %+v", holes)
+	}
+	for _, n := range []uint64{700, 999} {
+		if b, _ := store.BlockByNumber(ctx, 4663, n); b != nil {
+			t.Fatalf("block %d has no known state and must not be priced: %+v", n, b)
 		}
 	}
-	if total := blockCountIn(store, db.Resolution1h); total != 301 { // 700..999 backfilled plus the live head
+	if total := blockCountIn(store, db.Resolution1h); total != 1 { // the live head alone
 		t.Fatalf("hour bucket blocks = %d", total)
 	}
-	if c, _ := f.loadCursor(ctx); !c.Verified {
-		t.Fatalf("segments chosen after the scan are verified: %+v", c)
-	}
-	// Legacy chains backfill the same way from the live parameters.
+	// A legacy chain without an archive origin is the same: its historical
+	// parameters are not known, so nothing is replayed.
 	rpcL := newFakeRPC(1000)
 	lp := legacyParams()
 	rpcL.legacy = &lp
@@ -354,10 +367,82 @@ func TestBackfillWithoutSets(t *testing.T) {
 	if err := fl.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	runBackfill(t, fl, 100)
-	if storeL.BucketCount(4663, db.Resolution1m) == 0 {
-		t.Fatal("legacy backfill wrote no buckets")
+	if steps := runBackfill(t, fl, 100); steps != 1 {
+		t.Fatalf("legacy without an origin: %d steps", steps)
 	}
+	if holes := holesOf(t, storeL); len(holes) != 1 || holes[0].From != 700 {
+		t.Fatalf("legacy hole: %+v", holes)
+	}
+}
+
+// TestBackfillLegacyFromArchiveOrigin: a legacy chain whose whole state
+// was sampled at an archive scan origin replays forward from those
+// parameters and that backlog, splitting at the recorded legacy parameter
+// changes rather than pricing history with the current ones.
+func TestBackfillLegacyFromArchiveOrigin(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	lp := legacyParams()
+	rpc.legacy = &lp
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = 70 * time.Second // block 300
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The origin sampled a different speed limit and a real backlog at
+	// block 500; a recorded action raises the speed limit again at 800.
+	origin := `{"block":500,"minBaseFee":"30000000","archive":true,"legacy":{"speedLimit":3000000,"inertia":50,"tolerance":5,"backlog":900000}}`
+	if err := store.SetState(ctx, 4663, db.StateOwnerScanOrigin, origin); err != nil {
+		t.Fatal(err)
+	}
+	f2 := newTestFollower(t, rpc, store)
+	if err := f2.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f2.mu.Lock()
+	f2.legacyChanges = []legacyChange{{block: 800, method: methodSetSpeedLimit, value: 9_000_000}}
+	f2.mu.Unlock()
+	f2.cfg.BackfillDepth = 70 * time.Second
+	runBackfill(t, f2, 200)
+	c, _ := f2.loadCursor(ctx)
+	if !c.Done || c.DepthStart != 501 {
+		t.Fatalf("legacy origin cursor: %+v", c)
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 500); b != nil {
+		t.Fatal("the origin block itself is not replayed")
+	}
+	b501, _ := store.BlockByNumber(ctx, 4663, 501)
+	if b501 == nil || b501.MinBaseFee.Wei.Int64() != 30_000_000 {
+		t.Fatalf("the sampled floor applies from the origin on: %+v", b501)
+	}
+	// The sampled backlog, not zero, is where the replay starts: the first
+	// replayed block carries the sampled backlog minus one block of speed
+	// limit plus its own gas.
+	if b501.Backlogs[0] == gasFor(501) {
+		t.Fatalf("the replay must start from the sampled backlog: %+v", b501.Backlogs)
+	}
+	// The recorded speed limit change splits the replay: the parameters in
+	// force below 800 are the origin's, above it the changed one.
+	f2.mu.Lock()
+	tl := f2.timelineLocked(nil)
+	f2.mu.Unlock()
+	base := &pricer.Legacy{SpeedLimit: lp.SpeedLimit, Inertia: lp.Inertia, Tolerance: lp.Tolerance}
+	if got := tl.legacyAt(700, base); got.SpeedLimit != 3_000_000 || got.Inertia != 50 || got.Tolerance != 5 {
+		t.Fatalf("origin parameters below the change: %+v", got)
+	}
+	if got := tl.legacyAt(900, base); got.SpeedLimit != 9_000_000 || got.Inertia != 50 {
+		t.Fatalf("recorded change above it: %+v", got)
+	}
+	// Below the origin nothing is replayed at all.
+	if got := tl.legacyAt(400, base); got.SpeedLimit != lp.SpeedLimit {
+		t.Fatalf("below the origin the caller's base stands: %+v", got)
+	}
+	if !sameLegacyParams(nil, nil) || sameLegacyParams(base, nil) {
+		t.Fatal("legacy parameter comparison")
+	}
+	applyLegacyParams(&pricer.State{}, base)
+	applyLegacyParams(&pricer.State{Legacy: base}, nil)
 }
 
 func TestBackfillErrors(t *testing.T) {
@@ -442,15 +527,17 @@ func TestBackfillErrors(t *testing.T) {
 	f.sets = nil
 	f.lastSample = nil
 	f.mu.Unlock()
-	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
-		t.Fatalf("no set, no sample: %v %v", st, err)
+	// No set and no sampled origin state: the range becomes a hole rather
+	// than a replay of the live model.
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillDone {
+		t.Fatalf("no set, no sampled state: %v %v", st, err)
 	}
-	c.Active, c.SetID = true, 0
+	c.Active, c.SetID, c.Done = true, 0, false
 	if err := f.saveCursor(ctx, store, c); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.BackfillStep(ctx); err == nil {
-		t.Fatal("state without sample should fail")
+		t.Fatal("a live-model segment without sampled origin state should fail")
 	}
 	// Init failure surfaces.
 	bad := dbtest.New()
@@ -527,14 +614,17 @@ func TestBackfillArchiveAnchors(t *testing.T) {
 	// (no change is recorded, so the genesis default applied before).
 	b100, _ := store.BlockByNumber(ctx, 4663, 100)
 	b101, _ := store.BlockByNumber(ctx, 4663, 101)
-	if b100.MinBaseFee.Int64() != pricer.InitialMinimumBaseFeeWei || b101.MinBaseFee.Int64() != 20_000_000 {
-		t.Fatalf("anchor min fee: %s then %s", b100.MinBaseFee, b101.MinBaseFee)
+	if b100.MinBaseFee.Wei.Int64() != pricer.InitialMinimumBaseFeeWei || b101.MinBaseFee.Wei.Int64() != 20_000_000 {
+		t.Fatalf("anchor min fee: %s then %s", b100.MinBaseFee.Wei, b101.MinBaseFee.Wei)
 	}
 	// A recorded change after the anchor wins over the anchor.
 	f.mu.Lock()
 	f.minFeeChanges = []minFeeChange{{block: 150, fee: big.NewInt(7)}}
 	f.mu.Unlock()
-	fees := f.backfillFees(&backfillCursor{LastAnchor: 100, AnchorMinFee: "20000000"}, []nitro.Header{{Number: 149}, {Number: 150}, {Number: 200}, {Number: 201}}, map[uint64]*big.Int{200: big.NewInt(9)})
+	f.mu.Lock()
+	tl := f.timelineLocked(nil)
+	f.mu.Unlock()
+	fees := f.backfillFees(tl, &backfillCursor{LastAnchor: 100, AnchorMinFee: "20000000"}, []nitro.Header{{Number: 149}, {Number: 150}, {Number: 200}, {Number: 201}}, map[uint64]*big.Int{200: big.NewInt(9)})
 	if fees[0].Int64() != 20_000_000 || fees[1].Int64() != 7 || fees[2].Int64() != 7 || fees[3].Int64() != 9 {
 		t.Fatalf("backfill fees: %v", fees)
 	}

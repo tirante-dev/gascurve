@@ -179,9 +179,16 @@ func TestPoolVerification(t *testing.T) {
 	if p.Endpoints()[2].Verified() || p.Endpoints()[2].Disabled() {
 		t.Fatal("an unreachable endpoint stays unverified, not disabled")
 	}
-	// Capabilities skip the disabled endpoint.
-	if p.WS() != nil || p.Archive() == nil || p.Archive().Index() != 2 || !p.Archive().Archive() || p.Archive().WSURL() != "" {
-		t.Fatalf("capabilities: ws=%v archive=%v", p.WS(), p.Archive())
+	// Capabilities skip the disabled endpoint, and only a verified one is
+	// ever bound: the WebSocket endpoint here reports the wrong chain.
+	if p.WS() != nil || !p.HasWS() {
+		t.Fatalf("capabilities: ws=%v hasWS=%v", p.WS(), p.HasWS())
+	}
+	if _, err := p.WSURL(ctx); !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("a disabled WebSocket endpoint is never dialed: %v", err)
+	}
+	if ar := p.Archive(); ar == nil || ar.Endpoint() == nil || ar.Endpoint().Index() != 2 || !ar.Endpoint().Archive() {
+		t.Fatalf("archive: %v", p.Archive())
 	}
 	// A failure on the primary skips the disabled endpoint and verifies the
 	// flaky one before using it; when that fails too the primary is retried.
@@ -258,8 +265,14 @@ func TestPoolVerification(t *testing.T) {
 	if err := empty.Verify(ctx); !errors.Is(err, ErrNoEndpoint) {
 		t.Fatalf("empty verify: %v", err)
 	}
-	if _, err := empty.BlockNumber(ctx); !errors.Is(err, ErrNoEndpoint) || empty.Available() != 0 || empty.WS() != nil || empty.Archive() != nil {
+	if _, err := empty.BlockNumber(ctx); !errors.Is(err, ErrNoEndpoint) || empty.Available() != 0 || empty.WS() != nil || empty.Archive() != nil || empty.HasWS() {
 		t.Fatalf("empty pool: %v", err)
+	}
+	if _, err := empty.WSURL(ctx); !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("empty pool ws url: %v", err)
+	}
+	if pol := empty.Policy(); pol.Unlimited || pol.Rate != 0 {
+		t.Fatalf("an empty pool reports the paced policy: %+v", pol)
 	}
 	if empty.cooldown != defaultFailoverCooldown {
 		t.Fatal("default cooldown")
@@ -276,12 +289,31 @@ func TestPoolCapabilities(t *testing.T) {
 		config.EndpointConfig{RPCURL: b.server.URL, WSURL: "wss://b/ws"},
 		config.EndpointConfig{RPCURL: c.server.URL, WSURL: "wss://c/ws", Archive: true},
 	)
-	if ws := p.WS(); ws == nil || ws.Index() != 1 || ws.WSURL() != "wss://b/ws" {
+	if err := p.Verify(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ws := p.WS(); ws == nil || ws.Index() != 1 || ws.WSURL() != "wss://b/ws" || !p.HasWS() {
 		t.Fatalf("ws endpoint: %+v", ws)
 	}
-	if ar := p.Archive(); ar == nil || ar.Index() != 2 || !ar.Archive() {
-		t.Fatalf("archive endpoint: %+v", ar)
+	if url, err := p.WSURL(context.Background()); err != nil || url != "wss://b/ws" {
+		t.Fatalf("ws url: %q %v", url, err)
 	}
+	if ar := p.Archive(); ar == nil || ar.Endpoint() == nil || ar.Endpoint().Index() != 2 || !ar.Endpoint().Archive() {
+		t.Fatalf("archive endpoint: %+v", p.Archive())
+	}
+	// The policy follows the active endpoint, not the primary's budget.
+	if pol := p.Policy(); pol.Unlimited || pol.Rate != 4 {
+		t.Fatalf("primary policy: %+v", pol)
+	}
+	p.mu.Lock()
+	p.active = 1
+	p.mu.Unlock()
+	if pol := p.Policy(); !pol.Unlimited {
+		t.Fatalf("active fallback policy: %+v", pol)
+	}
+	p.mu.Lock()
+	p.active = 0
+	p.mu.Unlock()
 	if p.ActiveEndpoint() != 0 || p.Endpoints()[0].Client.Pacer().Rate() != 4 || !p.Endpoints()[1].Client.Pacer().Unlimited() {
 		t.Fatal("every endpoint keeps its own pacer")
 	}
@@ -297,10 +329,184 @@ func TestPoolCapabilities(t *testing.T) {
 	if !p.failOver(p.Endpoints()[0], errors.New("stale")) || p.Failovers() != 0 || p.ActiveEndpoint() != 1 {
 		t.Fatal("a stale failure must not fail over again")
 	}
-	// The production constructor runs on the real clock with its logger.
-	prod := NewPool(PoolConfig{ChainID: testChainID, Endpoints: []config.EndpointConfig{endpointOf(a, 4)}, BatchSize: 50}, WithPoolLogger(logger.Nop()))
-	if len(prod.Endpoints()) != 1 || prod.Endpoints()[0].BatchCap() != 50 || prod.Endpoints()[0].now == nil || prod.cooldown != defaultFailoverCooldown {
-		t.Fatalf("real clock pool: %+v", prod.Status())
+}
+
+// TestPoolProductionConstructor: the constructor production uses, with no
+// clock option at all, survives both a startup failover (a primary
+// reporting the wrong chain) and a runtime one (a primary answering 500).
+// The clock the failover path calls must be set before the options are
+// applied, not by them.
+func TestPoolProductionConstructor(t *testing.T) {
+	ctx := context.Background()
+	wrong, good := chainFake(t, "0x1"), chainFake(t, testChainIDHex)
+	p := NewPool(PoolConfig{ChainID: testChainID, BatchSize: 50, Endpoints: []config.EndpointConfig{
+		endpointOf(wrong, 100), endpointOf(good, 100),
+	}}, WithPoolLogger(logger.Nop()))
+	if p.now == nil || p.sleep == nil || p.cooldown != defaultFailoverCooldown {
+		t.Fatal("the production constructor must install a clock before the options")
+	}
+	// Startup failover: the mismatching primary is disabled and the pool
+	// moves to the fallback, which calls the clock.
+	if err := p.Verify(ctx); err != nil || p.ActiveEndpoint() != 1 || p.Failovers() != 1 {
+		t.Fatalf("startup failover: %v active=%d failovers=%d", err, p.ActiveEndpoint(), p.Failovers())
+	}
+	if st := p.Status(); !st.Endpoints[0].Disabled || st.Endpoints[0].Error == "" || st.Endpoints[1].Error != "" {
+		t.Fatalf("status carries the sanitized reason: %+v", st.Endpoints)
+	}
+	echoVia(t, p, "one")
+
+	// Runtime failover on a pool whose primary is fine at start and fails
+	// later, again with no clock option.
+	a, b := chainFake(t, testChainIDHex), chainFake(t, testChainIDHex)
+	q := NewPool(PoolConfig{ChainID: testChainID, BatchSize: 50, Endpoints: []config.EndpointConfig{
+		endpointOf(a, 100), endpointOf(b, 100),
+	}}, WithPoolLogger(logger.Nop()))
+	if err := q.Verify(ctx); err != nil || q.ActiveEndpoint() != 0 {
+		t.Fatalf("verify: %v", err)
+	}
+	a.fail(http.StatusInternalServerError)
+	echoVia(t, q, "two")
+	if q.ActiveEndpoint() != 1 || q.Failovers() != 1 {
+		t.Fatalf("runtime failover: active=%d failovers=%d", q.ActiveEndpoint(), q.Failovers())
+	}
+	if q.Endpoints()[0].BatchCap() != 50 || q.Endpoints()[0].now == nil {
+		t.Fatalf("endpoint clock and cap: %+v", q.Status())
+	}
+}
+
+// TestPoolArchiveFailover: the archive path verifies the endpoint it
+// picks, moves to the next archive endpoint when it fails and stays
+// there, and never binds an endpoint that reports another chain.
+func TestPoolArchiveFailover(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	plain, wrong, first, second := chainFake(t, testChainIDHex), chainFake(t, "0x1"), newFakeRPC(t), newFakeRPC(t)
+	for _, f := range []*fakeRPC{first, second} {
+		setupChain(f)
+		f.handlers["eth_chainId"] = func([]json.RawMessage) any { return testChainIDHex }
+	}
+	p := newTestPool(t, clock, time.Minute,
+		endpointOf(plain, 1000),
+		config.EndpointConfig{RPCURL: wrong.server.URL, Archive: true, CallsPerSecond: 1000},
+		config.EndpointConfig{RPCURL: first.server.URL, Archive: true, CallsPerSecond: 1000},
+		config.EndpointConfig{RPCURL: second.server.URL, Archive: true, CallsPerSecond: 1000},
+	)
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ar := p.Archive()
+	if ar == nil || ar.Endpoint().Index() != 2 {
+		t.Fatalf("the archive path skips the endpoint on another chain: %v", ar.Endpoint())
+	}
+	if s, err := ar.FastSampleAt(ctx, 200); err != nil || s.Header.Number != 200 {
+		t.Fatalf("archive sample: %+v %v", s, err)
+	}
+	// Ordinary calls stay on the primary while the archive path uses its
+	// own endpoint: a capability is routed by capability.
+	if p.ActiveEndpoint() != 0 {
+		t.Fatalf("archive calls must not move the active endpoint: %d", p.ActiveEndpoint())
+	}
+	// The archive endpoint goes down: the path moves to the next one and
+	// rebinds there.
+	first.server.Close()
+	if s, err := ar.FastSampleAt(ctx, 201); err != nil || s.Header.Number != 201 {
+		t.Fatalf("archive failover: %+v %v", s, err)
+	}
+	if ar.Endpoint().Index() != 3 || p.Failovers() != 0 {
+		t.Fatalf("rebinding: endpoint=%d failovers=%d", ar.Endpoint().Index(), p.Failovers())
+	}
+	// A node answer (a block that does not exist) is not an endpoint
+	// failure and does not move the binding.
+	if _, err := ar.FastSampleAt(ctx, 9_000); err == nil || IsEndpointError(err) || ar.Endpoint().Index() != 3 {
+		t.Fatalf("a node answer must not fail over: %v", err)
+	}
+	// With every archive endpoint gone the error names them all.
+	second.server.Close()
+	if _, err := ar.FastSampleAt(ctx, 202); !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("exhausted archive endpoints: %v", err)
+	}
+	if ar.Endpoint() != nil {
+		t.Fatalf("no archive endpoint left: %v", ar.Endpoint())
+	}
+	if _, err := ar.FastSampleAt(ctx, 203); !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("no archive endpoint: %v", err)
+	}
+	// A pool with no archive endpoint at all offers no archive path.
+	if newTestPool(t, clock, time.Minute, endpointOf(plain, 1000)).Archive() != nil {
+		t.Fatal("no archive endpoint configured")
+	}
+}
+
+// TestPoolWSRebinds: the WebSocket resolver skips a disabled endpoint and
+// one that cannot be verified, and returns the next verified endpoint's
+// URL, so a head subscriber rebinds instead of following a dead or
+// unverified endpoint for ever.
+func TestPoolWSRebinds(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	wrong, flaky, good := chainFake(t, "0x1"), chainFake(t, testChainIDHex), chainFake(t, testChainIDHex)
+	// Down for the verification at start and for the first resolution.
+	flaky.fail(http.StatusInternalServerError)
+	flaky.fail(http.StatusInternalServerError)
+	p := newTestPool(t, clock, time.Minute,
+		config.EndpointConfig{RPCURL: wrong.server.URL, WSURL: "wss://wrong/ws", CallsPerSecond: 100},
+		config.EndpointConfig{RPCURL: flaky.server.URL, WSURL: "wss://flaky/ws", CallsPerSecond: 100},
+		config.EndpointConfig{RPCURL: good.server.URL, WSURL: "wss://good/ws", CallsPerSecond: 100},
+	)
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The first endpoint is on another chain (disabled), the second could
+	// not be reached during Verify and fails its check now, so the third
+	// one is dialed.
+	url, err := p.WSURL(ctx)
+	if err != nil || url != "wss://good/ws" {
+		t.Fatalf("ws url: %q %v", url, err)
+	}
+	if ws := p.WS(); ws == nil || ws.Index() != 2 {
+		t.Fatalf("only a verified endpoint is bound: %v", ws)
+	}
+	// Once the flaky endpoint answers it is verified and taken back, since
+	// capability routing is by order among the usable endpoints.
+	if url, err := p.WSURL(ctx); err != nil || url != "wss://flaky/ws" {
+		t.Fatalf("recovered endpoint: %q %v", url, err)
+	}
+}
+
+// TestPoolStaleEndpointRefused: a call that selected an endpoint before
+// another caller failed over is refused under the send lock, its pacer
+// reservation is refunded, and the pool retries it on the endpoint that is
+// active now instead of hitting the failed one during its cooldown.
+func TestPoolStaleEndpointRefused(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	a, b := chainFake(t, testChainIDHex), chainFake(t, testChainIDHex)
+	p := newTestPool(t, clock, time.Minute, endpointOf(a, 100), endpointOf(b, 100))
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before := a.requestCount()
+	// Another caller fails the primary over while this one is queued.
+	e := p.Endpoints()[0]
+	if !p.failOver(e, errors.New("500")) || p.ActiveEndpoint() != 1 {
+		t.Fatalf("failover: active=%d", p.ActiveEndpoint())
+	}
+	tokens := e.Pacer().Available()
+	if err := e.preSend(ctx); !errors.Is(err, ErrStaleEndpoint) || !IsEndpointError(err) {
+		t.Fatalf("the send lock must refuse a stale endpoint: %v", err)
+	}
+	// The pool routes around it: the call lands on the active endpoint and
+	// the primary is not touched.
+	echoVia(t, p, "one")
+	if a.requestCount() != before || p.Failovers() != 1 {
+		t.Fatalf("a stale endpoint is retried, not failed over: a=%d failovers=%d", a.requestCount(), p.Failovers())
+	}
+	if e.Pacer().Available() != tokens {
+		t.Fatalf("the refused reservation must be refunded: %d, was %d", e.Pacer().Available(), tokens)
+	}
+	// A capability call names its endpoint and is exempt.
+	if err := e.preSend(withCapability(ctx)); err != nil {
+		t.Fatalf("capability call: %v", err)
 	}
 }
 

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"math/big"
 	"testing"
+	"time"
+
+	"github.com/tirante-dev/gascurve/internal/config"
 )
 
 func wordsOf(vals ...uint64) []byte {
@@ -468,5 +471,69 @@ func TestParseHeaderErrors(t *testing.T) {
 		if _, err := parseLogs(json.RawMessage(c)); err == nil {
 			t.Errorf("expected log error for %s", c)
 		}
+	}
+}
+
+// TestTypedBatchesAreChunked: every typed request list goes through the
+// endpoint's chunker, not straight to Batch, so an eight-call L1 sample on
+// a four calls per second budget is split into what the bulk share holds
+// rather than overdrawing the bucket and eating the fast reserve.
+func TestTypedBatchesAreChunked(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeRPC(t)
+	setupChain(f)
+	f.handlers["eth_chainId"] = func([]json.RawMessage) any { return testChainIDHex }
+	// A request carrying more than the burst is refused, the way an
+	// endpoint refuses an oversized batch.
+	f.maxItems = 8
+	clock := newFakeClock()
+	p := NewPool(PoolConfig{ChainID: testChainID, Endpoints: []config.EndpointConfig{endpointOf(f, 4)}, BatchSize: 100},
+		WithPoolClientOptions(WithHTTPClient(f.server.Client())), withPoolClock(clock.Now, clock.Sleep))
+	e := p.Endpoints()[0]
+	pacer := e.Pacer()
+	if pacer.MaxBatch() != 7 || pacer.MaxBatchFor(Fast) != 8 {
+		t.Fatalf("bulk share %d, fast share %d", pacer.MaxBatch(), pacer.MaxBatchFor(Fast))
+	}
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Hour)
+	before := f.requestCount()
+	if _, err := p.L1Sample(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Eight getters, seven of which the bulk share holds: two requests, no
+	// throttling, and the fast reserve untouched.
+	if n := f.requestCount() - before; n != 2 {
+		t.Fatalf("the eight L1 getters must be split: %d requests", n)
+	}
+	if p.Stats().RateLimitEvents != 0 {
+		t.Fatalf("chunked batches must not be refused: %+v", p.Stats())
+	}
+	if tokens, reserve := pacer.levels(); tokens < 0 || reserve < 0 {
+		t.Fatalf("the bucket must never go negative: tokens %v reserve %v", tokens, reserve)
+	}
+	// The fee accounts (three addresses then three balances) and the legacy
+	// parameters fit and stay one request each.
+	clock.Advance(time.Hour)
+	before = f.requestCount()
+	if _, err := p.FeeAccounts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.requestCount() - before; n != 2 {
+		t.Fatalf("fee accounts: %d requests", n)
+	}
+	// A fast sample may carry the reserve more than a bulk batch, so its
+	// four calls still go in one request under bulk pressure.
+	clock.Advance(time.Hour)
+	before = f.requestCount()
+	if _, err := p.FastSampleAt(WithClass(ctx, Fast), 200); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.requestCount() - before; n != 1 {
+		t.Fatalf("a fast sample fits in one request: %d", n)
+	}
+	if tokens, _ := pacer.levels(); tokens < 0 {
+		t.Fatalf("fast sampling must not overdraw: %v", tokens)
 	}
 }

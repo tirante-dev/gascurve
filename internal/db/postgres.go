@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"time"
 
@@ -16,7 +17,37 @@ import (
 type Postgres struct {
 	db *sqlx.DB
 	q  sqlx.ExtContext
+	// tx describes the open transaction this store is bound to, nil when it
+	// is the pool. Nested calls read it to tell whether they can reuse the
+	// transaction, must add a lock to it, or are incompatible with it.
+	tx *txMode
 }
+
+// txMode is the metadata of an open transaction: the chain locks it holds,
+// in acquisition order, and whether it is the read-only repeatable-read
+// snapshot.
+type txMode struct {
+	locks    []uint64
+	snapshot bool
+}
+
+// Nesting errors. A caller that believes it holds chain exclusion, or a
+// single database moment, and does not is a correctness problem, so the
+// combination is refused rather than silently downgraded.
+var (
+	// ErrNestedSnapshot is returned when a read-only repeatable-read
+	// transaction is requested inside a writing one: it would see that
+	// transaction's own uncommitted writes and no consistent snapshot.
+	ErrNestedSnapshot = errors.New("db: snapshot transaction inside a write transaction")
+	// ErrSnapshotWrite is returned when a chain transaction is requested
+	// inside a read-only snapshot transaction, which cannot write.
+	ErrSnapshotWrite = errors.New("db: chain transaction inside a snapshot transaction")
+	// ErrLockOrder is returned when a chain lock is requested inside a
+	// transaction that already holds a higher one. Locks are always taken
+	// in ascending chain id order, so taking this one now could deadlock
+	// against a transaction doing the reverse.
+	ErrLockOrder = errors.New("db: chain lock out of order")
+)
 
 // NewPostgres wraps an open connection pool.
 func NewPostgres(d *sqlx.DB) *Postgres {
@@ -31,39 +62,81 @@ func (p *Postgres) Ping(ctx context.Context) error {
 	return p.db.PingContext(ctx)
 }
 
-// WithTx runs fn in a transaction. Nested calls reuse the outer transaction.
+// WithTx runs fn in a transaction. Nested inside any open transaction it
+// reuses it: a plain transaction asks for nothing the outer one does not
+// already give.
 func (p *Postgres) WithTx(ctx context.Context, fn func(Store) error) error {
-	return p.transact(ctx, nil, nil, fn)
+	if p.tx != nil {
+		return fn(p)
+	}
+	return p.transact(ctx, nil, &txMode{}, nil, fn)
 }
 
 // WithChainTx runs fn in a transaction that holds the chain's advisory
 // lock (pg_advisory_xact_lock, released at commit or rollback) before any
-// other statement. Nested calls reuse the outer transaction.
+// other statement. Nested inside a transaction that already holds that
+// chain's lock it reuses it; inside one holding only lower chain ids it
+// takes the missing lock, keeping the ascending order that makes the
+// locks deadlock free; inside one holding a higher chain id, or inside a
+// read-only snapshot, it fails rather than run without the exclusion the
+// caller believes it has.
 func (p *Postgres) WithChainTx(ctx context.Context, chainID uint64, fn func(Store) error) error {
-	return p.transact(ctx, nil, func(s *Postgres) error {
-		if _, err := s.exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(chainID)); err != nil {
-			return fmt.Errorf("chain lock: %w", err)
+	if p.tx == nil {
+		return p.transact(ctx, nil, &txMode{locks: []uint64{chainID}}, func(s *Postgres) error {
+			return s.lockChain(ctx, chainID)
+		}, fn)
+	}
+	if p.tx.snapshot {
+		return fmt.Errorf("%w: chain %d", ErrSnapshotWrite, chainID)
+	}
+	for _, held := range p.tx.locks {
+		if held == chainID {
+			return fn(p)
 		}
-		return nil
-	}, fn)
+	}
+	if len(p.tx.locks) > 0 {
+		if highest := slices.Max(p.tx.locks); chainID < highest {
+			return fmt.Errorf("%w: chain %d after %d", ErrLockOrder, chainID, highest)
+		}
+	}
+	if err := p.lockChain(ctx, chainID); err != nil {
+		return err
+	}
+	p.tx.locks = append(p.tx.locks, chainID)
+	return fn(p)
 }
 
-// WithSnapshotTx runs fn in a read-only repeatable-read transaction.
+// lockChain takes the chain's transaction-scoped advisory lock.
+func (p *Postgres) lockChain(ctx context.Context, chainID uint64) error {
+	if _, err := p.exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(chainID)); err != nil {
+		return fmt.Errorf("chain lock: %w", err)
+	}
+	return nil
+}
+
+// WithSnapshotTx runs fn in a read-only repeatable-read transaction. Inside
+// another snapshot it reuses it; inside a writing transaction it fails,
+// since it would read that transaction's own uncommitted rows instead of
+// one committed database moment.
 func (p *Postgres) WithSnapshotTx(ctx context.Context, fn func(Store) error) error {
-	return p.transact(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, nil, fn)
-}
-
-// transact begins a transaction with opts (reusing an open one), runs
-// setup and then fn on it, and commits unless either failed.
-func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, setup func(*Postgres) error, fn func(Store) error) error {
-	if _, ok := p.q.(*sqlx.Tx); ok {
+	if p.tx != nil {
+		if !p.tx.snapshot {
+			return ErrNestedSnapshot
+		}
 		return fn(p)
 	}
+	return p.transact(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, &txMode{snapshot: true}, nil, fn)
+}
+
+// transact begins a transaction with opts, records mode on the bound
+// store so nested calls can check compatibility, runs setup and then fn on
+// it, and commits unless either failed.
+func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, mode *txMode, setup func(*Postgres) error, fn func(Store) error) error {
 	tx, err := p.db.BeginTxx(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	bound := &Postgres{db: p.db, q: tx}
+	bound := &Postgres{db: p.db, q: tx, tx: mode}
 	if setup != nil {
 		err = setup(bound)
 	}
@@ -163,23 +236,23 @@ func (p *Postgres) SetNetworkError(ctx context.Context, chainID uint64, msg stri
 	return err
 }
 
-const blockColumns = `chain_id, number, hash, parent_hash, ts, gas_used, base_fee, l1_block, tx_count, backlogs, constraint_bips, exponent_bips, predicted_base_fee, min_base_fee, anchored`
+const blockColumns = `chain_id, number, hash, parent_hash, ts, gas_used, base_fee, l1_block, tx_count, backlogs, constraint_bips, exponent_bips, predicted_base_fee, min_base_fee, anchored, pricing_version`
 
 // UpsertBlocks writes blocks, replacing replay fields on conflict.
 func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
 	for _, b := range blocks {
 		if _, err := p.exec(ctx, `
 			INSERT INTO blocks (`+blockColumns+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 			ON CONFLICT (chain_id, number) DO UPDATE SET
 				hash = EXCLUDED.hash, parent_hash = EXCLUDED.parent_hash,
 				ts = EXCLUDED.ts, gas_used = EXCLUDED.gas_used, base_fee = EXCLUDED.base_fee,
 				l1_block = EXCLUDED.l1_block, tx_count = EXCLUDED.tx_count, backlogs = EXCLUDED.backlogs,
 				constraint_bips = EXCLUDED.constraint_bips, exponent_bips = EXCLUDED.exponent_bips,
 				predicted_base_fee = EXCLUDED.predicted_base_fee, min_base_fee = EXCLUDED.min_base_fee,
-				anchored = EXCLUDED.anchored`,
+				anchored = EXCLUDED.anchored, pricing_version = EXCLUDED.pricing_version`,
 			b.ChainID, b.Number, b.Hash, b.ParentHash, b.TS, b.GasUsed, b.BaseFee, b.L1Block, b.TxCount, b.Backlogs, b.ConstraintBips,
-			b.ExponentBips, b.PredictedBaseFee, b.MinBaseFee, b.Anchored); err != nil {
+			b.ExponentBips, b.PredictedBaseFee, b.MinBaseFee, b.Anchored, b.PricingVersion); err != nil {
 			return fmt.Errorf("block %d: %w", b.Number, err)
 		}
 	}
@@ -248,7 +321,7 @@ func (p *Postgres) PruneBlocks(ctx context.Context, chainID uint64, before time.
 	return res.RowsAffected()
 }
 
-const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, fees_wei, base_fee_min, base_fee_avg, base_fee_max, base_fee_sum, exponent_end_bips, backlogs_end, backlogs_max, constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, constraint_set_id, replay_error_bips, last_block`
+const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, fees_wei, base_fee_min, base_fee_avg, base_fee_max, base_fee_sum, exponent_end_bips, backlogs_end, backlogs_max, constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, constraint_set_id, replay_error_bips, last_block, pricing_version`
 
 // FoldBuckets adds partial buckets into the stored rows (the backfill's
 // path for windows without block rows; the cursor commits with it). A sum
@@ -258,14 +331,17 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 	for _, b := range buckets {
 		if _, err := p.exec(ctx, `
 			INSERT INTO buckets (`+bucketColumns+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 			ON CONFLICT (chain_id, resolution, bucket_start) DO UPDATE SET
+				pricing_version = LEAST(buckets.pricing_version, EXCLUDED.pricing_version),
 				blocks = buckets.blocks + EXCLUDED.blocks,
 				gas_used = buckets.gas_used + EXCLUDED.gas_used,
 				fees_wei = buckets.fees_wei + EXCLUDED.fees_wei,
 				base_fee_sum = buckets.base_fee_sum + EXCLUDED.base_fee_sum,
-				floor_fees_wei = buckets.floor_fees_wei + EXCLUDED.floor_fees_wei,
-				surplus_fees_wei = buckets.surplus_fees_wei + EXCLUDED.surplus_fees_wei,
+				floor_fees_wei = CASE WHEN LEAST(buckets.pricing_version, EXCLUDED.pricing_version) = 0 THEN NULL
+					ELSE buckets.floor_fees_wei + EXCLUDED.floor_fees_wei END,
+				surplus_fees_wei = CASE WHEN LEAST(buckets.pricing_version, EXCLUDED.pricing_version) = 0 THEN NULL
+					ELSE buckets.surplus_fees_wei + EXCLUDED.surplus_fees_wei END,
 				base_fee_min = CASE WHEN buckets.blocks = 0 THEN EXCLUDED.base_fee_min ELSE LEAST(buckets.base_fee_min, EXCLUDED.base_fee_min) END,
 				base_fee_max = GREATEST(buckets.base_fee_max, EXCLUDED.base_fee_max),
 				base_fee_avg = CASE WHEN buckets.blocks + EXCLUDED.blocks > 0
@@ -273,15 +349,17 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 					ELSE 0 END,
 				exponent_end_bips = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.exponent_end_bips ELSE buckets.exponent_end_bips END,
 				backlogs_end = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.backlogs_end ELSE buckets.backlogs_end END,
-				constraint_bips_end = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.constraint_bips_end ELSE buckets.constraint_bips_end END,
-				min_base_fee = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.min_base_fee ELSE buckets.min_base_fee END,
+				constraint_bips_end = CASE WHEN LEAST(buckets.pricing_version, EXCLUDED.pricing_version) = 0 THEN NULL
+					WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.constraint_bips_end ELSE buckets.constraint_bips_end END,
+				min_base_fee = CASE WHEN LEAST(buckets.pricing_version, EXCLUDED.pricing_version) = 0 THEN NULL
+					WHEN EXCLUDED.last_block >= buckets.last_block THEN EXCLUDED.min_base_fee ELSE buckets.min_base_fee END,
 				backlogs_max = ARRAY(SELECT GREATEST(a, b) FROM unnest(buckets.backlogs_max, EXCLUDED.backlogs_max) AS u(a, b)),
 				constraint_set_id = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN COALESCE(EXCLUDED.constraint_set_id, buckets.constraint_set_id) ELSE buckets.constraint_set_id END,
 				replay_error_bips = GREATEST(buckets.replay_error_bips, EXCLUDED.replay_error_bips),
 				last_block = GREATEST(buckets.last_block, EXCLUDED.last_block)`,
 			b.ChainID, b.Resolution, b.BucketStart, b.Blocks, b.GasUsed, b.FeesWei, b.BaseFeeMin, b.BaseFeeAvg, b.BaseFeeMax, b.BaseFeeSum,
 			b.ExponentEndBips, b.BacklogsEnd, b.BacklogsMax, b.ConstraintBipsEnd, b.MinBaseFee, b.FloorFeesWei, b.SurplusFeesWei,
-			b.ConstraintSetID, b.ReplayErrorBips, b.LastBlock); err != nil {
+			b.ConstraintSetID, b.ReplayErrorBips, b.LastBlock, b.PricingVersion); err != nil {
 			return fmt.Errorf("bucket %s %s: %w", b.Resolution, b.BucketStart.Format(time.RFC3339), err)
 		}
 	}
@@ -293,6 +371,9 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 // bucket. The constraint set is the one in force at the window's last
 // block, and only when its constraint count matches the block's backlogs
 // (the live model); a block is never tagged with a set of another shape.
+// The bucket's pricing version is the lowest of its blocks': one block of
+// history without the breakdown makes the window's exponents, floor and
+// fee split unknown rather than letting a rebuild present them as exact.
 func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error {
 	width, ok := Resolutions[resolution]
 	if !ok {
@@ -312,6 +393,7 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 					COALESCE(min(base_fee), 0) AS base_fee_min,
 					COALESCE(max(base_fee), 0) AS base_fee_max,
 					COALESCE(sum(base_fee), 0) AS base_fee_sum,
+					COALESCE(min(pricing_version), 1)::SMALLINT AS pricing_version,
 					COALESCE(sum(min_base_fee * gas_used), 0) AS floor_fees_wei,
 					COALESCE(max(CASE WHEN base_fee > 0
 						THEN LEAST(floor(abs(predicted_base_fee - base_fee) * 10000 / base_fee), $5::NUMERIC)
@@ -322,11 +404,15 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 			)
 			INSERT INTO buckets (`+bucketColumns+`)
 			SELECT $1, $2, $3, agg.blocks, agg.gas_used, agg.fees_wei, agg.base_fee_min, floor(agg.base_fee_sum / agg.blocks), agg.base_fee_max, agg.base_fee_sum,
-				lastb.exponent_bips, lastb.backlogs, bmax.backlogs_max, lastb.constraint_bips, lastb.min_base_fee, agg.floor_fees_wei, agg.fees_wei - agg.floor_fees_wei,
+				lastb.exponent_bips, lastb.backlogs, bmax.backlogs_max,
+				CASE WHEN agg.pricing_version = 0 THEN NULL ELSE lastb.constraint_bips END,
+				CASE WHEN agg.pricing_version = 0 THEN NULL ELSE lastb.min_base_fee END,
+				CASE WHEN agg.pricing_version = 0 THEN NULL ELSE agg.floor_fees_wei END,
+				CASE WHEN agg.pricing_version = 0 THEN NULL ELSE agg.fees_wei - agg.floor_fees_wei END,
 				(SELECT cs.id FROM constraint_sets cs WHERE cs.chain_id = $1 AND cs.effective_block <= lastb.number
 					AND jsonb_array_length(cs.constraints) = COALESCE(array_length(lastb.backlogs, 1), 0)
 					ORDER BY cs.effective_block DESC, cs.id DESC LIMIT 1),
-				agg.replay_error_bips, lastb.number
+				agg.replay_error_bips, lastb.number, agg.pricing_version
 			FROM agg, bmax, lastb
 			ON CONFLICT (chain_id, resolution, bucket_start) DO UPDATE SET
 				blocks = EXCLUDED.blocks, gas_used = EXCLUDED.gas_used, fees_wei = EXCLUDED.fees_wei,
@@ -336,7 +422,7 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 				constraint_bips_end = EXCLUDED.constraint_bips_end, min_base_fee = EXCLUDED.min_base_fee,
 				floor_fees_wei = EXCLUDED.floor_fees_wei, surplus_fees_wei = EXCLUDED.surplus_fees_wei,
 				constraint_set_id = EXCLUDED.constraint_set_id, replay_error_bips = EXCLUDED.replay_error_bips,
-				last_block = EXCLUDED.last_block`,
+				last_block = EXCLUDED.last_block, pricing_version = EXCLUDED.pricing_version`,
 			chainID, resolution, start, end, strconv.FormatInt(math.MaxInt64, 10)); err != nil {
 			return fmt.Errorf("rebuild bucket %s %s: %w", resolution, start.Format(time.RFC3339), err)
 		}

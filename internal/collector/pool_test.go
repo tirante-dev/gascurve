@@ -18,23 +18,28 @@ import (
 )
 
 // fakePool is an EndpointPool over a fakeRPC with scripted verification,
-// capabilities and status.
+// capabilities, policy and status.
 type fakePool struct {
 	*fakeRPC
 	verifyErr error
 	verified  int
 	status    nitro.PoolStatus
-	ws        *nitro.Endpoint
-	archive   *nitro.Endpoint
+	hasWS     bool
+	wsURL     string
+	wsErr     error
+	archive   *nitro.ArchivePool
+	pol       nitro.Policy
 }
 
 func (p *fakePool) Verify(context.Context) error {
 	p.verified++
 	return p.verifyErr
 }
-func (p *fakePool) WS() *nitro.Endpoint      { return p.ws }
-func (p *fakePool) Archive() *nitro.Endpoint { return p.archive }
-func (p *fakePool) Status() nitro.PoolStatus { return p.status }
+func (p *fakePool) HasWS() bool                           { return p.hasWS }
+func (p *fakePool) WSURL(context.Context) (string, error) { return p.wsURL, p.wsErr }
+func (p *fakePool) Archive() *nitro.ArchivePool           { return p.archive }
+func (p *fakePool) Status() nitro.PoolStatus              { return p.status }
+func (p *fakePool) Policy() nitro.Policy                  { return p.pol }
 
 // chainIDServer is a JSON-RPC server that only answers eth_chainId.
 func chainIDServer(t *testing.T, id string) *httptest.Server {
@@ -71,7 +76,10 @@ func TestFollowerWithPool(t *testing.T) {
 	ctx := context.Background()
 	pool := &fakePool{fakeRPC: newFakeRPC(1000), status: nitro.PoolStatus{
 		Active: 1, Failovers: 2,
-		Endpoints: []nitro.EndpointStatus{{Index: 0, Disabled: true}, {Index: 1, WS: true, Archive: true}},
+		Endpoints: []nitro.EndpointStatus{
+			{Index: 0, Disabled: true, Error: "reports chain id 1, configured 4663"},
+			{Index: 1, WS: true, Archive: true},
+		},
 	}}
 	store := dbtest.New()
 	f := NewFollower(Options{
@@ -94,9 +102,14 @@ func TestFollowerWithPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, ok, _ := store.GetState(ctx, 4663, db.StateEndpoints)
-	want := `{"activeEndpoint":1,"failovers":2,"endpoints":[{"index":0,"ws":false,"archive":false,"disabled":true},{"index":1,"ws":true,"archive":true,"disabled":false}]}`
+	want := `{"activeEndpoint":1,"failovers":2,"endpoints":[{"index":0,"ws":false,"archive":false,"disabled":true,"error":"reports chain id 1, configured 4663"},{"index":1,"ws":true,"archive":true,"disabled":false,"error":null}]}`
 	if !ok || raw != want {
 		t.Fatalf("endpoints state = %s", raw)
+	}
+	// A disabled endpoint is an error on the network row even though the
+	// network keeps running on the other one.
+	if n0 := store.NetworkRows[4663]; !n0.LastError.Valid || n0.LastError.String != "endpoint 0 disabled: reports chain id 1, configured 4663" {
+		t.Fatalf("endpoint error on the network row: %+v", n0)
 	}
 	// Nothing usable: the follower refuses to run and records why.
 	pool.verifyErr = errors.New("no usable endpoint: endpoint 0: reports chain id 1, configured 4663")
@@ -137,9 +150,14 @@ func TestFollowerBindsPoolCapabilities(t *testing.T) {
 	}
 	sub, ok := f.heads.(*nitro.HeadSubscriber)
 	if !ok || sub == nil {
-		t.Fatalf("heads should follow the fallback's WebSocket, got %T", f.heads)
+		t.Fatalf("heads should follow the pool's WebSocket endpoints, got %T", f.heads)
 	}
-	if f.archive != ArchiveRPC(pool.Archive()) || pool.Archive().Index() != 1 {
+	// The subscriber is bound to the pool, not to one endpoint: it resolves
+	// a verified WebSocket endpoint before every connection attempt.
+	if url, err := pool.WSURL(ctx); err != nil || url != "ws://127.0.0.1:1/ws" {
+		t.Fatalf("ws url: %q %v", url, err)
+	}
+	if f.archive != ArchiveRPC(pool.Archive()) || pool.Archive().Endpoint().Index() != 1 {
 		t.Fatalf("archive should be the fallback endpoint, got %v", f.archive)
 	}
 	if st := pool.Status(); st.Active != 0 || st.Endpoints[1].Disabled || !st.Endpoints[1].WS || !st.Endpoints[1].Archive {
@@ -161,8 +179,25 @@ func TestFollowerBindsPoolCapabilities(t *testing.T) {
 		{RPCURL: primary.URL},
 		{RPCURL: wrong.URL, WSURL: "ws://127.0.0.1:1/ws", Archive: true},
 	}})
-	h := NewFollower(Options{Network: config.NetworkConfig{ChainID: 4663}, Collector: testConfig(), RPC: bad, Store: dbtest.New()})
-	if err := h.verifyChainID(ctx); err != nil || h.heads != nil || h.archive != nil {
-		t.Fatalf("disabled capabilities: %v heads=%v archive=%v", err, h.heads, h.archive)
+	h := NewFollower(Options{Network: config.NetworkConfig{ChainID: 4663}, Collector: testConfig(), RPC: bad, Store: dbtest.New(), Log: logger.Nop()})
+	if err := h.verifyChainID(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The endpoint is configured with both capabilities, so both paths are
+	// bound, but neither can ever use it: it reports another chain.
+	if h.heads == nil || h.archive == nil {
+		t.Fatalf("capabilities: heads=%v archive=%v", h.heads, h.archive)
+	}
+	if _, err := bad.WSURL(ctx); !errors.Is(err, nitro.ErrNoEndpoint) {
+		t.Fatalf("a disabled WebSocket endpoint is never dialed: %v", err)
+	}
+	if _, err := h.archive.FastSampleAt(ctx, 1); !errors.Is(err, nitro.ErrNoEndpoint) {
+		t.Fatalf("a disabled archive endpoint is never sampled: %v", err)
+	}
+	// A pool with no capability endpoint at all binds neither.
+	none := nitro.NewPool(nitro.PoolConfig{ChainID: 4663, Endpoints: []config.EndpointConfig{{RPCURL: primary.URL}}})
+	k := NewFollower(Options{Network: config.NetworkConfig{ChainID: 4663}, Collector: testConfig(), RPC: none, Store: dbtest.New(), Log: logger.Nop()})
+	if err := k.verifyChainID(ctx); err != nil || k.heads != nil || k.archive != nil {
+		t.Fatalf("no capabilities: %v heads=%v archive=%v", err, k.heads, k.archive)
 	}
 }

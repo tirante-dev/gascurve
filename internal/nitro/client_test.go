@@ -114,8 +114,9 @@ func TestCooldownSharedAcrossCallers(t *testing.T) {
 	f.handlers["echo"] = echoHandler
 	f.script = []scriptStep{{status: http.StatusTooManyRequests}}
 	clock := newFakeClock()
-	// Four calls per second: a 10-item batch takes the full burst of 8 and
-	// overdraws by two on every attempt.
+	// Four calls per second: a 10-item batch is three more than a bulk
+	// caller can ever hold, so it takes the bulk share and waits for the
+	// rest instead of overdrawing.
 	p := NewPacer(4).withClock(clock.Now, clock.Sleep)
 	c := NewClient(f.server.URL, 4, WithPacer(p), withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()))
 	reqs := make([]Request, 10)
@@ -125,12 +126,16 @@ func TestCooldownSharedAcrossCallers(t *testing.T) {
 	if _, err := c.Batch(context.Background(), reqs); err != nil {
 		t.Fatal(err)
 	}
-	// Attempt 1 finds a full bucket and sends at once (balance -2). The
-	// retry waits for a full bucket again, 2.5 s at 4/s, which already
-	// covers the 2 s cooldown the 429 started.
+	// Attempt 1 takes the seven tokens of the bulk share at once and waits
+	// 750 ms for the last three. The retry pays the whole ten again, in
+	// the same two steps, which already covers the 2 s cooldown the 429
+	// started; the bucket never goes negative.
 	sleeps := clock.Sleeps()
-	if len(sleeps) != 1 || sleeps[0] != 2500*time.Millisecond {
+	if len(sleeps) != 3 || sleeps[0] != 750*time.Millisecond || sleeps[1] != 1750*time.Millisecond || sleeps[2] != 750*time.Millisecond {
 		t.Fatalf("sleeps = %v", sleeps)
+	}
+	if tokens, _ := p.levels(); tokens < 0 {
+		t.Fatalf("a batch above the bulk share must not overdraw: %v", tokens)
 	}
 	if c.Stats().Backoff != minBackoff {
 		t.Fatal("back-off should reset after a success past the cooldown")
@@ -387,5 +392,63 @@ func TestJSONRPCRateLimit(t *testing.T) {
 	}
 	if st := c.Stats(); st.RateLimitEvents != 2+uint64(c.maxAttempts) {
 		t.Fatalf("every throttled attempt counts: %+v", st)
+	}
+}
+
+// TestReservationRefundedOnCooldown: tokens are taken before a caller
+// queues for the send lock, so a 429 another caller saw meanwhile
+// invalidates the reservation. It is refunded, the cooldown is waited out
+// and the tokens are paid for again under the lock, instead of a queue of
+// waiters bursting through the moment the lock opens with tokens they
+// reserved while the endpoint was throttling.
+func TestReservationRefundedOnCooldown(t *testing.T) {
+	f := newFakeRPC(t)
+	f.handlers["echo"] = echoHandler
+	clock := newFakeClock()
+	p := NewPacer(4).withClock(clock.Now, clock.Sleep)
+	c := NewClient(f.server.URL, 4, WithPacer(p), withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()))
+	// Another caller's 429 starts a two second cooldown while this one is
+	// paying for its seven token batch.
+	c.mu.Lock()
+	c.blockedUntil = clock.Now().Add(2 * time.Second)
+	c.mu.Unlock()
+	reqs := make([]Request, 7)
+	for i := range reqs {
+		reqs[i] = Request{Method: "echo", Params: []any{"a"}}
+	}
+	if _, err := c.Batch(context.Background(), reqs); err != nil {
+		t.Fatal(err)
+	}
+	if s := clock.Sleeps(); len(s) != 1 || s[0] != 2*time.Second {
+		t.Fatalf("the cooldown must be waited out under the lock: %v", s)
+	}
+	// The batch was paid for twice and refunded once, so the bucket holds
+	// what one seven token batch leaves, not a full one.
+	if tokens, reserve := p.levels(); tokens != 1 || reserve != 1 {
+		t.Fatalf("the invalidated reservation must be refunded and paid again: tokens %v reserve %v", tokens, reserve)
+	}
+	// A canceled cooldown wait gives the tokens back and fails.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.mu.Lock()
+	c.blockedUntil = clock.Now().Add(time.Minute)
+	c.mu.Unlock()
+	if _, err := c.Batch(ctx, reqs[:1]); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled cooldown: %v", err)
+	}
+	// A request refused under the send lock (its endpoint is no longer the
+	// active one) is refunded too and never reaches the wire.
+	c.mu.Lock()
+	c.blockedUntil = time.Time{}
+	c.mu.Unlock()
+	clock.Advance(time.Hour)
+	c.preSend = func(context.Context) error { return &EndpointError{Err: ErrStaleEndpoint} }
+	before, requests := p.Available(), f.requestCount()
+	if _, err := c.Batch(context.Background(), reqs[:3]); !errors.Is(err, ErrStaleEndpoint) {
+		t.Fatalf("stale endpoint: %v", err)
+	}
+	if p.Available() != before || f.requestCount() != requests {
+		t.Fatalf("a refused request must be refunded and unsent: available %d (was %d) requests %d (was %d)",
+			p.Available(), before, f.requestCount(), requests)
 	}
 }

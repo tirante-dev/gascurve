@@ -195,11 +195,17 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	if v, _, _ := storeA.GetState(ctx, 4663, db.StateOwnerScanOrigin); v != `{"block":70000000,"minBaseFee":"30000000","archive":true}` {
 		t.Fatalf("origin with archive: %q", v)
 	}
+	if fa.scanOrigin.replayFrom() != 70_000_001 || !fa.scanOrigin.fullState() {
+		t.Fatalf("the origin sample is end-of-block state: %+v", fa.scanOrigin)
+	}
 	if fa.minFeeAt(69_999_999).Int64() != pricer.InitialMinimumBaseFeeWei || fa.minFeeAt(70_000_000).Int64() != 30_000_000 || fa.minFeeChangeBlock(80_000_000) != 70_000_000 {
 		t.Fatalf("origin fee: %s", fa.minFeeAt(70_000_000))
 	}
+	// The sampled constraints are the state at the end of the cutoff, so
+	// the set takes effect at the block after it: replaying the cutoff
+	// again would add its own gas to backlogs that already contain it.
 	sets, _ := storeA.ConstraintSets(ctx, 4663)
-	if len(sets) != 1 || sets[0].EffectiveBlock != 70_000_000 || sets[0].Source != model.SourceObserved || len(holesOf(t, storeA)) != 0 {
+	if len(sets) != 1 || sets[0].EffectiveBlock != 70_000_001 || sets[0].Source != model.SourceObserved || len(holesOf(t, storeA)) != 0 {
 		t.Fatalf("origin set: %+v holes %+v", sets, holesOf(t, storeA))
 	}
 	delete(storeA.StateRows, "4663/"+db.StateOwnerLogCursor)
@@ -255,6 +261,66 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	sets, _ = store3.ConstraintSets(ctx, 4663)
 	if len(sets) != 1 || sets[0].Source != model.SourceObserved {
 		t.Fatalf("observed set on a chain without actions: %+v", sets)
+	}
+}
+
+// TestOriginRecordsLegacyState: on a legacy chain the archive origin
+// records the whole sampled pricer state, parameters and backlog, not the
+// minimum fee alone. Without it the backfill would price history from the
+// current parameters, which have nothing to do with what was in force.
+func TestOriginRecordsLegacyState(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(120_000_000)
+	rpc.legacy = &nitro.LegacyParams{SpeedLimit: 7_000_000, Inertia: 102, Tolerance: 10, Backlog: 42}
+	archive := newFakeRPC(120_000_000)
+	archive.legacy = &nitro.LegacyParams{SpeedLimit: 3_000_000, Inertia: 50, Tolerance: 5, Backlog: 900_000}
+	archive.minFee = big.NewInt(30_000_000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.archive = archive
+	if err := f.SlowTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	o := f.scanOrigin
+	if o == nil || o.Legacy == nil {
+		t.Fatalf("the legacy state must be persisted: %+v", o)
+	}
+	if o.Legacy.SpeedLimit != 3_000_000 || o.Legacy.Inertia != 50 || o.Legacy.Tolerance != 5 || o.Legacy.Backlog != 900_000 {
+		t.Fatalf("sampled legacy state: %+v", o.Legacy)
+	}
+	if o.MinBaseFee != "30000000" || !o.fullState() || o.replayFrom() != 70_000_001 {
+		t.Fatalf("origin: %+v", o)
+	}
+	// A legacy chain records no constraint set.
+	if sets, _ := store.ConstraintSets(ctx, 4663); len(sets) != 0 {
+		t.Fatalf("legacy origin must record no set: %+v", sets)
+	}
+	// A restarted follower reloads the whole state.
+	g := newTestFollower(t, rpc, store)
+	if err := g.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if g.scanOrigin == nil || g.scanOrigin.Legacy == nil || g.scanOrigin.Legacy.Backlog != 900_000 {
+		t.Fatalf("reloaded legacy origin: %+v", g.scanOrigin)
+	}
+	// From the origin on the sampled parameters are the base, not the live
+	// ones, so historical prices come from what was really in force.
+	tl := g.timelineLocked(nil)
+	base := &pricer.Legacy{SpeedLimit: 7_000_000, Inertia: 102, Tolerance: 10}
+	if got := tl.legacyAt(70_000_001, base); got.SpeedLimit != 3_000_000 || got.Inertia != 50 || got.Tolerance != 5 {
+		t.Fatalf("parameters at the origin: %+v", got)
+	}
+	if got := tl.legacyAt(69_999_999, base); got.SpeedLimit != 7_000_000 {
+		t.Fatalf("below the origin nothing is known: %+v", got)
+	}
+	// A legacy sample without parameters is an error rather than a
+	// half-recorded origin.
+	archive.legacy = nil
+	archive.constraints = nil
+	bad := newTestFollower(t, rpc, dbtest.New())
+	bad.archive = archive
+	if err := bad.SlowTick(ctx); err == nil || bad.scanOrigin != nil {
+		t.Fatalf("a legacy origin without parameters must fail: %v", err)
 	}
 }
 

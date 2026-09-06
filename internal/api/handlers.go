@@ -484,7 +484,7 @@ func blockPoint(b db.Block) model.BlockPoint {
 	return model.BlockPoint{
 		Number: b.Number, TS: uint64(b.TS.Unix()), GasUsed: b.GasUsed, BaseFee: b.BaseFee.String(),
 		PredictedBaseFee: b.PredictedBaseFee.String(), Backlogs: b.Backlogs.Uint64s(), ConstraintBips: int64s(b.ConstraintBips),
-		ExponentBips: b.ExponentBips, MinBaseFee: b.MinBaseFee.String(), Anchored: b.Anchored,
+		ExponentBips: b.ExponentBips, MinBaseFee: b.MinBaseFee.StringPtr(), Anchored: b.Anchored,
 	}
 }
 

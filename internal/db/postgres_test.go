@@ -30,14 +30,14 @@ func newMock(t *testing.T) (*Postgres, sqlmock.Sqlmock) {
 var (
 	now       = time.Date(2026, 9, 6, 7, 20, 0, 0, time.UTC)
 	errBoom   = errors.New("boom")
-	blockCols = []string{"chain_id", "number", "hash", "parent_hash", "ts", "gas_used", "base_fee", "l1_block", "tx_count", "backlogs", "constraint_bips", "exponent_bips", "predicted_base_fee", "min_base_fee", "anchored"}
+	blockCols = []string{"chain_id", "number", "hash", "parent_hash", "ts", "gas_used", "base_fee", "l1_block", "tx_count", "backlogs", "constraint_bips", "exponent_bips", "predicted_base_fee", "min_base_fee", "anchored", "pricing_version"}
 	netCols   = []string{"chain_id", "name", "display_name", "explorer_url", "enabled", "head_block", "head_at", "last_sample_at", "last_error", "updated_at"}
-	bucketCol = []string{"chain_id", "resolution", "bucket_start", "blocks", "gas_used", "fees_wei", "base_fee_min", "base_fee_avg", "base_fee_max", "base_fee_sum", "exponent_end_bips", "backlogs_end", "backlogs_max", "constraint_bips_end", "min_base_fee", "floor_fees_wei", "surplus_fees_wei", "constraint_set_id", "replay_error_bips", "last_block"}
+	bucketCol = []string{"chain_id", "resolution", "bucket_start", "blocks", "gas_used", "fees_wei", "base_fee_min", "base_fee_avg", "base_fee_max", "base_fee_sum", "exponent_end_bips", "backlogs_end", "backlogs_max", "constraint_bips_end", "min_base_fee", "floor_fees_wei", "surplus_fees_wei", "constraint_set_id", "replay_error_bips", "last_block", "pricing_version"}
 	sampleCol = []string{"chain_id", "sampled_at", "block_number", "base_fee", "min_base_fee", "constraints", "legacy", "prices", "l1", "accounts"}
 )
 
 func blockRow() *sqlmock.Rows {
-	return sqlmock.NewRows(blockCols).AddRow(4663, 100, "0xh", "0xp", now, 1000, "20000000", 5, 2, "{1,18446744073709551615}", "{3,31}", 34, "20000001", "20000000", true)
+	return sqlmock.NewRows(blockCols).AddRow(4663, 100, "0xh", "0xp", now, 1000, "20000000", 5, 2, "{1,18446744073709551615}", "{3,31}", 34, "20000001", "20000000", true, 1)
 }
 
 func TestPostgresQueries(t *testing.T) {
@@ -95,7 +95,7 @@ func TestPostgresQueries(t *testing.T) {
 	if err != nil || b == nil || b.Number != 100 || b.BaseFee.Int64() != 20000000 || len(b.Backlogs) != 2 || !b.Anchored {
 		t.Fatalf("LatestBlock: %+v %v", b, err)
 	}
-	if b.Hash != "0xh" || b.ParentHash != "0xp" || b.Backlogs[1] != math.MaxUint64 || b.ConstraintBips[1] != 31 || b.MinBaseFee.Int64() != 20000000 {
+	if b.Hash != "0xh" || b.ParentHash != "0xp" || b.Backlogs[1] != math.MaxUint64 || b.ConstraintBips[1] != 31 || b.MinBaseFee.Wei.Int64() != 20000000 {
 		t.Fatalf("LatestBlock new fields: %+v", b)
 	}
 	mock.ExpectQuery("SELECT .* FROM blocks WHERE chain_id = \\$1 AND number = \\$2").WillReturnRows(blockRow())
@@ -151,20 +151,23 @@ func TestPostgresQueries(t *testing.T) {
 	if n, err := p.DeleteBucketsBefore(ctx, 4663, now); err != nil || n != 4 {
 		t.Fatalf("DeleteBucketsBefore: %d %v", n, err)
 	}
-	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, "5", "1", "2", "3", "20", 34, "{1,2}", "{3,4}", "{5,6}", "7", "8", "9", 1, 50, 100))
+	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, "5", "1", "2", "3", "20", 34, "{1,2}", "{3,4}", "{5,6}", "7", "8", "9", 1, 50, 100, 1))
 	bk, err := p.Buckets(ctx, 4663, "1m", now, now)
 	if err != nil || len(bk) != 1 || bk[0].BacklogsMax[1] != 4 || bk[0].ConstraintSetID.Int64 != 1 || bk[0].LastBlock != 100 {
 		t.Fatalf("Buckets: %+v %v", bk, err)
 	}
-	if bk[0].BaseFeeSum.Wei.Int64() != 20 || bk[0].ConstraintBipsEnd[1] != 6 || bk[0].MinBaseFee.Int64() != 7 || bk[0].FloorFeesWei.Wei.Int64() != 8 || bk[0].SurplusFeesWei.Wei.Int64() != 9 {
+	if bk[0].BaseFeeSum.Wei.Int64() != 20 || bk[0].ConstraintBipsEnd[1] != 6 || bk[0].MinBaseFee.Wei.Int64() != 7 || bk[0].FloorFeesWei.Wei.Int64() != 8 || bk[0].SurplusFeesWei.Wei.Int64() != 9 {
 		t.Fatalf("Buckets new fields: %+v", bk[0])
 	}
 	// A bucket written before the sum and fee split existed scans as
 	// unknown, not zero, and a NULL exponent array as nil.
-	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, "5", "1", "2", "3", nil, 34, "{1,2}", "{3,4}", nil, "7", nil, nil, 1, 50, 100))
+	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, "5", "1", "2", "3", nil, 34, "{1,2}", "{3,4}", nil, nil, nil, nil, 1, 50, 100, 0))
 	bk, err = p.Buckets(ctx, 4663, "1m", now, now)
 	if err != nil || len(bk) != 1 || bk[0].BaseFeeSum.Valid || bk[0].FloorFeesWei.Valid || bk[0].SurplusFeesWei.Valid || bk[0].ConstraintBipsEnd != nil {
 		t.Fatalf("Buckets unknown fields: %+v %v", bk, err)
+	}
+	if bk[0].MinBaseFee.Valid || bk[0].PricingVersion != PricingUnknown {
+		t.Fatalf("history without a breakdown has no known floor: %+v", bk[0])
 	}
 
 	mock.ExpectExec("INSERT INTO state_samples").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -409,12 +412,91 @@ func TestWithTx(t *testing.T) {
 	if err := p.WithChainTx(ctx, 4663, func(Store) error { ran = true; return nil }); !errors.Is(err, errBoom) || ran {
 		t.Fatalf("lock error: %v ran=%v", err, ran)
 	}
-	// A snapshot transaction is repeatable read and read only.
+	// A snapshot transaction is repeatable read and read only; nesting one
+	// inside another reuses it.
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT value FROM collector_state").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("v"))
 	mock.ExpectCommit()
-	if err := p.WithSnapshotTx(ctx, func(s Store) error { _, _, err := s.GetState(ctx, 1, "k"); return err }); err != nil {
+	err = p.WithSnapshotTx(ctx, func(s Store) error {
+		return s.WithSnapshotTx(ctx, func(inner Store) error { _, _, err := inner.GetState(ctx, 1, "k"); return err })
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNestedTransactionModes: a nested transaction either reuses the open
+// one, adds the lock it is missing in ascending chain order, or fails.
+// Silently returning the outer transaction would leave the caller
+// believing it holds chain exclusion, or one database moment, when it does
+// not.
+func TestNestedTransactionModes(t *testing.T) {
+	p, mock := newMock(t)
+	ctx := context.Background()
+
+	// A second chain lock inside a chain transaction is taken, in
+	// ascending chain id order, and reused from then on.
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock\\(\\$1\\)").WithArgs(int64(10)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("SELECT pg_advisory_xact_lock\\(\\$1\\)").WithArgs(int64(20)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO collector_state").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	err := p.WithChainTx(ctx, 10, func(s Store) error {
+		return s.WithChainTx(ctx, 20, func(inner Store) error {
+			// Both locks are held now, so either chain reuses.
+			return inner.WithChainTx(ctx, 10, func(x Store) error { return x.SetState(ctx, 10, "a", "1") })
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A lower chain id after a higher one would invert the lock order.
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock\\(\\$1\\)").WithArgs(int64(20)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectRollback()
+	ran := false
+	err = p.WithChainTx(ctx, 20, func(s Store) error {
+		return s.WithChainTx(ctx, 10, func(Store) error { ran = true; return nil })
+	})
+	if !errors.Is(err, ErrLockOrder) || ran {
+		t.Fatalf("lock order: %v ran=%v", err, ran)
+	}
+
+	// A failing lock acquisition inside an open transaction surfaces.
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock\\(\\$1\\)").WithArgs(int64(10)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("SELECT pg_advisory_xact_lock\\(\\$1\\)").WithArgs(int64(20)).WillReturnError(errBoom)
+	mock.ExpectRollback()
+	err = p.WithChainTx(ctx, 10, func(s Store) error {
+		return s.WithChainTx(ctx, 20, func(Store) error { return nil })
+	})
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("nested lock error: %v", err)
+	}
+
+	// A snapshot inside a writing transaction would read that
+	// transaction's own uncommitted rows.
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	err = p.WithTx(ctx, func(s Store) error {
+		return s.WithSnapshotTx(ctx, func(Store) error { return nil })
+	})
+	if !errors.Is(err, ErrNestedSnapshot) {
+		t.Fatalf("snapshot inside a write transaction: %v", err)
+	}
+
+	// And a chain transaction inside a read-only snapshot cannot write.
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	err = p.WithSnapshotTx(ctx, func(s Store) error {
+		return s.WithChainTx(ctx, 10, func(Store) error { return nil })
+	})
+	if !errors.Is(err, ErrSnapshotWrite) {
+		t.Fatalf("chain transaction inside a snapshot: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

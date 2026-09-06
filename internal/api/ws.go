@@ -261,6 +261,29 @@ func (h *Hub) fanOut(st *netState, d delta, tick json.RawMessage) {
 	}
 }
 
+// refreshAndBroadcast is the one path that mutates the ring: whatever a
+// refresh finds is delivered to the network's clients before the lock is
+// released, so no committed delta is ever consumed without being sent.
+// A caller that discarded one would leave every client that was waiting
+// for those blocks without them until the next notification.
+func (h *Hub) refreshAndBroadcast(ctx context.Context, chainID uint64) error {
+	d, err := h.refreshBlocks(ctx, chainID)
+	if err != nil {
+		return err
+	}
+	h.mu.Lock()
+	h.fanOut(h.state(chainID), d, nil)
+	h.mu.Unlock()
+	return nil
+}
+
+// reverse flips a newest-first result into ascending order.
+func reverse(rows []db.Block) {
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+}
+
 // refreshBlocks reconciles the ring with the blocks table and returns what
 // changed: the blocks newer than the ring's tip, oldest first, or, when
 // the table no longer holds the tip the ring knows (its hash changed or
@@ -288,12 +311,23 @@ func (h *Hub) refreshBlocks(ctx context.Context, chainID uint64) (delta, error) 
 	var err error
 	if empty {
 		rows, err = h.store.RecentBlocks(ctx, chainID, helloBlocks)
-		for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
-			rows[i], rows[j] = rows[j], rows[i]
-		}
+		reverse(rows)
 	} else {
-		// From the tip itself, so its row proves the ring is still on-chain.
-		rows, err = h.store.BlocksAfter(ctx, chainID, last-1, ringSize)
+		// From the tip itself, so its row proves the ring is still
+		// on-chain, and on until the table's tip: one tick can advance the
+		// chain by more than a single page, and a ring left behind would
+		// only catch up at the next notification.
+		for from := last - 1; ; {
+			var page []db.Block
+			if page, err = h.store.BlocksAfter(ctx, chainID, from, ringSize); err != nil {
+				break
+			}
+			rows = append(rows, page...)
+			if len(page) < ringSize {
+				break
+			}
+			from = page[len(page)-1].Number
+		}
 	}
 	if err != nil {
 		return delta{}, err
@@ -353,8 +387,29 @@ func (h *Hub) reorgRing(ctx context.Context, st *netState, chainID uint64) (delt
 		st.blocks = append(st.blocks, ringBlock{point: blockPoint(r), hash: r.Hash})
 	}
 	st.trim()
+	// The owner-action cursor follows the chain down too: the actions above
+	// the ancestor were delivered from a fork that no longer exists, so
+	// their replacements must be able to arrive again, and reconciliation
+	// after a LISTEN outage has to look at that range once more.
+	st.forgetActionsAbove(ancestor)
 	h.log.Warn("blocks replaced below the ring tip, resending the canonical chain", "chainId", chainID, "ancestor", ancestor, "blocks", len(replaced))
 	return delta{reorg: &model.Reorg{ChainID: chainID, Ancestor: ancestor, Blocks: replaced}}, nil
+}
+
+// forgetActionsAbove drops the delivered owner actions above a reorg
+// ancestor and lowers the reconciliation cursor to it. The caller holds
+// h.mu.
+func (st *netState) forgetActionsAbove(ancestor uint64) {
+	kept := st.seenOrder[:0]
+	for _, k := range st.seenOrder {
+		if k.block > ancestor {
+			delete(st.seen, k)
+			continue
+		}
+		kept = append(kept, k)
+	}
+	st.seenOrder = kept
+	st.ownerSince = min(st.ownerSince, ancestor)
 }
 
 // trim caps the ring and records its tip. The caller holds h.mu.
@@ -524,8 +579,10 @@ type prepared struct {
 
 // prepare does the database work for a hello: the network model, the ring
 // (filled from the table when the hub has not seen a tick yet), the owner
-// cursor and a snapshot fallback. Short deadlines keep a subscribe storm
-// from holding connections.
+// cursor and a snapshot fallback. Filling the ring goes through the one
+// path that broadcasts what a refresh found, so a hello racing the first
+// notification can never swallow a block another client was waiting for.
+// Short deadlines keep a subscribe storm from holding connections.
 func (h *Hub) prepare(ctx context.Context, n db.Network) (*prepared, error) {
 	ctx, cancel := context.WithTimeout(ctx, wsDBTimeout)
 	defer cancel()
@@ -539,7 +596,7 @@ func (h *Hub) prepare(ctx context.Context, n db.Network) (*prepared, error) {
 	noSnap := st.snapshot == nil
 	h.mu.Unlock()
 	if empty {
-		if _, err := h.refreshBlocks(ctx, n.ChainID); err != nil {
+		if err := h.refreshAndBroadcast(ctx, n.ChainID); err != nil {
 			return nil, err
 		}
 	}
