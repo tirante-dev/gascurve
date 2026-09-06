@@ -249,8 +249,11 @@ func (f *Follower) currentHead(ctx context.Context) (uint64, error) {
 	return f.rpc.BlockNumber(ctx)
 }
 
-// scanBatchReports inspects new two-transaction blocks for batch posting
-// reports and stores the decoded cost.
+// scanBatchReports inspects new blocks for batch posting reports and
+// stores the decoded cost. A budgeted network only looks at
+// two-transaction blocks (the shape of a report block) and at most
+// batchScanLimit of them per slow tick; an unlimited one reads every block
+// with full transactions until it has caught up.
 func (f *Follower) scanBatchReports(ctx context.Context) error {
 	cursor, ok, err := f.store.GetState(ctx, f.chainID, db.StateBatchScanCursor)
 	if err != nil {
@@ -271,34 +274,68 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 		}
 		after = oldest.Number - 1
 	}
-	nums, err := f.store.TwoTxBlocks(ctx, f.chainID, after, batchScanLimit)
-	if err != nil {
-		return err
+	chunk := batchFetchChunk
+	if f.unlimited() {
+		chunk = nitro.MaxBatch
 	}
-	if len(nums) == 0 {
-		return nil
-	}
-	var reports []db.BatchReport
-	for start := 0; start < len(nums); start += batchFetchChunk {
-		end := min(start+batchFetchChunk, len(nums))
-		blocks, err := f.rpc.BlocksWithTxs(ctx, nums[start:end])
+	for {
+		nums, err := f.batchCandidates(ctx, after)
 		if err != nil {
 			return err
 		}
-		for _, b := range blocks {
-			if r := batchReportOf(f.chainID, b); r != nil {
-				reports = append(reports, *r)
-			}
+		if len(nums) == 0 {
+			return nil
 		}
-	}
-	return f.store.WithTx(ctx, func(s db.Store) error {
-		if len(reports) > 0 {
-			if err := s.UpsertBatchReports(ctx, reports); err != nil {
+		var reports []db.BatchReport
+		for start := 0; start < len(nums); start += chunk {
+			end := min(start+chunk, len(nums))
+			blocks, err := f.rpc.BlocksWithTxs(ctx, nums[start:end])
+			if err != nil {
 				return err
 			}
+			for _, b := range blocks {
+				if r := batchReportOf(f.chainID, b); r != nil {
+					reports = append(reports, *r)
+				}
+			}
 		}
-		return s.SetState(ctx, f.chainID, db.StateBatchScanCursor, strconv.FormatUint(nums[len(nums)-1], 10))
-	})
+		after = nums[len(nums)-1]
+		err = f.store.WithTx(ctx, func(s db.Store) error {
+			if len(reports) > 0 {
+				if err := s.UpsertBatchReports(ctx, reports); err != nil {
+					return err
+				}
+			}
+			return s.SetState(ctx, f.chainID, db.StateBatchScanCursor, strconv.FormatUint(after, 10))
+		})
+		if err != nil {
+			return err
+		}
+		if !f.unlimited() || len(nums) < batchScanLimit {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+}
+
+// batchCandidates lists the next blocks to inspect after the cursor: every
+// block on an unlimited network, only two-transaction blocks on a budgeted
+// one.
+func (f *Follower) batchCandidates(ctx context.Context, after uint64) ([]uint64, error) {
+	if !f.unlimited() {
+		return f.store.TwoTxBlocks(ctx, f.chainID, after, batchScanLimit)
+	}
+	blocks, err := f.store.BlocksAfter(ctx, f.chainID, after, batchScanLimit)
+	if err != nil {
+		return nil, err
+	}
+	nums := make([]uint64, len(blocks))
+	for i, b := range blocks {
+		nums[i] = b.Number
+	}
+	return nums, nil
 }
 
 // batchReportOf decodes a batch posting report from a block's internal

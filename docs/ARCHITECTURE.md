@@ -112,8 +112,10 @@ One `Follower` per network, all sharing one `*sqlx.DB`.
 
 Fast loop, every `collector.tick_interval` (1 s), or on every `newHeads` event when `ws_url` is configured (then state calls are made at that head's block number so samples align exactly with headers):
 
+With `ws_url` the follower starts on the timer, pauses timer sampling once the `newHeads` subscription is up, and resumes it the moment the subscription drops (the subscriber reconnects on its own with 1 s to 30 s back-off and a 15 s ping watchdog). Heads arriving mid-tick collapse into one tick at the newest head; catch-up fetches the rest.
+
 1. One JSON-RPC batch: `eth_getBlockByNumber("latest", false)`, `getGasPricingConstraints()`, `getPricesInWei()`, `getMinimumGasPrice()`. If the constraints call reverts or returns empty, also `getGasBacklog()`, `getPricingInertia()`, `getGasBacklogTolerance()`, `getGasAccountingParams()` (legacy model).
-2. Fetch headers for every block between the stored head and the new head, in batches of `header_batch_size`, respecting the per-network budget. On a paced network (`calls_per_second > 0`) a gap larger than 10 × `header_batch_size` blocks is skipped (logged) and the replay restarts from the sampled backlogs, because a 4 calls/s budget cannot follow a ~10 blocks/s chain block by block; unlimited (dedicated node) networks always fetch every block.
+2. Fetch headers for every block between the stored head and the new head, in batches of `header_batch_size`, respecting the per-network budget. On a paced network (`calls_per_second > 0`) a gap larger than `max_catch_up_batches` × `header_batch_size` blocks is skipped (logged) and the replay restarts from the sampled backlogs, because a 4 calls/s budget cannot follow a ~10 blocks/s chain block by block; unlimited (dedicated node) networks always fetch every block.
 3. Replay each block through the pricer. When the sampled state's block number equals a replayed block, overwrite the backlogs with the sampled values (`anchored = true`) so drift never accumulates.
 4. Upsert `blocks`, fold into `buckets` (1m, 15m, 1h), insert `state_samples`, update `networks.head_block`, `NOTIFY`.
 

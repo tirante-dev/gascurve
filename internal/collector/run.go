@@ -8,6 +8,7 @@ import (
 	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/logger"
+	"github.com/tirante-dev/gascurve/internal/nitro"
 )
 
 // Run drives the fast loop, the slow loop and the backfill until ctx ends.
@@ -31,7 +32,17 @@ func (f *Follower) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// runFast drives the fast loop: on the timer when polling, on newHeads
+// events when a head source is configured.
 func (f *Follower) runFast(ctx context.Context) {
+	if f.heads == nil {
+		f.runPolling(ctx)
+		return
+	}
+	f.runOnHeads(ctx)
+}
+
+func (f *Follower) runPolling(ctx context.Context) {
 	for ctx.Err() == nil {
 		start := f.now()
 		if err := f.Tick(ctx); err != nil && ctx.Err() == nil {
@@ -43,6 +54,63 @@ func (f *Follower) runFast(ctx context.Context) {
 		}
 		if err := f.sleep(ctx, wait); err != nil {
 			return
+		}
+	}
+}
+
+// runOnHeads ticks at every head the subscription delivers, sampling state
+// at that block number. Heads that arrive while a tick is running collapse
+// into one tick at the newest of them (the catch-up fetches the rest). The
+// timer keeps firing at tick_interval but only ticks while the
+// subscription is down, so the follower degrades to polling and picks the
+// subscription back up on its own. After a failed head tick (say the HTTP
+// node has not seen that block yet) the timer polls once so a quiet chain
+// cannot leave the follower stuck on a stale head.
+func (f *Follower) runOnHeads(ctx context.Context) {
+	var mu sync.Mutex
+	var latest uint64
+	signal := make(chan struct{}, 1)
+	go f.heads.Run(ctx, func(h nitro.Head) {
+		mu.Lock()
+		latest = max(latest, h.Number)
+		mu.Unlock()
+		select {
+		case signal <- struct{}{}:
+		default:
+		}
+	})
+	ticker := time.NewTicker(f.cfg.TickInterval)
+	defer ticker.Stop()
+	polling, retry := true, false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-signal:
+			mu.Lock()
+			n := latest
+			mu.Unlock()
+			if polling {
+				polling = false
+				f.log.Info("following newHeads, timer polling paused")
+			}
+			retry = false
+			if err := f.TickAt(ctx, n); err != nil && ctx.Err() == nil {
+				f.log.Debug("tick error", "head", n, "err", err.Error())
+				retry = true
+			}
+		case <-ticker.C:
+			if f.heads.Connected() && !retry {
+				continue
+			}
+			if !polling && !f.heads.Connected() {
+				polling = true
+				f.log.Warn("newHeads subscription down, polling on the timer")
+			}
+			retry = false
+			if err := f.Tick(ctx); err != nil && ctx.Err() == nil {
+				f.log.Debug("tick error", "err", err.Error())
+			}
 		}
 	}
 }

@@ -2,36 +2,47 @@ package nitro
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
 )
 
 // Pacer is a token bucket that meters JSON-RPC calls per network: one token
 // per call, including every item inside a batch, refilled at the configured
-// rate with a burst of twice the rate.
+// rate with a burst of twice the rate. A rate of zero means unlimited: Wait
+// never sleeps and Available is effectively infinite. Batch size caps and
+// 429 back-off live in the Client and apply either way.
 type Pacer struct {
-	mu     sync.Mutex
-	rate   float64
-	burst  float64
-	tokens float64
-	last   time.Time
-	now    func() time.Time
-	sleep  func(context.Context, time.Duration) error
+	mu        sync.Mutex
+	unlimited bool
+	rate      float64
+	burst     float64
+	tokens    float64
+	last      time.Time
+	now       func() time.Time
+	sleep     func(context.Context, time.Duration) error
 }
 
-// NewPacer creates a bucket allowing callsPerSecond sustained calls.
+// NewPacer creates a bucket allowing callsPerSecond sustained calls, or an
+// unlimited pacer when callsPerSecond is zero or negative.
 func NewPacer(callsPerSecond float64) *Pacer {
+	p := &Pacer{now: time.Now, sleep: sleepContext}
 	if callsPerSecond <= 0 {
-		callsPerSecond = 1
+		p.unlimited = true
+		p.last = p.now()
+		return p
 	}
 	burst := 2 * callsPerSecond
 	if burst < 1 {
 		burst = 1
 	}
-	p := &Pacer{rate: callsPerSecond, burst: burst, tokens: burst, now: time.Now, sleep: sleepContext}
+	p.rate, p.burst, p.tokens = callsPerSecond, burst, burst
 	p.last = p.now()
 	return p
 }
+
+// Unlimited reports whether the pacer never waits.
+func (p *Pacer) Unlimited() bool { return p.unlimited }
 
 // withClock replaces the clock and sleeper, for tests.
 func (p *Pacer) withClock(now func() time.Time, sleep func(context.Context, time.Duration) error) *Pacer {
@@ -43,7 +54,7 @@ func (p *Pacer) withClock(now func() time.Time, sleep func(context.Context, time
 	return p
 }
 
-// Rate returns the sustained calls per second.
+// Rate returns the sustained calls per second, 0 when unlimited.
 func (p *Pacer) Rate() float64 { return p.rate }
 
 func (p *Pacer) refillLocked() {
@@ -59,8 +70,11 @@ func (p *Pacer) refillLocked() {
 }
 
 // Available returns the number of whole tokens that can be taken without
-// waiting.
+// waiting (math.MaxInt when unlimited).
 func (p *Pacer) Available() int {
+	if p.unlimited {
+		return math.MaxInt
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.refillLocked()
@@ -75,6 +89,9 @@ func (p *Pacer) Available() int {
 func (p *Pacer) Wait(ctx context.Context, n int) error {
 	if n <= 0 {
 		return nil
+	}
+	if p.unlimited {
+		return ctx.Err()
 	}
 	p.mu.Lock()
 	p.refillLocked()

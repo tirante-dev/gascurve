@@ -188,18 +188,29 @@ func (c *Client) ArbOSVersion(ctx context.Context) (uint64, error) {
 // prices and minimum base fee. When the constraints call reverts or returns
 // an empty list a second batch reads the legacy pricer parameters.
 func (c *Client) FastSample(ctx context.Context) (*Sample, error) {
+	return c.sampleAt(ctx, latestTag)
+}
+
+// FastSampleAt is FastSample with every call pinned to one block number, so
+// the header and the state belong to the same block. Used when following
+// newHeads over WebSocket and by the archive backfill anchors.
+func (c *Client) FastSampleAt(ctx context.Context, number uint64) (*Sample, error) {
+	return c.sampleAt(ctx, blockTag(number))
+}
+
+func (c *Client) sampleAt(ctx context.Context, tag string) (*Sample, error) {
 	results, err := c.Batch(ctx, []Request{
-		{Method: methodGetBlockByNumber, Params: []any{latestTag, false}},
-		SelectorCall(ArbGasInfoAddress, SigGetGasPricingConstraints),
-		SelectorCall(ArbGasInfoAddress, SigGetPricesInWei),
-		SelectorCall(ArbGasInfoAddress, SigGetMinimumGasPrice),
+		{Method: methodGetBlockByNumber, Params: []any{tag, false}},
+		SelectorCallAt(ArbGasInfoAddress, SigGetGasPricingConstraints, tag),
+		SelectorCallAt(ArbGasInfoAddress, SigGetPricesInWei, tag),
+		SelectorCallAt(ArbGasInfoAddress, SigGetMinimumGasPrice, tag),
 	})
 	if err != nil {
 		return nil, err
 	}
 	s := &Sample{SampledAt: c.now()}
 	if results[0].Err != nil {
-		return nil, fmt.Errorf("latest block: %w", results[0].Err)
+		return nil, fmt.Errorf("block %s: %w", tag, results[0].Err)
 	}
 	b, err := parseHeader(results[0].Raw)
 	if err != nil {
@@ -238,7 +249,7 @@ func (c *Client) FastSample(ctx context.Context) (*Sample, error) {
 	}
 
 	if len(s.Constraints) == 0 {
-		legacy, err := c.LegacyParams(ctx)
+		legacy, err := c.legacyParamsAt(ctx, tag)
 		if err != nil {
 			return nil, err
 		}
@@ -247,13 +258,18 @@ func (c *Client) FastSample(ctx context.Context) (*Sample, error) {
 	return s, nil
 }
 
-// LegacyParams reads the legacy pricer parameters in one batch.
+// LegacyParams reads the legacy pricer parameters in one batch at the
+// latest block.
 func (c *Client) LegacyParams(ctx context.Context) (*LegacyParams, error) {
+	return c.legacyParamsAt(ctx, latestTag)
+}
+
+func (c *Client) legacyParamsAt(ctx context.Context, tag string) (*LegacyParams, error) {
 	results, err := c.Batch(ctx, []Request{
-		SelectorCall(ArbGasInfoAddress, SigGetGasBacklog),
-		SelectorCall(ArbGasInfoAddress, SigGetPricingInertia),
-		SelectorCall(ArbGasInfoAddress, SigGetGasBacklogTolerance),
-		SelectorCall(ArbGasInfoAddress, SigGetGasAccountingParams),
+		SelectorCallAt(ArbGasInfoAddress, SigGetGasBacklog, tag),
+		SelectorCallAt(ArbGasInfoAddress, SigGetPricingInertia, tag),
+		SelectorCallAt(ArbGasInfoAddress, SigGetGasBacklogTolerance, tag),
+		SelectorCallAt(ArbGasInfoAddress, SigGetGasAccountingParams, tag),
 	})
 	if err != nil {
 		return nil, err

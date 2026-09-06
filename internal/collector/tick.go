@@ -13,13 +13,26 @@ import (
 	"github.com/tirante-dev/gascurve/internal/pricer"
 )
 
-// Tick runs one fast iteration: sample, catch up on headers, replay, write
-// blocks, buckets and the state sample in one transaction, then NOTIFY.
+// Tick runs one fast iteration: sample the latest block, catch up on
+// headers, replay, write blocks, buckets and the state sample in one
+// transaction, then NOTIFY.
 func (f *Follower) Tick(ctx context.Context) error {
+	return f.tickWith(ctx, f.rpc.FastSample)
+}
+
+// TickAt is Tick with the sample pinned to one block number, used when a
+// newHeads event names the head so state and header match exactly.
+func (f *Follower) TickAt(ctx context.Context, number uint64) error {
+	return f.tickWith(ctx, func(ctx context.Context) (*nitro.Sample, error) {
+		return f.rpc.FastSampleAt(ctx, number)
+	})
+}
+
+func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) (*nitro.Sample, error)) error {
 	if err := f.ensureInit(ctx); err != nil {
 		return f.fail(ctx, err)
 	}
-	sample, err := f.rpc.FastSample(ctx)
+	sample, err := sampleFn(ctx)
 	if err != nil {
 		return f.fail(ctx, fmt.Errorf("sample: %w", err))
 	}
@@ -41,8 +54,10 @@ func (f *Follower) Tick(ctx context.Context) error {
 	if stored == 0 {
 		from = max(head-min(head, initialBlocks-1), 1)
 	}
-	maxGap := uint64(f.cfg.HeaderBatchSize) * maxCatchUpFactor
-	if gap := head - from + 1; gap > maxGap {
+	// A budgeted network cannot afford an unbounded catch-up; an unlimited
+	// one fetches every block so the replay never has a hole.
+	maxGap := uint64(f.cfg.HeaderBatchSize) * uint64(f.cfg.MaxCatchUpBatches)
+	if gap := head - from + 1; !f.unlimited() && gap > maxGap {
 		f.log.Warn("catch-up gap exceeds budget, skipping blocks", "gap", gap, "skipped", gap-maxGap)
 		from = head - maxGap + 1
 		f.mu.Lock()

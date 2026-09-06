@@ -41,8 +41,14 @@ type fakeRPC struct {
 	calls       map[string]int
 	logRanges   [][2]uint64
 	headerCalls [][]uint64
-	txCount     func(uint64) int
-	sampledAt   time.Time
+	sampleAt    []uint64 // block numbers passed to FastSampleAt
+	// backlogsAt and constraintsAt, when set, supply the backlogs and the
+	// constraint set FastSampleAt reports at a block (an archive node's
+	// real state at that height); nil means the live ones.
+	backlogsAt    func(uint64) []uint64
+	constraintsAt func(uint64) []nitro.Constraint
+	txCount       func(uint64) int
+	sampledAt     time.Time
 }
 
 func newFakeRPC(head uint64) *fakeRPC {
@@ -92,16 +98,51 @@ func (f *fakeRPC) FastSample(context.Context) (*nitro.Sample, error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s := &nitro.Sample{SampledAt: f.sampledAt, Header: f.header(f.head), MinBaseFee: new(big.Int).Set(f.minFee),
+	return f.sampleLocked(f.head, f.constraints, nil), nil
+}
+
+func (f *fakeRPC) FastSampleAt(_ context.Context, n uint64) (*nitro.Sample, error) {
+	if err := f.fail("FastSampleAt"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sampleAt = append(f.sampleAt, n)
+	if n > f.head {
+		return nil, fmt.Errorf("block %d not found", n)
+	}
+	var backlogs []uint64
+	if f.backlogsAt != nil {
+		backlogs = f.backlogsAt(n)
+	}
+	constraints := f.constraints
+	if f.constraintsAt != nil {
+		constraints = f.constraintsAt(n)
+	}
+	return f.sampleLocked(n, constraints, backlogs), nil
+}
+
+// sampleLocked builds a sample for block n with the given constraints,
+// overriding the backlogs when given.
+func (f *fakeRPC) sampleLocked(n uint64, constraints []nitro.Constraint, backlogs []uint64) *nitro.Sample {
+	s := &nitro.Sample{SampledAt: f.sampledAt, Header: f.header(n), MinBaseFee: new(big.Int).Set(f.minFee),
 		Prices: nitro.Prices{PerL2Tx: big.NewInt(1), PerL1CalldataByte: big.NewInt(2), PerL2Storage: big.NewInt(3), PerArbGasBase: big.NewInt(4), PerArbGasCongestion: big.NewInt(5), PerArbGasTotal: big.NewInt(6)}}
 	if f.legacy != nil {
 		l := *f.legacy
+		if len(backlogs) > 0 {
+			l.Backlog = backlogs[0]
+		}
 		s.Legacy = &l
 	} else {
-		s.Constraints = append([]nitro.Constraint(nil), f.constraints...)
+		s.Constraints = append([]nitro.Constraint(nil), constraints...)
+		for i := range s.Constraints {
+			if i < len(backlogs) {
+				s.Constraints[i].Backlog = backlogs[i]
+			}
+		}
 	}
 	f.sampledAt = f.sampledAt.Add(time.Second)
-	return s, nil
+	return s
 }
 
 func (f *fakeRPC) HeadersByNumbers(_ context.Context, numbers []uint64) ([]nitro.Header, error) {
@@ -262,7 +303,7 @@ func newTestFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore) *Follow
 	t.Helper()
 	clock := baseTime.Add(1000 * time.Second / 10)
 	f := NewFollower(Options{
-		Network:   config.NetworkConfig{Name: "robinhood", DisplayName: "Robinhood Chain", ChainID: 4663, ExplorerURL: "https://x", Enabled: true},
+		Network:   config.NetworkConfig{Name: "robinhood", DisplayName: "Robinhood Chain", ChainID: 4663, ExplorerURL: "https://x", CallsPerSecond: 4, Enabled: true},
 		Collector: testConfig(),
 		RPC:       rpc,
 		Store:     store,

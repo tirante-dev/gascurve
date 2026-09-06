@@ -27,6 +27,7 @@ import (
 // unit-tested with a fake.
 type RPC interface {
 	FastSample(ctx context.Context) (*nitro.Sample, error)
+	FastSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
 	HeadersByNumbers(ctx context.Context, numbers []uint64) ([]nitro.Header, error)
 	HeaderByNumber(ctx context.Context, number uint64) (*nitro.Header, error)
 	BlocksWithTxs(ctx context.Context, numbers []uint64) ([]nitro.Block, error)
@@ -41,11 +42,20 @@ type RPC interface {
 
 var _ RPC = (*nitro.Client)(nil)
 
+// HeadSource delivers newHeads events, normally a nitro.HeadSubscriber.
+// Connected tells the fast loop whether to trust it or poll on the timer.
+type HeadSource interface {
+	Run(ctx context.Context, fn func(nitro.Head))
+	Connected() bool
+}
+
+var _ HeadSource = (*nitro.HeadSubscriber)(nil)
+
 const (
-	// maxCatchUpFactor bounds a single tick's catch-up to this many header
-	// batches; a larger gap is skipped so the follower never falls behind
-	// forever on a budget below the chain's block rate.
-	maxCatchUpFactor = 10
+	// defaultCatchUpBatches is the fallback for collector.max_catch_up_batches.
+	defaultCatchUpBatches = 10
+	// defaultAnchorInterval is the fallback for collector.backfill_anchor_interval.
+	defaultAnchorInterval = 1000
 	// initialBlocks is how many blocks are fetched on a fresh database.
 	initialBlocks = 10
 	// ownerLogChunk is the widest eth_getLogs range.
@@ -79,6 +89,9 @@ type Options struct {
 	Log       *logger.Logger
 	Now       func() time.Time
 	Sleep     func(context.Context, time.Duration) error
+	// Heads overrides the newHeads source. Nil with a Network.WSURL means a
+	// nitro.HeadSubscriber for that URL; nil without one means polling.
+	Heads HeadSource
 }
 
 // Follower drives one network.
@@ -90,6 +103,7 @@ type Follower struct {
 	log     *logger.Logger
 	now     func() time.Time
 	sleep   func(context.Context, time.Duration) error
+	heads   HeadSource
 	chainID uint64
 
 	catchingUp atomic.Bool
@@ -127,6 +141,7 @@ func NewFollower(o Options) *Follower {
 		log:     o.Log,
 		now:     o.Now,
 		sleep:   o.Sleep,
+		heads:   o.Heads,
 		chainID: o.Network.ChainID,
 	}
 	if f.log == nil {
@@ -139,11 +154,24 @@ func NewFollower(o Options) *Follower {
 	if f.sleep == nil {
 		f.sleep = sleepContext
 	}
+	if f.heads == nil && o.Network.WSURL != "" {
+		f.heads = nitro.NewHeadSubscriber(o.Network.WSURL, nitro.WithHeadLogger(f.log))
+	}
 	if f.cfg.HeaderBatchSize <= 0 || f.cfg.HeaderBatchSize > nitro.MaxBatch {
 		f.cfg.HeaderBatchSize = nitro.MaxBatch
 	}
+	if f.cfg.MaxCatchUpBatches <= 0 {
+		f.cfg.MaxCatchUpBatches = defaultCatchUpBatches
+	}
+	if f.cfg.BackfillAnchorInterval <= 0 {
+		f.cfg.BackfillAnchorInterval = defaultAnchorInterval
+	}
 	return f
 }
+
+// unlimited reports whether the network has no call budget, which turns
+// off gap skipping and the two-transaction batch report prefilter.
+func (f *Follower) unlimited() bool { return f.net.Unlimited() }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
 	if d <= 0 {

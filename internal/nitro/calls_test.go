@@ -265,6 +265,51 @@ func TestFastSample(t *testing.T) {
 	}
 }
 
+func TestFastSampleAt(t *testing.T) {
+	f := newFakeRPC(t)
+	setupChain(f)
+	c, _ := newTestClient(t, f, 1000)
+	ctx := context.Background()
+
+	s, err := c.FastSampleAt(ctx, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Header.Number != 200 || len(s.Constraints) != 2 || s.MinBaseFee.Int64() != 20_000_000 {
+		t.Fatalf("sample at 200: %+v", s)
+	}
+	// Every state call in the batch carries the head's block tag.
+	if len(f.callTags) != 3 {
+		t.Fatalf("call tags = %v", f.callTags)
+	}
+	for _, tag := range f.callTags {
+		if tag != "0xc8" {
+			t.Fatalf("state call not pinned to the block: %v", f.callTags)
+		}
+	}
+	// Legacy getters are pinned too.
+	f.callTags = nil
+	f.setCall(SigGetGasPricingConstraints, EncodeSetGasPricingConstraints(nil)[4:])
+	if s, err = c.FastSampleAt(ctx, 150); err != nil || !s.IsLegacy() || s.Header.Number != 150 {
+		t.Fatalf("legacy sample at 150: %+v %v", s, err)
+	}
+	if len(f.callTags) != 7 || f.callTags[6] != "0x96" {
+		t.Fatalf("legacy call tags = %v", f.callTags)
+	}
+	// A block the node does not have is an error, not a silent "latest".
+	if _, err := c.FastSampleAt(ctx, 5); err == nil {
+		t.Fatal("missing block should error")
+	}
+	// The plain FastSample still asks for latest.
+	f.callTags = nil
+	if _, err := c.FastSample(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.callTags[0] != latestTag {
+		t.Fatalf("FastSample tag = %v", f.callTags)
+	}
+}
+
 func TestL1SampleAndFeeAccounts(t *testing.T) {
 	f := newFakeRPC(t)
 	setupChain(f)

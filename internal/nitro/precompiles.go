@@ -109,13 +109,25 @@ type FeeAccounts struct {
 
 // CallRequest builds an eth_call against a precompile at the latest block.
 func CallRequest(to string, data []byte) Request {
-	return Request{Method: "eth_call", Params: []any{map[string]string{"to": to, "data": EncodeHex(data)}, latestTag}}
+	return CallRequestAt(to, data, latestTag)
 }
 
-// SelectorCall builds an eth_call for a no-argument function.
+// CallRequestAt builds an eth_call against a precompile at a block tag
+// ("latest" or a hex block number).
+func CallRequestAt(to string, data []byte, tag string) Request {
+	return Request{Method: "eth_call", Params: []any{map[string]string{"to": to, "data": EncodeHex(data)}, tag}}
+}
+
+// SelectorCall builds an eth_call for a no-argument function at the latest
+// block.
 func SelectorCall(to, sig string) Request {
+	return SelectorCallAt(to, sig, latestTag)
+}
+
+// SelectorCallAt builds an eth_call for a no-argument function at a block tag.
+func SelectorCallAt(to, sig, tag string) Request {
 	s := Selector(sig)
-	return CallRequest(to, s[:])
+	return CallRequestAt(to, s[:], tag)
 }
 
 // DecodeConstraints decodes a getGasPricingConstraints() return value.

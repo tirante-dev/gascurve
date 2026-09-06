@@ -34,6 +34,13 @@ networks:
     chain_id: 42161
     calls_per_second: 2
     enabled: false
+  - name: dedicated
+    chain_id: 7
+    rpc_url: https://node.example
+    ws_url: wss://node.example/ws
+    calls_per_second: 0
+    archive: true
+    enabled: true
 `
 
 func writeYAML(t *testing.T, body string) string {
@@ -64,8 +71,19 @@ func TestLoadWith(t *testing.T) {
 	if cfg.LogLevel != "info" || cfg.Database.MaxOpen != 25 {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}
-	if len(cfg.EnabledNetworks()) != 1 || cfg.EnabledNetworks()[0].Name != "robinhood" {
+	if cfg.Collector.BackfillAnchorInterval != 1000 || cfg.Collector.MaxCatchUpBatches != 10 {
+		t.Fatalf("collector defaults not applied: %+v", cfg.Collector)
+	}
+	if len(cfg.EnabledNetworks()) != 2 || cfg.EnabledNetworks()[0].Name != "robinhood" {
 		t.Fatalf("enabled networks: %+v", cfg.EnabledNetworks())
+	}
+	rh := cfg.Networks[0]
+	if rh.WSURL != "" || rh.Archive || rh.Unlimited() {
+		t.Fatalf("optional fields should default off: %+v", rh)
+	}
+	ded := cfg.Networks[2]
+	if ded.WSURL != "wss://node.example/ws" || !ded.Archive || !ded.Unlimited() {
+		t.Fatalf("dedicated network: %+v", ded)
 	}
 }
 
@@ -79,6 +97,9 @@ func TestEnvOverrides(t *testing.T) {
 		"NETWORK_ARBITRUM_ONE_RPC_URL":          "https://arb.example",
 		"NETWORK_ARBITRUM_ONE_ENABLED":          "true",
 		"NETWORK_ARBITRUM_ONE_CALLS_PER_SECOND": "7.5",
+		"NETWORK_ARBITRUM_ONE_WS_URL":           "wss://arb.example/ws",
+		"NETWORK_ARBITRUM_ONE_ARCHIVE":          "true",
+		"NETWORK_DEDICATED_ARCHIVE":             "false",
 	})
 	cfg, err := LoadWith(Options{Path: p, RequireRPC: true, Getenv: env})
 	if err != nil {
@@ -88,8 +109,11 @@ func TestEnvOverrides(t *testing.T) {
 		t.Fatalf("env overrides not applied: %+v", cfg)
 	}
 	arb := cfg.Networks[1]
-	if arb.RPCURL != "https://arb.example" || !arb.Enabled || arb.CallsPerSecond != 7.5 {
+	if arb.RPCURL != "https://arb.example" || !arb.Enabled || arb.CallsPerSecond != 7.5 || arb.WSURL != "wss://arb.example/ws" || !arb.Archive {
 		t.Fatalf("network overrides not applied: %+v", arb)
+	}
+	if cfg.Networks[2].Archive {
+		t.Fatal("NETWORK_DEDICATED_ARCHIVE=false not applied")
 	}
 	if arb.EnvKey() != "NETWORK_ARBITRUM_ONE" {
 		t.Fatalf("EnvKey = %q", arb.EnvKey())
@@ -103,6 +127,9 @@ func TestEnvErrors(t *testing.T) {
 		{"DEV_MODE": "maybe"},
 		{"NETWORK_ROBINHOOD_ENABLED": "nah"},
 		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "fast"},
+		{"NETWORK_ROBINHOOD_ARCHIVE": "sometimes"},
+		{"NETWORK_ROBINHOOD_WS_URL": "https://not-a-socket"},
+		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "-1"},
 	} {
 		if _, err := LoadWith(Options{Path: p, Getenv: envOf(m)}); err == nil {
 			t.Fatalf("expected error for %v", m)
@@ -154,12 +181,20 @@ func TestValidate(t *testing.T) {
 			Collector: CollectorConfig{
 				TickInterval: time.Second, SlowInterval: time.Second, HeaderBatchSize: 10,
 				BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: time.Hour,
+				BackfillAnchorInterval: 1000, MaxCatchUpBatches: 10,
 			},
 			Networks: []NetworkConfig{{Name: "a", ChainID: 1, CallsPerSecond: 1, Enabled: true, RPCURL: "http://x"}},
 		}
 	}
 	if err := ptr(base()).Validate(true); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
+	}
+	unlimited := base()
+	unlimited.Networks[0].CallsPerSecond = 0
+	unlimited.Networks[0].WSURL = "ws://x/ws"
+	unlimited.Networks[0].Archive = true
+	if err := unlimited.Validate(true); err != nil {
+		t.Fatalf("unlimited archive network rejected: %v", err)
 	}
 	cases := map[string]func(*Config){
 		"port":            func(c *Config) { c.Server.Port = 0 },
@@ -172,7 +207,10 @@ func TestValidate(t *testing.T) {
 		"dup name":        func(c *Config) { c.Networks = append(c.Networks, c.Networks[0]) },
 		"zero chain":      func(c *Config) { c.Networks[0].ChainID = 0 },
 		"dup chain":       func(c *Config) { n := c.Networks[0]; n.Name = "b"; c.Networks = append(c.Networks, n) },
-		"calls":           func(c *Config) { c.Networks[0].CallsPerSecond = 0 },
+		"calls":           func(c *Config) { c.Networks[0].CallsPerSecond = -4 },
+		"ws url scheme":   func(c *Config) { c.Networks[0].WSURL = "http://x" },
+		"anchor interval": func(c *Config) { c.Collector.BackfillAnchorInterval = 0 },
+		"catch up":        func(c *Config) { c.Collector.MaxCatchUpBatches = 0 },
 		"missing rpc url": func(c *Config) { c.Networks[0].RPCURL = "" },
 	}
 	for name, mutate := range cases {

@@ -39,8 +39,30 @@ func TestPacer(t *testing.T) {
 	if err := p.Wait(canceled, 100); err == nil {
 		t.Fatal("expected context error")
 	}
-	if NewPacer(0).Rate() != 1 || NewPacer(0.25).burst != 1 {
-		t.Fatal("defaults")
+	if NewPacer(0.25).burst != 1 {
+		t.Fatal("small rates keep a burst of one")
+	}
+}
+
+func TestPacerUnlimited(t *testing.T) {
+	clock := newFakeClock()
+	p := NewPacer(0).withClock(clock.Now, clock.Sleep)
+	if !p.Unlimited() || p.Rate() != 0 || p.Available() < MaxBatch*1000 || NewPacer(-1).Unlimited() != true {
+		t.Fatalf("unlimited pacer: rate %v available %d", p.Rate(), p.Available())
+	}
+	ctx := context.Background()
+	for range 100 {
+		if err := p.Wait(ctx, MaxBatch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(clock.Sleeps()) != 0 || p.Available() < MaxBatch {
+		t.Fatalf("unlimited pacer must never sleep: %v", clock.Sleeps())
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := p.Wait(canceled, 1); err == nil {
+		t.Fatal("a canceled context is still honored")
 	}
 }
 

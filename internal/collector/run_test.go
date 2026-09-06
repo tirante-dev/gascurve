@@ -2,9 +2,17 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
@@ -115,5 +123,177 @@ func TestRunManager(t *testing.T) {
 	}
 	if clockNow == nil {
 		t.Fatal("clock")
+	}
+}
+
+// fakeHeads is a scripted HeadSource: the test flips connected and pushes
+// head numbers.
+type fakeHeads struct {
+	connected atomic.Bool
+	heads     chan uint64
+	started   chan struct{}
+}
+
+func newFakeHeads() *fakeHeads {
+	return &fakeHeads{heads: make(chan uint64, 16), started: make(chan struct{})}
+}
+
+func (h *fakeHeads) Run(ctx context.Context, fn func(nitro.Head)) {
+	close(h.started)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case n := <-h.heads:
+			fn(nitro.Head{Number: n})
+		}
+	}
+}
+
+func (h *fakeHeads) Connected() bool { return h.connected.Load() }
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestFollowerRunOnHeads(t *testing.T) {
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	heads := newFakeHeads()
+	f := NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, Enabled: true, CallsPerSecond: 4, WSURL: "ws://ignored"},
+		Collector: fastConfig(),
+		RPC:       rpc,
+		Store:     store,
+		Log:       logger.Nop(),
+		Now:       func() time.Time { return baseTime.Add(100 * time.Second) },
+		Sleep:     quickSleep,
+		Heads:     heads,
+	})
+	if f.heads != heads {
+		t.Fatal("Options.Heads must override the ws_url subscriber")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = f.Run(ctx)
+		close(done)
+	}()
+	<-heads.started
+	// Disconnected: the timer polls with FastSample.
+	waitFor(t, "timer polling", func() bool { return rpc.calledTimes("FastSample") >= 2 })
+	if f.Head() != 1000 || len(rpc.sampleAt) != 0 {
+		t.Fatalf("polling phase: head %d, sampleAt %v", f.Head(), rpc.sampleAt)
+	}
+	// Connected: heads drive ticks pinned to their block numbers and the
+	// timer stops sampling.
+	heads.connected.Store(true)
+	polled := rpc.calledTimes("FastSample")
+	rpc.setHead(1002)
+	heads.heads <- 1001
+	heads.heads <- 1002
+	waitFor(t, "head ticks", func() bool { return f.Head() == 1002 })
+	rpc.mu.Lock()
+	sampled := append([]uint64(nil), rpc.sampleAt...)
+	rpc.mu.Unlock()
+	if len(sampled) == 0 || sampled[len(sampled)-1] != 1002 {
+		t.Fatalf("sampleAt = %v", sampled)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if rpc.calledTimes("FastSample") > polled+1 {
+		t.Fatalf("timer must not poll while connected: %d > %d", rpc.calledTimes("FastSample"), polled)
+	}
+	// A head the node cannot serve yet is logged and dropped; the timer
+	// then polls once as a safety net, which keeps the head where it was.
+	polled = rpc.calledTimes("FastSample")
+	heads.heads <- 1010
+	waitFor(t, "failed head", func() bool {
+		rpc.mu.Lock()
+		defer rpc.mu.Unlock()
+		return len(rpc.sampleAt) > len(sampled)
+	})
+	waitFor(t, "retry poll", func() bool { return rpc.calledTimes("FastSample") == polled+1 })
+	time.Sleep(20 * time.Millisecond)
+	if f.Head() != 1002 || rpc.calledTimes("FastSample") != polled+1 {
+		t.Fatalf("after failed head: head %d, polls %d (want %d)", f.Head(), rpc.calledTimes("FastSample"), polled+1)
+	}
+	// Disconnected again: polling resumes and catches up on its own.
+	heads.connected.Store(false)
+	rpc.setHead(1010)
+	waitFor(t, "polling resumed", func() bool { return f.Head() == 1010 })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop")
+	}
+}
+
+func TestFollowerRunOnRealSocket(t *testing.T) {
+	// End to end: a newHeads WebSocket server drives ticks through the
+	// real nitro.HeadSubscriber.
+	stall := make(chan struct{})
+	defer close(stall)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		_, data, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		var req struct {
+			ID uint64 `json:"id"`
+		}
+		_ = json.Unmarshal(data, &req)
+		_ = conn.Write(r.Context(), websocket.MessageText, fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%d,"result":"0xabc"}`, req.ID))
+		_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xabc","result":{"number":"0x3ea","hash":"0x1","timestamp":"0x1"}}}`))
+		<-stall
+	}))
+	defer srv.Close()
+	rpc := newFakeRPC(1002)
+	store := dbtest.New()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	byURL := NewFollower(Options{Network: config.NetworkConfig{ChainID: 1, WSURL: wsURL}, Collector: fastConfig(), RPC: rpc, Store: store})
+	if _, ok := byURL.heads.(*nitro.HeadSubscriber); !ok {
+		t.Fatalf("ws_url should build a nitro.HeadSubscriber, got %T", byURL.heads)
+	}
+	f := NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, Enabled: true, CallsPerSecond: 4},
+		Collector: fastConfig(),
+		RPC:       rpc,
+		Store:     store,
+		Log:       logger.Nop(),
+		Now:       func() time.Time { return baseTime.Add(100 * time.Second) },
+		Sleep:     quickSleep,
+		Heads:     nitro.NewHeadSubscriber(wsURL, nitro.WithHeadBackoff(time.Millisecond, 4*time.Millisecond)),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = f.Run(ctx)
+		close(done)
+	}()
+	waitFor(t, "head from the socket", func() bool {
+		rpc.mu.Lock()
+		defer rpc.mu.Unlock()
+		return len(rpc.sampleAt) > 0 && rpc.sampleAt[0] == 1002
+	})
+	waitFor(t, "connected", f.heads.Connected)
+	cancel()
+	<-done
+	if f.Head() != 1002 {
+		t.Fatalf("head = %d", f.Head())
 	}
 }

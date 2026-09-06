@@ -1,8 +1,9 @@
 // Package config loads gascurve configuration from a YAML file (config.yaml
 // or CONFIG_PATH) and applies environment overrides: DB_URL, PORT, LOG_LEVEL,
-// DEV_MODE and per-network NETWORK_<NAME>_RPC_URL, NETWORK_<NAME>_ENABLED and
-// NETWORK_<NAME>_CALLS_PER_SECOND, where NAME is the network name upper-cased
-// with dashes replaced by underscores.
+// DEV_MODE and per-network NETWORK_<NAME>_RPC_URL, NETWORK_<NAME>_WS_URL,
+// NETWORK_<NAME>_ENABLED, NETWORK_<NAME>_CALLS_PER_SECOND and
+// NETWORK_<NAME>_ARCHIVE, where NAME is the network name upper-cased with
+// dashes replaced by underscores.
 package config
 
 import (
@@ -45,24 +46,54 @@ type DatabaseConfig struct {
 
 // CollectorConfig configures the follower loops.
 type CollectorConfig struct {
-	TickInterval    time.Duration `mapstructure:"tick_interval"`
+	// TickInterval is the fast loop cadence when polling. With a ws_url the
+	// fast loop runs on every newHeads event instead and the timer only
+	// fires while the subscription is down.
+	TickInterval time.Duration `mapstructure:"tick_interval"`
+	// SlowInterval is the cadence of the L1, balances, owner action and
+	// batch report loop.
 	SlowInterval    time.Duration `mapstructure:"slow_interval"`
 	HeaderBatchSize int           `mapstructure:"header_batch_size"`
 	BlockRetention  time.Duration `mapstructure:"block_retention"`
 	SampleRetention time.Duration `mapstructure:"sample_retention"`
 	BackfillDepth   time.Duration `mapstructure:"backfill_depth"`
+	// BackfillAnchorInterval is how many blocks the backfill replays
+	// between two state anchors on archive: true networks (default 1000).
+	// Networks without archive ignore it: their backfill is a pure replay.
+	BackfillAnchorInterval int `mapstructure:"backfill_anchor_interval"`
+	// MaxCatchUpBatches bounds one fast tick's catch-up to this many header
+	// batches on a budgeted network (default 10); a larger gap is skipped so
+	// the follower never falls behind forever on a budget below the chain's
+	// block rate. Unlimited networks (calls_per_second: 0) never skip.
+	MaxCatchUpBatches int `mapstructure:"max_catch_up_batches"`
 }
 
 // NetworkConfig describes one Arbitrum Nitro chain.
 type NetworkConfig struct {
-	Name           string  `mapstructure:"name"`
-	DisplayName    string  `mapstructure:"display_name"`
-	ChainID        uint64  `mapstructure:"chain_id"`
-	RPCURL         string  `mapstructure:"rpc_url"`
-	ExplorerURL    string  `mapstructure:"explorer_url"`
+	Name        string `mapstructure:"name"`
+	DisplayName string `mapstructure:"display_name"`
+	ChainID     uint64 `mapstructure:"chain_id"`
+	RPCURL      string `mapstructure:"rpc_url"`
+	// WSURL is an optional ws:// or wss:// endpoint. When set the follower
+	// subscribes to newHeads and samples state at each head's block number
+	// instead of polling every tick_interval; while the socket is down it
+	// falls back to the timer.
+	WSURL       string `mapstructure:"ws_url"`
+	ExplorerURL string `mapstructure:"explorer_url"`
+	// CallsPerSecond is the JSON-RPC budget, counting every item inside a
+	// batch. 0 means unlimited (a dedicated node): the pacer never waits,
+	// catch-up never skips blocks and the batch report scan reads every
+	// block. Batches stay capped at 100 items and 429 back-off still applies.
 	CallsPerSecond float64 `mapstructure:"calls_per_second"`
-	Enabled        bool    `mapstructure:"enabled"`
+	// Archive is true when the node serves historical eth_call. The backfill
+	// then anchors its replay to the real backlogs every
+	// collector.backfill_anchor_interval blocks.
+	Archive bool `mapstructure:"archive"`
+	Enabled bool `mapstructure:"enabled"`
 }
+
+// Unlimited reports whether the network has no call budget.
+func (n NetworkConfig) Unlimited() bool { return n.CallsPerSecond <= 0 }
 
 // EnvKey returns the environment variable prefix for this network, for
 // example NETWORK_ARBITRUM_ONE for "arbitrum-one".
@@ -137,6 +168,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collector.block_retention", "48h")
 	v.SetDefault("collector.sample_retention", "168h")
 	v.SetDefault("collector.backfill_depth", "720h")
+	v.SetDefault("collector.backfill_anchor_interval", 1000)
+	v.SetDefault("collector.max_catch_up_batches", 10)
 	v.SetDefault("log_level", "info")
 }
 
@@ -167,12 +200,22 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 		if s, ok := getenv(key + "_RPC_URL"); ok && s != "" {
 			n.RPCURL = s
 		}
+		if s, ok := getenv(key + "_WS_URL"); ok && s != "" {
+			n.WSURL = s
+		}
 		if s, ok := getenv(key + "_ENABLED"); ok && s != "" {
 			b, err := strconv.ParseBool(s)
 			if err != nil {
 				return fmt.Errorf("%s_ENABLED: %w", key, err)
 			}
 			n.Enabled = b
+		}
+		if s, ok := getenv(key + "_ARCHIVE"); ok && s != "" {
+			b, err := strconv.ParseBool(s)
+			if err != nil {
+				return fmt.Errorf("%s_ARCHIVE: %w", key, err)
+			}
+			n.Archive = b
 		}
 		if s, ok := getenv(key + "_CALLS_PER_SECOND"); ok && s != "" {
 			f, err := strconv.ParseFloat(s, 64)
@@ -186,8 +229,9 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 }
 
 // Validate checks invariants: unique names and chain IDs, positive
-// intervals, sane batch sizes and, when requireRPC is set, an RPC URL for
-// every enabled network.
+// intervals, sane batch sizes, non-negative call budgets, ws:// or wss://
+// ws_url values and, when requireRPC is set, an RPC URL for every enabled
+// network.
 func (c *Config) Validate(requireRPC bool) error {
 	var errs []error
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
@@ -213,6 +257,12 @@ func (c *Config) Validate(requireRPC bool) error {
 	if c.Collector.HeaderBatchSize <= 0 || c.Collector.HeaderBatchSize > 100 {
 		errs = append(errs, fmt.Errorf("collector.header_batch_size %d must be between 1 and 100", c.Collector.HeaderBatchSize))
 	}
+	if c.Collector.BackfillAnchorInterval <= 0 {
+		errs = append(errs, fmt.Errorf("collector.backfill_anchor_interval %d must be positive", c.Collector.BackfillAnchorInterval))
+	}
+	if c.Collector.MaxCatchUpBatches <= 0 {
+		errs = append(errs, fmt.Errorf("collector.max_catch_up_batches %d must be positive", c.Collector.MaxCatchUpBatches))
+	}
 	names := map[string]bool{}
 	ids := map[uint64]bool{}
 	for _, n := range c.Networks {
@@ -231,8 +281,11 @@ func (c *Config) Validate(requireRPC bool) error {
 			errs = append(errs, fmt.Errorf("duplicate chain id %d", n.ChainID))
 		}
 		ids[n.ChainID] = true
-		if n.CallsPerSecond <= 0 {
-			errs = append(errs, fmt.Errorf("network %s: calls_per_second must be positive", n.Name))
+		if n.CallsPerSecond < 0 {
+			errs = append(errs, fmt.Errorf("network %s: calls_per_second must be zero (unlimited) or positive", n.Name))
+		}
+		if n.WSURL != "" && !strings.HasPrefix(n.WSURL, "ws://") && !strings.HasPrefix(n.WSURL, "wss://") {
+			errs = append(errs, fmt.Errorf("network %s: ws_url %q must start with ws:// or wss://", n.Name, n.WSURL))
 		}
 		if requireRPC && n.Enabled && n.RPCURL == "" {
 			errs = append(errs, fmt.Errorf("network %s: rpc_url is required (set %s_RPC_URL)", n.Name, n.EnvKey()))

@@ -439,3 +439,92 @@ func TestHelpers(t *testing.T) {
 		t.Fatal("defaults")
 	}
 }
+
+func TestTickUnlimitedNeverSkips(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.net.CallsPerSecond = 0
+	if !f.unlimited() {
+		t.Fatal("calls_per_second 0 is unlimited")
+	}
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The same gap that a budgeted follower skips is fetched in full: 150
+	// blocks in 15 batches of 10, and the replay stays continuous.
+	rpc.setHead(1150)
+	rpc.headerCalls = nil
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.headerCalls) != 15 || rpc.headerCalls[0][0] != 1001 || rpc.headerCalls[14][8] != 1149 {
+		t.Fatalf("header batches = %d", len(rpc.headerCalls))
+	}
+	blocks, _ := store.BlocksAfter(ctx, 4663, 1000, 1000)
+	if len(blocks) != 150 || blocks[0].Number != 1001 || blocks[0].Anchored {
+		t.Fatalf("unlimited catch-up: %d blocks from %d", len(blocks), blocks[0].Number)
+	}
+	if blocks[0].Backlogs[0] != 3_111_506+int64(gasFor(1001)) {
+		t.Fatalf("replay must continue from the anchored state: %+v", blocks[0])
+	}
+	// A custom catch-up bound applies on a budgeted network.
+	f.net.CallsPerSecond = 4
+	f.cfg.MaxCatchUpBatches = 2
+	rpc.setHead(1250)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ = store.BlocksAfter(ctx, 4663, 1150, 1000)
+	if len(blocks) != 20 || blocks[0].Number != 1231 {
+		t.Fatalf("custom catch-up bound: %d blocks from %d", len(blocks), blocks[0].Number)
+	}
+}
+
+func TestTickAt(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A head event for 1005 samples state at 1005 even though the node's
+	// latest is already 1008: the sample and the header agree.
+	rpc.setHead(1008)
+	if err := f.TickAt(ctx, 1005); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.sampleAt) != 1 || rpc.sampleAt[0] != 1005 || rpc.calledTimes("FastSample") != 1 {
+		t.Fatalf("FastSampleAt calls = %v, FastSample calls = %d", rpc.sampleAt, rpc.calledTimes("FastSample"))
+	}
+	if f.Head() != 1005 {
+		t.Fatalf("head = %d", f.Head())
+	}
+	latest, _ := store.LatestBlock(ctx, 4663)
+	if latest.Number != 1005 || !latest.Anchored {
+		t.Fatalf("head block: %+v", latest)
+	}
+	if snap := lastSnapshot(t, store); snap.Block.Number != 1005 {
+		t.Fatalf("snapshot block = %d", snap.Block.Number)
+	}
+	// The same head again is a sample-only tick.
+	before := len(store.Notifications)
+	if err := f.TickAt(ctx, 1005); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Notifications) != before+1 || f.Head() != 1005 {
+		t.Fatal("repeated head should only re-sample")
+	}
+	// An older head is ignored, a head the node does not have yet fails.
+	if err := f.TickAt(ctx, 1003); err != nil || f.Head() != 1005 {
+		t.Fatalf("older head: %v head %d", err, f.Head())
+	}
+	if err := f.TickAt(ctx, 1010); err == nil {
+		t.Fatal("head beyond the node should fail")
+	}
+	if err := f.TickAt(ctx, 1008); err != nil || f.Head() != 1008 {
+		t.Fatalf("catch up to 1008: %v head %d", err, f.Head())
+	}
+}

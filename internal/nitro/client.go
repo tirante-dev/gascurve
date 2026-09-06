@@ -16,6 +16,8 @@ import (
 )
 
 const (
+	// jsonrpcVersion is the protocol version sent in every request.
+	jsonrpcVersion = "2.0"
 	// MaxBatch is the largest number of items sent in one HTTP batch request.
 	MaxBatch = 100
 	// RateLimitCode is the JSON-RPC error code some endpoints use for throttling.
@@ -224,7 +226,7 @@ func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 		if params == nil {
 			params = []any{}
 		}
-		body[i] = rpcRequest{JSONRPC: "2.0", ID: ids[i], Method: r.Method, Params: params}
+		body[i] = rpcRequest{JSONRPC: jsonrpcVersion, ID: ids[i], Method: r.Method, Params: params}
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {

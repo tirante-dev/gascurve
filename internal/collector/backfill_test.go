@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
 	"github.com/tirante-dev/gascurve/internal/model"
+	"github.com/tirante-dev/gascurve/internal/nitro"
+	"github.com/tirante-dev/gascurve/internal/pricer"
 )
 
 func seedSets(t *testing.T, store *dbtest.MemStore) {
@@ -280,5 +283,188 @@ func TestFindBlockAt(t *testing.T) {
 	rpc.errs["BlockNumber"] = errRPC
 	if _, err := f.findBlockAt(ctx, baseTime); !errors.Is(err, errRPC) {
 		t.Fatalf("head error: %v", err)
+	}
+}
+
+func TestBackfillArchiveAnchors(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	// The archive reports enormous backlogs so anchored stretches are
+	// unmistakable next to the pure replay.
+	rpc.backlogsAt = func(n uint64) []uint64 { return []uint64{n * 1_000_000_000, n * 2_000_000_000} }
+	// Historical state carries the constraint set in force at that block.
+	rpc.constraintsAt = func(n uint64) []nitro.Constraint {
+		if n < 500 {
+			return []nitro.Constraint{{Target: 60_000_000, Window: 15}, {Target: 20_000_000, Window: 86_400}}
+		}
+		return rpc.constraints
+	}
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.net.Archive = true
+	f.cfg.BackfillAnchorInterval = 100
+	f.cfg.BackfillDepth = 70 * time.Second // block 300
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.sampleAt = nil
+	runBackfill(t, f, 200)
+	// Segment [500, 991) then [100, 500): one anchor per 100 blocks, in
+	// replay order, and none for the live tick's own blocks.
+	if fmt.Sprint(rpc.sampleAt) != "[500 600 700 800 900 100 200 300 400]" {
+		t.Fatalf("anchor samples = %v", rpc.sampleAt)
+	}
+	c, err := f.loadCursor(ctx)
+	if err != nil || !c.Done || c.LastAnchor != 400 {
+		t.Fatalf("cursor: %+v %v", c, err)
+	}
+	if c.LastAnchorErrorBips != replayErrorAt(t, f, 400) {
+		t.Fatalf("anchor error %d should be the pre-anchor replay error", c.LastAnchorErrorBips)
+	}
+	bk, _ := store.Buckets(ctx, 4663, db.Resolution1m, baseTime, baseTime.Add(time.Minute))
+	if len(bk) != 1 || bk[0].BacklogsMax[0] < 500_000_000_000 || bk[0].BacklogsEnd[1] < 400_000_000_000 {
+		t.Fatalf("first minute bucket should carry the anchored backlogs: %+v", bk[0])
+	}
+	// The cursor round-trips the anchor fields.
+	raw, _ := json.Marshal(c)
+	var back backfillCursor
+	if err := json.Unmarshal(raw, &back); err != nil || back.LastAnchor != 400 || back.LastAnchorErrorBips != c.LastAnchorErrorBips {
+		t.Fatalf("cursor json: %+v %v", back, err)
+	}
+
+	// Without archive the same backfill never samples state.
+	rpc2 := newFakeRPC(1000)
+	rpc2.backlogsAt = rpc.backlogsAt
+	rpc2.constraintsAt = rpc.constraintsAt
+	store2 := dbtest.New()
+	seedSets(t, store2)
+	f2 := newTestFollower(t, rpc2, store2)
+	f2.cfg.BackfillAnchorInterval = 100
+	f2.cfg.BackfillDepth = 70 * time.Second
+	if err := f2.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc2.sampleAt = nil
+	runBackfill(t, f2, 200)
+	if len(rpc2.sampleAt) != 0 {
+		t.Fatalf("pure replay must not sample state: %v", rpc2.sampleAt)
+	}
+	c2, _ := f2.loadCursor(ctx)
+	if c2.LastAnchor != 0 {
+		t.Fatalf("no anchor expected: %+v", c2)
+	}
+	bk2, _ := store2.Buckets(ctx, 4663, db.Resolution1m, baseTime, baseTime.Add(time.Minute))
+	if bk2[0].BacklogsMax[0] >= 500_000_000_000 {
+		t.Fatalf("pure replay bucket carries archive backlogs: %+v", bk2[0])
+	}
+}
+
+// replayErrorAt recomputes the replay error the anchor recorded for a block
+// by replaying the anchored segment up to it.
+func replayErrorAt(t *testing.T, f *Follower, number uint64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	var set db.ConstraintSet
+	for _, s := range f.sets {
+		if s.EffectiveBlock <= number {
+			set = s
+		}
+	}
+	c := &backfillCursor{SetID: set.ID}
+	entries, err := setEntries(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		c.Backlogs = append(c.Backlogs, e.StartingBacklog)
+	}
+	st, _, err := f.segmentState(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var numbers []uint64
+	for n := set.EffectiveBlock; n <= number; n++ {
+		numbers = append(numbers, n)
+	}
+	headers, _ := f.rpc.HeadersByNumbers(ctx, numbers)
+	anchor, err := f.backfillAnchors(ctx, st, numbers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := f.replaySegment(st, c, headers, anchor)
+	last := rows[len(rows)-1]
+	if last.Number != number || !last.Anchored {
+		t.Fatalf("expected anchored row %d: %+v", number, last)
+	}
+	return replayError(last)
+}
+
+func TestBackfillAnchorEdgeCases(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	rpc.backlogsAt = func(n uint64) []uint64 { return []uint64{n, n} }
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.net.Archive = true
+	f.cfg.BackfillAnchorInterval = 5
+	f.cfg.BackfillDepth = 70 * time.Second
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := &pricer.State{MinBaseFee: big.NewInt(1), Constraints: []pricer.Constraint{{Target: 60_000_000, Window: 15}, {Target: 40_000_000, Window: 86_400}}}
+	numbers := []uint64{98, 99, 100, 101, 102, 103, 104, 105}
+	anchor, err := f.backfillAnchors(ctx, st, numbers)
+	if err != nil || anchor == nil {
+		t.Fatalf("anchors: %v", err)
+	}
+	if b, ok := anchor(100); !ok || b[0] != 100 {
+		t.Fatalf("anchor at 100: %v %v", b, ok)
+	}
+	if _, ok := anchor(101); ok {
+		t.Fatal("101 is not an anchor block")
+	}
+	headers, _ := rpc.HeadersByNumbers(ctx, numbers)
+	rows := f.replaySegment(st, &backfillCursor{}, headers, anchor)
+	for _, r := range rows {
+		anchored := r.Number == 100 || r.Number == 105
+		if r.Anchored != anchored {
+			t.Fatalf("row %d anchored = %v", r.Number, r.Anchored)
+		}
+		if anchored && (r.Backlogs[0] != int64(r.Number) || r.Backlogs[1] != int64(r.Number)) {
+			t.Fatalf("anchored row %d backlogs = %v", r.Number, r.Backlogs)
+		}
+	}
+	// No anchor block in range: nil anchor, no calls.
+	rpc.sampleAt = nil
+	if a, err := f.backfillAnchors(ctx, st, []uint64{101, 102}); err != nil || a != nil || len(rpc.sampleAt) != 0 {
+		t.Fatalf("out of range: %v %v %v", a, err, rpc.sampleAt)
+	}
+	// A sample whose model differs from the segment is skipped.
+	rpc.mu.Lock()
+	rpc.constraints = rpc.constraints[:1]
+	rpc.mu.Unlock()
+	if a, err := f.backfillAnchors(ctx, st, []uint64{100}); err != nil || a != nil {
+		t.Fatalf("shape mismatch: %v %v", a, err)
+	}
+	// Legacy chains anchor the single backlog.
+	lp := legacyParams()
+	rpc.legacy = &lp
+	lst := &pricer.State{MinBaseFee: big.NewInt(1), Legacy: &pricer.Legacy{SpeedLimit: lp.SpeedLimit, Inertia: lp.Inertia, Tolerance: lp.Tolerance}}
+	a, err := f.backfillAnchors(ctx, lst, []uint64{100})
+	if err != nil || a == nil {
+		t.Fatalf("legacy anchors: %v", err)
+	}
+	if b, ok := a(100); !ok || len(b) != 1 || b[0] != 100 {
+		t.Fatalf("legacy anchor: %v %v", b, ok)
+	}
+	// A failing archive call fails the step so it is retried.
+	rpc.errs["FastSampleAt"] = errRPC
+	if _, err := f.backfillAnchors(ctx, lst, []uint64{100}); !errors.Is(err, errRPC) {
+		t.Fatalf("anchor error: %v", err)
+	}
+	if _, err := f.BackfillStep(ctx); !errors.Is(err, errRPC) {
+		t.Fatalf("step with failing anchor: %v", err)
 	}
 }

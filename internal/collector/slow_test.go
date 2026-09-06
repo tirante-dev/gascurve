@@ -352,3 +352,76 @@ func TestBatchReportOf(t *testing.T) {
 		t.Fatalf("report: %+v", r)
 	}
 }
+
+func TestScanBatchReportsUnlimited(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	// No block has exactly two transactions, so the budgeted prefilter
+	// would never look at block 995's report.
+	report := nitro.BatchPostingReport{Version: 2, BatchTimestamp: uint64(baseTime.Unix()), Poster: "0xdaa5260800000000000000000000000000000000", BatchNumber: 7, CalldataLen: 1, CalldataNonZeros: 1, ExtraGas: 1, L1BaseFee: big.NewInt(1)}
+	rpc.fullBlocks[995] = nitro.Block{Header: rpc.header(995), Txs: []nitro.Tx{
+		{Hash: "0x1", Type: nitro.InternalTxType, To: nitro.ArbosAddress, Input: nitro.EncodeStartBlock(nitro.StartBlock{L1BaseFee: big.NewInt(0)})},
+		{Hash: "0x2", Type: nitro.InternalTxType, To: nitro.ArbosAddress, Input: nitro.EncodeBatchPostingReport(report)},
+		{Hash: "0x3", Type: 2, To: "0xdead"},
+	}}
+	store := dbtest.New()
+	budgeted := newTestFollower(t, rpc, store)
+	if err := budgeted.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := budgeted.scanBatchReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.ReportRows) != 0 || rpc.calledTimes("BlocksWithTxs") != 0 {
+		t.Fatal("budgeted scan must keep the two-transaction prefilter")
+	}
+
+	f := newTestFollower(t, rpc, dbtest.New())
+	f.net.CallsPerSecond = 0
+	f.store = store
+	if err := f.scanBatchReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.ReportRows) != 1 || store.ReportRows["4663/995"].BatchNumber != 7 {
+		t.Fatalf("unlimited scan reports: %+v", store.ReportRows)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); v != "1000" {
+		t.Fatalf("batch cursor = %q", v)
+	}
+	if rpc.calledTimes("BlocksWithTxs") != 1 {
+		t.Fatalf("BlocksWithTxs calls = %d", rpc.calledTimes("BlocksWithTxs"))
+	}
+	// More than batchScanLimit new blocks: the scan loops until it has
+	// caught up, in batches of nitro.MaxBatch.
+	f.net.CallsPerSecond = 0
+	rpc.setHead(1150)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.scanBatchReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); v != "1150" {
+		t.Fatalf("batch cursor after loop = %q", v)
+	}
+	if rpc.calledTimes("BlocksWithTxs") != 3 {
+		t.Fatalf("BlocksWithTxs calls = %d", rpc.calledTimes("BlocksWithTxs"))
+	}
+	// A canceled context stops the loop between rounds.
+	rpc.setHead(1400)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := f.scanBatchReports(cctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled scan: %v", err)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); v != "1250" {
+		t.Fatalf("cursor after canceled round = %q", v)
+	}
+	store.FailOn["BlocksAfter"] = true
+	if err := f.scanBatchReports(ctx); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("BlocksAfter failure: %v", err)
+	}
+}

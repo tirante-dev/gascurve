@@ -23,6 +23,7 @@ type fakeRPC struct {
 	requests int
 	items    int
 	agents   []string
+	callTags []string // block tag of every eth_call, in order
 	reverse  bool
 	// script of HTTP statuses/bodies to return before normal handling.
 	script []scriptStep
@@ -58,6 +59,9 @@ func (f *fakeRPC) ethCall(params []json.RawMessage) any {
 	}
 	if err := json.Unmarshal(params[0], &arg); err != nil {
 		return &RPCError{Code: -32602, Message: err.Error()}
+	}
+	if len(params) > 1 {
+		f.callTags = append(f.callTags, paramString(params[1]))
 	}
 	sel := arg.Data[:10]
 	if e, ok := f.callErrs[sel]; ok {
@@ -124,10 +128,11 @@ func (f *fakeRPC) serve(w http.ResponseWriter, r *http.Request) {
 			for i, p := range req.Params {
 				params[i], _ = json.Marshal(p)
 			}
-			if rpcErr, isErr := h(params).(*RPCError); isErr {
+			out := h(params)
+			if rpcErr, isErr := out.(*RPCError); isErr {
 				resp["error"] = rpcErr
 			} else {
-				resp["result"] = h(params)
+				resp["result"] = out
 			}
 		}
 		responses = append(responses, resp)

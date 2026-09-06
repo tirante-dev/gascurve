@@ -27,17 +27,21 @@ const (
 // backfillCursor is the resumable checkpoint stored in collector_state.
 // Segments are bounded by constraint sets and replayed forward from the
 // set's starting backlogs; the job walks segments backwards in time until
-// the segment end is older than backfill_depth.
+// the segment end is older than backfill_depth. On archive networks
+// LastAnchor and LastAnchorErrorBips record the most recent state anchor
+// and the replay error observed just before it.
 type backfillCursor struct {
-	Done       bool     `json:"done"`
-	DepthStart uint64   `json:"depthStart"`
-	Active     bool     `json:"active"`
-	SegStart   uint64   `json:"segStart"`
-	Next       uint64   `json:"next"`
-	End        uint64   `json:"end"`
-	PrevTs     uint64   `json:"prevTs"`
-	Backlogs   []uint64 `json:"backlogs"`
-	SetID      int64    `json:"setId"`
+	Done                bool     `json:"done"`
+	DepthStart          uint64   `json:"depthStart"`
+	Active              bool     `json:"active"`
+	SegStart            uint64   `json:"segStart"`
+	Next                uint64   `json:"next"`
+	End                 uint64   `json:"end"`
+	PrevTs              uint64   `json:"prevTs"`
+	Backlogs            []uint64 `json:"backlogs"`
+	SetID               int64    `json:"setId"`
+	LastAnchor          uint64   `json:"lastAnchor,omitempty"`
+	LastAnchorErrorBips int64    `json:"lastAnchorErrorBips,omitempty"`
 }
 
 func (f *Follower) loadCursor(ctx context.Context) (*backfillCursor, error) {
@@ -63,7 +67,10 @@ func (f *Follower) saveCursor(ctx context.Context, s db.Store, c *backfillCursor
 }
 
 // BackfillStep advances the backfill by at most one header batch. It only
-// spends RPC budget the fast loop is not using.
+// spends RPC budget the fast loop is not using. On archive networks the
+// replay is pinned to the real state every backfill_anchor_interval
+// blocks; otherwise it is a pure replay from the segment's starting
+// backlogs.
 func (f *Follower) BackfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err := f.ensureInit(ctx); err != nil {
 		return BackfillIdle, err
@@ -104,10 +111,20 @@ func (f *Follower) BackfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err != nil {
 		return BackfillIdle, err
 	}
-	rows := f.replaySegment(st, c, headers)
+	anchor, err := f.backfillAnchors(ctx, st, numbers)
+	if err != nil {
+		return BackfillIdle, err
+	}
+	rows := f.replaySegment(st, c, headers, anchor)
 	f.mu.Lock()
 	buckets := foldBuckets(rows, func(uint64) sql.NullInt64 { return setID })
 	f.mu.Unlock()
+	for _, r := range rows {
+		if r.Anchored {
+			c.LastAnchor, c.LastAnchorErrorBips = r.Number, replayError(r)
+			f.log.Info("backfill anchored to archive state", "block", r.Number, "replayErrorBips", c.LastAnchorErrorBips)
+		}
+	}
 
 	c.Next += n
 	c.PrevTs = headers[len(headers)-1].Timestamp
@@ -128,8 +145,44 @@ func (f *Follower) BackfillStep(ctx context.Context) (BackfillStatus, error) {
 	return BackfillProgressed, nil
 }
 
-// replaySegment replays headers, splitting at minimum base fee changes.
-func (f *Follower) replaySegment(st *pricer.State, c *backfillCursor, headers []nitro.Header) []db.Block {
+// backfillAnchors reads the real pricer state at every anchor block among
+// numbers on an archive network and returns the Anchor for the replay. It
+// is nil without archive (pure replay) and when no anchor block is in
+// range. An anchor whose model differs from the segment's constraint set
+// is skipped with a warning: the replay state cannot change shape mid
+// segment.
+func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, numbers []uint64) (pricer.Anchor, error) {
+	if !f.net.Archive {
+		return nil, nil
+	}
+	interval := uint64(f.cfg.BackfillAnchorInterval)
+	backlogs := map[uint64][]uint64{}
+	for _, n := range numbers {
+		if n%interval != 0 {
+			continue
+		}
+		sample, err := f.rpc.FastSampleAt(ctx, n)
+		if err != nil {
+			return nil, fmt.Errorf("backfill anchor %d: %w", n, err)
+		}
+		if !sameShape(st, sample) {
+			f.log.Warn("backfill anchor skipped, sampled model differs from the segment's set", "block", n)
+			continue
+		}
+		backlogs[n] = sampleBacklogs(sample)
+	}
+	if len(backlogs) == 0 {
+		return nil, nil
+	}
+	return func(n uint64) ([]uint64, bool) {
+		b, ok := backlogs[n]
+		return b, ok
+	}, nil
+}
+
+// replaySegment replays headers, splitting at minimum base fee changes and
+// pinning backlogs wherever anchor says so.
+func (f *Follower) replaySegment(st *pricer.State, c *backfillCursor, headers []nitro.Header, anchor pricer.Anchor) []db.Block {
 	f.mu.Lock()
 	var live *big.Int
 	if f.lastSample != nil {
@@ -158,7 +211,7 @@ func (f *Follower) replaySegment(st *pricer.State, c *backfillCursor, headers []
 		for i, h := range chunk {
 			blocks[i] = pricer.Block{Number: h.Number, Timestamp: h.Timestamp, GasUsed: h.GasUsed, BaseFee: h.BaseFee}
 		}
-		results := pricer.Replay(st, prevTs, blocks, nil)
+		results := pricer.Replay(st, prevTs, blocks, anchor)
 		rows = append(rows, blockRows(f.chainID, chunk, results)...)
 		prevTs = chunk[len(chunk)-1].Timestamp
 		start = end

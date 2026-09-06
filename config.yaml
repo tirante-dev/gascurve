@@ -20,6 +20,7 @@ collector:
   sample_retention: 168h     # raw state samples kept
   backfill_depth: 720h       # how far back the resumable backfill reaches (30d)
   backfill_anchor_interval: 1000  # blocks between state anchors when a network is archive: true
+  max_catch_up_batches: 10   # paced networks skip a catch-up gap larger than this many header batches; unlimited networks never skip
 
 # Every network is an Arbitrum Nitro chain. calls_per_second is the budget for
 # a public endpoint and counts JSON-RPC calls, including items inside a batch
