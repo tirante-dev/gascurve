@@ -1,0 +1,25 @@
+gascurve {{ .Chart.AppVersion }} installed as release {{ .Release.Name }}.
+
+Components:
+{{- if .Values.collector.enabled }}
+  collector  {{ include "gascurve.fullname" . }}-collector (single replica)
+{{- end }}
+{{- if .Values.api.enabled }}
+  api        {{ include "gascurve.fullname" . }}-api:{{ .Values.api.service.port }}  (/api/v1)
+{{- end }}
+{{- if .Values.web.enabled }}
+  web        {{ include "gascurve.fullname" . }}-web:{{ .Values.web.service.port }}
+{{- end }}
+{{- if .Values.ingress.enabled }}
+
+Ingress: https://{{ .Values.ingress.host }}  (/ to web, /api to api)
+{{- else }}
+
+Ingress is disabled. Port-forward to try it:
+  kubectl port-forward svc/{{ include "gascurve.fullname" . }}-web 3000:{{ .Values.web.service.port }}
+  kubectl port-forward svc/{{ include "gascurve.fullname" . }}-api 8080:{{ .Values.api.service.port }}
+{{- end }}
+{{- if and (not .Values.database.url) (not .Values.database.existingSecret) }}
+
+WARNING: no database configured. Set database.url or database.existingSecret.
+{{- end }}

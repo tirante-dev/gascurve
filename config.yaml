@@ -19,10 +19,17 @@ collector:
   block_retention: 48h       # per-block rows kept before pruning to buckets
   sample_retention: 168h     # raw state samples kept
   backfill_depth: 720h       # how far back the resumable backfill reaches (30d)
+  backfill_anchor_interval: 1000  # blocks between state anchors when a network is archive: true
 
 # Every network is an Arbitrum Nitro chain. calls_per_second is the budget for
-# the public endpoint and counts JSON-RPC calls, including items inside a
-# batch request, because that is how the Robinhood public RPC meters.
+# a public endpoint and counts JSON-RPC calls, including items inside a batch
+# request, because that is how the Robinhood public RPC meters. Set it to 0 for
+# a dedicated node (unlimited). Optional per network:
+#   ws_url:  wss endpoint; the collector subscribes to newHeads and samples
+#            state at each head instead of polling every second.
+#   archive: true when the node serves historical state; the backfill then
+#            anchors the replay to real backlogs every backfill_anchor_interval
+#            blocks instead of relying on replay alone.
 networks:
   - name: robinhood
     display_name: Robinhood Chain

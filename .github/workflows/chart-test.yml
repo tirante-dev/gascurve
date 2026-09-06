@@ -1,0 +1,42 @@
+name: Chart Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Chart Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v5
+
+      - name: helm lint
+        run: helm lint charts/gascurve --strict
+
+      - name: helm template (defaults, ingress, existing secret)
+        run: |
+          set -euo pipefail
+          helm template gascurve charts/gascurve --set database.url=postgres://x:y@db/gascurve > /tmp/default.yaml
+          helm template gascurve charts/gascurve --set database.existingSecret=my-db --set ingress.enabled=true --set ingress.host=gascurve.com > /tmp/ingress.yaml
+          grep -q 'kind: Ingress' /tmp/ingress.yaml
+          ! grep -q 'kind: Secret' /tmp/ingress.yaml
+          grep -q 'kind: Secret' /tmp/default.yaml
+
+      - uses: helm/chart-testing-action@v2
+
+      - name: ct lint
+        run: ct lint --config charts/ct.yaml --all

@@ -32,6 +32,8 @@ Configured in `config.yaml` (`networks:`), overridable by `NETWORK_<NAME>_*` env
 
 All four report ArbOS 61 (`ArbSys.arbOSVersion()` = 116).
 
+Per-network optional settings: `calls_per_second` (0 = unlimited, for dedicated nodes; the public defaults stay at 4), `ws_url` (subscribe to `newHeads` and sample state at each head instead of polling), `archive` (historical `eth_call` works, so the backfill anchors replay to real backlogs every `collector.backfill_anchor_interval` blocks). Production runs on dedicated nodes; the public-RPC pacing exists for development and for anyone running the collector without one.
+
 ## 3. Pricer model (`internal/pricer`)
 
 Pure functions, no I/O, shared by the collector (replay) and tests. Mirrors `arbos/l2pricing/model.go` in nitro exactly, using integer basis-point math.
@@ -103,7 +105,7 @@ collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))  
 
 One `Follower` per network, all sharing one `*sqlx.DB`.
 
-Fast loop, every `collector.tick_interval` (1 s):
+Fast loop, every `collector.tick_interval` (1 s), or on every `newHeads` event when `ws_url` is configured (then state calls are made at that head's block number so samples align exactly with headers):
 
 1. One JSON-RPC batch: `eth_getBlockByNumber("latest", false)`, `getGasPricingConstraints()`, `getPricesInWei()`, `getMinimumGasPrice()`. If the constraints call reverts or returns empty, also `getGasBacklog()`, `getPricingInertia()`, `getGasBacklogTolerance()`, `getGasAccountingParams()` (legacy model).
 2. Fetch headers for every block between the stored head and the new head, in batches of `header_batch_size`, respecting the per-network budget.
@@ -112,7 +114,7 @@ Fast loop, every `collector.tick_interval` (1 s):
 
 Slow loop, every `collector.slow_interval` (60 s): L1 pricer getters (`getL1BaseFeeEstimate`, `getL1PricingSurplus`, `getL1FeesAvailable`, `getL1PricingUnitsSinceUpdate`, `getLastL1PricingUpdateTime`, `getL1PricingEquilibrationUnits`, `getPerBatchGasCharge`, `getL1RewardRate`), fee-account balances (`ArbOwnerPublic.getInfraFeeAccount/getNetworkFeeAccount`, `ArbGasInfo.getL1RewardRecipient`, `eth_getBalance`), `eth_getLogs` on `0x…70` for new `OwnerActs` since the cursor, batch-report scan of new 2-transaction blocks, pruning.
 
-Backfill job (resumable, checkpoint in `collector_state`): walks backwards from the first stored block to `collector.backfill_depth` fetching headers, replaying from the nearest earlier `constraint_sets` row (starting backlogs from the owner action), and writing buckets only. Runs at low priority inside the same budget (it yields whenever the fast loop needs calls).
+Backfill job (resumable, checkpoint in `collector_state`): walks backwards from the first stored block to `collector.backfill_depth` fetching headers, replaying from the nearest earlier `constraint_sets` row (starting backlogs from the owner action), and writing buckets only. Runs at low priority inside the same budget (it yields whenever the fast loop needs calls). On `archive: true` networks it re-anchors backlogs from historical state every `backfill_anchor_interval` blocks and records the replay error observed just before each anchor.
 
 Rate limiting: a token bucket per network, `calls_per_second` tokens/s, burst 2× that. Every JSON-RPC call consumes one token, including each item inside a batch. Batches never exceed 100 items and are never sent concurrently for the same network. HTTP 429 or JSON-RPC error code 429: exponential back-off starting at 2 s, capped at 60 s, logged with the calls made in the last 10 s. All requests send `User-Agent: gascurve/<version>`.
 

@@ -1,0 +1,158 @@
+# Default values for gascurve.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  registry: registry.ahkc.win/gascurve
+  pullPolicy: IfNotPresent
+  tag: ""  # Defaults to Chart.appVersion when unset.
+  pullSecrets: []
+
+# The collector must run as a single replica: it is the only RPC client and
+# the only writer, and two collectors would double the public RPC budget and
+# race on the same rows. Recreate strategy guarantees at most one pod.
+collector:
+  enabled: true
+  image:
+    repository: gascurve-collector
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+api:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: gascurve-api
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+web:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: gascurve-web
+  service:
+    type: ClusterIP
+    port: 3000
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# One host serves both: / goes to web, /api goes to the API. The web image is
+# built with NEXT_PUBLIC_API_URL=/api/v1 so it talks to the same origin and
+# derives the WebSocket URL from it.
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  host: gascurve.com
+  tls: []
+  # - secretName: gascurve-tls
+  #   hosts: [gascurve.com]
+
+database:
+  # Provide the URL directly (rendered into a Secret) or point at an existing
+  # Secret. existingSecret wins when set.
+  url: ""
+  existingSecret: ""
+  existingSecretKey: DB_URL
+
+migrations:
+  # Runs cmd/migrate as a pre-install/pre-upgrade hook using the API image.
+  enabled: true
+
+# Rendered into config.yaml and mounted into the collector and api pods.
+# Environment overrides still apply (NETWORK_<NAME>_RPC_URL etc). For dedicated
+# nodes set calls_per_second: 0 and optionally ws_url and archive: true per
+# network; keep private URLs in a Secret via extraEnv rather than here.
+config:
+  server:
+    port: 8080
+    cors_origins:
+      - https://gascurve.com
+    dev_mode: false
+  database:
+    max_open: 25
+    max_idle: 10
+    run_migrations: false
+  collector:
+    tick_interval: 1s
+    slow_interval: 60s
+    header_batch_size: 100
+    block_retention: 48h
+    sample_retention: 168h
+    backfill_depth: 720h
+  networks:
+    - name: robinhood
+      display_name: Robinhood Chain
+      chain_id: 4663
+      rpc_url: https://rpc.mainnet.chain.robinhood.com
+      explorer_url: https://robinhoodchain.blockscout.com
+      calls_per_second: 4
+      enabled: true
+    - name: robinhood-testnet
+      display_name: Robinhood Chain Testnet
+      chain_id: 46630
+      rpc_url: https://rpc.testnet.chain.robinhood.com
+      explorer_url: https://testnet.robinhoodchain.blockscout.com
+      calls_per_second: 4
+      enabled: true
+    - name: arbitrum-one
+      display_name: Arbitrum One
+      chain_id: 42161
+      rpc_url: https://arb1.arbitrum.io/rpc
+      explorer_url: https://arbiscan.io
+      calls_per_second: 4
+      enabled: true
+    - name: arbitrum-sepolia
+      display_name: Arbitrum Sepolia
+      chain_id: 421614
+      rpc_url: https://sepolia-rollup.arbitrum.io/rpc
+      explorer_url: https://sepolia.arbiscan.io
+      calls_per_second: 4
+      enabled: true
+
+# Extra environment variables for the Go binaries, for example private RPC
+# URLs kept in a Secret: NETWORK_ROBINHOOD_RPC_URL from secretKeyRef.
+extraEnv: []
+
+logLevel: info
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

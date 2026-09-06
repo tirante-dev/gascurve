@@ -1,0 +1,55 @@
+name: Helm Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Helm chart version to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  helm:
+    # Only chart releases, not app releases
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'gascurve-chart-v')
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ${{ secrets.REGISTRY_HOST || 'registry.ahkc.win' }}
+      REGISTRY_PROJECT: gascurve
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve chart version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#gascurve-chart-v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: azure/setup-helm@v5
+
+      - name: Registry login
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: echo "${REGISTRY_PASSWORD}" | helm registry login "${REGISTRY}" -u "${REGISTRY_USERNAME}" --password-stdin
+
+      - name: Package chart
+        run: |
+          set -euo pipefail
+          app_version="$(jq -r '."."' .release-please-manifest.json)"
+          if [ -z "$app_version" ] || [ "$app_version" = "null" ]; then
+            echo "::error::.release-please-manifest.json is missing the root app version"
+            exit 1
+          fi
+          helm package charts/gascurve --version "${{ steps.version.outputs.version }}" --app-version "${app_version}"
+
+      - name: Push chart
+        run: helm push gascurve-${{ steps.version.outputs.version }}.tgz oci://${REGISTRY}/${REGISTRY_PROJECT}/charts

@@ -3,10 +3,22 @@
   "group-pull-request-title-pattern": "chore: release",
   "separate-pull-requests": true,
   "changelog-sections": [
-    { "type": "feat", "section": "Features" },
-    { "type": "fix", "section": "Bug Fixes" },
-    { "type": "perf", "section": "Performance Improvements" },
-    { "type": "deps", "section": "Dependencies" }
+    {
+      "type": "feat",
+      "section": "Features"
+    },
+    {
+      "type": "fix",
+      "section": "Bug Fixes"
+    },
+    {
+      "type": "perf",
+      "section": "Performance Improvements"
+    },
+    {
+      "type": "deps",
+      "section": "Dependencies"
+    }
   ],
   "packages": {
     ".": {
@@ -16,8 +28,21 @@
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
       "extra-files": [
-        { "type": "json", "path": "web/package.json", "jsonpath": "$.version" }
+        {
+          "type": "json",
+          "path": "web/package.json",
+          "jsonpath": "$.version"
+        }
+      ],
+      "exclude-paths": [
+        "charts/gascurve"
       ]
+    },
+    "charts/gascurve": {
+      "release-type": "helm",
+      "component": "gascurve-chart",
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true
     }
   }
 }
