@@ -34,6 +34,17 @@ All four report ArbOS 61 (`ArbSys.arbOSVersion()` = 116).
 
 Per-network optional settings: `calls_per_second` (0 = unlimited, for dedicated nodes; the public defaults stay at 4), `ws_url` (subscribe to `newHeads` and sample state at each head instead of polling), `archive` (historical `eth_call` works, so the backfill anchors replay to real backlogs every `collector.backfill_anchor_interval` blocks). Production runs on dedicated nodes; the public-RPC pacing exists for development and for anyone running the collector without one.
 
+### Multiple endpoints per network
+
+A network is a list of endpoints: the primary (`rpc_url`, `ws_url`, `archive`, `calls_per_second`) and `fallbacks`, each with the same four fields. Env overrides: `NETWORK_<NAME>_FALLBACK_RPC_URLS` and `NETWORK_<NAME>_FALLBACK_WS_URLS` (comma-separated, positional), `NETWORK_<NAME>_FALLBACK_ARCHIVE` and `NETWORK_<NAME>_FALLBACK_CALLS_PER_SECOND` (comma-separated, positional, optional). Endpoint URLs carrying keys never go in `config.yaml`; they come from the environment (a Secret in the chart's `extraEnv`).
+
+Routing rules:
+
+- **Ordinary calls** (fast tick, catch-up headers, logs, batch-report scan) go to the primary. After a failed request (transport error, HTTP 5xx, 429 past its back-off, or an `eth_chainId` mismatch) the network fails over to the next endpoint for `collector.failover_cooldown` (default 60 s), then probes the primary again with a single cheap call before returning to it. Failovers are counted in `/status` (`failovers`, `activeEndpoint`).
+- **Capability calls** are routed by capability, not by order: the `newHeads` subscription uses the first endpoint that has a `ws_url`; archive anchoring uses the first endpoint with `archive: true`. The public Robinhood RPC has neither, so with a QuickNode fallback the collector polls the public RPC for ordinary work, follows heads over QuickNode's WebSocket, and anchors the backfill against QuickNode's archive state.
+- **Per-endpoint pacing and batch size.** Every endpoint has its own token bucket and its own adaptive batch cap: it starts at `header_batch_size` and halves (floor 10) whenever that endpoint answers a batch with 429, recovering by one step per successful minute. QuickNode rejects 100-item batches and accepts 50; the public RPC accepts 100.
+- Every endpoint must report the configured `chain_id`; one that does not is disabled with an error in `/status`.
+
 ## 3. Pricer model (`internal/pricer`)
 
 Pure functions, no I/O, shared by the collector (replay) and tests. Mirrors `arbos/l2pricing/model.go` in nitro exactly, using integer basis-point math.
