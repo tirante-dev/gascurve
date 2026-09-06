@@ -24,6 +24,7 @@ import type {
   BlockPoint,
   ConstraintSet,
   ConstraintsResponse,
+  EthUsd,
   L1Series,
   LiveSnapshot,
   Network,
@@ -702,7 +703,23 @@ export class MockWorld {
         l1Reward: { address: accounts.l1Reward, balance: accounts.l1RewardWei.toString() },
       },
       replayErrorBips: replayError,
+      ethUsd: this.ethUsd(now),
     };
+  }
+
+  /**
+   * The ETH/USD quote the collector's slow loop would hold: refetched on the
+   * minute and quoted with the minute it was fetched in, so the UI sees a
+   * price that ages for up to a minute and then refreshes. Null for a network
+   * defined without a price feed.
+   */
+  ethUsd(now: number): EthUsd | null {
+    const profile = this.def.ethUsd;
+    if (!profile) return null;
+    const minute = alignDown(now, 60);
+    // A slow deterministic walk of about a percent either way, so the figure moves without ever looking implausible.
+    const drift = 1 + (hash01(this.def.chainId, minute / 60) - 0.5) * 0.02;
+    return { price: (profile.basePrice * drift).toFixed(2), at: unixToIso(minute), source: profile.source };
   }
 
   /** Average gas per second over the `windowSeconds` timestamp seconds ending with the last block. */

@@ -16,6 +16,8 @@ import {
   formatInteger,
   formatMultiplierFixed,
   formatPercent,
+  formatUsdFixed,
+  freshUsdPrice,
   weiToGweiNumber,
 } from "@/utils/format";
 import { Figure, Label, Stat, StatusPill } from "./primitives";
@@ -127,6 +129,37 @@ function Freshness({ sinceBlock, age }: { sinceBlock: number; age: number }) {
   );
 }
 
+/**
+ * What a transaction of a given size costs, in dollars when the collector has
+ * a fresh quote and in ETH when it does not. The dollar figure is the primary
+ * one because it is the one people hold in their heads; the ETH amount stays
+ * a hover away and is always in the accessible description, so nothing is
+ * only available to a pointer.
+ */
+export function CostTile({ label, eth, usdPerEth }: { label: string; eth: number; usdPerEth: number | null }) {
+  if (usdPerEth === null) {
+    return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.eth}>{formatEthFixed(eth)}</Figure>} unit="ETH" size="sm" />;
+  }
+  const ethText = `${formatEthFixed(eth)} ETH`;
+  const usd = formatUsdFixed(eth * usdPerEth);
+  return (
+    <Stat
+      label={label}
+      size="sm"
+      value={
+        <span title={ethText}>
+          {/* The dollar sign sits outside the reserved box, so a changing digit never shifts it. */}
+          <span aria-hidden="true">
+            <span className="text-ink-2">$</span>
+            <Figure ch={FIXED_WIDTH_CH.usd}>{usd}</Figure>
+          </span>
+          <span className="sr-only">{`${usd} US dollars, ${ethText}, at ${formatUsdFixed(usdPerEth)} dollars per ETH`}</span>
+        </span>
+      }
+    />
+  );
+}
+
 /** Copy for an empty strip: a reorg took the last state away, or nothing has arrived yet. */
 export const RESYNC_COPY = "Resyncing after a reorg.";
 export const WAITING_COPY = "Waiting for the first sample.";
@@ -161,6 +194,8 @@ export function LiveStripView({ snapshot, values, blocks, nowMs, status, resynci
   const step = rampStep(multiplierBips);
   const sinceBlock = Math.max(0, nowMs / 1000 - snapshot.block.ts);
   const age = sampleAge(snapshot.sampledAt, nowMs);
+  // No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all.
+  const usdPerEth = freshUsdPrice(snapshot.ethUsd, nowMs);
   return (
     <div className="vw-card p-5">
       <div className="grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)]">
@@ -204,8 +239,8 @@ export function LiveStripView({ snapshot, values, blocks, nowMs, status, resynci
 
         <div className="flex flex-col gap-5">
           <div className="grid grid-cols-2 gap-4">
-            <Stat label="21k transfer" value={<Figure ch={FIXED_WIDTH_CH.eth}>{formatEthFixed(v.transferEth)}</Figure>} unit="ETH" size="sm" />
-            <Stat label="150k swap" value={<Figure ch={FIXED_WIDTH_CH.eth}>{formatEthFixed(v.swapEth)}</Figure>} unit="ETH" size="sm" />
+            <CostTile label="21k transfer" eth={v.transferEth} usdPerEth={usdPerEth} />
+            <CostTile label="150k swap" eth={v.swapEth} usdPerEth={usdPerEth} />
           </div>
           <FeeSplitBar snapshot={snapshot} />
         </div>

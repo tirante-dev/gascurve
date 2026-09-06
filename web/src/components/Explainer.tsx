@@ -61,7 +61,7 @@ export function Explainer({ snapshot }: { snapshot: LiveSnapshot | null }) {
       <h3>The owner can reset the backlogs</h3>
       <p>
         A call to <code>setGasPricingConstraints</code> replaces the constraint set and sets each backlog to the starting value supplied with it. The fee can therefore jump, up or down, at an
-        owner action. Those actions are marked on the history charts and listed below.
+        owner action. Those actions are marked on the history charts and listed under owner actions on the live page.
       </p>
 
       <h3>P4 is a polynomial, not an exponential</h3>

@@ -45,6 +45,9 @@ export type ConstraintSet = {
 
 export type Account = { address: string; balance: string };
 
+/** ETH/USD spot fetched by the collector's slow loop, server side; `at` is when it was fetched. */
+export type EthUsd = { price: string; at: string; source: string };
+
 export type LegacyParams = {
   speedLimit: number;
   inertia: number;
@@ -88,6 +91,8 @@ export type LiveSnapshot = {
   l1?: L1State;
   accounts?: { infra: Account; network: Account; l1Reward: Account };
   replayErrorBips: number;
+  /** Null when the collector has no price. A price older than ten minutes is stale and the UI falls back to ETH. */
+  ethUsd: EthUsd | null;
 };
 
 export type BlockPoint = {

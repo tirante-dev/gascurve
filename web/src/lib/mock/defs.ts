@@ -30,6 +30,9 @@ export type MockConstraintSet = {
 
 export type MockLegacyParams = { speedLimit: number; inertia: number; tolerance: number };
 
+/** The ETH/USD quote the collector's slow loop would carry. A network without one serves `ethUsd: null`, the scenario the UI falls back to ETH in. */
+export type EthUsdProfile = { basePrice: number; source: string };
+
 export type BatchProfile = {
   intervalSeconds: number;
   calldataBytes: number;
@@ -71,6 +74,8 @@ export type MockNetworkDef = {
   };
   accounts: { infra: string; network: string; l1Reward: string; infraWei: bigint; networkWei: bigint; l1RewardWei: bigint };
   batch: BatchProfile;
+  /** Omitted for a network whose collector has no price feed: its snapshots carry `ethUsd: null`. */
+  ethUsd?: EthUsdProfile;
 };
 
 const GWEI = 1_000_000_000n;
@@ -233,6 +238,7 @@ export const ROBINHOOD: MockNetworkDef = {
     l1RewardWei: ethWei(0.3121),
   },
   batch: { intervalSeconds: 18, calldataBytes: 137, gasSpent: 29_036, l1BaseFeeWei: 73_500_000 },
+  ethUsd: { basePrice: 4_200, source: "coingecko" },
 };
 
 const ARBITRUM_ONE_SETS: MockConstraintSet[] = [
@@ -312,6 +318,7 @@ export const ARBITRUM_ONE: MockNetworkDef = {
     l1RewardWei: ethWei(12.02),
   },
   batch: { intervalSeconds: 60, calldataBytes: 102_400, gasSpent: 2_100_000, l1BaseFeeWei: 1_100_000_000 },
+  ethUsd: { basePrice: 4_200, source: "coingecko" },
 };
 
 export const ROBINHOOD_TESTNET: MockNetworkDef = {
@@ -374,6 +381,7 @@ export const ROBINHOOD_TESTNET: MockNetworkDef = {
     l1RewardWei: ethWei(0.01),
   },
   batch: { intervalSeconds: 45, calldataBytes: 120, gasSpent: 28_500, l1BaseFeeWei: 12_000_000 },
+  // No price feed on the testnet: every snapshot carries ethUsd null, and the UI shows ETH.
 };
 
 export const MOCK_NETWORKS: readonly MockNetworkDef[] = [ROBINHOOD, ARBITRUM_ONE, ROBINHOOD_TESTNET];

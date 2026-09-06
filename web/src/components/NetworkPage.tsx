@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "@/hooks/useApi";
 import { useLive } from "@/hooks/useLive";
@@ -14,15 +13,15 @@ import type { OwnerAction, SeriesRange } from "@/types";
 import { canonicalNetworkName, findNetwork, isUnknownNetwork } from "@/utils/network";
 import { ConstraintCards } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
-import { Explainer } from "./Explainer";
 import { FeeFlows } from "./FeeFlows";
 import { HistoryTabs } from "./HistoryTabs";
 import { L1Section } from "./L1Section";
 import { LiveStrip } from "./LiveStrip";
 import { NetworkSwitcher } from "./NetworkSwitcher";
 import { OwnerActionTimeline } from "./OwnerActionTimeline";
+import { HowItWorksLink, PageHeader } from "./PageHeader";
 import { PricerEquation } from "./PricerEquation";
-import { Section } from "./primitives";
+import { Prose, Section } from "./primitives";
 import { SeriesCharts } from "./SeriesCharts";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -76,21 +75,11 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
 
   return (
     <div className="mx-auto max-w-[1200px] px-4 pb-12 sm:px-6">
-      <header className="flex flex-wrap items-center justify-between gap-3 py-4">
-        <div className="flex min-w-0 flex-col gap-1">
-          <Link href="/" className="vw-wordmark text-lg leading-none sm:text-xl">
-            gascurve
-          </Link>
-          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-            <span className="text-[11px] uppercase tracking-[0.18em] text-label">nitro base fee telemetry</span>
-            <span className="text-sm text-ink-3">{info ? `${info.displayName} · chain ${info.chainId}` : name}</span>
-          </div>
-        </div>
-        <div className="flex max-w-full flex-wrap items-center gap-2">
-          <NetworkSwitcher networks={networks.data} current={name} onChange={setNetwork} loading={networks.loading} />
-          <ThemeToggle />
-        </div>
-      </header>
+      <PageHeader name={name} info={info}>
+        <NetworkSwitcher networks={networks.data} current={name} onChange={setNetwork} loading={networks.loading} />
+        <HowItWorksLink network={name} className="vw-control px-3 py-1 text-sm text-ink-2 hover:text-ink" />
+        <ThemeToggle />
+      </PageHeader>
 
       {unknown ? (
         <div className="vw-card mb-6 p-4 text-sm text-ink-2">
@@ -102,12 +91,12 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
       <main>
         <div className="relative isolate">
           <div className="vw-horizon" aria-hidden="true" />
-          <Section id="live" title="Live" lede="The base fee right now, the floor it sits on, and the last two minutes of blocks.">
+          <Section id="live" title="Live">
             <LiveStrip live={smooth} status={live.status} />
           </Section>
         </div>
 
-        <Section id="pricer" title="The pricer, live" lede="One card per constraint. Figures ease toward each sample; long windows drain at their target rate between samples, short ones show a 2 s average of their per-second sawtooth.">
+        <Section id="pricer" title="The pricer, live">
           <ConstraintCards live={smooth} />
           <div className="mt-6">
             <PricerEquation snapshot={snapshot} />
@@ -115,28 +104,34 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         </Section>
 
         <Section id="explainer" title="How the fee works">
-          <Explainer snapshot={snapshot} />
+          <Prose>
+            <p>
+              The fee is the floor multiplied by <code>P4(x)</code>, and x is the sum over the chain&apos;s constraints of each backlog divided by its target times its window. Long windows
+              ratchet on the average demand, short ones spike on bursts and drain within seconds, and there are no tips to jump the queue. The explainer walks through all of it with{" "}
+              {info ? info.displayName : name}&apos;s own floor and constraint set.{" "}
+              <HowItWorksLink network={name} className="text-accent underline-offset-2 hover:underline" />
+            </p>
+          </Prose>
         </Section>
 
         <Section
           id="history"
           title="History"
-          lede="Base fee, the split of x across constraints, gas per second against targets, and the backlogs. Hover or use the point inspector for exact values; owner actions are marked and each constraint set is drawn as its own series."
           aside={<HistoryTabs range={range} onChange={setRange} loading={series.loading} />}
         >
           {series.error ? <p className="mb-3 text-sm text-critical">Could not load history: {series.error}</p> : null}
           <SeriesCharts series={series.data} loading={series.loading} model={model} />
         </Section>
 
-        <Section id="fees" title="Fee flows" lede="The floor in force at each block goes to the infra account, everything above it to the network account.">
-          <FeeFlows snapshot={snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} />
+        <Section id="fees" title="Fee flows">
+          <FeeFlows snapshot={snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} nowMs={now} />
         </Section>
 
-        <Section id="l1" title="L1" lede="What the chain pays Ethereum, and the pricer that recovers it.">
+        <Section id="l1" title="L1">
           <L1Section network={name} range={range} snapshot={snapshot} series={series.data} />
         </Section>
 
-        <Section id="owner" title="Owner actions" lede="Parameter changes decoded from OwnerActs logs. A constraint change replaces the backlogs with the starting values it carries.">
+        <Section id="owner" title="Owner actions">
           <OwnerActionTimeline actions={actions} explorerUrl={info?.explorerUrl} loading={ownerActions.loading} error={ownerActions.error} />
         </Section>
       </main>

@@ -1,13 +1,15 @@
 "use client";
 
 import { memo, useMemo } from "react";
+import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
-import { AVERAGE_WINDOW_S, isShortWindow, SAWTOOTH_WINDOW_S, sawtoothSamples, SHORT_WINDOW_S, targetValues, type LiveValues, type SawtoothSample } from "@/lib/smoothing";
+import { AVERAGE_WINDOW_S, isShortWindow, SAWTOOTH_WINDOW_S, sawtoothChart, sawtoothSamples, SHORT_WINDOW_S, targetValues, type LiveValues, type SawtoothSample } from "@/lib/smoothing";
 import type { BlockPoint, Constraint, LegacyParams, LiveSnapshot } from "@/types";
 import { constraintGauge, contributionRampStep, legacyGauge, seriesColor } from "@/utils/chart";
 import { FIXED_WIDTH_CH, formatDuration, formatGas, formatGasFixed, formatInteger, formatPercent, formatSecondsOfTarget } from "@/utils/format";
+import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { RESYNC_COPY, WAITING_COPY } from "./LiveStrip";
-import { Card, Figure, Label, Swatch } from "./primitives";
+import { Card, ChartFrame, Figure, Label, Swatch } from "./primitives";
 
 /** A meter whose fill carries magnitude on the sequential ramp; the track is an inset of the surface. */
 export function Gauge({ fraction, step, label, marks = [] }: { fraction: number; step: number; label: string; marks?: number[] }) {
@@ -22,34 +24,82 @@ export function Gauge({ fraction, step, label, marks = [] }: { fraction: number;
   );
 }
 
-const SAWTOOTH_W = 200;
-const SAWTOOTH_H = 32;
-
-/** The polyline points of a sawtooth sparkline: x by block order, y by backlog against the peak. Exported for tests. */
-export function sawtoothPoints(samples: readonly SawtoothSample[], width = SAWTOOTH_W, height = SAWTOOTH_H): string {
-  const max = Math.max(1, ...samples.map((s) => s.backlog));
-  const last = Math.max(1, samples.length - 1);
-  return samples.map((s, i) => `${((i / last) * width).toFixed(1)},${(height - 1 - (s.backlog / max) * (height - 2)).toFixed(1)}`).join(" ");
+/** "drains 60M/s at each second": what the dashed line on the chart is. */
+export function drainLabel(target: number): string {
+  return `drains ${formatGas(target)}/s at each second`;
 }
 
+/** Y ticks of the backlog chart: zero, the midpoint and the top, so the scale reads in gas without crowding a card. */
+export function backlogTicks(max: number): number[] {
+  return [0, max / 2, max];
+}
+
+/** The average and the threshold are drawn in ink, never in a constraint colour: a short window can sit at any index in the set. */
+const AVERAGE_COLOR = "var(--ink-2)";
+const THRESHOLD_COLOR = "var(--ink-3)";
+
+/** A point's place on the axis, read out: "3.4 s ago", or "now" for the newest block. */
+export function secondsAgoLabel(x: number): string {
+  return x >= 0 ? "now" : `${Math.abs(x).toFixed(1)} s ago`;
+}
+
+/** What a hovered block says: which block it was, what it carried, the backlog it left and the average that includes it. */
+export function sawtoothTooltipRows(color: string): TooltipRow[] {
+  return [
+    { label: "block", value: (r) => formatInteger(Number(r.number)) },
+    { label: "gas used", value: (r) => `${formatGas(Number(r.gasUsed))} gas` },
+    { label: "backlog", color, value: (r) => `${formatGas(Number(r.backlog))} gas` },
+    { label: `${AVERAGE_WINDOW_S} s average`, color: AVERAGE_COLOR, value: (r) => `${formatGas(Number(r.average))} gas` },
+  ];
+}
+
+/** Tall enough for a labelled threshold and two axes without crowding the card. */
+const SAWTOOTH_HEIGHT = 132;
+
+/** X ticks over the sawtooth span, in seconds before now. */
+const SAWTOOTH_TICKS = [-SAWTOOTH_WINDOW_S, -10, -5, 0];
+
 /**
- * The raw per-block backlog of a short window over the last fifteen seconds,
- * drawn as a polyline so the sawtooth stays a sawtooth. Memoised on the
- * samples: they change when blocks arrive, the card re-renders every frame.
+ * The short-window backlog over the last fifteen seconds: the raw per-block
+ * sawtooth, the 2 s average the card's figure shows, and a dashed line at one
+ * second of target, the gas the constraint sheds at every second boundary.
+ * Memoised on the samples: they change when blocks arrive, the card
+ * re-renders every frame.
  */
-export const Sawtooth = memo(function Sawtooth({ samples, color }: { samples: SawtoothSample[]; color: string }) {
-  if (samples.length < 2) return <div className="h-8 w-full rounded-sm bg-chart" aria-hidden="true" />;
-  const peak = Math.max(...samples.map((s) => s.backlog));
+export const Sawtooth = memo(function Sawtooth({ samples, color, target, index }: { samples: SawtoothSample[]; color: string; target: number; index: number }) {
+  const lastTs = samples.length > 0 ? samples[samples.length - 1].ts : 0;
+  const data = useMemo(() => sawtoothChart(samples, lastTs), [samples, lastTs]);
+  if (data.length < 2) return <div className="w-full rounded-sm bg-chart" style={{ height: SAWTOOTH_HEIGHT }} aria-hidden="true" />;
+  const peak = Math.max(...data.map((d) => d.backlog));
+  const max = Math.max(peak, target);
   return (
-    <svg
-      className="h-8 w-full rounded-sm bg-chart"
-      viewBox={`0 0 ${SAWTOOTH_W} ${SAWTOOTH_H}`}
-      preserveAspectRatio="none"
-      role="img"
-      aria-label={`Backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${samples.length} blocks, peak ${formatGas(peak)} gas`}
+    <ChartFrame
+      height={SAWTOOTH_HEIGHT}
+      minWidth={260}
+      label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(max)} gas, with the ${AVERAGE_WINDOW_S} s average and a dashed threshold at ${formatGas(target)} gas: it ${drainLabel(target)} boundary`}
     >
-      <polyline points={sawtoothPoints(samples)} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-    </svg>
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 8, right: 8, bottom: 2, left: 0 }}>
+          <CartesianGrid vertical={false} />
+          <XAxis
+            dataKey="x"
+            type="number"
+            domain={[-SAWTOOTH_WINDOW_S, 0]}
+            ticks={SAWTOOTH_TICKS}
+            tickFormatter={(v: number) => (v === 0 ? "now" : `${v}s`)}
+            tickLine
+            axisLine={false}
+            height={18}
+          />
+          <YAxis domain={[0, max]} ticks={backlogTicks(max)} tickFormatter={(v: number) => formatGas(v)} tickLine={false} axisLine={false} width={44} />
+          {/* One second of target: the gas the constraint sheds at every second boundary. */}
+          <ReferenceLine y={target} stroke={THRESHOLD_COLOR} strokeDasharray="4 3" strokeWidth={1} label={{ value: drainLabel(target), position: "insideTopRight" }} />
+          <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={secondsAgoLabel} rows={sawtoothTooltipRows(color)} />} />
+          <Line type="linear" dataKey="backlog" stroke={color} strokeWidth={1.25} dot={false} isAnimationActive={false} activeDot={{ r: 2.5 }} />
+          <Line type="monotone" dataKey="average" stroke={AVERAGE_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} activeDot={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </ChartFrame>
   );
 });
 
@@ -104,8 +154,8 @@ function ConstraintCard({ c, index, backlog, bips, share, samples }: { c: Constr
       </dl>
       {samples ? (
         <div className="mt-4">
-          <Sawtooth samples={samples} color={seriesColor(index)} />
-          <p className="mt-1 text-[11px] text-ink-3">drains {formatGas(c.target)} gas at each second boundary; bursts show as sawteeth</p>
+          <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} />
+          <p className="mt-1 text-[11px] text-ink-3">{drainLabel(c.target)} boundary; bursts show as sawteeth. The thin line is the {AVERAGE_WINDOW_S} s average.</p>
         </div>
       ) : null}
       <div className="mt-4">

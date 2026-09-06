@@ -1,6 +1,8 @@
 // Formatting helpers. Wei is always handled as BigInt or a decimal string;
 // Number is only used once a value has been scaled down to gwei or ETH.
 
+import type { EthUsd } from "@/types";
+
 const WEI_PER_GWEI = 1_000_000_000n;
 const WEI_PER_ETH = 1_000_000_000_000_000_000n;
 
@@ -184,7 +186,7 @@ function fixedByBand(value: number, decimals: (abs: number) => number): string {
 }
 
 /** Reserved widths in ch for the fixed formatters: the widest band their live values move in. */
-export const FIXED_WIDTH_CH = { gwei: 6, multiplier: 5, gasPerSecond: 4, eth: 10, gas: 6, x: 6 } as const;
+export const FIXED_WIDTH_CH = { gwei: 6, multiplier: 5, gasPerSecond: 4, eth: 10, gas: 6, x: 6, usd: 6 } as const;
 
 /** Decimals of a gwei figure by band: below 1 four, 1 to 10 three, 10 to 100 two, otherwise one. */
 function gweiDecimals(gwei: number): number {
@@ -222,6 +224,32 @@ function ethDecimals(eth: number): number {
 /** An ETH amount (as a float, the tween's unit) with a fixed decimal count per decade: "0.00000839". The unit sits outside. */
 export function formatEthFixed(eth: number): string {
   return fixedByBand(eth, ethDecimals);
+}
+
+/** Decimals of a USD figure: two below 100, one from 100 up, so the band keeps one character count. */
+function usdDecimals(usd: number): number {
+  return usd < 100 ? 2 : 1;
+}
+
+/** A USD amount at a fixed width per band: "0.04", "12.35", "210.4", "1,240.5". The "$" sits outside. */
+export function formatUsdFixed(usd: number): string {
+  return fixedByBand(usd, usdDecimals);
+}
+
+/** A quote older than this is not money any more: the fee has moved on and the price has not. */
+export const ETH_USD_MAX_AGE_MS = 10 * 60 * 1000;
+
+/**
+ * The ETH/USD price a fee may be shown in, or null when there is none to use:
+ * no quote at all, an unparseable or non-positive one, or one fetched more
+ * than ETH_USD_MAX_AGE_MS before `nowMs`. A null sends the caller back to ETH.
+ */
+export function freshUsdPrice(ethUsd: EthUsd | null | undefined, nowMs: number): number | null {
+  if (!ethUsd) return null;
+  const at = Date.parse(ethUsd.at);
+  if (Number.isNaN(at) || nowMs - at > ETH_USD_MAX_AGE_MS) return null;
+  const price = Number(ethUsd.price);
+  return Number.isFinite(price) && price > 0 ? price : null;
 }
 
 /** Plain integer with thousands separators. */

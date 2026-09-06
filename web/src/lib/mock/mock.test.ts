@@ -272,6 +272,31 @@ describe("mock world", () => {
     expect(world.constraintsResponse().history).toHaveLength(2);
   });
 
+  it("quotes a plausible ETH price that refreshes on the minute, and none at all for a network without a feed", () => {
+    const world = findMockWorld("robinhood");
+    if (!world) throw new Error("no world");
+    const now = mockNow();
+    const quote = world.snapshot(now).ethUsd;
+    if (!quote) throw new Error("no quote");
+    // Around 4,200 dollars, never further than a percent from it.
+    expect(Number(quote.price)).toBeGreaterThan(4_158);
+    expect(Number(quote.price)).toBeLessThan(4_242);
+    expect(quote.price).toMatch(/^\d+\.\d{2}$/);
+    expect(quote.source).toBe("coingecko");
+    // Fetched on the minute, so it ages for up to a minute and then refreshes.
+    expect(isoToUnix(quote.at) % 60).toBe(0);
+    expect(isoToUnix(quote.at)).toBeLessThanOrEqual(now);
+    expect(world.snapshot(now + 30).ethUsd).toEqual(quote);
+    const next = world.ethUsd(isoToUnix(quote.at) + 60);
+    expect(next?.at).not.toBe(quote.at);
+    expect(next?.price).not.toBe(quote.price);
+    // The testnet has no price feed at all: the snapshot says so rather than guessing.
+    const testnet = findMockWorld("robinhood-testnet");
+    if (!testnet) throw new Error("no testnet world");
+    expect(testnet.snapshot(now).ethUsd).toBeNull();
+    expect(testnet.ethUsd(now)).toBeNull();
+  });
+
   it("models the legacy Robinhood testnet pricer", () => {
     const world = findMockWorld("robinhood-testnet");
     if (!world) throw new Error("no world");

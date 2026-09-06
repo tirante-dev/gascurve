@@ -77,6 +77,7 @@ const snapshot: LiveSnapshot = {
   prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "379726000", perArbGasTotal: "399726000" },
   gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
   replayErrorBips: 2,
+  ethUsd: null,
 };
 
 describe("SeriesCharts", () => {
@@ -243,13 +244,16 @@ describe("ChartTooltip", () => {
   });
 });
 
+/** The wall clock the fee-flow tests measure a quote's age against: the fixture's own sample time. */
+const NOW_MS = Date.parse("2026-09-06T07:20:00Z");
+
 describe("FeeFlows", () => {
   it("splits fees by the floor in force at each block, from the api's exact sums, not today's floor", () => {
     const totals = feeTotals(series);
     expect(totals.total).toBeCloseTo(5);
     expect(totals.floorEth).toBeCloseTo(2.2);
     expect(totals.surplusEth).toBeCloseTo(2.8);
-    render(<FeeFlows snapshot={snapshot} series={series} model="constraints" />);
+    render(<FeeFlows snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText("2.2")).toBeInTheDocument();
     expect(screen.getByText("2.8")).toBeInTheDocument();
     const summary = screen.getByText(/Data table \(3 buckets\)/);
@@ -259,8 +263,24 @@ describe("FeeFlows", () => {
     expect(within(details).getAllByRole("row")).toHaveLength(4);
     expect(within(details).getByText("0.1")).toBeInTheDocument();
   });
+  it("puts a dollar line under each ETH total while the quote is fresh, and drops it once the quote is stale", () => {
+    const now = NOW_MS;
+    const priced = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:15:00Z", source: "coingecko" } };
+    const { rerender } = render(<FeeFlows snapshot={priced} series={series} model="constraints" nowMs={now} />);
+    // 5 ETH of fees, 2.2 to the infra account and 2.8 to the network account, at 4,200 dollars.
+    expect(screen.getByText("$21,000.0")).toBeInTheDocument();
+    expect(screen.getByText("$9,240.0")).toBeInTheDocument();
+    expect(screen.getByText("$11,760.0")).toBeInTheDocument();
+    // Eleven minutes old: the same rule as the live tiles, so the totals go back to ETH alone.
+    rerender(<FeeFlows snapshot={{ ...priced, ethUsd: { ...priced.ethUsd, at: "2026-09-06T07:09:00Z" } }} series={series} model="constraints" nowMs={now} />);
+    expect(screen.queryByText("$21,000.0")).toBeNull();
+    // And a network whose collector has no price feed never shows one.
+    rerender(<FeeFlows snapshot={snapshot} series={series} model="constraints" nowMs={now} />);
+    expect(screen.queryByText(/^\$/)).toBeNull();
+    expect(screen.getByText("2.2")).toBeInTheDocument();
+  });
   it("renders without a snapshot or history", () => {
-    render(<FeeFlows snapshot={null} series={null} />);
+    render(<FeeFlows snapshot={null} series={null} nowMs={NOW_MS} />);
     expect(screen.getByText("No history loaded.")).toBeInTheDocument();
     expect(screen.getByText(/none yet/)).toBeInTheDocument();
     expect(screen.queryByText(/predate the fee split/)).toBeNull();
@@ -279,7 +299,7 @@ describe("FeeFlows", () => {
     expect(feeTotals(series).unsplit).toBe(0);
     expect(unsplitNote(1)).toBe("1 bucket predates the fee split");
     expect(unsplitNote(1200)).toBe("1,200 buckets predate the fee split");
-    render(<FeeFlows snapshot={snapshot} series={mixed} model="constraints" />);
+    render(<FeeFlows snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText(/^2 buckets predate the fee split/)).toBeInTheDocument();
     expect(screen.getByText("unknown split (predates the fee split)")).toBeInTheDocument();
     expect(screen.getByRole("figure", { name: /hatched where the split predates the record/ })).toBeInTheDocument();
@@ -295,7 +315,7 @@ describe("FeeFlows", () => {
   });
   it("draws the unknown series as a hatch in the chart and the same hatch in its legend", () => {
     const mixed: Series = { ...series, points: [point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }), ...series.points] };
-    render(<FeeFlows snapshot={snapshot} series={mixed} model="constraints" />);
+    render(<FeeFlows snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
     const item = screen.getByText("unknown split (predates the fee split)", { selector: "li span" }).closest("li") as HTMLLIElement;
     const swatch = item.querySelector("span[aria-hidden]") as HTMLElement;
     // The legend carries the pattern, not a solid square: the association with
@@ -317,7 +337,7 @@ describe("FeeFlows", () => {
   });
 
   it("shows no unknown-split legend or footnote when every bucket carries the split", () => {
-    render(<FeeFlows snapshot={snapshot} series={series} model="constraints" />);
+    render(<FeeFlows snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
     expect(screen.queryByText(/predate the fee split/)).toBeNull();
     expect(screen.queryByText("unknown split (predates the fee split)")).toBeNull();
     expect(screen.getByText("congestion to network", { selector: "li span" })).toBeInTheDocument();

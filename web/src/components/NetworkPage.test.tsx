@@ -73,6 +73,34 @@ describe("NetworkPage with a chain-id route", () => {
     expect(refreshMock).toHaveBeenCalledTimes(2);
   });
 
+  it("lets every heading stand alone, with no section description under it", () => {
+    routeParams = { network: "robinhood" };
+    render(<NetworkPage network="robinhood" />);
+    for (const title of ["Live", "The pricer, live", "How the fee works", "History", "Fee flows", "L1", "Owner actions"]) {
+      expect(screen.getByRole("heading", { name: title, level: 2 })).toBeInTheDocument();
+    }
+    expect(screen.queryByText(/The base fee right now, the floor it sits on/)).toBeNull();
+    expect(screen.queryByText(/One card per constraint/)).toBeNull();
+    expect(screen.queryByText(/Base fee, the split of x across constraints/)).toBeNull();
+    expect(screen.queryByText(/The floor in force at each block goes to the infra account/)).toBeNull();
+    expect(screen.queryByText(/What the chain pays Ethereum/)).toBeNull();
+    expect(screen.queryByText(/Parameter changes decoded from OwnerActs logs/)).toBeNull();
+  });
+
+  it("keeps a one-paragraph lead-in on the fee section and links to the network's explainer from it and from the header", () => {
+    routeParams = { network: "robinhood" };
+    render(<NetworkPage network="robinhood" />);
+    // The prose itself moved to its own route; what stays is one paragraph and the link.
+    expect(screen.queryByRole("heading", { name: "Two parts, one fee" })).toBeNull();
+    expect(screen.getByText(/The explainer walks through all of it with Robinhood Chain's own floor/)).toBeInTheDocument();
+    const links = screen.getAllByRole("link", { name: "How the fee works →" });
+    expect(links).toHaveLength(2);
+    for (const link of links) expect(link).toHaveAttribute("href", "/robinhood/how-it-works");
+    // The live equation stayed behind, and the P4 chart went with the prose.
+    expect(screen.getByText("minBaseFee")).toBeInTheDocument();
+    expect(screen.queryByRole("figure", { name: /Degree-4 Taylor polynomial/ })).toBeNull();
+  });
+
   it("treats /4663 as Robinhood and redirects to the canonical name after hello", () => {
     const { rerender } = render(<NetworkPage network="4663" />);
     expect(screen.queryByText(/does not know a network/)).toBeNull();

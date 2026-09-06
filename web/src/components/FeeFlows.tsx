@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { LiveSnapshot, PricerModel, Series } from "@/types";
 import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL } from "@/utils/chart";
-import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, shortAddress } from "@/utils/format";
+import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, formatUsdFixed, freshUsdPrice, shortAddress } from "@/utils/format";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { Card, ChartFrame, HatchPattern, Label, Legend, Stat } from "./primitives";
 
@@ -65,9 +65,16 @@ export function feeTotals(series: Pick<Series, "points">): { total: number; floo
   return { total, floorEth: floor.eth, surplusEth: surplus.eth, perDay: span > 0 ? (total / span) * 86_400 : 0, unsplit: Math.max(floor.unknown, surplus.unknown) };
 }
 
+/** The dollar line under an ETH total, or nothing at all when there is no fresh quote to convert with. */
+function usdLine(eth: number, usdPerEth: number | null): string | undefined {
+  return usdPerEth === null ? undefined : `$${formatUsdFixed(eth * usdPerEth)}`;
+}
+
 /** Fee account balances as sampled counters, and fees per bucket from the history split by the floor in force at each block. */
-export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown" }: { snapshot: LiveSnapshot | null; series: Series | null; explorerUrl?: string; model?: PricerModel }) {
+export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown", nowMs }: { snapshot: LiveSnapshot | null; series: Series | null; explorerUrl?: string; model?: PricerModel; /** Wall clock of the page's ticker: what the quote's age is measured against. */ nowMs: number }) {
   const points = useMemo(() => (series ? buildChartPoints(series, model) : []), [series, model]);
+  // The same rule the live tiles follow: no quote, or one older than ten minutes, and the totals stay in ETH alone.
+  const usdPerEth = freshUsdPrice(snapshot?.ethUsd, nowMs);
   const totals = useMemo(() => (series ? feeTotals(series) : null), [series]);
   const [tableOpen, setTableOpen] = useState(false);
   const span = spanSeconds(points);
@@ -111,10 +118,10 @@ export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown" }: {
         {totals && series ? (
           <>
             <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
-              <Stat label={`Fees in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" />
-              <Stat label="Per day (est.)" value={formatSignificant(totals.perDay, 4)} unit="ETH" size="sm" />
-              <Stat label="Floor to infra" value={formatSignificant(totals.floorEth, 3)} unit="ETH" size="sm" />
-              <Stat label="Congestion to network" value={formatSignificant(totals.surplusEth, 3)} unit="ETH" size="sm" />
+              <Stat label={`Fees in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, usdPerEth)} />
+              <Stat label="Per day (est.)" value={formatSignificant(totals.perDay, 4)} unit="ETH" size="sm" hint={usdLine(totals.perDay, usdPerEth)} />
+              <Stat label="Floor to infra" value={formatSignificant(totals.floorEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.floorEth, usdPerEth)} />
+              <Stat label="Congestion to network" value={formatSignificant(totals.surplusEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.surplusEth, usdPerEth)} />
             </div>
             {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}; the floor and congestion totals leave them out.</p> : null}
           </>

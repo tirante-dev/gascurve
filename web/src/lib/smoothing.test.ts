@@ -12,6 +12,7 @@ import {
   drained,
   isShortWindow,
   SAWTOOTH_WINDOW_S,
+  sawtoothChart,
   sawtoothSamples,
   SHORT_WINDOW_S,
   signatureOf,
@@ -40,6 +41,7 @@ const snapshot: LiveSnapshot = {
   prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "379726000", perArbGasTotal: "399726000" },
   gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
   replayErrorBips: 2,
+  ethUsd: null,
 };
 
 /** A sawtooth: ten blocks a second each adding 4M, the drain landing at each second boundary. */
@@ -106,8 +108,8 @@ describe("averageBacklog and sawtoothSamples", () => {
   it("extracts the raw sawtooth over the last fifteen seconds, oldest first", () => {
     const samples = sawtoothSamples(blocks, 0, 1000);
     expect(samples).toHaveLength(150);
-    expect(samples[0]).toEqual({ number: 51, ts: 986, backlog: 4_000_000 });
-    expect(samples[samples.length - 1]).toEqual({ number: 200, ts: 1000, backlog: 40_000_000 });
+    expect(samples[0]).toEqual({ number: 51, ts: 986, gasUsed: 4_000_000, backlog: 4_000_000 });
+    expect(samples[samples.length - 1]).toEqual({ number: 200, ts: 1000, gasUsed: 4_000_000, backlog: 40_000_000 });
     // Within a second the backlog only climbs; at each boundary it falls.
     for (let i = 1; i < samples.length; i++) {
       if (samples[i].ts === samples[i - 1].ts) expect(samples[i].backlog).toBeGreaterThan(samples[i - 1].backlog);
@@ -116,6 +118,26 @@ describe("averageBacklog and sawtoothSamples", () => {
     expect(sawtoothSamples(blocks, 0, 1000, 1)).toHaveLength(10);
     expect(sawtoothSamples(blocks, 0, 950)).toEqual([]);
     expect(sawtoothSamples(blocks, 5, 1000)).toEqual([]);
+  });
+
+  it("places the sawtooth on a time axis and carries the trailing average with it", () => {
+    const samples = sawtoothSamples(blocks, 0, 1000);
+    const chart = sawtoothChart(samples, 1000);
+    expect(chart).toHaveLength(samples.length);
+    // The span reaches back a whole window and ends at the newest block: the
+    // ten blocks of a second are spread evenly across the second they belong to.
+    expect(chart[0].x).toBeCloseTo(-SAWTOOTH_WINDOW_S);
+    expect(chart[1].x).toBeCloseTo(-SAWTOOTH_WINDOW_S + 0.1);
+    expect(chart[chart.length - 1].x).toBeCloseTo(-0.1);
+    expect(chart.every((p, i) => i === 0 || p.x > chart[i - 1].x)).toBe(true);
+    expect(chart[chart.length - 1]).toMatchObject({ number: 200, gasUsed: 4_000_000, backlog: 40_000_000 });
+    // The average is the same 2 s per-block mean the card's figure shows.
+    expect(chart[chart.length - 1].average).toBe(averageBacklog(blocks, 0, 1000));
+    // The first sample has only its own second to average over.
+    expect(chart[0].average).toBe(4_000_000);
+    // A single block sits at the end of its own second, and its average is itself.
+    expect(sawtoothChart([{ number: 1, ts: 1000, gasUsed: 5, backlog: 7 }], 1000)).toEqual([{ x: -1, number: 1, ts: 1000, gasUsed: 5, backlog: 7, average: 7 }]);
+    expect(sawtoothChart([], 1000)).toEqual([]);
   });
 });
 

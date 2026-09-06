@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   bipsToMultiplier,
+  ETH_USD_MAX_AGE_MS,
+  formatUsdFixed,
+  freshUsdPrice,
   bipsToX,
   costWei,
   formatAgo,
@@ -328,5 +331,32 @@ describe("fixed-width formatters", () => {
     expect(formatGas(999_600_000)).toBe("1G");
     expect(formatGas(9_996_000)).toBe("10M");
     for (let g = 10e6; g < 100e6; g += 2.1e6) expect(formatGasFixed(g)).toHaveLength(5);
+  });
+  it("formats dollars at two decimals below a hundred and one above, so a band keeps its width", () => {
+    expect(formatUsdFixed(0.0352)).toBe("0.04");
+    expect(formatUsdFixed(0.2518)).toBe("0.25");
+    expect(formatUsdFixed(12.345)).toBe("12.35");
+    // The band is chosen after rounding, so a value that rounds up into the next band takes that band's decimals.
+    expect(formatUsdFixed(99.996)).toBe("100.0");
+    expect(formatUsdFixed(4_200)).toBe("4,200.0");
+    expect(formatUsdFixed(Number.NaN)).toBe("n/a");
+    expect(FIXED_WIDTH_CH.usd).toBe(6);
+    for (let d = 1; d < 100; d += 0.7) expect(formatUsdFixed(d)).toHaveLength(d < 10 ? 4 : 5);
+  });
+
+  it("only prices a fee in dollars with a fresh, usable quote", () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    const quote = (at: string, price = "4200.00") => ({ price, at, source: "coingecko" });
+    expect(freshUsdPrice(quote("2026-09-06T07:15:00Z"), now)).toBe(4200);
+    // Exactly at the cutoff the quote still counts; a second past it does not.
+    expect(ETH_USD_MAX_AGE_MS).toBe(600_000);
+    expect(freshUsdPrice(quote("2026-09-06T07:10:00Z"), now)).toBe(4200);
+    expect(freshUsdPrice(quote("2026-09-06T07:09:59Z"), now)).toBeNull();
+    // No quote, an unreadable timestamp, or a price that is not a positive number: back to ETH.
+    expect(freshUsdPrice(null, now)).toBeNull();
+    expect(freshUsdPrice(undefined, now)).toBeNull();
+    expect(freshUsdPrice(quote("not a date"), now)).toBeNull();
+    expect(freshUsdPrice(quote("2026-09-06T07:15:00Z", "0"), now)).toBeNull();
+    expect(freshUsdPrice(quote("2026-09-06T07:15:00Z", "not a price"), now)).toBeNull();
   });
 });

@@ -25,6 +25,7 @@ function snapshot(n: number, baseFee = "399726000", longBacklog = 11_194_391_810
     prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "0", perArbGasTotal: baseFee },
     gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
     replayErrorBips: 2,
+    ethUsd: null,
   };
 }
 

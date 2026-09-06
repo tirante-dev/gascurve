@@ -164,7 +164,7 @@ export function averageBacklog(
   return n > 0 ? sum / n : null;
 }
 
-export type SawtoothSample = { number: number; ts: number; backlog: number };
+export type SawtoothSample = { number: number; ts: number; gasUsed: number; backlog: number };
 
 /** The raw per-block backlog of one constraint over the last `seconds` timestamp seconds ending at `lastTs`, oldest first. */
 export function sawtoothSamples(blocks: readonly BlockPoint[], index: number, lastTs: number, seconds = SAWTOOTH_WINDOW_S): SawtoothSample[] {
@@ -174,9 +174,47 @@ export function sawtoothSamples(blocks: readonly BlockPoint[], index: number, la
     if (b.ts < from || b.ts > lastTs) continue;
     const v = b.backlogs[index];
     if (v === undefined) continue;
-    out.push({ number: b.number, ts: b.ts, backlog: v });
+    out.push({ number: b.number, ts: b.ts, gasUsed: b.gasUsed, backlog: v });
   }
   return out;
+}
+
+/**
+ * A sample placed on a time axis, in seconds before the end of the newest
+ * block's second: 0 is now and the span reaches back to minus the window.
+ * `average` is the same trailing mean the card's backlog figure shows, so the
+ * chart carries both the raw sawtooth and the number beside it.
+ */
+export type SawtoothPoint = { x: number; number: number; ts: number; gasUsed: number; backlog: number; average: number };
+
+/** Mean backlog over the samples of the `seconds` timestamp seconds ending with sample `i`, per block, as averageBacklog computes it. */
+function trailingMean(samples: readonly SawtoothSample[], i: number, seconds: number): number {
+  const from = samples[i].ts - seconds + 1;
+  let sum = 0;
+  let n = 0;
+  for (let j = i; j >= 0; j--) {
+    if (samples[j].ts < from) break;
+    sum += samples[j].backlog;
+    n++;
+  }
+  return sum / n;
+}
+
+/**
+ * The short-window chart's series. Blocks that share a timestamp are spread
+ * evenly across the second they belong to, so the sawtooth keeps its shape
+ * against a real time axis instead of stacking on one tick.
+ */
+export function sawtoothChart(samples: readonly SawtoothSample[], lastTs: number, averageSeconds = AVERAGE_WINDOW_S): SawtoothPoint[] {
+  const counts = new Map<number, number>();
+  for (const s of samples) counts.set(s.ts, (counts.get(s.ts) ?? 0) + 1);
+  const placed = new Map<number, number>();
+  return samples.map((s, i) => {
+    const k = placed.get(s.ts) ?? 0;
+    placed.set(s.ts, k + 1);
+    const n = counts.get(s.ts) ?? 1;
+    return { x: s.ts - lastTs - 1 + k / n, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog, average: trailingMean(samples, i, averageSeconds) };
+  });
 }
 
 /** A backlog paid down at `rate` gas per second for `seconds`, floored at zero. */

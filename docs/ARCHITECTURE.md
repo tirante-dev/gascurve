@@ -252,8 +252,8 @@ Client to server: `{ type: 'pong' }` and `{ type: 'subscribe', network: string }
 ## 8. Web (`web/`, Next.js App Router, TypeScript strict, Tailwind, Recharts, Vitest)
 
 ```
-src/app/                 layout, page (redirect to default network), [network]/page
-src/components/          LiveStrip, ConstraintCards, PricerEquation, Explainer, HistoryTabs, SeriesCharts,
+src/app/                 layout, page (redirect to default network), [network]/page, [network]/how-it-works/page
+src/components/          PageHeader, LiveStrip, ConstraintCards, PricerEquation, HowItWorks (Explainer + TaylorChart), HistoryTabs, SeriesCharts,
                          FeeFlows, L1Section, OwnerActionTimeline, NetworkSwitcher, DataFooter
 src/hooks/               useLive (WS + fallback), useSmoothedLive (250 ms render cadence, tweened values, one rAF loop), useSeries, useNetwork
 src/lib/api/             core.ts (fetch with timeout and retry), networks.ts, series.ts, live.ts, ws.ts

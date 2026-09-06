@@ -1,22 +1,31 @@
 import { act, render, screen, within } from "@testing-library/react";
+import { cloneElement, isValidElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { BlockPoint, LiveSnapshot, Network, OwnerAction } from "@/types";
 import { createFrameStore, targetValues } from "@/lib/smoothing";
 import { applyReorg } from "@/hooks/useLive";
-import { ConstraintCards, ConstraintCardsView, Sawtooth, sawtoothPoints } from "./ConstraintCards";
+import { backlogTicks, ConstraintCards, ConstraintCardsView, drainLabel, Sawtooth, sawtoothTooltipRows, secondsAgoLabel } from "./ConstraintCards";
+import { ChartTooltip } from "./ChartTooltip";
 import { DataFooter } from "./DataFooter";
-import { COLLECTOR_LAG_S, FeeSplitBar, LiveStrip, LiveStripView, sampleAge } from "./LiveStrip";
+import { COLLECTOR_LAG_S, CostTile, FeeSplitBar, LiveStrip, LiveStripView, sampleAge } from "./LiveStrip";
 import { HistoryTabs } from "./HistoryTabs";
 import { NetworkSwitcher } from "./NetworkSwitcher";
 import { OwnerActionTimeline } from "./OwnerActionTimeline";
 import { applyTheme, readTheme, ThemeToggle } from "./ThemeToggle";
 import { StatusPill } from "./primitives";
 
+// ResponsiveContainer measures its box, and jsdom has none: hand the chart a
+// fixed size instead, so recharts really lays its axes and marks out and the
+// tests can read them rather than only the frame around them.
 vi.mock("recharts", async (importOriginal) => {
   const original = await importOriginal<typeof import("recharts")>();
-  // ResponsiveContainer needs layout; render children in a fixed box under jsdom.
-  return { ...original, ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div style={{ width: 400, height: 100 }}>{children}</div> };
+  const Sized = ({ children }: { children: React.ReactNode }) => (
+    <div style={{ width: 400, height: 200 }}>
+      {isValidElement<{ width?: number; height?: number }>(children) ? cloneElement(children, { width: 400, height: 200 }) : children}
+    </div>
+  );
+  return { ...original, ResponsiveContainer: Sized };
 });
 
 const snapshot: LiveSnapshot = {
@@ -34,7 +43,9 @@ const snapshot: LiveSnapshot = {
   ],
   prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "379726000", perArbGasTotal: "399726000" },
   gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
+  // The shared fixture carries no quote, so the cost tiles read in ETH; the USD cases below supply their own.
   replayErrorBips: 2,
+  ethUsd: null,
 };
 
 /** Ten blocks a second for `seconds` seconds ending at `lastTs`, the short window climbing 4M a block and dropping at each boundary. */
@@ -130,6 +141,36 @@ describe("LiveStrip", () => {
     expect(screen.getByText("Since last block")).toBeInTheDocument();
     expect(screen.queryByText("13.4")).toBeNull();
   });
+  it("prices the transfer and swap tiles in dollars when the quote is fresh, keeping the ETH amount on hover and in the description", () => {
+    const priced = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:15:00Z", source: "coingecko" } };
+    render(<LiveStripView snapshot={priced} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    // 21,000 gas at 0.3997 gwei is 0.0000084 ETH: about four cents.
+    expect(screen.getByText("0.04")).toHaveStyle({ minWidth: "6ch" });
+    expect(screen.getByText("0.25")).toBeInTheDocument();
+    // The dollar sign is outside the reserved box, so a changing digit cannot move it.
+    expect(screen.getByText("0.04").previousSibling).toHaveTextContent("$");
+    // The ETH figure is never lost: hover and the accessible description both carry it.
+    expect(screen.getByTitle("0.00000839 ETH")).toBeInTheDocument();
+    expect(screen.getByText("0.04 US dollars, 0.00000839 ETH, at 4,200.0 dollars per ETH")).toBeInTheDocument();
+    expect(screen.queryByText("0.00000839")).toBeNull();
+  });
+  it("falls back to ETH when there is no quote at all and when the one there is has gone stale", () => {
+    // Eleven minutes old: past the ten minute cutoff, so the fee has moved on and the price has not.
+    const stale = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:09:00Z", source: "coingecko" } };
+    const { rerender } = render(<LiveStripView snapshot={stale} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(screen.getByText("0.00000839")).toHaveStyle({ minWidth: "10ch" });
+    expect(screen.queryByText("0.04")).toBeNull();
+    // And with no quote the tiles are exactly what they were before there was one.
+    rerender(<LiveStripView snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(screen.getByText("0.00000839")).toBeInTheDocument();
+    expect(screen.getByText("0.0000600")).toBeInTheDocument();
+  });
+  it("shows a cost tile in ETH without a price and in dollars with one", () => {
+    const { rerender } = render(<CostTile label="21k transfer" eth={0.0000084} usdPerEth={null} />);
+    expect(screen.getByText("0.00000840")).toBeInTheDocument();
+    rerender(<CostTile label="21k transfer" eth={0.0000084} usdPerEth={4200} />);
+    expect(screen.getByText("0.04")).toBeInTheDocument();
+  });
   it("measures the sample age from the wall clock", () => {
     expect(COLLECTOR_LAG_S).toBe(5);
     expect(sampleAge("2026-09-06T07:20:00Z", Date.parse("2026-09-06T07:20:07.9Z"))).toBeCloseTo(7.9);
@@ -150,18 +191,31 @@ describe("ConstraintCards", () => {
     // The 15 s window is short: averaged, with its note, but no sparkline until blocks arrive.
     expect(screen.getByText("Backlog (avg 2 s)")).toBeInTheDocument();
     expect(screen.getAllByText("Backlog")).toHaveLength(1);
-    expect(screen.getByText("drains 60M gas at each second boundary; bursts show as sawteeth")).toBeInTheDocument();
-    expect(screen.queryByRole("img", { name: /Backlog per block/ })).toBeNull();
+    expect(screen.getByText(/drains 60M\/s at each second boundary/)).toBeInTheDocument();
+    expect(screen.queryByRole("figure", { name: /backlog per block/ })).toBeNull();
     expect(screen.getByText(/Windows of 1 min or less are shown as a 2 s average/)).toBeInTheDocument();
     expect(screen.getByText("3.11M")).toBeInTheDocument();
     expect(screen.getByText("11.2T")).toBeInTheDocument();
   });
-  it("draws the raw sawtooth of a short window and shows the eased figures", () => {
+  it("charts the raw sawtooth of a short window against its drain threshold, and shows the eased figures", () => {
     const blocks = sawtoothBlocks(20, snapshot.block.ts);
     const values = { ...targetValues(snapshot, blocks, 0), backlogs: [22_000_000, 11_100_000_000_000], bips: [244.4, 32_118.5] };
     render(<ConstraintCardsView snapshot={snapshot} values={values} blocks={blocks} />);
-    const spark = screen.getByRole("img", { name: "Backlog per block over the last 15 s, 150 blocks, peak 40M gas" });
-    expect(spark.querySelector("polyline")?.getAttribute("points")).toBe(sawtoothPoints(values.backlogs.length > 0 ? blocks.slice(-150).map((b) => ({ number: b.number, ts: b.ts, backlog: b.backlogs[0] })) : []));
+    // The label names the span, the scale and the threshold, so the chart is
+    // readable without seeing it: the peak is 40M, the threshold 60M, and the
+    // axis tops out at the larger of the two.
+    const chart = screen.getByRole("figure", {
+      name: "Constraint 1 backlog per block over the last 15 s, 150 blocks, 0 to 60M gas, with the 2 s average and a dashed threshold at 60M gas: it drains 60M/s at each second boundary",
+    });
+    // Two thin lines: the per-block backlog and the 2 s average.
+    expect(chart.querySelectorAll("path.recharts-curve.recharts-line-curve")).toHaveLength(2);
+    // The y axis reads in gas with an M suffix, the x axis in seconds before now.
+    expect(within(chart).getByText("30M")).toBeInTheDocument();
+    expect(within(chart).getByText("60M")).toBeInTheDocument();
+    expect(within(chart).getByText("-15s")).toBeInTheDocument();
+    expect(within(chart).getByText("now")).toBeInTheDocument();
+    // And the threshold line carries its own label.
+    expect(within(chart).getByText("drains 60M/s at each second")).toBeInTheDocument();
     expect(screen.getByText("22.0M")).toBeInTheDocument();
     expect(screen.getByText("11.1T")).toBeInTheDocument();
     expect(screen.getByText("0.0244")).toBeInTheDocument();
@@ -190,13 +244,43 @@ describe("ConstraintCards", () => {
     rerender(<ConstraintCardsView snapshot={null} values={null} blocks={[]} resyncing />);
     expect(screen.getByText("Resyncing after a reorg.")).toBeInTheDocument();
   });
-  it("draws the sawtooth as a polyline scaled to its peak, or a blank with fewer than two samples", () => {
-    expect(sawtoothPoints([{ number: 1, ts: 1, backlog: 0 }, { number: 2, ts: 1, backlog: 50 }, { number: 3, ts: 1, backlog: 100 }])).toBe("0.0,31.0 100.0,16.0 200.0,1.0");
-    expect(sawtoothPoints([{ number: 1, ts: 1, backlog: 0 }])).toBe("0.0,31.0");
-    const { container, rerender } = render(<Sawtooth samples={[{ number: 1, ts: 1, backlog: 5 }]} color="red" />);
+  it("draws nothing until there are two samples, and scales the axis to the threshold when the backlog stays under it", () => {
+    const { container, rerender } = render(<Sawtooth samples={[{ number: 1, ts: 1, gasUsed: 1, backlog: 5 }]} color="red" target={60_000_000} index={0} />);
     expect(container.querySelector("svg")).toBeNull();
-    rerender(<Sawtooth samples={[{ number: 1, ts: 1, backlog: 5 }, { number: 2, ts: 1, backlog: 10 }]} color="red" />);
-    expect(container.querySelector("polyline")).toHaveAttribute("stroke", "red");
+    rerender(
+      <Sawtooth
+        samples={[
+          { number: 1, ts: 1, gasUsed: 4_000_000, backlog: 5_000_000 },
+          { number: 2, ts: 2, gasUsed: 4_000_000, backlog: 10_000_000 },
+        ]}
+        color="red"
+        target={60_000_000}
+        index={1}
+      />,
+    );
+    expect(screen.getByRole("figure", { name: /^Constraint 2 backlog per block/ })).toBeInTheDocument();
+    expect(container.querySelector("path.recharts-line-curve")).toHaveAttribute("stroke", "red");
+    // Ticks are zero, the midpoint and the top; the top is the threshold here because the backlog never reached it.
+    expect(backlogTicks(60_000_000)).toEqual([0, 30_000_000, 60_000_000]);
+    expect(drainLabel(60_000_000)).toBe("drains 60M/s at each second");
+  });
+  it("reads a hovered block out as its number, its gas and the backlog it left", () => {
+    const row = { number: 55_812_345, gasUsed: 4_021_130, backlog: 22_000_000, average: 21_000_000 };
+    render(
+      <ChartTooltip
+        active
+        payload={[{ payload: row, value: 1, name: "backlog", dataKey: "backlog", graphicalItemId: "backlog" }]}
+        label={-3.4}
+        title={secondsAgoLabel}
+        rows={sawtoothTooltipRows("red")}
+      />,
+    );
+    expect(screen.getByText("3.4 s ago")).toBeInTheDocument();
+    expect(screen.getByText("55,812,345")).toBeInTheDocument();
+    expect(screen.getByText("4.02M gas")).toBeInTheDocument();
+    expect(screen.getByText("22M gas")).toBeInTheDocument();
+    expect(screen.getByText("21M gas")).toBeInTheDocument();
+    expect(secondsAgoLabel(0)).toBe("now");
   });
 });
 

@@ -90,6 +90,7 @@ function snapshot(n: number, chainId = 4663, sampledAt = "2026-09-06T07:20:00Z")
     prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "1", perArbGasCongestion: "0", perArbGasTotal: "1" },
     gasPerSecond: { s10: 0, s60: 0 },
     replayErrorBips: 0,
+    ethUsd: null,
   };
 }
 

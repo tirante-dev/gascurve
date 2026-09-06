@@ -3,16 +3,14 @@
 import type { ReactNode } from "react";
 import type { LiveStatus } from "@/types";
 
-export function Section({ id, title, lede, children, aside }: { id: string; title: string; lede?: string; children: ReactNode; aside?: ReactNode }) {
+/** A titled section. The heading stands alone: sections carry no description line. */
+export function Section({ id, title, children, aside }: { id: string; title: string; children: ReactNode; aside?: ReactNode }) {
   return (
     <section id={id} className="vw-rule py-8 first:border-t-0" aria-labelledby={`${id}-title`}>
       <header className="mb-5 flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-        <div className="max-w-[65ch]">
-          <h2 id={`${id}-title`} className="vw-title text-lg font-bold tracking-tight text-ink" style={{ textWrap: "balance" }}>
-            {title}
-          </h2>
-          {lede ? <p className="mt-2 text-sm leading-relaxed text-ink-2">{lede}</p> : null}
-        </div>
+        <h2 id={`${id}-title`} className="vw-title max-w-[65ch] text-lg font-bold tracking-tight text-ink" style={{ textWrap: "balance" }}>
+          {title}
+        </h2>
         {aside}
       </header>
       {children}
