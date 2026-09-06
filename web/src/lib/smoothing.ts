@@ -1,7 +1,15 @@
 // The presentation layer of the live section, kept pure so the frame loop in
 // useSmoothedLive is only a scheduler: the render cadence, the tween that
-// eases every figure toward its sample, the drain projection for long windows
-// and the moving average for short ones.
+// eases the sampled figures, the drain projection for long windows and the
+// moving average for short ones.
+//
+// What is eased and what is derived: the backlogs are the state, so they are
+// what the tween moves. Each frame's per-constraint contributions and shares
+// are then computed from that frame's backlogs through the integer pricer, so
+// a card can never show a backlog beside a contribution that is not its own.
+// The constraint definition (the targets and windows) travels with the values
+// as a signature: when an owner replaces a set, even with one of the same
+// size, there is nothing to ease from and everything snaps.
 //
 // Why the short windows are averaged: nitro drains a backlog only when the
 // block timestamp advances. Within one wall-clock second every block adds its
@@ -29,6 +37,46 @@ export const SAWTOOTH_WINDOW_S = 15;
 export const TRANSFER_GAS = 21_000;
 export const SWAP_GAS = 150_000;
 
+/**
+ * What prices a snapshot: the constraint targets and windows, or the legacy
+ * parameters. Backlogs are the state that moves; this is the definition that
+ * turns them into an exponent, and it only changes when the owner changes it.
+ */
+export type PricingDefinition =
+  | { model: "constraints"; constraints: { target: number; window: number }[] }
+  | { model: "legacy"; legacy: { speedLimit: number; inertia: number; tolerance: number } };
+
+/** The definition a snapshot was priced under. A legacy snapshot without its parameters is read as an empty constraint set. */
+export function definitionOf(snapshot: Pick<LiveSnapshot, "model" | "constraints" | "legacy">): PricingDefinition {
+  if (snapshot.model === "legacy" && snapshot.legacy) {
+    const { speedLimit, inertia, tolerance } = snapshot.legacy;
+    return { model: "legacy", legacy: { speedLimit, inertia, tolerance } };
+  }
+  return { model: "constraints", constraints: snapshot.constraints.map((c) => ({ target: c.target, window: c.window })) };
+}
+
+/**
+ * A stable string for a definition. Two snapshots with the same signature
+ * price the same way, so their backlogs may be eased into one another; any
+ * other change (an owner replacing a set with one of the same size included)
+ * makes the old figures meaningless and has to snap.
+ */
+export function signatureOf(definition: PricingDefinition): string {
+  if (definition.model === "legacy") {
+    const l = definition.legacy;
+    return `legacy:${l.speedLimit}/${l.inertia}/${l.tolerance}`;
+  }
+  return `constraints:${definition.constraints.map((c) => `${c.target}/${c.window}`).join(",")}`;
+}
+
+/** The exponent contributions of `backlogs` under `definition`, through the integer pricer. A missing backlog counts as zero gas. */
+export function bipsFor(definition: PricingDefinition, backlogs: readonly number[]): number[] {
+  if (definition.model === "legacy") {
+    return [Number(legacyExponentBips(toLegacyState({ ...definition.legacy, backlog: backlogs[0] ?? 0 })))];
+  }
+  return contributionsBips(definition.constraints.map((c, i) => ({ target: c.target, window: c.window, backlog: backlogs[i] ?? 0 })));
+}
+
 /** Every number the live section animates, in display units (gwei, ETH, x), plus per-constraint arrays in snapshot order. */
 export type LiveValues = {
   baseFeeGwei: number;
@@ -41,9 +89,13 @@ export type LiveValues = {
   exponent: number;
   /** Per constraint: the drained projection for long windows, the 2 s average for short ones; the legacy backlog for the legacy model. */
   backlogs: number[];
-  /** Per constraint exponent contribution in bips, from `backlogs` through the integer pricer at the sample, then eased. */
+  /** Per constraint exponent contribution in bips, derived from `backlogs` through the integer pricer every frame, never eased on its own. */
   bips: number[];
+  /** Each constraint's share of the total, from those same bips. */
   shares: number[];
+  /** The definition `backlogs` are priced under, and its signature: the tween snaps whenever the signature changes. */
+  definition: PricingDefinition;
+  signature: string;
 };
 
 /** What the frame loop publishes each frame: the block ring, the eased values and the wall clock at the last cadence commit. */
@@ -84,9 +136,18 @@ export function isShortWindow(windowSeconds: number): boolean {
  * `seconds` timestamp seconds ending at `lastTs`, or null when the ring has
  * no block in that span (a polled feed carries no blocks). Blocks within one
  * second share a timestamp, so the window is whole seconds and the mean is
- * per block: every sample the collector took counts once.
+ * per block: every sample the collector took counts once. Blocks below
+ * `sinceBlock` are left out: they were priced under another constraint
+ * definition, and averaging across a definition change would mix two meanings
+ * of the same slot.
  */
-export function averageBacklog(blocks: readonly BlockPoint[], index: number, lastTs: number, seconds = AVERAGE_WINDOW_S): number | null {
+export function averageBacklog(
+  blocks: readonly BlockPoint[],
+  index: number,
+  lastTs: number,
+  seconds = AVERAGE_WINDOW_S,
+  sinceBlock = Number.NEGATIVE_INFINITY,
+): number | null {
   const from = lastTs - seconds + 1;
   let sum = 0;
   let n = 0;
@@ -94,6 +155,7 @@ export function averageBacklog(blocks: readonly BlockPoint[], index: number, las
     const b = blocks[i];
     if (b.ts > lastTs) continue;
     if (b.ts < from) break;
+    if (b.number < sinceBlock) continue;
     const v = b.backlogs[index];
     if (v === undefined) continue;
     sum += v;
@@ -126,10 +188,13 @@ export function drained(backlog: number, rate: number, seconds: number): number 
  * The values a snapshot asks the screen to show `elapsedS` seconds after it
  * was sampled: long windows keep draining at their target, short windows show
  * the 2 s average from the block ring (falling back to the sample when the
- * ring has nothing recent), bips and shares follow through the integer pricer.
+ * ring has nothing recent, and never reaching back past `sinceBlock`, the
+ * first block priced under the snapshot's definition), bips and shares follow
+ * from those backlogs through the integer pricer.
  */
-export function targetValues(snapshot: LiveSnapshot, blocks: readonly BlockPoint[], elapsedS: number): LiveValues {
+export function targetValues(snapshot: LiveSnapshot, blocks: readonly BlockPoint[], elapsedS: number, sinceBlock = Number.NEGATIVE_INFINITY): LiveValues {
   const fee = snapshot.baseFee;
+  const definition = definitionOf(snapshot);
   const base = {
     baseFeeGwei: weiToGweiNumber(fee),
     multiplier: snapshot.multiplierBips / 10_000,
@@ -138,17 +203,23 @@ export function targetValues(snapshot: LiveSnapshot, blocks: readonly BlockPoint
     transferEth: weiToEthNumber(costWei(TRANSFER_GAS, fee)),
     swapEth: weiToEthNumber(costWei(SWAP_GAS, fee)),
     exponent: snapshot.exponentBips / 10_000,
+    definition,
+    signature: signatureOf(definition),
   };
-  if (snapshot.model === "legacy" && snapshot.legacy) {
-    const backlog = drained(snapshot.legacy.backlog, snapshot.legacy.speedLimit, elapsedS);
-    const bips = [Number(legacyExponentBips(toLegacyState({ ...snapshot.legacy, backlog })))];
-    return { ...base, backlogs: [backlog], bips, shares: sharesOf(bips) };
+  if (definition.model === "legacy" && snapshot.legacy) {
+    const backlogs = [drained(snapshot.legacy.backlog, snapshot.legacy.speedLimit, elapsedS)];
+    return { ...base, backlogs, ...derived(definition, backlogs) };
   }
   const backlogs = snapshot.constraints.map((c, i) =>
-    isShortWindow(c.window) ? (averageBacklog(blocks, i, snapshot.block.ts) ?? c.backlog) : drained(c.backlog, c.target, elapsedS),
+    isShortWindow(c.window) ? (averageBacklog(blocks, i, snapshot.block.ts, AVERAGE_WINDOW_S, sinceBlock) ?? c.backlog) : drained(c.backlog, c.target, elapsedS),
   );
-  const bips = contributionsBips(snapshot.constraints.map((c, i) => ({ target: c.target, window: c.window, backlog: backlogs[i] })));
-  return { ...base, backlogs, bips, shares: sharesOf(bips) };
+  return { ...base, backlogs, ...derived(definition, backlogs) };
+}
+
+/** The bips and shares that follow from `backlogs`, so the two are never eased on their own. */
+function derived(definition: PricingDefinition, backlogs: readonly number[]): { bips: number[]; shares: number[] } {
+  const bips = bipsFor(definition, backlogs);
+  return { bips, shares: sharesOf(bips) };
 }
 
 /** Below this distance from the target the tween settles exactly, so an idle frame publishes nothing. */
@@ -169,18 +240,24 @@ export function approach(current: number, target: number, dtMs: number, tauMs = 
 }
 
 /**
- * Eases every figure of `current` toward `target` by `dtMs`. Returns `current`
- * itself when nothing moved, so callers can skip a publish; snaps to the
- * target when there is nothing to ease from or the constraint set changed shape.
+ * Eases every figure of `current` toward `target` by `dtMs`. Only primitives
+ * are eased: the backlogs are the state, and the bips and shares are computed
+ * from the eased backlogs through the integer pricer, so what a card shows as
+ * its contribution is always the contribution of the backlog beside it.
+ * Returns `current` itself when nothing moved, so callers can skip a publish;
+ * snaps to the target when there is nothing to ease from or the constraint
+ * definition changed (a signature change, which includes a replacement set of
+ * the same size).
  */
 export function tweenValues(current: LiveValues | null, target: LiveValues, dtMs: number, tauMs = TWEEN_TAU_MS): LiveValues {
-  if (!current || current.backlogs.length !== target.backlogs.length) return target;
+  if (!current || current.signature !== target.signature || current.backlogs.length !== target.backlogs.length) return target;
   let moved = false;
   const ease = (a: number, b: number): number => {
     const v = approach(a, b, dtMs, tauMs);
     if (v !== a) moved = true;
     return v;
   };
+  const backlogs = current.backlogs.map((v, i) => ease(v, target.backlogs[i]));
   const next: LiveValues = {
     baseFeeGwei: ease(current.baseFeeGwei, target.baseFeeGwei),
     multiplier: ease(current.multiplier, target.multiplier),
@@ -189,9 +266,10 @@ export function tweenValues(current: LiveValues | null, target: LiveValues, dtMs
     transferEth: ease(current.transferEth, target.transferEth),
     swapEth: ease(current.swapEth, target.swapEth),
     exponent: ease(current.exponent, target.exponent),
-    backlogs: current.backlogs.map((v, i) => ease(v, target.backlogs[i])),
-    bips: current.bips.map((v, i) => ease(v, target.bips[i])),
-    shares: current.shares.map((v, i) => ease(v, target.shares[i])),
+    backlogs,
+    definition: target.definition,
+    signature: target.signature,
+    ...derived(target.definition, backlogs),
   };
   return moved ? next : current;
 }

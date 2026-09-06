@@ -62,12 +62,26 @@ function inForce(s: Segment): (row: Record<string, unknown>) => boolean {
   return (row) => Number(row.constraintSetId) === s.setId;
 }
 
+/**
+ * True when `s` has a per-constraint contribution to show for the row: its
+ * set is in force and the split was recorded. A point with a known set but a
+ * null split has no per-constraint values at all, and zero is not one.
+ */
+function splitInForce(s: Segment): (row: Record<string, unknown>) => boolean {
+  return (row) => inForce(s)(row) && row.splitKnown === true && typeof row[s.key] === "number";
+}
+
+/** A nullable chart value: the number when it is one, "n/a" when it was never recorded. */
+function known(value: unknown, render: (v: number) => string): string {
+  return typeof value === "number" ? render(value) : "n/a";
+}
+
 /** "C1 0.0034 · C2 3.2391" for the set in force at the point, or the unknown-split note (set unknown, or split not recorded). */
 export function describeSplit(row: ChartPoint, segments: readonly Segment[]): string {
   if (!row.setKnown) return `${UNKNOWN_LABEL}: ${row.x.toFixed(4)}`;
   if (!row.splitKnown) return `${NULL_SPLIT_LABEL}: ${row.x.toFixed(4)}`;
   const own = segments.filter((s) => s.setId === row.constraintSetId);
-  return own.map((s) => `C${s.index + 1} ${(row[s.key] ?? 0).toFixed(4)}`).join(" · ");
+  return own.map((s) => `C${s.index + 1} ${known(row[s.key], (v) => v.toFixed(4))}`).join(" · ");
 }
 
 /** "0.1234" for a known fee part, "n/a" for one that predates the fee split. */
@@ -174,17 +188,33 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
     label: s.label,
     color: s.color,
     kind: "rect",
-    value: (r) => Number(r[s.key] ?? 0).toFixed(4),
-    when: inForce(s),
+    value: (r) => known(r[s.key], (v) => v.toFixed(4)),
+    when: splitInForce(s),
   }));
-  if (unknown) contributionRows.push({ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => Number(r[UNKNOWN_KEY] ?? 0).toFixed(4), when: (r) => r.setKnown === false });
-  if (unrecorded) contributionRows.push({ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => Number(r[UNKNOWN_KEY] ?? 0).toFixed(4), when: (r) => r.setKnown === true && r.splitKnown === false });
+  if (unknown) contributionRows.push({ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => known(r[UNKNOWN_KEY], (v) => v.toFixed(4)), when: (r) => r.setKnown === false });
+  if (unrecorded) contributionRows.push({ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => known(r[UNKNOWN_KEY], (v) => v.toFixed(4)), when: (r) => r.setKnown === true && r.splitKnown === false });
   contributionRows.push({ label: "x total", value: (r) => Number(r.x).toFixed(4) });
   const gasRows: TooltipRow[] = [{ label: "gas per second", color: "var(--series-1)", value: (r) => `${formatGas(Number(r.gps))} gas/s` }];
   indices.forEach((i) => gasRows.push({ label: `target C${i + 1} in force`, color: seriesColor(i), value: (r) => `${formatGas(Number(r[targetKey(i)]))} gas/s`, when: (r) => typeof r[targetKey(i)] === "number" }));
   const backlogRowsFor = (i: number): TooltipRow[] => [
-    ...segments.filter((s) => s.index === i).map((s): TooltipRow => ({ label: `backlog ${s.label}`, color: s.color, value: (r) => `${formatGas(Number(r[s.backlogKey] ?? 0))} gas`, when: inForce(s) })),
-    ...(unknown ? [{ label: `backlog C${i + 1} (set unknown)`, color: UNKNOWN_COLOR, value: (r: Record<string, unknown>) => `${formatGas(Number(r[unknownBacklogKey(i)] ?? 0))} gas`, when: (r: Record<string, unknown>) => r.setKnown === false && typeof r[unknownBacklogKey(i)] === "number" }] : []),
+    ...segments
+      .filter((s) => s.index === i)
+      .map((s): TooltipRow => ({
+        label: `backlog ${s.label}`,
+        color: s.color,
+        value: (r) => known(r[s.backlogKey], (v) => `${formatGas(v)} gas`),
+        when: (r) => inForce(s)(r) && typeof r[s.backlogKey] === "number",
+      })),
+    ...(unknown
+      ? [
+          {
+            label: `backlog C${i + 1} (set unknown)`,
+            color: UNKNOWN_COLOR,
+            value: (r: Record<string, unknown>) => known(r[unknownBacklogKey(i)], (v) => `${formatGas(v)} gas`),
+            when: (r: Record<string, unknown>) => r.setKnown === false && typeof r[unknownBacklogKey(i)] === "number",
+          },
+        ]
+      : []),
   ];
   const backlogRows: TooltipRow[] = indices.flatMap(backlogRowsFor);
   const contributionLegend = [

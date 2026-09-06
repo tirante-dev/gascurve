@@ -1,12 +1,12 @@
 "use client";
 
 import type { TooltipContentProps } from "recharts";
-import { Swatch } from "./primitives";
+import { Swatch, type SwatchKind } from "./primitives";
 
 export type TooltipRow = {
   label: string;
   color?: string;
-  kind?: "rect" | "line";
+  kind?: SwatchKind;
   value: (row: Record<string, unknown>) => string;
   /** Rows that do not apply to the hovered point (another constraint set) are hidden. */
   when?: (row: Record<string, unknown>) => boolean;

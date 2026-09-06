@@ -138,7 +138,7 @@ With `ws_url` the follower starts on the timer, pauses timer sampling once the `
 3. Replay each block through the pricer. When the sampled state's block number equals a replayed block, overwrite the backlogs with the sampled values (`anchored = true`) so drift never accumulates.
 4. Upsert `blocks`, fold into `buckets` (1m, 15m, 1h), insert `state_samples`, update `networks.head_block`, `NOTIFY`.
 
-Slow loop, every `collector.slow_interval` (60 s): L1 pricer getters (`getL1BaseFeeEstimate`, `getL1PricingSurplus`, `getL1FeesAvailable`, `getL1PricingUnitsSinceUpdate`, `getLastL1PricingUpdateTime`, `getL1PricingEquilibrationUnits`, `getPerBatchGasCharge`, `getL1RewardRate`), fee-account balances (`ArbOwnerPublic.getInfraFeeAccount/getNetworkFeeAccount`, `ArbGasInfo.getL1RewardRecipient`, `eth_getBalance`), `eth_getLogs` on `0x…70` for new `OwnerActs` since the cursor, batch-report scan of new 2-transaction blocks, pruning.
+Slow loop, every `collector.slow_interval` (60 s): the ETH/USD spot from `collector.eth_usd_source` (default Coinbase's public spot endpoint, no key; disable with an empty value), stored in `collector_state` and included in every snapshot until it is older than `collector.eth_usd_max_age` (default 10 m); L1 pricer getters (`getL1BaseFeeEstimate`, `getL1PricingSurplus`, `getL1FeesAvailable`, `getL1PricingUnitsSinceUpdate`, `getLastL1PricingUpdateTime`, `getL1PricingEquilibrationUnits`, `getPerBatchGasCharge`, `getL1RewardRate`), fee-account balances (`ArbOwnerPublic.getInfraFeeAccount/getNetworkFeeAccount`, `ArbGasInfo.getL1RewardRecipient`, `eth_getBalance`), `eth_getLogs` on `0x…70` for new `OwnerActs` since the cursor, batch-report scan of new 2-transaction blocks, pruning.
 
 Backfill job (resumable, checkpoint in `collector_state`): walks backwards from the first stored block to `collector.backfill_depth` fetching headers, replaying from the nearest earlier `constraint_sets` row (starting backlogs from the owner action), and writing buckets only. Runs at low priority inside the same budget (it yields whenever the fast loop needs calls). On `archive: true` networks it re-anchors backlogs from historical state every `backfill_anchor_interval` blocks and records the replay error observed just before each anchor.
 
@@ -195,6 +195,7 @@ type LiveSnapshot = {
          lastUpdateAt: string; equilibrationUnits: number; perBatchGasCharge: number; rewardRate: number };
   accounts?: { infra: Account; network: Account; l1Reward: Account };
   replayErrorBips: number;                 // |predicted - actual| for the latest block
+  ethUsd: { price: string; at: string; source: string } | null;   // ETH/USD spot fetched by the collector's slow loop (server side, never the browser), null when unavailable or stale
 }
 type Account = { address: string; balance: string }
 

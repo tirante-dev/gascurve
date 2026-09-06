@@ -6,6 +6,7 @@ import { AVERAGE_WINDOW_S, isShortWindow, SAWTOOTH_WINDOW_S, sawtoothSamples, SH
 import type { BlockPoint, Constraint, LegacyParams, LiveSnapshot } from "@/types";
 import { constraintGauge, contributionRampStep, legacyGauge, seriesColor } from "@/utils/chart";
 import { FIXED_WIDTH_CH, formatDuration, formatGas, formatGasFixed, formatInteger, formatPercent, formatSecondsOfTarget } from "@/utils/format";
+import { RESYNC_COPY, WAITING_COPY } from "./LiveStrip";
 import { Card, Figure, Label, Swatch } from "./primitives";
 
 /** A meter whose fill carries magnitude on the sequential ramp; the track is an inset of the surface. */
@@ -165,22 +166,22 @@ function LegacyCard({ legacy, backlog, bips }: { legacy: LegacyParams; backlog: 
   );
 }
 
-const MOTION_NOTE = "Figures ease toward each sample over about 300 ms. Long windows keep draining at their target rate between samples and x is recomputed from them, so the numbers, shares and gauges stay consistent.";
+const MOTION_NOTE = "Figures ease toward each sample over about 300 ms. Long windows keep draining at their target rate between samples, and x and the shares are recomputed from each frame's backlogs, so the numbers, shares and gauges stay consistent. An owner action that changes the constraints snaps everything: the old figures no longer mean anything under the new definition.";
 const SAWTOOTH_NOTE = `Windows of ${formatDuration(SHORT_WINDOW_S)} or less are shown as a ${AVERAGE_WINDOW_S} s average: nitro pays a backlog down only when the block timestamp advances, so within one second every block adds gas and the whole second's drain lands at once. The raw sparkline shows that sawtooth.`;
 
 /** One card per constraint, subscribed to the frame store: the figures move every frame, the page around them does not. */
 export function ConstraintCards({ live }: { live: SmoothedLive }) {
   const frame = useLiveFrame(live.frame);
-  return <ConstraintCardsView snapshot={live.display} values={frame.values} blocks={frame.blocks} />;
+  return <ConstraintCardsView snapshot={live.display} values={frame.values} blocks={frame.blocks} resyncing={live.resyncing} />;
 }
 
 /** The cards with everything they show as plain props; until the first frame has eased values the sample stands in. */
-export function ConstraintCardsView({ snapshot, values, blocks }: { snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[] }) {
+export function ConstraintCardsView({ snapshot, values, blocks, resyncing = false }: { snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[]; resyncing?: boolean }) {
   const samples = useMemo(() => {
     if (!snapshot || snapshot.model === "legacy") return [];
     return snapshot.constraints.map((c, i) => (isShortWindow(c.window) ? sawtoothSamples(blocks, i, snapshot.block.ts) : null));
   }, [snapshot, blocks]);
-  if (!snapshot) return <p className="text-sm text-ink-2">Waiting for the first sample.</p>;
+  if (!snapshot) return <p className="text-sm text-ink-2">{resyncing ? RESYNC_COPY : WAITING_COPY}</p>;
   const v = values ?? targetValues(snapshot, blocks, 0);
   if (snapshot.model === "legacy" && snapshot.legacy) {
     return (

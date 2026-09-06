@@ -1,5 +1,6 @@
 // Pure helpers that turn api shapes into what the charts draw.
 
+import { saturatingCastToBips, saturatingUMul, toUint64 } from "@/lib/pricer";
 import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesPoint } from "@/types";
 import { formatDuration, formatGas, weiToEthNumber, weiToGweiNumber } from "./format";
 
@@ -311,7 +312,10 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
     for (let i = 0; i < slots; i++) row[unknownBacklogKey(i)] = null;
     if (own) {
       for (const s of own) {
-        row[s.key] = split ? bipsToXValue(split[s.index] ?? 0) : null;
+        // A split that was never recorded stays null: zero would read as a
+        // constraint that contributed nothing, which is a different fact.
+        const contribution = split ? split[s.index] : undefined;
+        row[s.key] = contribution === undefined ? null : bipsToXValue(contribution);
         row[s.backlogKey] = p.backlogs[s.index] ?? null;
         if (s.constraint) row[targetKey(s.index)] = s.constraint.target;
       }
@@ -363,11 +367,28 @@ export function withSetBoundaries(rows: readonly ChartPoint[]): ChartPoint[] {
 /** The most tick marks a gauge draws, whatever its scale; a billion windows must not become a billion elements. */
 export const MAX_GAUGE_MARKS = 24;
 
-/** `numerator / denominator` as a finite, non-negative fraction; zero for a zero or non-finite denominator. */
-export function safeFraction(numerator: number, denominator: number): number {
-  if (!(denominator > 0) || !Number.isFinite(denominator) || !Number.isFinite(numerator)) return 0;
-  const f = numerator / denominator;
-  return Number.isFinite(f) && f > 0 ? f : 0;
+/** The largest integer a double represents exactly; above it a ratio is taken in BigInt instead. */
+const MAX_EXACT = BigInt(Number.MAX_SAFE_INTEGER);
+/** Fixed-point scale for ratios of uint64-scale integers. */
+const FRACTION_SCALE = 1_000_000_000_000n;
+
+/**
+ * `numerator / denominator` as a bounded, non-negative fraction, computed on
+ * integers. Both sides divide exactly as doubles in every ordinary case;
+ * above 2^53 the ratio is taken in BigInt at a fixed scale, so a uint64-scale
+ * threshold keeps its meaning instead of being rounded away. Only the bounded
+ * result becomes a number.
+ */
+export function bigFraction(numerator: bigint, denominator: bigint): number {
+  if (denominator <= 0n || numerator <= 0n) return 0;
+  if (numerator <= MAX_EXACT && denominator <= MAX_EXACT) return Number(numerator) / Number(denominator);
+  return Number((numerator * FRACTION_SCALE) / denominator) / Number(FRACTION_SCALE);
+}
+
+/** Ceiling of `a / b` for non-negative integers; one for an empty numerator or denominator. */
+function ceilScale(a: bigint, b: bigint): bigint {
+  if (a <= 0n || b <= 0n) return 1n;
+  return (a + b - 1n) / b;
 }
 
 /**
@@ -383,12 +404,19 @@ export function gaugeMarks(scale: number, max = MAX_GAUGE_MARKS): number[] {
   return out;
 }
 
-/** What a constraint's backlog gauge spans: `scale` windows of target, marks at each window boundary. */
+/**
+ * What a constraint's backlog gauge spans: `scale` windows of target, marks at
+ * each window boundary. The window of target is the pricer's own divisor,
+ * `SaturatingUMul(window, target)` cast into bips, so a uint64-scale parameter
+ * that saturates in nitro saturates here too and the gauge cannot promise a
+ * free region the pricer does not give.
+ */
 export function constraintGauge(c: { target: number; window: number }, backlog: number): { scale: number; fraction: number; marks: number[]; denominator: number } {
-  const denominator = c.target * c.window;
-  const x = safeFraction(backlog, denominator);
-  const scale = Math.max(1, Math.ceil(x));
-  return { scale, fraction: x / scale, marks: gaugeMarks(scale), denominator };
+  const denominator = saturatingCastToBips(saturatingUMul(toUint64(c.window), toUint64(c.target)));
+  if (denominator <= 0n) return { scale: 1, fraction: 0, marks: [], denominator: 0 };
+  const gas = toUint64(backlog);
+  const scale = ceilScale(gas, denominator);
+  return { scale: Number(scale), fraction: bigFraction(gas, denominator * scale), marks: gaugeMarks(Number(scale)), denominator: Number(denominator) };
 }
 
 export type LegacyGauge = {
@@ -403,25 +431,32 @@ export type LegacyGauge = {
 };
 
 /**
- * The legacy gauge. With a tolerance the span is a whole number of tolerance
- * thresholds (at least two, so the threshold sits inside the bar) and the
- * single mark is the threshold. With zero tolerance there is no free region:
- * the span is whole units of x (inertia times speed limit) with a mark at
- * each, like a constraint gauge. Zero inertia or speed limit gives an empty
- * gauge rather than NaN.
+ * The legacy gauge. Both thresholds are the pricer's own: the free region is
+ * the tolerance threshold `tolerance * speedLimit` as a plain uint64 multiply
+ * that wraps exactly as nitro's does (a wrapped threshold of zero therefore
+ * shows no free region, as the pricer charges from the first unit of gas),
+ * and the unit of x is the saturating `inertia * speedLimit` cast into bips.
+ * With a free region the span is a whole number of thresholds (at least two,
+ * so the threshold sits inside the bar) and the single mark is the threshold.
+ * Without one the span is whole units of x with a mark at each, like a
+ * constraint gauge. Zero inertia or speed limit gives an empty gauge rather
+ * than NaN.
  */
 export function legacyGauge(legacy: { speedLimit: number; inertia: number; tolerance: number }, backlog: number): LegacyGauge {
-  const free = legacy.tolerance * legacy.speedLimit;
-  const unit = legacy.inertia * legacy.speedLimit;
-  if (free > 0 && Number.isFinite(free)) {
-    const scale = Math.max(2, Math.ceil(safeFraction(backlog, free)) + 1);
-    const span = free * scale;
-    return { free, unit, span, fraction: safeFraction(backlog, span), marks: [1 / scale] };
+  const speedLimit = toUint64(legacy.speedLimit);
+  const free = BigInt.asUintN(64, toUint64(legacy.tolerance) * speedLimit);
+  const unit = saturatingCastToBips(saturatingUMul(toUint64(legacy.inertia), speedLimit));
+  const gas = toUint64(backlog);
+  if (free > 0n) {
+    const scale = ceilScale(gas, free) + (gas > 0n ? 1n : 0n);
+    const bounded = scale < 2n ? 2n : scale;
+    const span = free * bounded;
+    return { free: Number(free), unit: Number(unit), span: Number(span), fraction: bigFraction(gas, span), marks: [1 / Number(bounded)] };
   }
-  if (unit > 0 && Number.isFinite(unit)) {
-    const scale = Math.max(1, Math.ceil(safeFraction(backlog, unit)));
+  if (unit > 0n) {
+    const scale = ceilScale(gas, unit);
     const span = unit * scale;
-    return { free: 0, unit, span, fraction: safeFraction(backlog, span), marks: gaugeMarks(scale) };
+    return { free: 0, unit: Number(unit), span: Number(span), fraction: bigFraction(gas, span), marks: gaugeMarks(Number(scale)) };
   }
   return { free: 0, unit: 0, span: 0, fraction: 0, marks: [] };
 }

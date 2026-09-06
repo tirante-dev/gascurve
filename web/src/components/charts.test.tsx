@@ -14,6 +14,7 @@ vi.mock("@/lib/api/batches", () => ({ getBatches: (...args: unknown[]) => getBat
 vi.mock("@/lib/api/l1", () => ({ getL1: (...args: unknown[]) => getL1Mock(...args) }));
 
 import { ChartTooltip } from "./ChartTooltip";
+import { HATCH_SPACING, HATCH_STROKE, HatchPattern } from "./primitives";
 import { targetValues } from "@/lib/smoothing";
 import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
@@ -188,6 +189,31 @@ describe("SeriesCharts", () => {
     fireEvent.change(slider, { target: { value: "1" } });
     expect(screen.queryByText("unknown split (total x, split not recorded)", { selector: "dt" })).toBeNull();
   });
+
+  it("never reads a null split as a zero contribution, and never contradicts itself in the same readout", () => {
+    // A bucket whose set is known but whose per-constraint split was never
+    // recorded: the tooltip and the inspector may say that, and must not also
+    // list each constraint at 0.0000.
+    const unrecorded = point({ t: 1788679140, exponentBips: 10_000, constraintBips: null, backlogs: [1, 2], backlogsMax: [1, 2], constraintSetId: 5, minBaseFee: "100000000", baseFeeMin: "100000000", baseFeeAvg: "100000000", baseFeeMax: "100000000" });
+    render(<SeriesCharts series={{ ...series, points: [unrecorded, ...series.points] }} loading={false} model="constraints" />);
+    const slider = screen.getByRole("slider", { name: /Select a bucket/ });
+    fireEvent.change(slider, { target: { value: "0" } });
+    expect(screen.getByText("unknown split (total x, split not recorded)", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.queryByText("C1 · 60M/s · 15 s · set 5 (from block 10)", { selector: "dt" })).toBeNull();
+    expect(screen.queryByText("C2 · 30M/s · 24 h · set 5 (from block 10)", { selector: "dt" })).toBeNull();
+    expect(screen.queryByText("0.0000", { selector: "dd" })).toBeNull();
+    // The bucket next to it, with a recorded split, still lists every constraint.
+    fireEvent.change(slider, { target: { value: "1" } });
+    expect(screen.getByText("C1 · 60M/s · 15 s · set 5 (from block 10)", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.queryByText("unknown split (total x, split not recorded)", { selector: "dt" })).toBeNull();
+  });
+
+  it("hides a tooltip row whose value was never recorded rather than showing it as zero", () => {
+    const segments = segmentsFor(series, "constraints");
+    const [row] = buildChartPoints({ ...series, points: [{ ...series.points[0], constraintBips: null }] }, "constraints");
+    // describeSplit is the same readout in the data table: no zeroes invented.
+    expect(describeSplit({ ...row, splitKnown: true }, segments)).toBe("C1 n/a · C2 n/a");
+  });
 });
 
 describe("ChartTooltip", () => {
@@ -267,6 +293,29 @@ describe("FeeFlows", () => {
     expect(within(rows[3]).queryByText("n/a")).toBeNull();
     expect(within(details).getAllByText("n/a")).toHaveLength(4);
   });
+  it("draws the unknown series as a hatch in the chart and the same hatch in its legend", () => {
+    const mixed: Series = { ...series, points: [point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }), ...series.points] };
+    render(<FeeFlows snapshot={snapshot} series={mixed} model="constraints" />);
+    const item = screen.getByText("unknown split (predates the fee split)", { selector: "li span" }).closest("li") as HTMLLIElement;
+    const swatch = item.querySelector("span[aria-hidden]") as HTMLElement;
+    // The legend carries the pattern, not a solid square: the association with
+    // the hatched area does not depend on colour alone.
+    expect(swatch.style.backgroundImage).toContain("repeating-linear-gradient(45deg");
+    expect(swatch.style.background).not.toBe("var(--ink-3)");
+    // The chart fills with the same pattern component, at the same geometry.
+    const { container } = render(
+      <svg>
+        <HatchPattern id="fee-unsplit-hatch" color="var(--ink-3)" />
+      </svg>,
+    );
+    const line = container.querySelector("#fee-unsplit-hatch line") as SVGLineElement;
+    // Full strength: the 55% opaque hatch composited below 3:1 on the light chart surface.
+    expect(line.getAttribute("stroke-opacity")).toBeNull();
+    expect(line.getAttribute("stroke-width")).toBe(String(HATCH_STROKE));
+    expect(swatch.style.backgroundImage).toContain(`${HATCH_STROKE}px`);
+    expect(swatch.style.backgroundImage).toContain(`${HATCH_SPACING}px`);
+  });
+
   it("shows no unknown-split legend or footnote when every bucket carries the split", () => {
     render(<FeeFlows snapshot={snapshot} series={series} model="constraints" />);
     expect(screen.queryByText(/predate the fee split/)).toBeNull();

@@ -278,11 +278,15 @@ describe("useLive", () => {
       [12, "7"],
     ]);
     expect(result.current.reorgs).toBe(1);
-    // The snapshot is untouched until the tick that follows; new blocks build on the canonical tail.
-    expect(result.current.snapshot?.block.number).toBe(12);
+    // The snapshot was taken on an orphaned block, so it goes with the blocks
+    // it was priced on: the feed reports itself resyncing rather than showing
+    // a canonical ring under an orphan snapshot.
+    expect(result.current.snapshot).toBeNull();
+    expect(result.current.resyncing).toBe(true);
     act(() => socket.serverMessage({ type: "tick", data: snapshot(13) }));
     act(() => socket.serverMessage({ type: "blocks", data: [block(13)] }));
     expect(result.current.snapshot?.block.number).toBe(13);
+    expect(result.current.resyncing).toBe(false);
     expect(result.current.recentBlocks.map((b) => b.number)).toEqual([9, 10, 11, 12, 13]);
     // Another chain's reorg is not this feed's.
     act(() => socket.serverMessage({ type: "reorg", data: { chainId: 42161, ancestor: 1, blocks: [] } }));
@@ -291,6 +295,57 @@ describe("useLive", () => {
     // A new hello starts the count over.
     act(() => socket.serverHello("robinhood", 4663, 20, [block(20)]));
     expect(result.current.reorgs).toBe(0);
+  });
+
+  it("keeps a snapshot the reorg does not orphan, and never shows a canonical ring under an orphan sample", async () => {
+    const { result } = renderHook(() => useLive("robinhood"));
+    await flush();
+    const socket = latest();
+    act(() => socket.serverOpen());
+    act(() => socket.serverHello("robinhood", 4663, 10, [block(9), block(10), block(11)]));
+    // The ancestor is at or above the sampled block: the sample is still
+    // canonical, so the last canonical state stays on screen.
+    act(() => socket.serverMessage({ type: "reorg", data: { chainId: 4663, ancestor: 10, blocks: [block(11)] } }));
+    expect(result.current.snapshot?.block.number).toBe(10);
+    expect(result.current.resyncing).toBe(false);
+    expect(result.current.reorgs).toBe(1);
+    // A deeper one does orphan it, and a poll result clears the resync too.
+    act(() => socket.serverMessage({ type: "reorg", data: { chainId: 4663, ancestor: 8, blocks: [block(9)] } }));
+    expect(result.current.snapshot).toBeNull();
+    expect(result.current.resyncing).toBe(true);
+    expect(result.current.recentBlocks.map((b) => b.number)).toEqual([9]);
+    getLiveMock.mockResolvedValue(snapshot(9));
+    act(() => socket.serverDrop());
+    await flush();
+    expect(result.current.snapshot?.block.number).toBe(9);
+    expect(result.current.resyncing).toBe(false);
+  });
+
+  it("keeps live owner actions across a same-chain hello and drops the ones a reorg orphans", async () => {
+    const { result, rerender } = renderHook(({ network }) => useLive(network), { initialProps: { network: "robinhood" } });
+    await flush();
+    const socket = latest();
+    act(() => socket.serverOpen());
+    act(() => socket.serverHello("robinhood", 4663, 12, [block(12)]));
+    act(() => socket.serverMessage({ type: "owner_action", data: { block: 8, method: "setSpeedLimit" } }));
+    act(() => socket.serverMessage({ type: "owner_action", data: { block: 12, method: "setMinimumL2BaseFee" } }));
+    expect(result.current.ownerActions.map((a) => a.block)).toEqual([12, 8]);
+    // A reconnect to the same chain: the hello carries no owner actions, so
+    // the ones seen over the socket must survive it.
+    getLiveMock.mockResolvedValue(snapshot(12));
+    act(() => socket.serverDrop());
+    await flush(1000);
+    const second = latest();
+    act(() => second.serverOpen());
+    act(() => second.serverHello("robinhood", 4663, 13, [block(13)]));
+    expect(result.current.ownerActions.map((a) => a.block)).toEqual([12, 8]);
+    // A reorg below block 12 orphans that action; the one at block 8 stands.
+    act(() => second.serverMessage({ type: "reorg", data: { chainId: 4663, ancestor: 10, blocks: [block(11)] } }));
+    expect(result.current.ownerActions.map((a) => a.block)).toEqual([8]);
+    // Another chain starts empty.
+    rerender({ network: "arbitrum-one" });
+    act(() => second.serverHello("arbitrum-one", 42161, 1, [block(1)]));
+    expect(result.current.ownerActions).toEqual([]);
   });
 
   it("keeps the feed when the route moves between a chain id and the network's name", async () => {

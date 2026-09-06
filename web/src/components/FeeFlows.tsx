@@ -6,16 +6,25 @@ import type { LiveSnapshot, PricerModel, Series } from "@/types";
 import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL } from "@/utils/chart";
 import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, shortAddress } from "@/utils/format";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
-import { Card, ChartFrame, Label, Legend, Stat } from "./primitives";
+import { Card, ChartFrame, HatchPattern, Label, Legend, Stat } from "./primitives";
 
 const FLOOR_FILL = "var(--seq-2)";
 const SURPLUS_FILL = "var(--seq-8)";
-/** The hatch that fills buckets whose destination split predates the record: muted ink, never a destination colour. */
+/**
+ * The hatch that fills buckets whose destination split predates the record:
+ * muted ink, never a destination colour, drawn at full strength so the lines
+ * clear 3:1 against the chart surface in both themes.
+ */
 const UNSPLIT_PATTERN_ID = "fee-unsplit-hatch";
 
 /** "0.1234" for a known part, "n/a" for one that predates the fee split. */
 function formatPart(eth: number | null): string {
   return eth === null ? "n/a" : formatSignificant(eth, 4);
+}
+
+/** A nullable ETH field of a chart row: never coerced to zero. */
+function ethCell(value: unknown): string {
+  return typeof value === "number" ? `${formatSignificant(value, 4)} ETH` : "n/a";
 }
 
 /** "3 buckets predate the fee split", singular when it is one. */
@@ -67,13 +76,15 @@ export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown" }: {
   const legend = [
     { label: "floor to infra", color: FLOOR_FILL },
     { label: "congestion to network", color: SURPLUS_FILL },
-    ...(unsplit ? [{ label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR }] : []),
+    // The unknown series is drawn as a hatch, so its swatch is the same hatch:
+    // the legend has to carry the pattern, not only the colour.
+    ...(unsplit ? [{ label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR, kind: "hatch" as const }] : []),
   ];
   const tooltipRows: TooltipRow[] = [
     { label: "fees in bucket", value: (r) => `${formatSignificant(Number(r.feesEth), 4)} ETH` },
-    { label: "floor to infra", color: FLOOR_FILL, kind: "rect", value: (r) => `${formatSignificant(Number(r.floorFeesEth), 4)} ETH`, when: (r) => r.unsplitFeesEth === null },
-    { label: "congestion to network", color: SURPLUS_FILL, kind: "rect", value: (r) => `${formatSignificant(Number(r.surplusFeesEth), 4)} ETH`, when: (r) => r.unsplitFeesEth === null },
-    { label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => `${formatSignificant(Number(r.unsplitFeesEth), 4)} ETH`, when: (r) => r.unsplitFeesEth !== null },
+    { label: "floor to infra", color: FLOOR_FILL, kind: "rect", value: (r) => ethCell(r.floorFeesEth), when: (r) => r.unsplitFeesEth === null },
+    { label: "congestion to network", color: SURPLUS_FILL, kind: "rect", value: (r) => ethCell(r.surplusFeesEth), when: (r) => r.unsplitFeesEth === null },
+    { label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR, kind: "hatch", value: (r) => ethCell(r.unsplitFeesEth), when: (r) => r.unsplitFeesEth !== null },
     { label: "floor in force", value: (r) => `${formatSignificant(Number(r.floor), 3)} gwei` },
   ];
 
@@ -119,9 +130,7 @@ export function FeeFlows({ snapshot, series, explorerUrl, model = "unknown" }: {
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={points} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
                     <defs>
-                      <pattern id={UNSPLIT_PATTERN_ID} width={6} height={6} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                        <line x1={0} y1={0} x2={0} y2={6} stroke={UNKNOWN_COLOR} strokeWidth={2} strokeOpacity={0.55} />
-                      </pattern>
+                      <HatchPattern id={UNSPLIT_PATTERN_ID} color={UNKNOWN_COLOR} />
                     </defs>
                     <CartesianGrid vertical={false} />
                     <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />

@@ -54,7 +54,7 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
             </dd>
           </dl>
           <p className="mt-3 text-[11px] font-medium uppercase tracking-[0.1em] text-label">
-            <a href="https://tirante.dev" target="_blank" rel="noopener noreferrer" className="hover:text-accent-2">
+            <a href="https://tirante.dev" target="_blank" rel="noopener noreferrer" className="hover:text-accent-2-text">
               powered by tirante.dev
             </a>
           </p>

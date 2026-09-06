@@ -111,18 +111,72 @@ export function formatGasFixed(gas: number): string {
 }
 
 /**
+ * A non-negative finite number as a plain decimal string, never in exponent
+ * notation: the shortest representation that round-trips, with the point
+ * moved for the exponent. This is the string the value reads as, which is
+ * what the rounding below has to work on.
+ */
+function plainDecimal(abs: number): string {
+  const text = abs.toString();
+  const parts = /^(\d*)(?:\.(\d*))?e([+-]?\d+)$/i.exec(text);
+  if (!parts) return text;
+  const digits = (parts[1] ?? "") + (parts[2] ?? "");
+  const point = (parts[1] ?? "").length + Number(parts[3]);
+  // JavaScript only prints an exponent below 1e-6 or at 1e21 and above, so
+  // the point always lands outside the digits, never inside them.
+  if (point <= 0) return `0.${"0".repeat(-point)}${digits}`;
+  return digits + "0".repeat(Math.max(0, point - digits.length));
+}
+
+/** A digit string plus one, carrying left and growing at the front when every digit was a nine. */
+function increment(digits: string): string {
+  const out = digits.split("");
+  for (let i = out.length - 1; i >= 0; i--) {
+    if (out[i] === "9") {
+      out[i] = "0";
+      continue;
+    }
+    out[i] = String(Number(out[i]) + 1);
+    return out.join("");
+  }
+  return `1${out.join("")}`;
+}
+
+/**
+ * `value` rounded half away from zero to `decimals` places, as an unsigned
+ * decimal string. The rounding runs on the decimal representation as a scaled
+ * integer, so a literal that sits a fraction below the decimal half in binary
+ * (9.9995 is stored as 9.99949999...) still rounds the way it is written, and
+ * a tie never depends on which side of the half the double landed.
+ */
+export function roundDecimal(value: number, decimals: number): string {
+  if (!Number.isFinite(value)) return "n/a";
+  const plain = plainDecimal(Math.abs(value));
+  const dot = plain.indexOf(".");
+  const int = dot < 0 ? plain : plain.slice(0, dot);
+  const frac = dot < 0 ? "" : plain.slice(dot + 1);
+  if (frac.length <= decimals) return decimals === 0 ? int : `${int}.${frac.padEnd(decimals, "0")}`;
+  const kept = int + frac.slice(0, decimals);
+  const digits = frac.charCodeAt(decimals) >= "5".charCodeAt(0) ? increment(kept) : kept;
+  const split = digits.length - decimals;
+  const rounded = digits.slice(0, split);
+  return decimals === 0 ? rounded : `${rounded}.${digits.slice(split)}`;
+}
+
+/**
  * A number with the decimals its magnitude band prescribes. The band is
  * chosen after rounding ("9.9996" rounds to "10.000" in the 1 to 10 band, so
  * it takes the 10 to 100 band's "10.00" instead), so every value in a band has
- * the same character count. Thousands separators apply above 1000.
+ * the same character count. Rounding is decimal, not binary, so an exact half
+ * as written rounds up. Thousands separators apply above 1000.
  */
 function fixedByBand(value: number, decimals: (abs: number) => number): string {
   if (!Number.isFinite(value)) return "n/a";
   const abs = Math.abs(value);
-  let d = decimals(abs);
-  const rounded = Number(abs.toFixed(d));
-  if (decimals(rounded) !== d) d = decimals(rounded);
-  const text = abs.toFixed(d);
+  const d = decimals(abs);
+  const first = roundDecimal(abs, d);
+  const rounded = Number(first);
+  const text = decimals(rounded) === d ? first : roundDecimal(abs, decimals(rounded));
   const dot = text.indexOf(".");
   const int = dot < 0 ? text : text.slice(0, dot);
   const sign = value < 0 && rounded !== 0 ? "-" : "";

@@ -238,6 +238,108 @@ describe("useSmoothedLive", () => {
     expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.4);
   });
 
+  it("snaps and stops averaging across a constraint definition change", () => {
+    // A short window, so the displayed backlog is the 2 s average of the ring.
+    const ring = [block(1, 1000, [4_000_000]), block(2, 1000, [8_000_000])];
+    const before = shortOnly(1);
+    const { result, rerender } = renderHook(({ s, blocks }) => useSmoothedLive({ snapshot: s, recentBlocks: blocks }), { initialProps: { s: before, blocks: ring } });
+    runFrame(16);
+    let t = 16;
+    for (let i = 0; i < 400; i++) runFrame((t += 16));
+    expect(result.current.frame.get().values?.backlogs[0]).toBe(6_000_000);
+    // The owner replaces the constraint with another of the same shape but a
+    // different window. Nothing eases into it, and the average does not reach
+    // back over blocks priced under the old definition.
+    const after: LiveSnapshot = { ...before, block: { ...before.block, number: 3 }, constraints: [{ ...before.constraints[0], window: 30, backlog: 1_000_000 }] };
+    clock = t;
+    rerender({ s: after, blocks: [...ring, block(3, 1000, [20_000_000])] });
+    // The new sample commits at the next cadence, and takes its definition with it.
+    runFrame((t += 250));
+    const values = result.current.frame.get().values;
+    // Block 3 is the only one known to be priced under the new definition.
+    expect(values?.backlogs[0]).toBe(20_000_000);
+    expect(values?.bips).toEqual(targetValues(after, [block(3, 1000, [20_000_000])], 0).bips);
+    // Later blocks under the same definition join the average again.
+    rerender({ s: after, blocks: [...ring, block(3, 1000, [20_000_000]), block(4, 1000, [30_000_000])] });
+    for (let i = 0; i < 400; i++) runFrame((t += 16));
+    expect(result.current.frame.get().values?.backlogs[0]).toBe(25_000_000);
+  });
+
+  it("consumes the fresh flag only for a sample that arrived after the reorg", () => {
+    const { result, rerender } = renderHook(({ s, reorgs }) => useSmoothedLive({ snapshot: s, recentBlocks: [], reorgs }), { initialProps: { s: snapshot(1), reorgs: 0 } });
+    runFrame(16);
+    // A tick lands inside the cadence window, then the reorg that orphans it
+    // arrives. That pending sample must not be committed as the fresh one.
+    clock = 32;
+    const orphan = snapshot(2, "800000000");
+    rerender({ s: orphan, reorgs: 0 });
+    rerender({ s: orphan, reorgs: 1 });
+    runFrame(48);
+    expect(result.current.display?.block.number).toBe(1);
+    // The tick that follows the reorg is the fresh one: shown at once, snapped.
+    clock = 64;
+    rerender({ s: snapshot(3, "400000000"), reorgs: 1 });
+    runFrame(80);
+    expect(result.current.display?.block.number).toBe(3);
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.4);
+  });
+
+  it("clears the display for a reorg that orphaned the snapshot and says it is resyncing", () => {
+    const { result, rerender } = renderHook(({ s, reorgs, resyncing }) => useSmoothedLive({ snapshot: s, recentBlocks: [], reorgs, resyncing }), {
+      initialProps: { s: snapshot(1) as LiveSnapshot | null, reorgs: 0, resyncing: false },
+    });
+    runFrame(16);
+    expect(result.current.display?.block.number).toBe(1);
+    expect(result.current.resyncing).toBe(false);
+    // useLive drops the orphaned snapshot with the ring it was priced on.
+    rerender({ s: null, reorgs: 1, resyncing: true });
+    expect(result.current.display).toBeNull();
+    expect(result.current.resyncing).toBe(true);
+    expect(result.current.frame.get().values).toBeNull();
+    clock = 32;
+    rerender({ s: snapshot(4, "800000000"), reorgs: 1, resyncing: false });
+    runFrame(48);
+    expect(result.current.display?.block.number).toBe(4);
+    expect(result.current.resyncing).toBe(false);
+    // Nothing was eased from the orphan: the canonical tick is shown as it is.
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.8);
+  });
+
+  it("follows a reduced-motion preference that changes while the page is open", () => {
+    const listeners = new Set<() => void>();
+    let matches = false;
+    vi.stubGlobal("matchMedia", () => ({
+      get matches() {
+        return matches;
+      },
+      addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+    }));
+    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: [] }), { initialProps: { s: snapshot(1) } });
+    runFrame(16);
+    clock = 16;
+    rerender({ s: snapshot(2, "800000000") });
+    runFrame(300);
+    // Motion is allowed: the figure eases toward the new sample.
+    const eased = result.current.frame.get().values?.baseFeeGwei ?? 0;
+    expect(eased).toBeGreaterThan(0.399726);
+    expect(eased).toBeLessThan(0.8);
+    // The preference changes while the loop runs; the next frame respects it.
+    matches = true;
+    act(() => listeners.forEach((listener) => listener()));
+    runFrame(316);
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.8);
+    // And back again: the tween resumes without restarting the loop.
+    matches = false;
+    act(() => listeners.forEach((listener) => listener()));
+    clock = 320;
+    rerender({ s: snapshot(3, "400000000") });
+    runFrame(600);
+    const back = result.current.frame.get().values?.baseFeeGwei ?? 0;
+    expect(back).toBeGreaterThan(0.4);
+    expect(back).toBeLessThan(0.8);
+  });
+
   it("reads the store with useLiveFrame", () => {
     const store = createFrameStore({ nowMs: 1 });
     const { result } = renderHook(() => useLiveFrame(store));

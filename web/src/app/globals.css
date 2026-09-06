@@ -12,6 +12,13 @@
   assigned in fixed order and never cycled; --floor and --marker are the two
   accents in chart roles; --seq-N is one sequential ramp, lavender to magenta
   to orange, monotone in lightness, with a per-step ink that clears AA.
+
+  Cyan comes in two tokens. --accent-2 is the graphical cyan: marks, rules,
+  glows, focus rings and the chart floor line, where 3:1 is the bar.
+  --accent-2-text is the one text and links use, dark enough to clear 4.5:1
+  as normal text on --page, --surface and --surface-2 in both themes. Text
+  never takes --accent-2, and the wordmark gradient ends on the text token
+  because 18px bold is normal text, not large.
 */
 :root {
   color-scheme: light;
@@ -30,6 +37,7 @@
   --axis: rgba(192, 24, 154, 0.3);
   --accent: #c0189a;
   --accent-2: #0a86a0;
+  --accent-2-text: #0b6f85;
   --accent-ink: #ffffff;
   --focus: #0a86a0;
   --floor: #0a86a0;
@@ -68,7 +76,7 @@
   --seq-ink-9: #ffffff;
 
   --sunset-text: linear-gradient(100deg, #c0189a 0%, #c25415 55%, #8a6200 100%);
-  --chrome-text: linear-gradient(90deg, #c0189a 0%, #5e36cc 55%, #0a86a0 100%);
+  --chrome-text: linear-gradient(90deg, #c0189a 0%, #5e36cc 55%, #0b6f85 100%);
   --chrome-rule: linear-gradient(90deg, transparent 0%, rgba(192, 24, 154, 0.7) 25%, rgba(10, 134, 160, 0.8) 50%, rgba(192, 24, 154, 0.7) 75%, transparent 100%);
   --horizon-line: rgba(192, 24, 154, 0.2);
   --horizon-sun: rgba(255, 138, 61, 0.3);
@@ -97,6 +105,7 @@
     --axis: rgba(255, 79, 216, 0.35);
     --accent: #ff4fd8;
     --accent-2: #2ee6ff;
+    --accent-2-text: #2ee6ff;
     --accent-ink: #14062e;
     --focus: #2ee6ff;
     --floor: #2ee6ff;
@@ -160,6 +169,7 @@
   --axis: rgba(255, 79, 216, 0.35);
   --accent: #ff4fd8;
   --accent-2: #2ee6ff;
+  --accent-2-text: #2ee6ff;
   --accent-ink: #14062e;
   --focus: #2ee6ff;
   --floor: #2ee6ff;
@@ -220,6 +230,7 @@
   --color-grid: var(--grid);
   --color-accent: var(--accent);
   --color-accent-2: var(--accent-2);
+  --color-accent-2-text: var(--accent-2-text);
   --color-accent-ink: var(--accent-ink);
   --color-focus: var(--focus);
   --color-good: var(--good);

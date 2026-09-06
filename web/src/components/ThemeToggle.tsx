@@ -16,10 +16,20 @@ export function readTheme(): ThemeChoice {
   }
 }
 
-export function applyTheme(choice: ThemeChoice): void {
+/** Stamps `choice` on the root element. The pre-paint script in the layout does the same thing for the first render. */
+export function stampTheme(choice: ThemeChoice): void {
   const root = document.documentElement;
   if (choice === "system") root.removeAttribute("data-theme");
   else root.setAttribute("data-theme", choice);
+}
+
+/** Applies whatever is stored now, without writing it back: what another tab's change means for this document. */
+export function syncTheme(): void {
+  stampTheme(readTheme());
+}
+
+export function applyTheme(choice: ThemeChoice): void {
+  stampTheme(choice);
   try {
     if (choice === "system") window.localStorage.removeItem(THEME_STORAGE_KEY);
     else window.localStorage.setItem(THEME_STORAGE_KEY, choice);
@@ -31,10 +41,18 @@ export function applyTheme(choice: ThemeChoice): void {
 
 function subscribe(onChange: () => void): () => void {
   listeners.add(onChange);
-  window.addEventListener("storage", onChange);
+  // Another tab's change reaches this document as a storage event: the page
+  // has to take the new choice on before the control reports it, or the
+  // button would name a theme the page is not wearing.
+  const onStorage = (event: StorageEvent) => {
+    if (event.key !== null && event.key !== THEME_STORAGE_KEY) return;
+    syncTheme();
+    onChange();
+  };
+  window.addEventListener("storage", onStorage);
   return () => {
     listeners.delete(onChange);
-    window.removeEventListener("storage", onChange);
+    window.removeEventListener("storage", onStorage);
   };
 }
 
@@ -56,7 +74,7 @@ export function ThemeToggle() {
       aria-label={`Theme: ${choice}. Switch to ${next}`}
       title={`Switch to ${next} theme`}
     >
-      <span className="text-accent-2" aria-hidden="true">
+      <span className="text-accent-2-text" aria-hidden="true">
         {GLYPH[choice]}
       </span>
       theme: {choice}

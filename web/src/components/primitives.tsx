@@ -76,14 +76,48 @@ export function StatusPill({ status }: { status: LiveStatus }) {
   );
 }
 
-export function Swatch({ color, kind = "rect" }: { color: string; kind?: "rect" | "line" }) {
+/** The hatch geometry, shared by the chart pattern and its legend swatch so the two are the same mark. */
+export const HATCH_SPACING = 6;
+export const HATCH_STROKE = 2;
+
+export type SwatchKind = "rect" | "line" | "hatch";
+
+/**
+ * The hatch a chart fills an unknown series with. Drawn at full strength: a
+ * translucent hatch composites to about 2.2:1 on the light chart surface,
+ * under the 3:1 a non-text mark needs. Its legend swatch repeats the same
+ * geometry, so the association does not rest on colour alone.
+ */
+export function HatchPattern({ id, color }: { id: string; color: string }) {
+  return (
+    <pattern id={id} width={HATCH_SPACING} height={HATCH_SPACING} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1={0} y1={0} x2={0} y2={HATCH_SPACING} stroke={color} strokeWidth={HATCH_STROKE} />
+    </pattern>
+  );
+}
+
+export function Swatch({ color, kind = "rect" }: { color: string; kind?: SwatchKind }) {
   if (kind === "line") {
     return <span className="inline-block h-0.5 w-4 rounded-full align-middle" style={{ background: color }} aria-hidden="true" />;
+  }
+  if (kind === "hatch") {
+    // The same 45 degree hatch the chart fills with, at the same spacing, so
+    // the legend carries the pattern and not only the colour.
+    return (
+      <span
+        className="inline-block h-2.5 w-2.5 rounded-[2px] align-middle"
+        style={{
+          backgroundImage: `repeating-linear-gradient(45deg, ${color} 0, ${color} ${HATCH_STROKE}px, transparent ${HATCH_STROKE}px, transparent ${HATCH_SPACING}px)`,
+          boxShadow: `inset 0 0 0 1px ${color}`,
+        }}
+        aria-hidden="true"
+      />
+    );
   }
   return <span className="inline-block h-2.5 w-2.5 rounded-[2px] align-middle" style={{ background: color }} aria-hidden="true" />;
 }
 
-export function Legend({ items }: { items: { label: string; color: string; kind?: "rect" | "line" }[] }) {
+export function Legend({ items }: { items: { label: string; color: string; kind?: SwatchKind }[] }) {
   return (
     <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-2">
       {items.map((item) => (

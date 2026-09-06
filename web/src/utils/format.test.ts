@@ -25,6 +25,7 @@ import {
   formatUtcOffset,
   formatZone,
   formatX,
+  roundDecimal,
   secondsOfTarget,
   shortAddress,
   shortHash,
@@ -234,6 +235,39 @@ describe("fixed-width formatters", () => {
     expect(formatGweiFixed(0)).toBe("0.0000");
     expect(formatGweiFixed(-0.5)).toBe("-0.5000");
     expect(formatGweiFixed(Number.NaN)).toBe("n/a");
+  });
+
+  it("rounds an exact decimal half up, whichever side of it the double landed on", () => {
+    // 9.9995 is stored as 9.99949999...: binary rounding would show 9.999 and
+    // keep the 1 to 10 band. The decimal it reads as rounds to 10.00.
+    expect(formatGweiFixed(9.9995)).toBe("10.00");
+    expect(formatGweiFixed(99.995)).toBe("100.0");
+    expect(formatGweiFixed(0.00005)).toBe("0.0001");
+    expect(formatGweiFixed(0.99995)).toBe("1.000");
+    // The band a value lands in is decided after that rounding, so the
+    // character count of a band never depends on the tie.
+    expect(formatGweiFixed(9.9995)).toHaveLength(5);
+    expect(formatGweiFixed(9.99949)).toBe("9.999");
+    expect(formatMultiplierFixed(1.005)).toBe("1.01");
+    expect(formatGasPerSecondFixed(9_950_000)).toBe("10.0");
+  });
+
+  it("rounds decimal strings as scaled integers, in and out of exponent notation", () => {
+    expect(roundDecimal(9.9995, 3)).toBe("10.000");
+    expect(roundDecimal(0.5, 0)).toBe("1");
+    expect(roundDecimal(0.4999, 0)).toBe("0");
+    expect(roundDecimal(-9.9995, 3)).toBe("10.000");
+    expect(roundDecimal(1.5, 4)).toBe("1.5000");
+    expect(roundDecimal(12, 0)).toBe("12");
+    // Exponent notation on both sides of the point.
+    expect(roundDecimal(5e-7, 7)).toBe("0.0000005");
+    expect(roundDecimal(5e-7, 6)).toBe("0.000001");
+    expect(roundDecimal(1e21, 0)).toBe("1000000000000000000000");
+    expect(roundDecimal(9.995e-5, 6)).toBe("0.000100");
+    // A carry that runs through every nine grows the integer part.
+    expect(roundDecimal(9.9999, 3)).toBe("10.000");
+    expect(roundDecimal(99.9999, 2)).toBe("100.00");
+    expect(roundDecimal(Number.NaN, 2)).toBe("n/a");
   });
 
   it("keeps one character count within every gwei band", () => {

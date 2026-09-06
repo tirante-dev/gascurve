@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { constraintExponentBips, legacyExponentBips, naturalToBips, saturatingCastToBips, saturatingUMul, toLegacyState } from "@/lib/pricer";
 import type { Series, SeriesPoint } from "@/types";
 import {
   backlogKey,
@@ -24,7 +25,7 @@ import {
   MARKER_COLOR,
   resampleBatches,
   resampleFees,
-  safeFraction,
+  bigFraction,
   segmentsFor,
   seriesColor,
   seriesCount,
@@ -531,13 +532,15 @@ describe("gauges", () => {
     expect(gaugeMarks(Number.NaN)).toEqual([]);
     expect(gaugeMarks(0)).toEqual([]);
   });
-  it("guards zero and non-finite denominators", () => {
-    expect(safeFraction(3, 4)).toBe(0.75);
-    expect(safeFraction(1, 0)).toBe(0);
-    expect(safeFraction(Number.NaN, 1)).toBe(0);
-    expect(safeFraction(-1, 2)).toBe(0);
-    expect(safeFraction(1, Number.POSITIVE_INFINITY)).toBe(0);
-    expect(safeFraction(Number.POSITIVE_INFINITY, 1)).toBe(0);
+  it("takes ratios on integers, exactly below 2^53 and in BigInt above it", () => {
+    expect(bigFraction(3n, 4n)).toBe(0.75);
+    expect(bigFraction(1n, 0n)).toBe(0);
+    expect(bigFraction(0n, 4n)).toBe(0);
+    expect(bigFraction(-1n, 2n)).toBe(0);
+    // Two uint64-scale integers whose ratio a double could not hold apart.
+    const max = (1n << 64n) - 1n;
+    expect(bigFraction(max / 4n, max)).toBeCloseTo(0.25, 9);
+    expect(bigFraction(max, max)).toBe(1);
   });
   it("lays out a constraint gauge in whole windows of target", () => {
     // Target 1, window 1, backlog a billion: a billion windows, but only a handful of marks.
@@ -549,6 +552,21 @@ describe("gauges", () => {
     expect(two).toEqual({ scale: 2, fraction: 1, marks: [0.5], denominator: 900_000_000 });
     expect(constraintGauge({ target: 60_000_000, window: 15 }, 450_000_000).fraction).toBe(0.5);
     expect(constraintGauge({ target: 0, window: 15 }, 5)).toEqual({ scale: 1, fraction: 0, marks: [], denominator: 0 });
+    expect(constraintGauge({ target: 60_000_000, window: 15 }, 0)).toEqual({ scale: 1, fraction: 0, marks: [], denominator: 900_000_000 });
+  });
+  it("takes the window of target from the pricer, saturating as nitro does", () => {
+    // target × window overflows uint64: the pricer's divisor saturates at
+    // MaxUint64 and the gauge spans that, not an unbounded float product.
+    const target = 2 ** 63;
+    const maxInt64 = (1n << 63n) - 1n;
+    const gauge = constraintGauge({ target, window: 4 }, target);
+    // Unbounded float arithmetic would have made this 3.7e19; the pricer's
+    // divisor saturates at MaxUint64 and is cast into int64 bips.
+    expect(target * 4).toBeGreaterThan(Number(maxInt64));
+    expect(gauge.denominator).toBe(Number(maxInt64));
+    expect(gauge.fraction).toBeCloseTo(0.5, 6);
+    // The same numbers through the pricer: that saturated divisor is the one it divides by.
+    expect(constraintExponentBips({ target: BigInt(target), window: 4n, backlog: BigInt(target) })).toBe(naturalToBips(BigInt(target)) / saturatingCastToBips(saturatingUMul(4n, BigInt(target))));
   });
   it("lays out the legacy gauge, including zero tolerance", () => {
     expect(legacyGauge({ speedLimit: 7_000_000, inertia: 102, tolerance: 10 }, 90_000_000)).toEqual({ free: 70_000_000, unit: 714_000_000, span: 210_000_000, fraction: 90 / 210, marks: [1 / 3] });
@@ -562,5 +580,24 @@ describe("gauges", () => {
     expect(legacyGauge({ speedLimit: 7_000_000, inertia: 0, tolerance: 0 }, 5)).toEqual({ free: 0, unit: 0, span: 0, fraction: 0, marks: [] });
     expect(legacyGauge({ speedLimit: 0, inertia: 102, tolerance: 10 }, 5)).toEqual({ free: 0, unit: 0, span: 0, fraction: 0, marks: [] });
     expect(legacyGauge({ speedLimit: 1, inertia: 1, tolerance: 0 }, 1_000_000_000).marks.length).toBeLessThanOrEqual(MAX_GAUGE_MARKS);
+  });
+  it("wraps the legacy tolerance threshold exactly as the pricer does, so a wrapped threshold shows no free gas", () => {
+    // tolerance × speedLimit wraps to zero in uint64: the pricer charges from
+    // the first unit of gas, so the gauge must not promise a free region.
+    const speedLimit = 2 ** 63;
+    const legacy = { speedLimit, inertia: 102, tolerance: 2 };
+    const state = toLegacyState({ ...legacy, backlog: 1_000_000_000 });
+    expect(BigInt.asUintN(64, state.tolerance * state.speedLimit)).toBe(0n);
+    // Float arithmetic would have shown a free region of 1.8e19 gas where the
+    // pricer has none: every unit of gas above zero is priced.
+    expect(legacy.tolerance * legacy.speedLimit).toBeGreaterThan(1e19);
+    expect(legacyExponentBips({ ...state, backlog: 0n })).toBe(0n);
+    expect(legacyExponentBips({ ...state, backlog: (1n << 63n) })).toBeGreaterThan(0n);
+    const gauge = legacyGauge(legacy, 1_000_000_000);
+    expect(gauge.free).toBe(0);
+    // The unit of x saturates into int64 bips, as the pricer's denominator does.
+    expect(gauge.unit).toBe(Number(saturatingCastToBips(saturatingUMul(102n, BigInt(speedLimit)))));
+    expect(gauge.fraction).toBeGreaterThan(0);
+    expect(gauge.fraction).toBeLessThanOrEqual(1);
   });
 });

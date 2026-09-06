@@ -22,6 +22,8 @@ export type LiveState = {
   ownerActions: OwnerAction[];
   /** Reorgs applied to this feed since its hello; a change means the ring's tail was replaced. */
   reorgs: number;
+  /** True while a reorg has orphaned the snapshot and the canonical tick has not arrived. */
+  resyncing: boolean;
   error: string | null;
 };
 
@@ -38,10 +40,11 @@ type Feed = {
   networkInfo: Network | null;
   ownerActions: OwnerAction[];
   reorgs: number;
+  resyncing: boolean;
 };
 
 function emptyFeed(key: NetworkKey | null): Feed {
-  return { key, snapshot: null, recentBlocks: [], networkInfo: null, ownerActions: [], reorgs: 0 };
+  return { key, snapshot: null, recentBlocks: [], networkInfo: null, ownerActions: [], reorgs: 0, resyncing: false };
 }
 
 /** True when the feed belongs to the keyed network: chain ids are the identity, names are aliases. */
@@ -94,7 +97,9 @@ export function isNewerSnapshot(prev: LiveSnapshot | null, next: LiveSnapshot): 
  * by the network the server confirmed with a hello (name and chain id), so
  * switching shows an empty feed until the new hello arrives, a late message for
  * the previous network is never shown under the new one, and moving between a
- * chain-id route and its name keeps the feed.
+ * chain-id route and its name keeps the feed. A reorg repairs the ring, the
+ * snapshot and the live owner actions in one step, so what is on screen is
+ * always one consistent chain.
  */
 export function useLive(network: string): LiveState {
   const [feed, setFeed] = useState<Feed>(() => emptyFeed(null));
@@ -119,17 +124,43 @@ export function useLive(network: string): LiveState {
         network: wantedNetwork.current,
         socketFactory,
         onHello: (hello, key) => {
-          setFeed({ key, snapshot: hello.snapshot, recentBlocks: appendBlocks([], hello.recentBlocks), networkInfo: hello.network, ownerActions: [], reorgs: 0 });
+          setFeed((prev) => ({
+            key,
+            snapshot: hello.snapshot,
+            recentBlocks: appendBlocks([], hello.recentBlocks),
+            networkInfo: hello.network,
+            // A hello carries no owner actions, so a reconnect to the same
+            // chain keeps the live ones rather than erasing what was seen
+            // since the page loaded; another chain starts empty.
+            ownerActions: feedIs(prev, key) ? prev.ownerActions : [],
+            reorgs: 0,
+            resyncing: false,
+          }));
           setError(null);
         },
         onReorg: (reorg, key) => {
           setFeed((prev) => {
             const base = feedIs(prev, key) ? prev : emptyFeed(key);
-            return { ...base, key, recentBlocks: applyReorg(base.recentBlocks, reorg.ancestor, reorg.blocks), reorgs: base.reorgs + 1 };
+            // The ring repair and the snapshot move together: a sample taken
+            // on an orphaned block is not a valid origin to ease from, so it
+            // goes with the blocks it was priced on and the feed reports
+            // itself resyncing until the canonical tick lands. Owner actions
+            // above the ancestor are orphaned too; the page revalidates the
+            // REST list so persisted results are replaced as well.
+            const orphaned = base.snapshot !== null && base.snapshot.block.number > reorg.ancestor;
+            return {
+              ...base,
+              key,
+              recentBlocks: applyReorg(base.recentBlocks, reorg.ancestor, reorg.blocks),
+              snapshot: orphaned ? null : base.snapshot,
+              ownerActions: base.ownerActions.filter((a) => a.block <= reorg.ancestor),
+              reorgs: base.reorgs + 1,
+              resyncing: orphaned,
+            };
           });
         },
         onTick: (tick, key) => {
-          setFeed((prev) => ({ ...(feedIs(prev, key) ? prev : emptyFeed(key)), key, snapshot: tick }));
+          setFeed((prev) => ({ ...(feedIs(prev, key) ? prev : emptyFeed(key)), key, snapshot: tick, resyncing: false }));
           setError(null);
         },
         onBlocks: (blocks, key) => {
@@ -190,7 +221,7 @@ export function useLive(network: string): LiveState {
           // The route parameter stands in for the name until a hello supplies the canonical one.
           const key: NetworkKey = { name: prev.key && feedMatches(prev, network) ? prev.key.name : network, chainId: next.chainId };
           const base = feedMatches(prev, network) ? prev : emptyFeed(key);
-          return isNewerSnapshot(base.snapshot, next) ? { ...base, key, snapshot: next } : base;
+          return isNewerSnapshot(base.snapshot, next) ? { ...base, key, snapshot: next, resyncing: false } : base;
         });
         setError(null);
       } catch (err: unknown) {
@@ -209,6 +240,15 @@ export function useLive(network: string): LiveState {
 
   return useMemo(() => {
     const current = feedMatches(feed, network) ? feed : emptyFeed(null);
-    return { snapshot: current.snapshot, recentBlocks: current.recentBlocks, status, networkInfo: current.networkInfo, ownerActions: current.ownerActions, reorgs: current.reorgs, error };
+    return {
+      snapshot: current.snapshot,
+      recentBlocks: current.recentBlocks,
+      status,
+      networkInfo: current.networkInfo,
+      ownerActions: current.ownerActions,
+      reorgs: current.reorgs,
+      resyncing: current.resyncing,
+      error,
+    };
   }, [feed, network, status, error]);
 }

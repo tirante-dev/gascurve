@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "@/hooks/useApi";
 import { useLive } from "@/hooks/useLive";
 import { useSmoothedLive } from "@/hooks/useSmoothedLive";
@@ -26,6 +26,9 @@ import { Section } from "./primitives";
 import { SeriesCharts } from "./SeriesCharts";
 import { ThemeToggle } from "./ThemeToggle";
 
+/** How often the REST owner-action list is revalidated; the socket carries new ones in between. */
+export const OWNER_ACTION_REFETCH_MS = 300_000;
+
 function mergeActions(fetched: OwnerAction[] | null, live: OwnerAction[]): OwnerAction[] | null {
   if (!fetched) return live.length > 0 ? live : null;
   const seen = new Set(fetched.map((a) => `${a.txHash}-${a.block}`));
@@ -45,7 +48,18 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
   const series = useSeries(name, range);
   const networks = useApi("networks", useCallback((signal: AbortSignal) => listNetworks({ signal }), []), { refetchMs: 300_000 });
   const apiStatus = useApi("status", useCallback((signal: AbortSignal) => getStatus({ signal }), []), { refetchMs: 60_000 });
-  const ownerActions = useApi(`${name}:owner-actions`, useCallback((signal: AbortSignal) => getOwnerActions(name, { signal }), [name]));
+  // Owner actions are pushed over the socket as they happen; the REST list is
+  // the record that survives a reconnect. It is revalidated every five minutes
+  // and again on every reorg, so a persisted action on an orphaned block is
+  // replaced rather than left on screen.
+  const ownerActions = useApi(`${name}:owner-actions`, useCallback((signal: AbortSignal) => getOwnerActions(name, { signal }), [name]), { refetchMs: OWNER_ACTION_REFETCH_MS });
+  const refreshOwnerActions = ownerActions.refresh;
+  const seenReorgs = useRef(live.reorgs);
+  useEffect(() => {
+    if (live.reorgs === seenReorgs.current) return;
+    seenReorgs.current = live.reorgs;
+    refreshOwnerActions();
+  }, [live.reorgs, refreshOwnerActions]);
   const now = useTicker(1000);
   const actions = useMemo(() => mergeActions(ownerActions.data, live.ownerActions), [ownerActions.data, live.ownerActions]);
   const info = live.networkInfo ?? (networks.data ? findNetwork(networks.data, name) : undefined) ?? null;

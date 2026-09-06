@@ -127,24 +127,30 @@ function Freshness({ sinceBlock, age }: { sinceBlock: number; age: number }) {
   );
 }
 
+/** Copy for an empty strip: a reorg took the last state away, or nothing has arrived yet. */
+export const RESYNC_COPY = "Resyncing after a reorg.";
+export const WAITING_COPY = "Waiting for the first sample.";
+
 /** The live strip, subscribed to the frame store so its figures move every frame while the page around it does not. */
 export function LiveStrip({ live, status }: { live: SmoothedLive; status: LiveStatus }) {
   const frame = useLiveFrame(live.frame);
-  return <LiveStripView snapshot={live.display} values={frame.values} blocks={frame.blocks} nowMs={frame.nowMs} status={status} />;
+  return <LiveStripView snapshot={live.display} values={frame.values} blocks={frame.blocks} nowMs={frame.nowMs} status={status} resyncing={live.resyncing} />;
 }
 
 /**
  * The strip with everything it shows as plain props. `snapshot` is the
  * display snapshot (the render cadence): block number, gas in the block and
  * the freshness follow it. `values` are the eased figures; until the first
- * frame has produced them the sample stands in.
+ * frame has produced them the sample stands in. With no snapshot the strip
+ * says which kind of nothing it is: a reorg that took the last canonical
+ * state away, or a feed that has not delivered one yet.
  */
-export function LiveStripView({ snapshot, values, blocks, nowMs, status }: { snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[]; nowMs: number; status: LiveStatus }) {
+export function LiveStripView({ snapshot, values, blocks, nowMs, status, resyncing = false }: { snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[]; nowMs: number; status: LiveStatus; resyncing?: boolean }) {
   if (!snapshot) {
     return (
       <div className="vw-card p-5 text-sm text-ink-2" aria-busy="true">
         <div className="flex items-center justify-between">
-          <span>Waiting for the first sample.</span>
+          <span>{resyncing ? RESYNC_COPY : WAITING_COPY}</span>
           <StatusPill status={status} />
         </div>
       </div>

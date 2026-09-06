@@ -78,7 +78,7 @@ describe("LiveStrip", () => {
   });
   it("subscribes to the frame store", () => {
     const frame = createFrameStore({ nowMs: Date.parse(snapshot.sampledAt) });
-    render(<LiveStrip live={{ display: snapshot, frame }} status="open" />);
+    render(<LiveStrip live={{ display: snapshot, frame, resyncing: false }} status="open" />);
     expect(screen.getByText("0.3997")).toBeInTheDocument();
     act(() => frame.set({ blocks: [], values: { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.75 }, nowMs: Date.parse(snapshot.sampledAt) }));
     expect(screen.getByText("0.7500")).toBeInTheDocument();
@@ -102,10 +102,15 @@ describe("LiveStrip", () => {
     expect(screen.getByText(`Latest block ${head}`)).toBeInTheDocument();
     expect(screen.getByText("last 20 blocks · floor 0.02 gwei")).toBeInTheDocument();
   });
-  it("waits for the first sample", () => {
-    render(<LiveStrip live={{ display: null, frame: createFrameStore() }} status="connecting" />);
+  it("waits for the first sample, and says so differently while a reorg is being repaired", () => {
+    const { rerender } = render(<LiveStrip live={{ display: null, frame: createFrameStore(), resyncing: false }} status="connecting" />);
     expect(screen.getByText("Waiting for the first sample.")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("connecting");
+    // A reorg took the last canonical state away: the strip must not claim it
+    // is waiting for a first sample, and must show no orphaned figures.
+    rerender(<LiveStrip live={{ display: null, frame: createFrameStore(), resyncing: true }} status="open" />);
+    expect(screen.getByText("Resyncing after a reorg.")).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for the first sample.")).toBeNull();
   });
   it("splits a fee at the floor entirely to infra", () => {
     render(<FeeSplitBar snapshot={{ ...snapshot, prices: { ...snapshot.prices, perArbGasCongestion: "0" } }} />);
@@ -165,7 +170,7 @@ describe("ConstraintCards", () => {
   });
   it("subscribes to the frame store and says so when nothing contributes", () => {
     const frame = createFrameStore();
-    render(<ConstraintCards live={{ display: snapshot, frame }} />);
+    render(<ConstraintCards live={{ display: snapshot, frame, resyncing: false }} />);
     expect(screen.getByText("3.11M")).toBeInTheDocument();
     act(() => frame.set({ blocks: [], values: { ...targetValues(snapshot, [], 0), backlogs: [0, 0], bips: [0, 0], shares: [0, 0] }, nowMs: 0 }));
     expect(screen.getAllByText("no contribution")).toHaveLength(2);
@@ -179,9 +184,11 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("90.0M")).toBeInTheDocument();
     expect(screen.queryByText(/2 s average/)).toBeNull();
   });
-  it("handles a missing snapshot", () => {
-    render(<ConstraintCardsView snapshot={null} values={null} blocks={[]} />);
+  it("handles a missing snapshot, and names a reorg repair as one", () => {
+    const { rerender } = render(<ConstraintCardsView snapshot={null} values={null} blocks={[]} />);
     expect(screen.getByText("Waiting for the first sample.")).toBeInTheDocument();
+    rerender(<ConstraintCardsView snapshot={null} values={null} blocks={[]} resyncing />);
+    expect(screen.getByText("Resyncing after a reorg.")).toBeInTheDocument();
   });
   it("draws the sawtooth as a polyline scaled to its peak, or a blank with fewer than two samples", () => {
     expect(sawtoothPoints([{ number: 1, ts: 1, backlog: 0 }, { number: 2, ts: 1, backlog: 50 }, { number: 3, ts: 1, backlog: 100 }])).toBe("0.0,31.0 100.0,16.0 200.0,1.0");
@@ -279,6 +286,34 @@ describe("ThemeToggle", () => {
     expect(button).toHaveTextContent("theme: dark");
     await userEvent.click(button);
     expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
+    applyTheme("system");
+  });
+
+  it("applies another tab's choice to this document, not only to the control", async () => {
+    window.localStorage.removeItem("gascurve:theme");
+    applyTheme("system");
+    render(<ThemeToggle />);
+    const button = screen.getByRole("button");
+    // Another tab stored dark: the page has to wear it, not just name it.
+    window.localStorage.setItem("gascurve:theme", "dark");
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "gascurve:theme", newValue: "dark" }));
+    });
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(button).toHaveTextContent("theme: dark");
+    // And a removal takes the page back to following the system.
+    window.localStorage.removeItem("gascurve:theme");
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "gascurve:theme", newValue: null }));
+    });
+    expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
+    expect(button).toHaveTextContent("theme: system");
+    // An unrelated key changes nothing.
+    document.documentElement.setAttribute("data-theme", "light");
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "gascurve:network", newValue: "robinhood" }));
+    });
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
     applyTheme("system");
   });
 });

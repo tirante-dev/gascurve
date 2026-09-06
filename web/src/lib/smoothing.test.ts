@@ -1,16 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import type { BlockPoint, LiveSnapshot } from "@/types";
+import { contributionsBips } from "./pricer";
 import {
   approach,
   AVERAGE_WINDOW_S,
   averageBacklog,
+  bipsFor,
   createFrameStore,
+  definitionOf,
   DISPLAY_INTERVAL_MS,
   drained,
   isShortWindow,
   SAWTOOTH_WINDOW_S,
   sawtoothSamples,
   SHORT_WINDOW_S,
+  signatureOf,
   targetValues,
   tweenValues,
   TWEEN_TAU_MS,
@@ -77,6 +81,18 @@ describe("averageBacklog and sawtoothSamples", () => {
     expect(averageBacklog(blocks, 0, 1000, 1)).toBe(22_000_000);
     // The long window is steady within a second and drains 40M per second.
     expect(averageBacklog(blocks, 1, 1000)).toBe(11_194_391_810_886 - 20_000_000);
+  });
+
+  it("leaves out blocks priced under another constraint definition", () => {
+    // Blocks 191 to 200 are the second of the sawtooth ending at 1000; a
+    // definition that took effect at block 196 excludes the earlier half.
+    expect(averageBacklog(blocks, 0, 1000, 1, 196)).toBe(32_000_000);
+    expect(averageBacklog(blocks, 0, 1000, AVERAGE_WINDOW_S, 196)).toBe(32_000_000);
+    // Nothing in the ring is under the new definition yet: the caller falls back to the sample.
+    expect(averageBacklog(blocks, 0, 1000, AVERAGE_WINDOW_S, 1000)).toBeNull();
+    const v = targetValues(snapshot, blocks, 0, 1000);
+    expect(v.backlogs[0]).toBe(3_111_506);
+    expect(targetValues(snapshot, blocks, 0, 196).backlogs[0]).toBe(32_000_000);
   });
 
   it("returns null when the ring has nothing recent, and skips blocks newer than the sample", () => {
@@ -187,7 +203,8 @@ describe("tweenValues", () => {
     expect(mid.transferEth).toBeCloseTo(start.transferEth + (target.transferEth - start.transferEth) * k, 12);
     expect(mid.swapEth).toBeCloseTo(start.swapEth + (target.swapEth - start.swapEth) * k, 12);
     expect(mid.backlogs[0]).toBeCloseTo(3_111_506 + (22_000_000 - 3_111_506) * k);
-    expect(mid.bips[0]).toBeCloseTo(34 + (244 - 34) * k);
+    // bips are not eased on their own: they are the eased backlogs priced.
+    expect(mid.bips).toEqual(bipsFor(target.definition, mid.backlogs));
     expect(mid.shares[0]).toBeGreaterThan(start.shares[0]);
     expect(mid.shares[0]).toBeLessThan(target.shares[0]);
     let v = mid;
@@ -202,9 +219,53 @@ describe("tweenValues", () => {
     expect(tweenValues(other, target, 16)).toBe(target);
   });
 
+  it("snaps when a set is replaced by one of the same size, and keeps every frame's bips and shares consistent with its backlogs", () => {
+    // The owner replaces the 24 h constraint with a 12 h one: same count, a
+    // different definition, so nothing on screen is a valid origin to ease from.
+    const replaced: LiveSnapshot = {
+      ...snapshot,
+      constraints: [snapshot.constraints[0], { ...snapshot.constraints[1], window: 43_200, backlog: 0, exponentBips: 0 }],
+    };
+    const before = targetValues(snapshot, [], 0);
+    const after = targetValues(replaced, [], 0);
+    expect(before.signature).not.toBe(after.signature);
+    expect(tweenValues(before, after, 16)).toBe(after);
+    // Within one definition the tween runs, and every frame's bips and shares
+    // are those of that frame's backlogs, never a separate easing of their own.
+    const start = targetValues({ ...replaced, constraints: [replaced.constraints[0], { ...replaced.constraints[1], backlog: 500_000_000_000 }] }, [], 0);
+    let v = start;
+    for (let i = 0; i < 40; i++) {
+      v = tweenValues(v, after, 16);
+      const expected = contributionsBips(after.definition.model === "constraints" ? after.definition.constraints.map((c, j) => ({ ...c, backlog: v.backlogs[j] })) : []);
+      expect(v.bips).toEqual(expected);
+      const total = expected.reduce((sum, b) => sum + b, 0);
+      expect(v.shares).toEqual(expected.map((b) => (total > 0 ? b / total : 0)));
+    }
+  });
+
   it("honours a custom time constant", () => {
     const start = targetValues({ ...snapshot, baseFee: "0" }, [], 0);
     expect(tweenValues(start, target, 100, 100).baseFeeGwei).toBeCloseTo(0.399726 * (1 - Math.exp(-1)));
+  });
+});
+
+describe("definitions", () => {
+  it("carries the targets and windows, and separates a replacement set of the same size", () => {
+    const definition = definitionOf(snapshot);
+    expect(definition).toEqual({ model: "constraints", constraints: [{ target: 60_000_000, window: 15 }, { target: 40_000_000, window: 86_400 }] });
+    expect(signatureOf(definition)).toBe("constraints:60000000/15,40000000/86400");
+    // A different window with the same shape is a different definition.
+    const replaced = definitionOf({ ...snapshot, constraints: [snapshot.constraints[0], { ...snapshot.constraints[1], window: 43_200 }] });
+    expect(signatureOf(replaced)).not.toBe(signatureOf(definition));
+    // The backlog is state, not definition: it never enters the signature.
+    expect(signatureOf(definitionOf({ ...snapshot, constraints: snapshot.constraints.map((c) => ({ ...c, backlog: 1 })) }))).toBe(signatureOf(definition));
+    const legacy = definitionOf({ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 90_000_000 } });
+    expect(signatureOf(legacy)).toBe("legacy:7000000/102/10");
+    expect(bipsFor(legacy, [90_000_000])).toEqual([280]);
+    expect(bipsFor(legacy, [])).toEqual([0]);
+    // A legacy snapshot without its parameters is read as an empty constraint set, never as a legacy definition.
+    expect(definitionOf({ ...snapshot, model: "legacy", constraints: [] })).toEqual({ model: "constraints", constraints: [] });
+    expect(bipsFor(definition, [900_000_000])).toEqual([10_000, 0]);
   });
 });
 
