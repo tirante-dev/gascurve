@@ -40,20 +40,34 @@ func (f *Follower) Run(ctx context.Context) error {
 
 // verifyChainID refuses to run against an RPC whose eth_chainId differs
 // from the configured chain id, recording the mismatch on the network row.
+// With a pool every endpoint is verified (a mismatching one is disabled
+// and shown in /status) and the follower runs as long as one is usable;
+// capabilities are then routed among the usable endpoints.
 func (f *Follower) verifyChainID(ctx context.Context) error {
+	if f.pool != nil {
+		if err := f.pool.Verify(ctx); err != nil {
+			return f.refuse(ctx, fmt.Errorf("%w: refusing to run", err))
+		}
+		f.bindPool()
+		return nil
+	}
 	id, err := f.rpc.ChainID(ctx)
 	if err != nil {
 		return fmt.Errorf("eth_chainId: %w", err)
 	}
 	if id != f.chainID {
-		err := fmt.Errorf("rpc reports chain id %d, configured %d: refusing to run", id, f.chainID)
 		f.log.Error("chain id mismatch", "rpcChainId", id, "configured", f.chainID)
-		if serr := f.store.SetNetworkError(ctx, f.chainID, err.Error()); serr != nil {
-			f.log.Warn("record error", "err", serr.Error())
-		}
-		return err
+		return f.refuse(ctx, fmt.Errorf("rpc reports chain id %d, configured %d: refusing to run", id, f.chainID))
 	}
 	return nil
+}
+
+// refuse records why the follower will not run on the network row.
+func (f *Follower) refuse(ctx context.Context, err error) error {
+	if serr := f.store.SetNetworkError(ctx, f.chainID, err.Error()); serr != nil {
+		f.log.Warn("record error", "err", serr.Error())
+	}
+	return err
 }
 
 // runFast drives the fast loop: on the timer when polling, on newHeads

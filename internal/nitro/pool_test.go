@@ -1,0 +1,432 @@
+package nitro
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/tirante-dev/gascurve/internal/config"
+	"github.com/tirante-dev/gascurve/internal/logger"
+)
+
+const (
+	testChainID    = 4663
+	testChainIDHex = "0x1237"
+)
+
+// chainFake is a fakeRPC that answers eth_chainId with id and echoes.
+func chainFake(t *testing.T, id string) *fakeRPC {
+	t.Helper()
+	f := newFakeRPC(t)
+	f.handlers["eth_chainId"] = func([]json.RawMessage) any { return id }
+	f.handlers["echo"] = echoHandler
+	return f
+}
+
+func (f *fakeRPC) requestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests
+}
+
+func (f *fakeRPC) fail(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.script = append(f.script, scriptStep{status: status, body: "down"})
+}
+
+func endpointOf(f *fakeRPC, cps float64) config.EndpointConfig {
+	return config.EndpointConfig{RPCURL: f.server.URL, CallsPerSecond: cps}
+}
+
+func newTestPool(t *testing.T, clock *fakeClock, cooldown time.Duration, eps ...config.EndpointConfig) *Pool {
+	t.Helper()
+	return NewPool(PoolConfig{ChainID: testChainID, Endpoints: eps, BatchSize: 100, Cooldown: cooldown},
+		WithPoolClientOptions(WithHTTPClient(&http.Client{}), WithMaxAttempts(2)), withPoolClock(clock.Now, clock.Sleep))
+}
+
+func echoVia(t *testing.T, p *Pool, want string) {
+	t.Helper()
+	raw, err := p.Call(context.Background(), "echo", want)
+	if err != nil || string(raw) != fmt.Sprintf("%q", want) {
+		t.Fatalf("echo: %s %v", raw, err)
+	}
+}
+
+// TestPoolFailoverAndRecovery: a failed request moves ordinary calls to the
+// fallback for the cooldown, after which the primary is probed with one
+// eth_chainId and taken back only when it answers; failures on the
+// fallback wrap around, and answers from the node never fail over.
+func TestPoolFailoverAndRecovery(t *testing.T) {
+	ctx := context.Background()
+	a, b := chainFake(t, testChainIDHex), chainFake(t, testChainIDHex)
+	clock := newFakeClock()
+	p := newTestPool(t, clock, 30*time.Second, endpointOf(a, 100), endpointOf(b, 100))
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a.requestCount() != 1 || b.requestCount() != 1 || !p.Endpoints()[0].Verified() || !p.Endpoints()[1].Verified() {
+		t.Fatalf("verify: %d %d", a.requestCount(), b.requestCount())
+	}
+	echoVia(t, p, "one")
+	if a.requestCount() != 2 || b.requestCount() != 1 || p.ActiveEndpoint() != 0 {
+		t.Fatalf("ordinary call must go to the primary: %d %d", a.requestCount(), b.requestCount())
+	}
+	// The primary answers 500: the call succeeds on the fallback.
+	a.fail(http.StatusInternalServerError)
+	echoVia(t, p, "two")
+	if a.requestCount() != 3 || b.requestCount() != 2 || p.ActiveEndpoint() != 1 || p.Failovers() != 1 {
+		t.Fatalf("failover: a=%d b=%d active=%d failovers=%d", a.requestCount(), b.requestCount(), p.ActiveEndpoint(), p.Failovers())
+	}
+	// Inside the cooldown the primary is left alone.
+	clock.Advance(29 * time.Second)
+	echoVia(t, p, "three")
+	if a.requestCount() != 3 || b.requestCount() != 3 {
+		t.Fatalf("cooldown: a=%d b=%d", a.requestCount(), b.requestCount())
+	}
+	// After the cooldown the primary is probed; a failed probe extends the
+	// stay on the fallback by another cooldown.
+	clock.Advance(time.Second)
+	a.fail(http.StatusBadGateway)
+	echoVia(t, p, "four")
+	if a.requestCount() != 4 || b.requestCount() != 4 || p.ActiveEndpoint() != 1 {
+		t.Fatalf("failed probe: a=%d b=%d active=%d", a.requestCount(), b.requestCount(), p.ActiveEndpoint())
+	}
+	clock.Advance(29 * time.Second)
+	echoVia(t, p, "five")
+	if a.requestCount() != 4 || b.requestCount() != 5 {
+		t.Fatalf("extended cooldown: a=%d b=%d", a.requestCount(), b.requestCount())
+	}
+	// A successful probe (eth_chainId on the primary) returns to it.
+	clock.Advance(time.Second)
+	echoVia(t, p, "six")
+	if a.requestCount() != 6 || b.requestCount() != 5 || p.ActiveEndpoint() != 0 || p.Failovers() != 1 {
+		t.Fatalf("recovery: a=%d b=%d active=%d failovers=%d", a.requestCount(), b.requestCount(), p.ActiveEndpoint(), p.Failovers())
+	}
+	// A transport error on the fallback wraps around to the primary.
+	a.fail(http.StatusInternalServerError)
+	echoVia(t, p, "seven")
+	if p.ActiveEndpoint() != 1 || p.Failovers() != 2 {
+		t.Fatalf("second failover: active=%d failovers=%d", p.ActiveEndpoint(), p.Failovers())
+	}
+	b.fail(http.StatusServiceUnavailable)
+	echoVia(t, p, "eight")
+	if p.ActiveEndpoint() != 0 || p.Failovers() != 3 {
+		t.Fatalf("wrap around: active=%d failovers=%d", p.ActiveEndpoint(), p.Failovers())
+	}
+	// Both down: the error is returned once every endpoint was tried.
+	a.fail(http.StatusInternalServerError)
+	b.fail(http.StatusInternalServerError)
+	if _, err := p.Call(ctx, "echo", "nine"); !IsEndpointError(err) || p.Failovers() != 4 || p.ActiveEndpoint() != 1 {
+		t.Fatalf("both down: %v active=%d failovers=%d", err, p.ActiveEndpoint(), p.Failovers())
+	}
+	// The node's own errors are answers, not endpoint failures.
+	var rpcErr *RPCError
+	if _, err := p.Call(ctx, "nope"); !errors.As(err, &rpcErr) || IsEndpointError(err) || p.Failovers() != 4 {
+		t.Fatalf("rpc error must not fail over: %v", err)
+	}
+	// Throttling past the back-off is an endpoint failure (attempts: 2).
+	clock.Advance(time.Minute)
+	echoVia(t, p, "ten") // probe and return to the primary
+	a.fail(http.StatusTooManyRequests)
+	a.fail(http.StatusTooManyRequests)
+	echoVia(t, p, "eleven")
+	if p.ActiveEndpoint() != 1 || p.Failovers() != 5 {
+		t.Fatalf("429 past back-off: active=%d failovers=%d", p.ActiveEndpoint(), p.Failovers())
+	}
+	st := p.Stats()
+	if st.RateLimitEvents != 2 || st.Last429At.IsZero() || st.CallsLast10s == 0 || st.Backoff != minBackoff {
+		t.Fatalf("aggregated stats: %+v", st)
+	}
+	if p.Available() <= 0 {
+		t.Fatal("available")
+	}
+	// A canceled context is returned as is, without failing over.
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := p.Call(canceled, "echo", "x"); !errors.Is(err, context.Canceled) || p.Failovers() != 5 {
+		t.Fatalf("canceled: %v failovers=%d", err, p.Failovers())
+	}
+	if len(p.Status().Endpoints) != 2 || p.Status().Active != 1 || p.Status().Failovers != 5 {
+		t.Fatalf("status: %+v", p.Status())
+	}
+}
+
+// TestPoolVerification: a mismatching endpoint is disabled and skipped by
+// routing, an unreachable one stays unverified until it answers, and a
+// pool without a usable endpoint refuses to run.
+func TestPoolVerification(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	good, wrong, flaky := chainFake(t, testChainIDHex), chainFake(t, "0x1"), chainFake(t, testChainIDHex)
+	flaky.fail(http.StatusInternalServerError)
+	p := newTestPool(t, clock, 30*time.Second,
+		endpointOf(good, 100),
+		config.EndpointConfig{RPCURL: wrong.server.URL, WSURL: "wss://wrong", Archive: true, CallsPerSecond: 100},
+		config.EndpointConfig{RPCURL: flaky.server.URL, Archive: true, CallsPerSecond: 100},
+	)
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := p.Status()
+	if st.Active != 0 || st.Failovers != 0 || !st.Endpoints[1].Disabled || st.Endpoints[2].Disabled || !st.Endpoints[1].WS || !st.Endpoints[1].Archive || st.Endpoints[2].WS {
+		t.Fatalf("status after verify: %+v", st)
+	}
+	if p.Endpoints()[2].Verified() || p.Endpoints()[2].Disabled() {
+		t.Fatal("an unreachable endpoint stays unverified, not disabled")
+	}
+	// Capabilities skip the disabled endpoint.
+	if p.WS() != nil || p.Archive() == nil || p.Archive().Index() != 2 || !p.Archive().Archive() || p.Archive().WSURL() != "" {
+		t.Fatalf("capabilities: ws=%v archive=%v", p.WS(), p.Archive())
+	}
+	// A failure on the primary skips the disabled endpoint and verifies the
+	// flaky one before using it; when that fails too the primary is retried.
+	good.fail(http.StatusInternalServerError)
+	flaky.fail(http.StatusInternalServerError)
+	echoVia(t, p, "one")
+	if p.ActiveEndpoint() != 0 || p.Failovers() != 2 || wrong.requestCount() != 1 {
+		t.Fatalf("skip disabled: active=%d failovers=%d wrong=%d", p.ActiveEndpoint(), p.Failovers(), wrong.requestCount())
+	}
+	// Now the flaky endpoint answers: it is verified on first use.
+	good.fail(http.StatusInternalServerError)
+	echoVia(t, p, "two")
+	if p.ActiveEndpoint() != 2 || !p.Endpoints()[2].Verified() {
+		t.Fatalf("lazy verification: active=%d verified=%v", p.ActiveEndpoint(), p.Endpoints()[2].Verified())
+	}
+	// A primary that starts reporting another chain at the probe is
+	// disabled and never probed again.
+	clock.Advance(time.Minute)
+	good.handlers["eth_chainId"] = func([]json.RawMessage) any { return "0x1" }
+	echoVia(t, p, "three")
+	if p.ActiveEndpoint() != 2 || !p.Endpoints()[0].Disabled() {
+		t.Fatalf("probe mismatch: active=%d disabled=%v", p.ActiveEndpoint(), p.Endpoints()[0].Disabled())
+	}
+	clock.Advance(time.Minute)
+	before := good.requestCount()
+	echoVia(t, p, "four")
+	if good.requestCount() != before {
+		t.Fatal("a disabled primary must not be probed")
+	}
+	// The last usable endpoint failing leaves nothing to fail over to.
+	flaky.fail(http.StatusInternalServerError)
+	if _, err := p.Call(ctx, "echo", "five"); !IsEndpointError(err) || p.Failovers() != 3 {
+		t.Fatalf("no alternative: %v failovers=%d", err, p.Failovers())
+	}
+
+	// A mismatching primary with a good fallback starts on the fallback.
+	wrong2, good2 := chainFake(t, "0x2"), chainFake(t, testChainIDHex)
+	p2 := newTestPool(t, clock, time.Minute, endpointOf(wrong2, 100), endpointOf(good2, 100))
+	if err := p2.Verify(ctx); err != nil || p2.ActiveEndpoint() != 1 || p2.Failovers() != 1 {
+		t.Fatalf("primary mismatch: %v active=%d failovers=%d", err, p2.ActiveEndpoint(), p2.Failovers())
+	}
+	echoVia(t, p2, "x")
+	if wrong2.requestCount() != 1 {
+		t.Fatal("a disabled primary must not receive calls")
+	}
+	// Verify is idempotent and the fallback stays disabled-free.
+	if err := p2.Verify(ctx); err != nil || p2.Failovers() != 1 {
+		t.Fatalf("second verify: %v", err)
+	}
+
+	// Nothing usable: mismatch plus unreachable.
+	dead := chainFake(t, testChainIDHex)
+	dead.server.Close()
+	p3 := newTestPool(t, clock, time.Minute, endpointOf(wrong2, 100), endpointOf(dead, 100))
+	if err := p3.Verify(ctx); !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("expected ErrNoEndpoint, got %v", err)
+	}
+	if _, err := p3.Call(ctx, "echo"); !IsEndpointError(err) {
+		t.Fatalf("unreachable fallback: %v", err)
+	}
+	if err := p3.Verify(ctx); !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("expected ErrNoEndpoint, got %v", err)
+	}
+	// Only disabled endpoints: every call is ErrNoEndpoint.
+	p4 := newTestPool(t, clock, time.Minute, endpointOf(wrong2, 100))
+	if err := p4.Verify(ctx); !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("expected ErrNoEndpoint, got %v", err)
+	}
+	if _, err := p4.Call(ctx, "echo"); !errors.Is(err, ErrNoEndpoint) || p4.Available() != 0 {
+		t.Fatalf("disabled only: %v", err)
+	}
+	// An empty pool.
+	empty := NewPool(PoolConfig{ChainID: testChainID})
+	if err := empty.Verify(ctx); !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("empty verify: %v", err)
+	}
+	if _, err := empty.BlockNumber(ctx); !errors.Is(err, ErrNoEndpoint) || empty.Available() != 0 || empty.WS() != nil || empty.Archive() != nil {
+		t.Fatalf("empty pool: %v", err)
+	}
+	if empty.cooldown != defaultFailoverCooldown {
+		t.Fatal("default cooldown")
+	}
+}
+
+// TestPoolCapabilities: newHeads and archive are routed to the first
+// endpoint that has them, whatever the active endpoint is.
+func TestPoolCapabilities(t *testing.T) {
+	clock := newFakeClock()
+	a, b, c := chainFake(t, testChainIDHex), chainFake(t, testChainIDHex), chainFake(t, testChainIDHex)
+	p := newTestPool(t, clock, time.Minute,
+		endpointOf(a, 4),
+		config.EndpointConfig{RPCURL: b.server.URL, WSURL: "wss://b/ws"},
+		config.EndpointConfig{RPCURL: c.server.URL, WSURL: "wss://c/ws", Archive: true},
+	)
+	if ws := p.WS(); ws == nil || ws.Index() != 1 || ws.WSURL() != "wss://b/ws" {
+		t.Fatalf("ws endpoint: %+v", ws)
+	}
+	if ar := p.Archive(); ar == nil || ar.Index() != 2 || !ar.Archive() {
+		t.Fatalf("archive endpoint: %+v", ar)
+	}
+	if p.ActiveEndpoint() != 0 || p.Endpoints()[0].Client.Pacer().Rate() != 4 || !p.Endpoints()[1].Client.Pacer().Unlimited() {
+		t.Fatal("every endpoint keeps its own pacer")
+	}
+	st := p.Status()
+	if st.Endpoints[0].WS || !st.Endpoints[1].WS || st.Endpoints[1].Archive || !st.Endpoints[2].Archive || st.Endpoints[2].Index != 2 {
+		t.Fatalf("status capabilities: %+v", st)
+	}
+	// A failure reported for an endpoint that is no longer active (another
+	// caller already moved on) is simply retried on the new one.
+	p.mu.Lock()
+	p.active = 1
+	p.mu.Unlock()
+	if !p.failOver(p.Endpoints()[0], errors.New("stale")) || p.Failovers() != 0 || p.ActiveEndpoint() != 1 {
+		t.Fatal("a stale failure must not fail over again")
+	}
+	// The production constructor runs on the real clock with its logger.
+	prod := NewPool(PoolConfig{ChainID: testChainID, Endpoints: []config.EndpointConfig{endpointOf(a, 4)}, BatchSize: 50}, WithPoolLogger(logger.Nop()))
+	if len(prod.Endpoints()) != 1 || prod.Endpoints()[0].BatchCap() != 50 || prod.Endpoints()[0].now == nil || prod.cooldown != defaultFailoverCooldown {
+		t.Fatalf("real clock pool: %+v", prod.Status())
+	}
+}
+
+// TestEndpointBatchCap: a 429 answered to a batch halves the endpoint's
+// cap (floor 10) and the batch is resent at the new size; a successful
+// minute grows it back one step at a time.
+func TestEndpointBatchCap(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeRPC(t)
+	setupChain(f)
+	f.handlers["eth_chainId"] = func([]json.RawMessage) any { return testChainIDHex }
+	f.maxItems = 50
+	clock := newFakeClock()
+	p := NewPool(PoolConfig{ChainID: testChainID, Endpoints: []config.EndpointConfig{endpointOf(f, 1000)}, BatchSize: 100},
+		WithPoolClientOptions(WithHTTPClient(f.server.Client())), withPoolClock(clock.Now, clock.Sleep))
+	e := p.Endpoints()[0]
+	if e.BatchCap() != 100 {
+		t.Fatalf("cap = %d", e.BatchCap())
+	}
+	nums := make([]uint64, 0, 100)
+	for n := uint64(100); n < 200; n++ {
+		nums = append(nums, n)
+	}
+	hs, err := p.HeadersByNumbers(ctx, nums)
+	if err != nil || len(hs) != 100 || hs[99].Number != 199 {
+		t.Fatalf("headers: %d %v", len(hs), err)
+	}
+	// After eth_chainId: 100 items rejected, then two batches of 50 after
+	// the 2 s back-off.
+	if e.BatchCap() != 50 || f.requestCount() != 4 || fmt.Sprint(clock.Sleeps()) != "[2s]" {
+		t.Fatalf("after 429: cap=%d requests=%d sleeps=%v", e.BatchCap(), f.requestCount(), clock.Sleeps())
+	}
+	// No recovery before a successful minute has passed.
+	if _, err := p.HeadersByNumbers(ctx, nums[:50]); err != nil || e.BatchCap() != 50 {
+		t.Fatalf("early recovery: cap=%d %v", e.BatchCap(), err)
+	}
+	clock.Advance(capRecoveryInterval)
+	f.maxItems = 100
+	if _, err := p.HeadersByNumbers(ctx, nums[:10]); err != nil || e.BatchCap() != 100 {
+		t.Fatalf("recovery: cap=%d %v", e.BatchCap(), err)
+	}
+	// The cap never drops below 10; once it is there the endpoint gives up
+	// after the client's attempts and reports an endpoint failure.
+	f.maxItems = 1
+	if _, err := p.HeadersByNumbers(ctx, nums[:20]); !errors.Is(err, ErrRateLimited) || !IsEndpointError(err) {
+		t.Fatalf("expected rate limit failure, got %v", err)
+	}
+	if e.BatchCap() != 10 || p.Stats().RateLimitEvents != 6 {
+		t.Fatalf("floor: cap=%d stats=%+v", e.BatchCap(), p.Stats())
+	}
+	// Single calls are unaffected by the cap and a 429 on one does not
+	// halve it further.
+	if h, err := p.HeaderByNumber(ctx, 150); err != nil || h.Number != 150 || e.BatchCap() != 10 {
+		t.Fatalf("single call: %+v %v cap=%d", h, err, e.BatchCap())
+	}
+	f.maxItems = 0
+	f.fail(http.StatusTooManyRequests)
+	if _, err := p.BlockNumber(ctx); err != nil || e.BatchCap() != 10 {
+		t.Fatalf("single 429: %v cap=%d", err, e.BatchCap())
+	}
+	// Recovery is one doubling per quiet minute: 10, 20, 40, 80, 100.
+	for _, want := range []int{20, 40, 80, 100, 100} {
+		clock.Advance(capRecoveryInterval)
+		if _, err := p.BlockNumber(ctx); err != nil || e.BatchCap() != want {
+			t.Fatalf("recovery step: cap=%d want %d %v", e.BatchCap(), want, err)
+		}
+	}
+	// Full blocks use the cap too, and transport errors surface.
+	if blocks, err := p.BlocksWithTxs(ctx, []uint64{320}); err != nil || len(blocks) != 1 || len(blocks[0].Txs) != 2 {
+		t.Fatalf("blocks with txs: %v %v", blocks, err)
+	}
+	f.server.Close()
+	if _, err := p.HeadersByNumbers(ctx, nums[:5]); !IsEndpointError(err) {
+		t.Fatalf("transport error: %v", err)
+	}
+	// A batch size outside the limits falls back to MaxBatch, and the
+	// floor never exceeds a small configured size.
+	if newEndpoint(0, config.EndpointConfig{}, 0, p.log, clock.Now).BatchCap() != MaxBatch || newEndpoint(0, config.EndpointConfig{}, 5, p.log, clock.Now).minBatchCap != 5 {
+		t.Fatal("batch size defaults")
+	}
+}
+
+// TestPoolTypedCalls runs every typed call through a pool against the
+// fake chain.
+func TestPoolTypedCalls(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeRPC(t)
+	setupChain(f)
+	f.handlers["eth_chainId"] = func([]json.RawMessage) any { return testChainIDHex }
+	clock := newFakeClock()
+	p := NewPool(PoolConfig{ChainID: testChainID, Endpoints: []config.EndpointConfig{endpointOf(f, 1000)}, BatchSize: 100},
+		WithPoolClientOptions(WithHTTPClient(f.server.Client())), withPoolClock(clock.Now, clock.Sleep))
+	if id, err := p.ChainID(ctx); err != nil || id != testChainID {
+		t.Fatalf("ChainID: %d %v", id, err)
+	}
+	if n, err := p.BlockNumber(ctx); err != nil || n != 320 {
+		t.Fatalf("BlockNumber: %d %v", n, err)
+	}
+	if h, err := p.HeaderByNumber(ctx, 100); err != nil || h.Number != 100 {
+		t.Fatalf("HeaderByNumber: %+v %v", h, err)
+	}
+	if s, err := p.FastSample(ctx); err != nil || s.Header.Number != 320 || len(s.Constraints) != 2 {
+		t.Fatalf("FastSample: %+v %v", s, err)
+	}
+	if s, err := p.FastSampleAt(ctx, 200); err != nil || s.Header.Number != 200 {
+		t.Fatalf("FastSampleAt: %+v %v", s, err)
+	}
+	if logs, err := p.OwnerActsLogs(ctx, 0, 100); err != nil || len(logs) != 1 {
+		t.Fatalf("OwnerActsLogs: %v %v", logs, err)
+	}
+	if bal, err := p.Balance(ctx, "0x1"); err != nil || bal.Int64() != 100 {
+		t.Fatalf("Balance: %s %v", bal, err)
+	}
+	if l1, err := p.L1Sample(ctx); err != nil || l1.RewardRate != 10 {
+		t.Fatalf("L1Sample: %+v %v", l1, err)
+	}
+	if acc, err := p.FeeAccounts(ctx); err != nil || acc.Network.Balance.Int64() != 100 {
+		t.Fatalf("FeeAccounts: %+v %v", acc, err)
+	}
+	if v, err := p.ArbOSVersion(ctx); err != nil || v != 61 {
+		t.Fatalf("ArbOSVersion: %d %v", v, err)
+	}
+	if _, err := p.HeadersByNumbers(ctx, []uint64{100, 5}); err == nil || IsEndpointError(err) {
+		t.Fatalf("a missing block is an answer, not a failure: %v", err)
+	}
+	if st := p.Status(); st.Active != 0 || st.Failovers != 0 || len(st.Endpoints) != 1 {
+		t.Fatalf("status: %+v", st)
+	}
+}

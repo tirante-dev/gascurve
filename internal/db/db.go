@@ -40,6 +40,9 @@ const (
 	// StateHoles is a JSON array of {from,to,at} block ranges the replay
 	// skipped (a catch-up gap over budget); no rows exist for them.
 	StateHoles = "holes"
+	// StateEndpoints is the endpoint pool's routing state
+	// (model.EndpointsStatus as JSON), refreshed by the slow loop.
+	StateEndpoints = "endpoints"
 )
 
 // Open connects to Postgres and applies pool limits.

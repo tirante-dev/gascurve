@@ -32,6 +32,31 @@ const (
 // retry attempts.
 var ErrRateLimited = errors.New("rpc: rate limited")
 
+// EndpointError marks a failure of the endpoint itself rather than an
+// answer from the node: a transport error, an HTTP 5xx, throttling that
+// outlasted the back-off, or a chain id mismatch. A Pool fails over on
+// these; JSON-RPC errors (reverts, unknown methods, missing blocks) never
+// carry it.
+type EndpointError struct {
+	Err error
+}
+
+func (e *EndpointError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes the underlying error to errors.Is and errors.As.
+func (e *EndpointError) Unwrap() error { return e.Err }
+
+// IsEndpointError reports whether err is, or wraps, an EndpointError.
+func IsEndpointError(err error) bool {
+	var ee *EndpointError
+	return errors.As(err, &ee)
+}
+
+// endpointErrorf wraps a formatted error as an EndpointError.
+func endpointErrorf(format string, args ...any) error {
+	return &EndpointError{Err: fmt.Errorf(format, args...)}
+}
+
 // RPCError is a JSON-RPC error object.
 type RPCError struct {
 	Code    int             `json:"code"`
@@ -130,6 +155,10 @@ type Client struct {
 	sleep       func(context.Context, time.Duration) error
 	now         func() time.Time
 	maxAttempts int
+	// observe, when set, sees every batch attempt: how many items it
+	// carried and whether the endpoint answered 429. An Endpoint adapts
+	// its batch cap from it.
+	observe func(items int, limited bool)
 
 	sendMu sync.Mutex // one in-flight HTTP request per network
 
@@ -158,6 +187,12 @@ func WithLogger(l *logger.Logger) Option { return func(c *Client) { c.log = l } 
 
 // WithMaxAttempts sets how many times a throttled request is retried.
 func WithMaxAttempts(n int) Option { return func(c *Client) { c.maxAttempts = n } }
+
+// withBatchObserver reports every batch attempt's item count and whether
+// it was throttled.
+func withBatchObserver(fn func(items int, limited bool)) Option {
+	return func(c *Client) { c.observe = fn }
+}
 
 // withClock replaces the clock and sleeper, for tests.
 func withClock(now func() time.Time, sleep func(context.Context, time.Duration) error) Option {
@@ -256,6 +291,31 @@ func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	if len(reqs) > MaxBatch {
 		return nil, fmt.Errorf("rpc: batch of %d exceeds %d items", len(reqs), MaxBatch)
 	}
+	for attempt := 1; ; attempt++ {
+		results, limited, err := c.attempt(ctx, reqs)
+		if err != nil {
+			return nil, err
+		}
+		if !limited {
+			return results, nil
+		}
+		if attempt >= c.maxAttempts {
+			return nil, throttled(attempt)
+		}
+	}
+}
+
+// throttled is the error for a request that stayed rate limited after
+// attempts tries.
+func throttled(attempts int) error {
+	return endpointErrorf("%w after %d attempts", ErrRateLimited, attempts)
+}
+
+// attempt sends reqs once: it pays the pacer, waits out any cooldown, posts
+// the batch and reports whether the endpoint throttled it (after recording
+// the 429 and starting the back-off) or answered (after resetting the
+// back-off). The results are in request order.
+func (c *Client) attempt(ctx context.Context, reqs []Request) (results []Result, limited bool, err error) {
 	ids := c.ids(len(reqs))
 	body := make([]rpcRequest, len(reqs))
 	for i, r := range reqs {
@@ -267,26 +327,24 @@ func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("rpc: encode batch: %w", err)
+		return nil, false, fmt.Errorf("rpc: encode batch: %w", err)
 	}
-
-	for attempt := 1; ; attempt++ {
-		if err := c.pacer.Wait(ctx, len(reqs)); err != nil {
-			return nil, err
-		}
-		responses, limited, sentAt, err := c.send(ctx, payload, len(reqs))
-		if err != nil {
-			return nil, err
-		}
-		if !limited {
-			c.resetBackoff(sentAt)
-			return matchResults(ids, responses), nil
-		}
+	if err := c.pacer.Wait(ctx, len(reqs)); err != nil {
+		return nil, false, err
+	}
+	responses, limited, sentAt, err := c.send(ctx, payload, len(reqs))
+	if err != nil {
+		return nil, false, err
+	}
+	if c.observe != nil {
+		c.observe(len(reqs), limited)
+	}
+	if limited {
 		c.noteRateLimit()
-		if attempt >= c.maxAttempts {
-			return nil, fmt.Errorf("%w after %d attempts", ErrRateLimited, attempt)
-		}
+		return nil, true, nil
 	}
+	c.resetBackoff(sentAt)
+	return matchResults(ids, responses), false, nil
 }
 
 // cooldown returns how long the network-wide 429 cooldown still has to run.
@@ -325,7 +383,7 @@ func (c *Client) post(ctx context.Context, payload []byte) (responses []rpcRespo
 	req.Header.Set("User-Agent", c.userAgent)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, false, fmt.Errorf("rpc: %w", err)
+		return nil, false, endpointErrorf("rpc: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
@@ -334,7 +392,10 @@ func (c *Client) post(ctx context.Context, payload []byte) (responses []rpcRespo
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
-		return nil, false, fmt.Errorf("rpc: read response: %w", err)
+		return nil, false, endpointErrorf("rpc: read response: %w", err)
+	}
+	if resp.StatusCode/100 == 5 {
+		return nil, false, endpointErrorf("rpc: http %d: %s", resp.StatusCode, truncate(string(data), 200))
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, false, fmt.Errorf("rpc: http %d: %s", resp.StatusCode, truncate(string(data), 200))
@@ -397,7 +458,7 @@ func (c *Client) noteRateLimit() {
 	}
 	recent := len(c.callTimes)
 	c.mu.Unlock()
-	c.log.Warn("rpc rate limited", "url", c.url, "backoff", wait.String(), "callsLast10s", recent)
+	c.log.Warn("rpc rate limited", "backoff", wait.String(), "callsLast10s", recent)
 }
 
 // resetBackoff returns the back-off to its minimum after a request that was

@@ -27,6 +27,9 @@ type fakeRPC struct {
 	reverse  bool
 	// script of HTTP statuses/bodies to return before normal handling.
 	script []scriptStep
+	// maxItems, when positive, answers any batch with more items with 429
+	// (the way QuickNode rejects oversized batches).
+	maxItems int
 }
 
 type scriptStep struct {
@@ -113,6 +116,11 @@ func (f *fakeRPC) serve(w http.ResponseWriter, r *http.Request) {
 		single = true
 	}
 	f.mu.Lock()
+	if f.maxItems > 0 && len(reqs) > f.maxItems {
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
 	f.items += len(reqs)
 	f.mu.Unlock()
 	responses := make([]map[string]any, 0, len(reqs))

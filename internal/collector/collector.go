@@ -44,6 +44,29 @@ type RPC interface {
 
 var _ RPC = (*nitro.Client)(nil)
 
+// ArchiveRPC serves historical state: FastSampleAt at any block, not just
+// the last few minutes. The backfill anchors and the archive minimum fee
+// samples go through it.
+type ArchiveRPC interface {
+	FastSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
+}
+
+// EndpointPool is what a nitro.Pool adds to RPC: chain id verification of
+// every endpoint, capability routing (the endpoint serving newHeads, the
+// one serving historical state) and the routing state for /status.
+type EndpointPool interface {
+	RPC
+	Verify(ctx context.Context) error
+	WS() *nitro.Endpoint
+	Archive() *nitro.Endpoint
+	Status() nitro.PoolStatus
+}
+
+var (
+	_ EndpointPool = (*nitro.Pool)(nil)
+	_ ArchiveRPC   = (*nitro.Endpoint)(nil)
+)
+
 // HeadSource delivers newHeads events, normally a nitro.HeadSubscriber.
 // Connected tells the fast loop whether to trust it or poll on the timer.
 type HeadSource interface {
@@ -89,13 +112,22 @@ const (
 type Options struct {
 	Network   config.NetworkConfig
 	Collector config.CollectorConfig
-	RPC       RPC
-	Store     db.Store
-	Log       *logger.Logger
-	Now       func() time.Time
-	Sleep     func(context.Context, time.Duration) error
-	// Heads overrides the newHeads source. Nil with a Network.WSURL means a
-	// nitro.HeadSubscriber for that URL; nil without one means polling.
+	// RPC serves ordinary calls: a nitro.Pool in production. When it is an
+	// EndpointPool the follower verifies every endpoint at start and, unless
+	// Archive or Heads override them, routes anchors to the pool's archive
+	// endpoint and heads to its WebSocket endpoint.
+	RPC RPC
+	// Archive serves the backfill anchors and archive minimum fee samples.
+	// Nil means the pool's archive endpoint, or, for a plain RPC, RPC itself
+	// when Network.Archive is set; otherwise the backfill is a pure replay.
+	Archive ArchiveRPC
+	Store   db.Store
+	Log     *logger.Logger
+	Now     func() time.Time
+	Sleep   func(context.Context, time.Duration) error
+	// Heads overrides the newHeads source. Nil means a nitro.HeadSubscriber
+	// for the pool's WebSocket endpoint (or Network.WSURL with a plain
+	// RPC); polling when there is none.
 	Heads HeadSource
 }
 
@@ -104,6 +136,8 @@ type Follower struct {
 	net     config.NetworkConfig
 	cfg     config.CollectorConfig
 	rpc     RPC
+	pool    EndpointPool // rpc when it is a pool, else nil
+	archive ArchiveRPC   // nil without an archive endpoint
 	store   db.Store
 	log     *logger.Logger
 	now     func() time.Time
@@ -163,6 +197,7 @@ func NewFollower(o Options) *Follower {
 		net:     o.Network,
 		cfg:     o.Collector,
 		rpc:     o.RPC,
+		archive: o.Archive,
 		store:   o.Store,
 		log:     o.Log,
 		now:     o.Now,
@@ -180,8 +215,16 @@ func NewFollower(o Options) *Follower {
 	if f.sleep == nil {
 		f.sleep = sleepContext
 	}
-	if f.heads == nil && o.Network.WSURL != "" {
-		f.heads = nitro.NewHeadSubscriber(o.Network.WSURL, nitro.WithHeadLogger(f.log))
+	if p, ok := o.RPC.(EndpointPool); ok {
+		f.pool = p
+	} else {
+		// A plain client: the network's own capabilities apply to it.
+		if f.heads == nil && o.Network.WSURL != "" {
+			f.heads = nitro.NewHeadSubscriber(o.Network.WSURL, nitro.WithHeadLogger(f.log))
+		}
+		if f.archive == nil && o.Network.Archive {
+			f.archive = o.RPC
+		}
 	}
 	if f.cfg.HeaderBatchSize <= 0 || f.cfg.HeaderBatchSize > nitro.MaxBatch {
 		f.cfg.HeaderBatchSize = nitro.MaxBatch
@@ -198,6 +241,38 @@ func NewFollower(o Options) *Follower {
 // unlimited reports whether the network has no call budget, which turns
 // off gap skipping and the two-transaction batch report prefilter.
 func (f *Follower) unlimited() bool { return f.net.Unlimited() }
+
+// bindPool routes capabilities once the pool's endpoints are verified:
+// heads come from the first usable endpoint with a ws_url, anchors from
+// the first with archive: true. Explicit Options win and a binding is
+// made only once, so a restarted follower keeps its subscriber.
+func (f *Follower) bindPool() {
+	if f.heads == nil {
+		if ws := f.pool.WS(); ws != nil {
+			f.heads = nitro.NewHeadSubscriber(ws.WSURL(), nitro.WithHeadLogger(f.log.With("endpoint", ws.Index())))
+			f.log.Info("newHeads routed to endpoint", "endpoint", ws.Index())
+		} else {
+			f.log.Info("no endpoint has a ws_url, polling on the timer")
+		}
+	}
+	if f.archive == nil {
+		if ar := f.pool.Archive(); ar != nil {
+			f.archive = ar
+			f.log.Info("backfill anchors routed to archive endpoint", "endpoint", ar.Index())
+		} else {
+			f.log.Info("no archive endpoint, backfill is a pure replay")
+		}
+	}
+}
+
+// endpointsStatus renders the pool's routing state for /status.
+func endpointsStatus(st nitro.PoolStatus) model.EndpointsStatus {
+	out := model.EndpointsStatus{ActiveEndpoint: st.Active, Failovers: st.Failovers, Endpoints: make([]model.EndpointStatus, len(st.Endpoints))}
+	for i, e := range st.Endpoints {
+		out.Endpoints[i] = model.EndpointStatus{Index: e.Index, WS: e.WS, Archive: e.Archive, Disabled: e.Disabled}
+	}
+	return out
+}
 
 func sleepContext(ctx context.Context, d time.Duration) error {
 	if d <= 0 {

@@ -415,11 +415,21 @@ func (f *Follower) prune(ctx context.Context) error {
 	return nil
 }
 
-// persistStats records rate limit accounting for /status.
+// persistStats records rate limit accounting and, with a pool, the
+// endpoint routing state for /status.
 func (f *Follower) persistStats(ctx context.Context) error {
 	st := f.rpc.Stats()
 	if err := f.store.SetState(ctx, f.chainID, db.StateRateLimitEvents, strconv.FormatUint(st.RateLimitEvents, 10)); err != nil {
 		return err
+	}
+	if f.pool != nil {
+		b, err := json.Marshal(endpointsStatus(f.pool.Status()))
+		if err != nil {
+			return fmt.Errorf("encode endpoints: %w", err)
+		}
+		if err := f.store.SetState(ctx, f.chainID, db.StateEndpoints, string(b)); err != nil {
+			return err
+		}
 	}
 	if st.Last429At.IsZero() {
 		return nil

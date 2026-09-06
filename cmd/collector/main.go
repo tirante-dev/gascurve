@@ -55,7 +55,12 @@ func run() error {
 	}
 
 	newRPC := func(n config.NetworkConfig) collector.RPC {
-		return nitro.NewClient(n.RPCURL, n.CallsPerSecond, nitro.WithLogger(log.With("network", n.Name)))
+		return nitro.NewPool(nitro.PoolConfig{
+			ChainID:   n.ChainID,
+			Endpoints: n.Endpoints(),
+			BatchSize: cfg.Collector.HeaderBatchSize,
+			Cooldown:  cfg.Collector.FailoverCooldown,
+		}, nitro.WithPoolLogger(log.With("network", n.Name)))
 	}
 	collector.Run(ctx, cfg, store, newRPC, log)
 	log.Info("collector stopped")

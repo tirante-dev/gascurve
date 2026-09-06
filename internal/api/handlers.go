@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -427,9 +428,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ns.Last429At = optString(st, db.StateLast429At)
 		ns.BackfillCursor = optString(st, db.StateBackfillCursor)
 		ns.ArbOSVersion = optString(st, db.StateArbOSVersion)
+		ns.EndpointsStatus = endpointsStatus(st)
 		out.Networks = append(out.Networks, ns)
 	}
 	writeJSON(w, http.StatusOK, cacheNone, out)
+}
+
+// endpointsStatus decodes the collector's endpoint routing state; a
+// network without one (or with an unreadable one) reports the primary
+// alone with no endpoints listed.
+func endpointsStatus(st map[string]string) model.EndpointsStatus {
+	out := model.EndpointsStatus{Endpoints: []model.EndpointStatus{}}
+	if raw, ok := st[db.StateEndpoints]; ok {
+		var decoded model.EndpointsStatus
+		if err := json.Unmarshal([]byte(raw), &decoded); err == nil && decoded.Endpoints != nil {
+			out = decoded
+		}
+	}
+	return out
 }
 
 func optString(m map[string]string, key string) *string {

@@ -397,31 +397,35 @@ func TestFindBlockAt(t *testing.T) {
 func TestBackfillArchiveAnchors(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
-	// The archive reports enormous backlogs so anchored stretches are
-	// unmistakable next to the pure replay.
-	rpc.backlogsAt = func(n uint64) []uint64 { return []uint64{n * 1_000_000_000, n * 2_000_000_000} }
+	// The archive endpoint is a separate RPC: it reports enormous backlogs
+	// so anchored stretches are unmistakable next to the pure replay.
+	archive := newFakeRPC(1000)
+	archive.backlogsAt = func(n uint64) []uint64 { return []uint64{n * 1_000_000_000, n * 2_000_000_000} }
 	// Historical state carries the constraint set in force at that block.
-	rpc.constraintsAt = func(n uint64) []nitro.Constraint {
+	archive.constraintsAt = func(n uint64) []nitro.Constraint {
 		if n < 500 {
 			return []nitro.Constraint{{Target: 60_000_000, Window: 15}, {Target: 20_000_000, Window: 86_400}}
 		}
-		return rpc.constraints
+		return archive.constraints
 	}
 	store := dbtest.New()
 	seedSets(t, store)
 	f := newTestFollower(t, rpc, store)
-	f.net.Archive = true
+	f.archive = archive
 	f.cfg.BackfillAnchorInterval = 100
 	f.cfg.BackfillDepth = 70 * time.Second // block 300
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	rpc.sampleAt = nil
 	runBackfill(t, f, 200)
 	// Segment [500, 991) then [100, 500): one anchor per 100 blocks, in
-	// replay order, and none for the live tick's own blocks.
-	if fmt.Sprint(rpc.sampleAt) != "[500 600 700 800 900 100 200 300 400]" {
-		t.Fatalf("anchor samples = %v", rpc.sampleAt)
+	// replay order, and none for the live tick's own blocks. Every anchor
+	// is sampled on the archive endpoint, never on the ordinary one.
+	if fmt.Sprint(archive.sampleAt) != "[500 600 700 800 900 100 200 300 400]" || len(rpc.sampleAt) != 0 {
+		t.Fatalf("anchor samples = %v (ordinary endpoint: %v)", archive.sampleAt, rpc.sampleAt)
+	}
+	if archive.calledTimes("HeadersByNumbers") != 0 || rpc.calledTimes("HeadersByNumbers") == 0 {
+		t.Fatal("headers must come from the ordinary endpoint")
 	}
 	c, err := f.loadCursor(ctx)
 	if err != nil || !c.Done || c.LastAnchor != 400 || c.AnchorMinFee != "20000000" {
@@ -458,8 +462,8 @@ func TestBackfillArchiveAnchors(t *testing.T) {
 
 	// Without archive the same backfill never samples state.
 	rpc2 := newFakeRPC(1000)
-	rpc2.backlogsAt = rpc.backlogsAt
-	rpc2.constraintsAt = rpc.constraintsAt
+	rpc2.backlogsAt = archive.backlogsAt
+	rpc2.constraintsAt = archive.constraintsAt
 	store2 := dbtest.New()
 	seedSets(t, store2)
 	f2 := newTestFollower(t, rpc2, store2)
@@ -530,7 +534,7 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 	store := dbtest.New()
 	seedSets(t, store)
 	f := newTestFollower(t, rpc, store)
-	f.net.Archive = true
+	f.archive = rpc
 	f.cfg.BackfillAnchorInterval = 5
 	f.cfg.BackfillDepth = 70 * time.Second
 	if err := f.Tick(ctx); err != nil {

@@ -43,6 +43,9 @@ networks:
     calls_per_second: 0
     archive: true
     enabled: true
+    fallbacks:
+      - rpc_url: https://spare.example
+        calls_per_second: 2
 `
 
 func writeYAML(t *testing.T, body string) string {
@@ -73,7 +76,7 @@ func TestLoadWith(t *testing.T) {
 	if cfg.LogLevel != "info" || cfg.Database.MaxOpen != 25 {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}
-	if cfg.Collector.BackfillAnchorInterval != 1000 || cfg.Collector.MaxCatchUpBatches != 10 {
+	if cfg.Collector.BackfillAnchorInterval != 1000 || cfg.Collector.MaxCatchUpBatches != 10 || cfg.Collector.FailoverCooldown != time.Minute {
 		t.Fatalf("collector defaults not applied: %+v", cfg.Collector)
 	}
 	if cfg.Server.WSMaxPerIP != 8 || cfg.Server.WSMaxTotal != 2000 || len(cfg.Server.TrustedProxies) != 0 {
@@ -89,6 +92,70 @@ func TestLoadWith(t *testing.T) {
 	ded := cfg.Networks[2]
 	if ded.WSURL != "wss://node.example/ws" || !ded.Archive || !ded.Unlimited() {
 		t.Fatalf("dedicated network: %+v", ded)
+	}
+	if len(rh.Endpoints()) != 1 || rh.Endpoints()[0] != rh.Primary() || rh.Primary().RPCURL != "https://rpc.example" {
+		t.Fatalf("endpoints without fallbacks: %+v", rh.Endpoints())
+	}
+	eps := ded.Endpoints()
+	if len(eps) != 2 || eps[0] != (EndpointConfig{RPCURL: "https://node.example", WSURL: "wss://node.example/ws", Archive: true}) || eps[1] != (EndpointConfig{RPCURL: "https://spare.example", CallsPerSecond: 2}) {
+		t.Fatalf("endpoints with a yaml fallback: %+v", eps)
+	}
+}
+
+// TestFallbackEnv: the positional lists create fallbacks as needed, empty
+// items leave a position's field alone and YAML values survive where the
+// environment says nothing.
+func TestFallbackEnv(t *testing.T) {
+	p := writeYAML(t, sampleYAML)
+	env := envOf(map[string]string{
+		"NETWORK_ROBINHOOD_FALLBACK_RPC_URLS":         "https://quick.example/key, https://spare.example",
+		"NETWORK_ROBINHOOD_FALLBACK_WS_URLS":          "wss://quick.example/key",
+		"NETWORK_ROBINHOOD_FALLBACK_ARCHIVE":          "true,",
+		"NETWORK_ROBINHOOD_FALLBACK_CALLS_PER_SECOND": ",8",
+		// The dedicated network keeps its YAML fallback URL and only gains
+		// a WS URL at position 0 and a second fallback.
+		"NETWORK_DEDICATED_FALLBACK_RPC_URLS": ",https://third.example",
+		"NETWORK_DEDICATED_FALLBACK_WS_URLS":  "wss://spare.example/ws,",
+	})
+	cfg, err := LoadWith(Options{Path: p, RequireRPC: true, Getenv: env})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rh := cfg.Networks[0]
+	want := []EndpointConfig{
+		{RPCURL: "https://quick.example/key", WSURL: "wss://quick.example/key", Archive: true},
+		{RPCURL: "https://spare.example", CallsPerSecond: 8},
+	}
+	if len(rh.Fallbacks) != 2 || rh.Fallbacks[0] != want[0] || rh.Fallbacks[1] != want[1] {
+		t.Fatalf("robinhood fallbacks: %+v", rh.Fallbacks)
+	}
+	if eps := rh.Endpoints(); len(eps) != 3 || eps[0] != rh.Primary() || eps[2] != want[1] {
+		t.Fatalf("robinhood endpoints: %+v", eps)
+	}
+	ded := cfg.Networks[2]
+	if len(ded.Fallbacks) != 2 || ded.Fallbacks[0] != (EndpointConfig{RPCURL: "https://spare.example", WSURL: "wss://spare.example/ws", CallsPerSecond: 2}) || ded.Fallbacks[1] != (EndpointConfig{RPCURL: "https://third.example"}) {
+		t.Fatalf("dedicated fallbacks: %+v", ded.Fallbacks)
+	}
+	// Unset and empty variables change nothing.
+	cfg, err = LoadWith(Options{Path: p, RequireRPC: true, Getenv: envOf(map[string]string{"NETWORK_ROBINHOOD_FALLBACK_RPC_URLS": ""})})
+	if err != nil || len(cfg.Networks[0].Fallbacks) != 0 {
+		t.Fatalf("empty list: %+v %v", cfg.Networks[0].Fallbacks, err)
+	}
+	// Bad values and incomplete fallbacks are rejected.
+	for _, m := range []map[string]string{
+		{"NETWORK_ROBINHOOD_FALLBACK_ARCHIVE": "yes,please"},
+		{"NETWORK_ROBINHOOD_FALLBACK_CALLS_PER_SECOND": "1,fast"},
+		{"NETWORK_ROBINHOOD_FALLBACK_RPC_URLS": "https://a", "NETWORK_ROBINHOOD_FALLBACK_CALLS_PER_SECOND": "-1"},
+		{"NETWORK_ROBINHOOD_FALLBACK_RPC_URLS": "https://a", "NETWORK_ROBINHOOD_FALLBACK_WS_URLS": "https://not-a-socket"},
+		{"NETWORK_ROBINHOOD_FALLBACK_WS_URLS": "wss://a"}, // a fallback without rpc_url
+	} {
+		if _, err := LoadWith(Options{Path: p, RequireRPC: true, Getenv: envOf(m)}); err == nil {
+			t.Fatalf("expected error for %v", m)
+		}
+	}
+	// The API does not need fallback RPC URLs either.
+	if _, err := LoadWith(Options{Path: p, RequireRPC: false, Getenv: envOf(map[string]string{"NETWORK_ROBINHOOD_FALLBACK_WS_URLS": "wss://a"})}); err != nil {
+		t.Fatalf("api load should not require fallback rpc urls: %v", err)
 	}
 }
 
@@ -190,9 +257,9 @@ func TestValidate(t *testing.T) {
 			Collector: CollectorConfig{
 				TickInterval: time.Second, SlowInterval: time.Second, HeaderBatchSize: 10,
 				BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: time.Hour,
-				BackfillAnchorInterval: 1000, MaxCatchUpBatches: 10,
+				BackfillAnchorInterval: 1000, MaxCatchUpBatches: 10, FailoverCooldown: time.Minute,
 			},
-			Networks: []NetworkConfig{{Name: "a", ChainID: 1, CallsPerSecond: 1, Enabled: true, RPCURL: "http://x"}},
+			Networks: []NetworkConfig{{Name: "a", ChainID: 1, CallsPerSecond: 1, Enabled: true, RPCURL: "http://x", Fallbacks: []EndpointConfig{{RPCURL: "http://y", WSURL: "wss://y", Archive: true, CallsPerSecond: 2}}}},
 		}
 	}
 	if err := ptr(base()).Validate(true); err != nil {
@@ -228,6 +295,11 @@ func TestValidate(t *testing.T) {
 		"anchor interval": func(c *Config) { c.Collector.BackfillAnchorInterval = 0 },
 		"catch up":        func(c *Config) { c.Collector.MaxCatchUpBatches = 0 },
 		"missing rpc url": func(c *Config) { c.Networks[0].RPCURL = "" },
+		"cooldown":        func(c *Config) { c.Collector.FailoverCooldown = 0 },
+		"fallback calls":  func(c *Config) { c.Networks[0].Fallbacks[0].CallsPerSecond = math.Inf(1) },
+		"fallback huge":   func(c *Config) { c.Networks[0].Fallbacks[0].CallsPerSecond = MaxCallsPerSecond + 1 },
+		"fallback ws":     func(c *Config) { c.Networks[0].Fallbacks[0].WSURL = "http://y" },
+		"fallback rpc":    func(c *Config) { c.Networks[0].Fallbacks[0].RPCURL = "" },
 	}
 	for name, mutate := range cases {
 		c := base()

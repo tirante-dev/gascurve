@@ -208,13 +208,14 @@ func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor) (*backfil
 }
 
 // backfillAnchors reads the real pricer state at every anchor block among
-// numbers on an archive network and returns the Anchor for the replay
+// numbers from the archive endpoint and returns the Anchor for the replay
 // plus the minimum base fee sampled at each anchor. The anchor is nil
-// without archive (pure replay) and when no anchor block is in range. An
-// anchor whose model differs from the segment's constraint set is skipped
-// with a warning: the replay state cannot change shape mid segment.
+// without an archive endpoint (pure replay) and when no anchor block is
+// in range. An anchor whose model differs from the segment's constraint
+// set is skipped with a warning: the replay state cannot change shape mid
+// segment.
 func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, numbers []uint64) (pricer.Anchor, map[uint64]*big.Int, error) {
-	if !f.net.Archive {
+	if f.archive == nil {
 		return nil, nil, nil
 	}
 	interval := uint64(f.cfg.BackfillAnchorInterval)
@@ -224,7 +225,7 @@ func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, number
 		if n%interval != 0 {
 			continue
 		}
-		sample, err := f.rpc.FastSampleAt(ctx, n)
+		sample, err := f.archive.FastSampleAt(ctx, n)
 		if err != nil {
 			return nil, nil, fmt.Errorf("backfill anchor %d: %w", n, err)
 		}

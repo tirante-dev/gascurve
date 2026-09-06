@@ -38,7 +38,8 @@ type Head struct {
 // HeadSubscriber keeps an eth_subscribe("newHeads") subscription open over
 // WebSocket. It reconnects with exponential back-off (1 s to 30 s) and
 // reports whether it is currently subscribed so the follower can fall back
-// to polling while the socket is down.
+// to polling while the socket is down. The URL is never logged: it can
+// carry a key.
 type HeadSubscriber struct {
 	url          string
 	userAgent    string
@@ -114,9 +115,9 @@ func (s *HeadSubscriber) Run(ctx context.Context, fn func(Head)) {
 		}
 		if subscribed {
 			backoff = s.minBackoff
-			s.log.Warn("newHeads subscription lost, polling until it reconnects", "url", s.url, "err", err.Error(), "retryIn", backoff.String())
+			s.log.Warn("newHeads subscription lost, polling until it reconnects", "err", err.Error(), "retryIn", backoff.String())
 		} else {
-			s.log.Warn("newHeads subscription failed, polling until it connects", "url", s.url, "err", err.Error(), "retryIn", backoff.String())
+			s.log.Warn("newHeads subscription failed, polling until it connects", "err", err.Error(), "retryIn", backoff.String())
 		}
 		if err := s.sleep(ctx, backoff); err != nil {
 			return
@@ -147,7 +148,7 @@ func (s *HeadSubscriber) runOnce(ctx context.Context, fn func(Head)) (subscribed
 	}
 	s.connected.Store(true)
 	defer s.connected.Store(false)
-	s.log.Info("newHeads subscription connected", "url", s.url, "subscription", subID)
+	s.log.Info("newHeads subscription connected", "subscription", subID)
 
 	pingCtx, stopPing := context.WithCancel(ctx)
 	defer stopPing()

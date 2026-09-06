@@ -227,6 +227,26 @@ type L1Series struct {
 	Points []L1Point `json:"points"`
 }
 
+// EndpointStatus describes one RPC endpoint of a network in /status.
+// Index 0 is the primary; URLs are never exposed because they can carry
+// keys.
+type EndpointStatus struct {
+	Index    int  `json:"index"`
+	WS       bool `json:"ws"`
+	Archive  bool `json:"archive"`
+	Disabled bool `json:"disabled"`
+}
+
+// EndpointsStatus is the routing state of a network's endpoint pool: the
+// endpoint ordinary calls go to, how often the collector failed over and
+// every endpoint's capabilities. The collector stores it in
+// collector_state under the endpoints key; Endpoints is never null.
+type EndpointsStatus struct {
+	ActiveEndpoint int              `json:"activeEndpoint"`
+	Failovers      uint64           `json:"failovers"`
+	Endpoints      []EndpointStatus `json:"endpoints"`
+}
+
 // NetworkStatus is the collector status of one network. HeadAt,
 // LagSeconds and LastSampleAt are null before the first head.
 type NetworkStatus struct {
@@ -242,6 +262,7 @@ type NetworkStatus struct {
 	Last429At       *string `json:"last429At"`
 	BackfillCursor  *string `json:"backfillCursor"`
 	ArbOSVersion    *string `json:"arbosVersion"`
+	EndpointsStatus
 }
 
 // Status is the /status response.

@@ -73,27 +73,13 @@ func (c *Client) HeaderByNumber(ctx context.Context, number uint64) (*Header, er
 
 // HeadersByNumbers fetches headers in batches of at most MaxBatch, in order.
 func (c *Client) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
-	out := make([]Header, 0, len(numbers))
-	for start := 0; start < len(numbers); start += MaxBatch {
-		end := min(start+MaxBatch, len(numbers))
-		reqs := make([]Request, 0, end-start)
-		for _, n := range numbers[start:end] {
-			reqs = append(reqs, Request{Method: methodGetBlockByNumber, Params: []any{blockTag(n), false}})
-		}
-		results, err := c.Batch(ctx, reqs)
-		if err != nil {
-			return nil, err
-		}
-		for i, r := range results {
-			if r.Err != nil {
-				return nil, fmt.Errorf("block %d: %w", numbers[start+i], r.Err)
-			}
-			b, err := parseHeader(r.Raw)
-			if err != nil {
-				return nil, fmt.Errorf("block %d: %w", numbers[start+i], err)
-			}
-			out = append(out, b.Header)
-		}
+	blocks, err := blocksByNumbers(ctx, numbers, false, c.batchCapped)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Header, len(blocks))
+	for i := range blocks {
+		out[i] = blocks[i].Header
 	}
 	return out, nil
 }
@@ -110,27 +96,47 @@ func (c *Client) BlockWithTxs(ctx context.Context, number uint64) (*Block, error
 // BlocksWithTxs fetches several blocks with full transactions in one batch
 // per MaxBatch items.
 func (c *Client) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, error) {
-	out := make([]Block, 0, len(numbers))
-	for start := 0; start < len(numbers); start += MaxBatch {
-		end := min(start+MaxBatch, len(numbers))
-		reqs := make([]Request, 0, end-start)
-		for _, n := range numbers[start:end] {
-			reqs = append(reqs, Request{Method: methodGetBlockByNumber, Params: []any{blockTag(n), true}})
-		}
-		results, err := c.Batch(ctx, reqs)
+	return blocksByNumbers(ctx, numbers, true, c.batchCapped)
+}
+
+// batcher sends a request list of any length, splitting it into HTTP
+// batches as it sees fit, and returns one Result per request in order.
+type batcher func(ctx context.Context, reqs []Request) ([]Result, error)
+
+// batchCapped is the Client's batcher: fixed batches of MaxBatch items.
+func (c *Client) batchCapped(ctx context.Context, reqs []Request) ([]Result, error) {
+	out := make([]Result, 0, len(reqs))
+	for start := 0; start < len(reqs); start += MaxBatch {
+		results, err := c.Batch(ctx, reqs[start:min(start+MaxBatch, len(reqs))])
 		if err != nil {
 			return nil, err
 		}
-		for i, r := range results {
-			if r.Err != nil {
-				return nil, fmt.Errorf("block %d: %w", numbers[start+i], r.Err)
-			}
-			b, err := parseHeader(r.Raw)
-			if err != nil {
-				return nil, fmt.Errorf("block %d: %w", numbers[start+i], err)
-			}
-			out = append(out, *b)
+		out = append(out, results...)
+	}
+	return out, nil
+}
+
+// blocksByNumbers fetches eth_getBlockByNumber for every number through
+// send, with or without full transactions, and parses the results.
+func blocksByNumbers(ctx context.Context, numbers []uint64, full bool, send batcher) ([]Block, error) {
+	reqs := make([]Request, len(numbers))
+	for i, n := range numbers {
+		reqs[i] = Request{Method: methodGetBlockByNumber, Params: []any{blockTag(n), full}}
+	}
+	results, err := send(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Block, 0, len(numbers))
+	for i, r := range results {
+		if r.Err != nil {
+			return nil, fmt.Errorf("block %d: %w", numbers[i], r.Err)
 		}
+		b, err := parseHeader(r.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("block %d: %w", numbers[i], err)
+		}
+		out = append(out, *b)
 	}
 	return out, nil
 }

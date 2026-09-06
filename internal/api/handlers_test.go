@@ -96,6 +96,8 @@ func seed(t *testing.T) *dbtest.MemStore {
 	must(s.SetState(ctx, robinhood, db.StateLast429At, "2026-09-06T07:00:00Z"))
 	must(s.SetState(ctx, robinhood, db.StateArbOSVersion, "61"))
 	must(s.SetState(ctx, robinhood, db.StateBackfillCursor, `{"done":true}`))
+	must(s.SetState(ctx, robinhood, db.StateEndpoints, `{"activeEndpoint":1,"failovers":3,"endpoints":[{"index":0,"ws":false,"archive":false,"disabled":true},{"index":1,"ws":true,"archive":true,"disabled":false}]}`))
+	must(s.SetState(ctx, testnet, db.StateEndpoints, `not json`))
 	return s
 }
 
@@ -359,6 +361,19 @@ func TestEndpoints(t *testing.T) {
 			}
 			if !strings.Contains(string(b), `"lastSampleAt":null`) {
 				t.Fatalf("null lastSampleAt expected: %s", b)
+			}
+			if rh.ActiveEndpoint != 1 || rh.Failovers != 3 || len(rh.Endpoints) != 2 || !rh.Endpoints[0].Disabled || rh.Endpoints[0].Index != 0 || !rh.Endpoints[1].WS || !rh.Endpoints[1].Archive {
+				t.Fatalf("status endpoints: %+v", rh.EndpointsStatus)
+			}
+			// Networks without (or with an unreadable) routing state report
+			// the primary alone and an empty, never null, endpoint list.
+			for _, n := range s.Networks[1:] {
+				if n.ActiveEndpoint != 0 || n.Failovers != 0 || n.Endpoints == nil || len(n.Endpoints) != 0 {
+					t.Fatalf("status endpoints default: %+v", n.EndpointsStatus)
+				}
+			}
+			if strings.Count(string(b), `"endpoints":[]`) != 2 || strings.Contains(string(b), "rpc_url") {
+				t.Fatalf("endpoints json: %s", b)
 			}
 		}},
 		{"/api/v1/nothing", 404, cacheNone, nil},

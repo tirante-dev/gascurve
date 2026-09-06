@@ -3,7 +3,10 @@
 // DEV_MODE and per-network NETWORK_<NAME>_RPC_URL, NETWORK_<NAME>_WS_URL,
 // NETWORK_<NAME>_ENABLED, NETWORK_<NAME>_CALLS_PER_SECOND and
 // NETWORK_<NAME>_ARCHIVE, where NAME is the network name upper-cased with
-// dashes replaced by underscores.
+// dashes replaced by underscores. Fallback endpoints come from the
+// positional, comma-separated NETWORK_<NAME>_FALLBACK_RPC_URLS,
+// NETWORK_<NAME>_FALLBACK_WS_URLS, NETWORK_<NAME>_FALLBACK_ARCHIVE and
+// NETWORK_<NAME>_FALLBACK_CALLS_PER_SECOND.
 package config
 
 import (
@@ -106,6 +109,26 @@ type CollectorConfig struct {
 	// the follower never falls behind forever on a budget below the chain's
 	// block rate. Unlimited networks (calls_per_second: 0) never skip.
 	MaxCatchUpBatches int `mapstructure:"max_catch_up_batches"`
+	// FailoverCooldown is how long a network stays on a fallback endpoint
+	// after the active one failed before the primary is probed again with
+	// one eth_chainId (default 60s).
+	FailoverCooldown time.Duration `mapstructure:"failover_cooldown"`
+}
+
+// EndpointConfig is one JSON-RPC endpoint of a network. The primary is
+// described by the network's own rpc_url, ws_url, archive and
+// calls_per_second; fallbacks carry the same four fields.
+type EndpointConfig struct {
+	RPCURL string `mapstructure:"rpc_url"`
+	// WSURL is an optional ws:// or wss:// endpoint for the newHeads
+	// subscription. The first endpoint that has one serves it.
+	WSURL string `mapstructure:"ws_url"`
+	// Archive is true when the node serves historical eth_call. The first
+	// endpoint that has it serves the backfill anchors.
+	Archive bool `mapstructure:"archive"`
+	// CallsPerSecond is this endpoint's own JSON-RPC budget, 0 for
+	// unlimited. Every endpoint has its own token bucket.
+	CallsPerSecond float64 `mapstructure:"calls_per_second"`
 }
 
 // NetworkConfig describes one Arbitrum Nitro chain.
@@ -131,6 +154,14 @@ type NetworkConfig struct {
 	// collector.backfill_anchor_interval blocks.
 	Archive bool `mapstructure:"archive"`
 	Enabled bool `mapstructure:"enabled"`
+	// Fallbacks are further endpoints for the same chain, tried in order
+	// when the active endpoint fails (see collector.failover_cooldown).
+	// Capabilities are routed independently of the order: the first
+	// endpoint with a ws_url serves newHeads, the first with archive: true
+	// serves the backfill anchors. URLs that carry keys belong in the
+	// environment (NETWORK_<NAME>_FALLBACK_RPC_URLS and friends), never in
+	// config.yaml.
+	Fallbacks []EndpointConfig `mapstructure:"fallbacks"`
 }
 
 // MaxCallsPerSecond bounds calls_per_second; anything above it is a typo
@@ -139,6 +170,27 @@ const MaxCallsPerSecond = 10_000
 
 // Unlimited reports whether the network has no call budget.
 func (n NetworkConfig) Unlimited() bool { return n.CallsPerSecond <= 0 }
+
+// Primary returns the network's primary endpoint.
+func (n NetworkConfig) Primary() EndpointConfig {
+	return EndpointConfig{RPCURL: n.RPCURL, WSURL: n.WSURL, Archive: n.Archive, CallsPerSecond: n.CallsPerSecond}
+}
+
+// Endpoints returns the primary endpoint followed by the fallbacks.
+func (n NetworkConfig) Endpoints() []EndpointConfig {
+	out := make([]EndpointConfig, 0, 1+len(n.Fallbacks))
+	out = append(out, n.Primary())
+	return append(out, n.Fallbacks...)
+}
+
+// fallback returns the i-th fallback, growing the list with zero-valued
+// entries as needed.
+func (n *NetworkConfig) fallback(i int) *EndpointConfig {
+	for len(n.Fallbacks) <= i {
+		n.Fallbacks = append(n.Fallbacks, EndpointConfig{})
+	}
+	return &n.Fallbacks[i]
+}
 
 // EnvKey returns the environment variable prefix for this network, for
 // example NETWORK_ARBITRUM_ONE for "arbitrum-one".
@@ -217,6 +269,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collector.backfill_depth", "720h")
 	v.SetDefault("collector.backfill_anchor_interval", 1000)
 	v.SetDefault("collector.max_catch_up_batches", 10)
+	v.SetDefault("collector.failover_cooldown", "60s")
 	v.SetDefault("log_level", "info")
 }
 
@@ -271,8 +324,64 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 			}
 			n.CallsPerSecond = f
 		}
+		if err := applyFallbackEnv(n, getenv); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// applyFallbackEnv applies the positional fallback lists. Every list is
+// comma-separated and position i addresses fallbacks[i], which is created
+// with zero values when the YAML has fewer; an empty item leaves that
+// position's field alone.
+func applyFallbackEnv(n *NetworkConfig, getenv func(string) (string, bool)) error {
+	key := n.EnvKey() + "_FALLBACK_"
+	for i, v := range envList(getenv, key+"RPC_URLS") {
+		if v != "" {
+			n.fallback(i).RPCURL = v
+		}
+	}
+	for i, v := range envList(getenv, key+"WS_URLS") {
+		if v != "" {
+			n.fallback(i).WSURL = v
+		}
+	}
+	for i, v := range envList(getenv, key+"ARCHIVE") {
+		if v == "" {
+			continue
+		}
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("%sARCHIVE[%d]: %w", key, i, err)
+		}
+		n.fallback(i).Archive = b
+	}
+	for i, v := range envList(getenv, key+"CALLS_PER_SECOND") {
+		if v == "" {
+			continue
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("%sCALLS_PER_SECOND[%d]: %w", key, i, err)
+		}
+		n.fallback(i).CallsPerSecond = f
+	}
+	return nil
+}
+
+// envList splits a comma-separated variable into trimmed items; an unset
+// or empty variable is no items.
+func envList(getenv func(string) (string, bool), name string) []string {
+	s, ok := getenv(name)
+	if !ok || s == "" {
+		return nil
+	}
+	items := strings.Split(s, ",")
+	for i := range items {
+		items[i] = strings.TrimSpace(items[i])
+	}
+	return items
 }
 
 // Validate checks invariants: unique names and chain IDs, positive
@@ -297,11 +406,12 @@ func (c *Config) Validate(requireRPC bool) error {
 		errs = append(errs, errors.New("database.url is required"))
 	}
 	for name, d := range map[string]time.Duration{
-		"collector.tick_interval":    c.Collector.TickInterval,
-		"collector.slow_interval":    c.Collector.SlowInterval,
-		"collector.block_retention":  c.Collector.BlockRetention,
-		"collector.sample_retention": c.Collector.SampleRetention,
-		"collector.backfill_depth":   c.Collector.BackfillDepth,
+		"collector.tick_interval":     c.Collector.TickInterval,
+		"collector.slow_interval":     c.Collector.SlowInterval,
+		"collector.block_retention":   c.Collector.BlockRetention,
+		"collector.sample_retention":  c.Collector.SampleRetention,
+		"collector.backfill_depth":    c.Collector.BackfillDepth,
+		"collector.failover_cooldown": c.Collector.FailoverCooldown,
 	} {
 		if d <= 0 {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
@@ -334,19 +444,33 @@ func (c *Config) Validate(requireRPC bool) error {
 			errs = append(errs, fmt.Errorf("duplicate chain id %d", n.ChainID))
 		}
 		ids[n.ChainID] = true
-		if n.CallsPerSecond < 0 || math.IsNaN(n.CallsPerSecond) || math.IsInf(n.CallsPerSecond, 0) {
-			errs = append(errs, fmt.Errorf("network %s: calls_per_second must be zero (unlimited) or a finite positive number", n.Name))
-		} else if n.CallsPerSecond > MaxCallsPerSecond {
-			errs = append(errs, fmt.Errorf("network %s: calls_per_second %v exceeds %d (use 0 for a dedicated node)", n.Name, n.CallsPerSecond, MaxCallsPerSecond))
-		}
-		if n.WSURL != "" && !strings.HasPrefix(n.WSURL, "ws://") && !strings.HasPrefix(n.WSURL, "wss://") {
-			errs = append(errs, fmt.Errorf("network %s: ws_url %q must start with ws:// or wss://", n.Name, n.WSURL))
-		}
+		errs = append(errs, validateEndpoint("network "+n.Name, n.Primary())...)
 		if requireRPC && n.Enabled && n.RPCURL == "" {
 			errs = append(errs, fmt.Errorf("network %s: rpc_url is required (set %s_RPC_URL)", n.Name, n.EnvKey()))
 		}
+		for i, e := range n.Fallbacks {
+			where := fmt.Sprintf("network %s: fallbacks[%d]", n.Name, i)
+			errs = append(errs, validateEndpoint(where, e)...)
+			if requireRPC && n.Enabled && e.RPCURL == "" {
+				errs = append(errs, fmt.Errorf("%s: rpc_url is required (set %s_FALLBACK_RPC_URLS)", where, n.EnvKey()))
+			}
+		}
 	}
 	return errors.Join(errs...)
+}
+
+// validateEndpoint checks an endpoint's budget and ws_url scheme.
+func validateEndpoint(where string, e EndpointConfig) []error {
+	var errs []error
+	if e.CallsPerSecond < 0 || math.IsNaN(e.CallsPerSecond) || math.IsInf(e.CallsPerSecond, 0) {
+		errs = append(errs, fmt.Errorf("%s: calls_per_second must be zero (unlimited) or a finite positive number", where))
+	} else if e.CallsPerSecond > MaxCallsPerSecond {
+		errs = append(errs, fmt.Errorf("%s: calls_per_second %v exceeds %d (use 0 for a dedicated node)", where, e.CallsPerSecond, MaxCallsPerSecond))
+	}
+	if e.WSURL != "" && !strings.HasPrefix(e.WSURL, "ws://") && !strings.HasPrefix(e.WSURL, "wss://") {
+		errs = append(errs, fmt.Errorf("%s: ws_url %q must start with ws:// or wss://", where, e.WSURL))
+	}
+	return errs
 }
 
 // EnabledNetworks returns the networks with enabled: true.

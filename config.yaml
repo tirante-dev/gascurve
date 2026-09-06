@@ -27,6 +27,7 @@ collector:
   backfill_depth: 720h       # how far back the resumable backfill reaches (30d)
   backfill_anchor_interval: 1000  # blocks between state anchors when a network is archive: true
   max_catch_up_batches: 10   # paced networks skip a catch-up gap larger than this many header batches; unlimited networks never skip
+  failover_cooldown: 60s     # time on a fallback endpoint before the primary is probed again (one eth_chainId)
 
 # Every network is an Arbitrum Nitro chain. calls_per_second is the budget for
 # a public endpoint and counts JSON-RPC calls, including items inside a batch
@@ -37,6 +38,25 @@ collector:
 #   archive: true when the node serves historical state; the backfill then
 #            anchors the replay to real backlogs every backfill_anchor_interval
 #            blocks instead of relying on replay alone.
+#   fallbacks: further endpoints for the same chain, each with the same four
+#            fields (rpc_url, ws_url, archive, calls_per_second) and its own
+#            token bucket and adaptive batch cap. Ordinary calls go to the
+#            primary; after a failed request (transport error, HTTP 5xx, a 429
+#            that outlasts its back-off, chain id mismatch) they move to the
+#            next fallback for collector.failover_cooldown, then the primary
+#            is probed and taken back. newHeads uses the first endpoint with a
+#            ws_url and the backfill anchors the first with archive: true,
+#            whichever endpoint is active. Every endpoint must report chain_id
+#            or it is disabled. Never put URLs that carry keys here: set them
+#            in the environment instead (positional, comma-separated lists):
+#              NETWORK_<NAME>_FALLBACK_RPC_URLS, NETWORK_<NAME>_FALLBACK_WS_URLS,
+#              NETWORK_<NAME>_FALLBACK_ARCHIVE, NETWORK_<NAME>_FALLBACK_CALLS_PER_SECOND
+#            Example in YAML for a keyless fallback:
+#              fallbacks:
+#                - rpc_url: https://spare.example/rpc
+#                  ws_url: wss://spare.example/ws
+#                  archive: true
+#                  calls_per_second: 0
 networks:
   - name: robinhood
     display_name: Robinhood Chain
