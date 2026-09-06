@@ -71,6 +71,8 @@ Replay validation vector (Robinhood, 2026-09-06): constraints `[60e6,15,3_111_50
 
 `Exponent` per constraint (`c.Backlog / (c.Window*c.Target)` in bips) is exposed to the API as `exponentBips` so the UI can show each constraint's share.
 
+Replay comparison: ArbOS computes the fee in block N's `startBlock` and it applies to header N+1's `baseFeePerGas`; the replay compares `predicted(N)` with header N, so `replayErrorBips` carries at most one block of lag. The EIP-7623 floor is not applied to batch-report `gasSpent`.
+
 ## 4. Database (PostgreSQL 16, migrations in `internal/db/migrations`)
 
 All tables are keyed by `chain_id` first. Wei values are `NUMERIC(40,0)`. Gas values are `BIGINT`.
@@ -85,6 +87,7 @@ buckets             (chain_id, resolution TEXT /* '1m'|'15m'|'1h' */, bucket_sta
                      base_fee_min/avg/max NUMERIC, exponent_end_bips BIGINT,
                      backlogs_end BIGINT[], backlogs_max BIGINT[], constraint_set_id INT,
                      replay_error_bips BIGINT /* max |predicted-actual| in bips over the bucket */,
+                     last_block BIGINT /* highest block folded in; the backfill never overwrites *_end fields written by newer blocks */,
                      PK(chain_id, resolution, bucket_start))     -- kept forever
 state_samples       (chain_id, sampled_at, block_number, base_fee, min_base_fee, constraints JSONB,
                      legacy JSONB /* {speedLimit,inertia,tolerance,backlog} or null */,
@@ -101,6 +104,8 @@ collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))  
 
 `NOTIFY gascurve_live, '<json>'` is issued by the collector after each tick with the `LiveSnapshot` below (payloads stay under 8 kB; `recentBlocks` is not included in the notify payload, the API keeps its own ring buffer from `blocks` rows).
 
+`NOTIFY gascurve_owner_action, '{"chainId": …, "action": OwnerAction}'` is issued when the slow loop stores a new owner action; the API turns it into the WebSocket `owner_action` message.
+
 ## 5. Collector (`internal/collector`)
 
 One `Follower` per network, all sharing one `*sqlx.DB`.
@@ -108,7 +113,7 @@ One `Follower` per network, all sharing one `*sqlx.DB`.
 Fast loop, every `collector.tick_interval` (1 s), or on every `newHeads` event when `ws_url` is configured (then state calls are made at that head's block number so samples align exactly with headers):
 
 1. One JSON-RPC batch: `eth_getBlockByNumber("latest", false)`, `getGasPricingConstraints()`, `getPricesInWei()`, `getMinimumGasPrice()`. If the constraints call reverts or returns empty, also `getGasBacklog()`, `getPricingInertia()`, `getGasBacklogTolerance()`, `getGasAccountingParams()` (legacy model).
-2. Fetch headers for every block between the stored head and the new head, in batches of `header_batch_size`, respecting the per-network budget.
+2. Fetch headers for every block between the stored head and the new head, in batches of `header_batch_size`, respecting the per-network budget. On a paced network (`calls_per_second > 0`) a gap larger than 10 × `header_batch_size` blocks is skipped (logged) and the replay restarts from the sampled backlogs, because a 4 calls/s budget cannot follow a ~10 blocks/s chain block by block; unlimited (dedicated node) networks always fetch every block.
 3. Replay each block through the pricer. When the sampled state's block number equals a replayed block, overwrite the backlogs with the sampled values (`anchored = true`) so drift never accumulates.
 4. Upsert `blocks`, fold into `buckets` (1m, 15m, 1h), insert `state_samples`, update `networks.head_block`, `NOTIFY`.
 
@@ -132,14 +137,14 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 | `GET /networks/{network}/live` | `LiveSnapshot` (same as WS `tick`), `Cache-Control: no-store` |
 | `GET /networks/{network}/blocks?limit=120` | `BlockPoint[]` newest first, max 1000 |
 | `GET /networks/{network}/series?range=1h\|24h\|30d\|all` | `Series` (see below) |
-| `GET /networks/{network}/constraints` | `{ current: ConstraintSet, history: ConstraintSet[] }` |
+| `GET /networks/{network}/constraints` | `{ current: ConstraintSet \| null, history: ConstraintSet[] }` (`null` on legacy chains or before any set is known) |
 | `GET /networks/{network}/owner-actions` | `OwnerAction[]` newest first |
 | `GET /networks/{network}/batches?range=…` | `BatchSeries` (L1 cost per bucket, batch cadence) |
 | `GET /networks/{network}/l1?range=…` | `L1Series` (pricer getters over time, from state samples) |
-| `GET /status` | collector status per network (head, lag, last error, rate-limit events) |
+| `GET /status` | `{ version, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion }] }` |
 | `GET /ws?network=…` | WebSocket, see §7 |
 
-Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applied server-side if more than 2000 points), `24h` → `1m` buckets, `30d` → `15m`, `all` → `1h`.
+Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applied server-side if more than 2000 points), `24h` → `1m` buckets, `30d` → `15m`, `all` → `1h`. `/live` returns 404 until the collector has produced a sample. Arrays are never `null` in responses. `L1Series` reaches back at most `collector.sample_retention`.
 
 ```ts
 type Network = {
@@ -196,7 +201,7 @@ type OwnerAction = {
   args: Record<string, unknown>;           // decoded when the selector is known, else { raw: '0x…' }
 }
 
-type BatchSeries = { range: string; resolution: string; points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
+type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; /* 'batch' = one point per report, used for 1h */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
 type L1Series = { range: string; points: { t: number; baseFeeEstimate: string; surplus: string; feesAvailable: string; unitsSinceUpdate: number }[] }
 ```
 
@@ -205,7 +210,8 @@ type L1Series = { range: string; points: { t: number; baseFeeEstimate: string; s
 Server to client, one JSON object per message:
 
 ```ts
-{ type: 'hello', data: { network: Network; snapshot: LiveSnapshot; recentBlocks: BlockPoint[] } }   // on connect
+{ type: 'hello', data: { network: Network; snapshot: LiveSnapshot | null; recentBlocks: BlockPoint[] } }   // on connect; snapshot null until the collector has sampled
+{ type: 'error', error: { code: string; message: string } }   // e.g. unknown subscribe target; the socket stays open
 { type: 'tick',  data: LiveSnapshot }                    // every collector tick, ~1/s
 { type: 'blocks', data: BlockPoint[] }                   // new blocks since the previous message, oldest first
 { type: 'owner_action', data: OwnerAction }              // when the collector sees a new one

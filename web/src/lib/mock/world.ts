@@ -19,6 +19,7 @@ import {
   type LegacyState,
 } from "@/lib/pricer";
 import type {
+  BatchResolution,
   BatchSeries,
   BlockPoint,
   ConstraintSet,
@@ -139,8 +140,8 @@ const RANGE_SPEC: Record<SeriesRange, { seconds: number; resolution: Series["res
   all: { seconds: 3600, resolution: "1h", span: Number.POSITIVE_INFINITY },
 };
 
-const BATCH_RESOLUTION: Record<SeriesRange, { seconds: number; resolution: string }> = {
-  "1h": { seconds: 60, resolution: "1m" },
+const BATCH_RESOLUTION: Record<SeriesRange, { seconds: number; resolution: BatchResolution }> = {
+  "1h": { seconds: 15, resolution: "batch" },
   "24h": { seconds: 900, resolution: "15m" },
   "30d": { seconds: 3600, resolution: "1h" },
   all: { seconds: 3600, resolution: "1h" },
@@ -613,8 +614,8 @@ export class MockWorld {
   constraintsResponse(): ConstraintsResponse {
     const sets = this.def.constraintSets;
     if (sets.length === 0) {
-      const empty: ConstraintSet = { id: 0, effectiveBlock: 0, effectiveAt: this.def.historyStart, source: "observed", constraints: [] };
-      return { current: empty, history: [] };
+      // Legacy chains have no constraint set; the API returns null.
+      return { current: null, history: [] };
     }
     const history = sets.map((_, i) => this.constraintSet(i));
     return { current: history[history.length - 1], history };

@@ -142,8 +142,11 @@ export function resampleFees(points: readonly Pick<SeriesPoint, "t" | "feesWei">
 export type CostRow = { t: number; l1Eth: number; l2Eth: number; batches: number };
 
 /** Joins batch spend with resampled L2 fees on the batch buckets. */
-export function joinCosts(batches: readonly BatchPoint[], fees: Map<number, number>): CostRow[] {
-  return batches.map((b) => ({ t: b.t, l1Eth: weiToEthNumber(b.weiSpent), l2Eth: fees.get(b.t) ?? 0, batches: b.batches }));
+export function joinCosts(batches: readonly BatchPoint[], fees: Map<number, number>, bucketSeconds = 1): CostRow[] {
+  return batches.map((b) => {
+    const key = Math.floor(b.t / bucketSeconds) * bucketSeconds;
+    return { t: b.t, l1Eth: weiToEthNumber(b.weiSpent), l2Eth: fees.get(key) ?? 0, batches: b.batches };
+  });
 }
 
 /** Points for the P4 versus e^x comparison, x in [0, max]. */

@@ -43,6 +43,7 @@ export type LiveClientHandlers = {
   onBlocks?: (blocks: BlockPoint[]) => void;
   onOwnerAction?: (action: OwnerAction) => void;
   onStatus?: (status: LiveStatus) => void;
+  onError?: (message: string) => void;
 };
 
 export type LiveClientOptions = LiveClientHandlers & {
@@ -69,6 +70,7 @@ function parseServerMessage(raw: unknown): ServerMessage | null {
     case "blocks":
     case "owner_action":
     case "ping":
+    case "error":
       return parsed as ServerMessage;
     default:
       return null;
@@ -159,6 +161,10 @@ export class LiveClient {
         break;
       case "blocks":
         this.options.onBlocks?.(message.data);
+        break;
+      case "error":
+        // The server keeps the socket open (for example an unknown subscribe target).
+        this.options.onError?.(message.error.message);
         break;
       case "owner_action":
         this.options.onOwnerAction?.(message.data);

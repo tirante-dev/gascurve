@@ -11,7 +11,8 @@ import { formatDateTime, formatDuration, formatEth, formatGas, formatGwei, forma
 import { ChartTooltip } from "./ChartTooltip";
 import { Card, ChartFrame, Legend, Stat } from "./primitives";
 
-const RESOLUTION_SECONDS: Record<string, number> = { "1m": 60, "5s": 5, "15m": 900, "1h": 3600, block: 1 };
+// "batch" is one point per posting report (every 12 to 24 s on Robinhood); L2 fees are joined on 15 s buckets for it.
+const RESOLUTION_SECONDS: Record<string, number> = { batch: 15, "1m": 60, "15m": 900, "1h": 3600 };
 
 /** L1 pricer values and what the chain pays Ethereum against what users pay. Collapsed by default. */
 export function L1Section({ network, range, snapshot, series }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null }) {
@@ -24,7 +25,7 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
   const rows = useMemo(() => {
     if (!batches.data || !series) return [];
     const bucket = RESOLUTION_SECONDS[batches.data.resolution] ?? 3600;
-    return joinCosts(batches.data.points, resampleFees(series.points, bucket));
+    return joinCosts(batches.data.points, resampleFees(series.points, bucket), bucket);
   }, [batches.data, series]);
   const span = spanSeconds(rows);
   const totals = useMemo(() => {

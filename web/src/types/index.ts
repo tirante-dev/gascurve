@@ -133,7 +133,7 @@ export type Series = {
   points: SeriesPoint[];
 };
 
-export type ConstraintsResponse = { current: ConstraintSet; history: ConstraintSet[] };
+export type ConstraintsResponse = { current: ConstraintSet | null; history: ConstraintSet[] };
 
 export type BatchPoint = {
   t: number;
@@ -144,7 +144,9 @@ export type BatchPoint = {
   calldataBytes: number;
 };
 
-export type BatchSeries = { range: string; resolution: string; points: BatchPoint[] };
+export type BatchResolution = "batch" | "1m" | "15m" | "1h";
+
+export type BatchSeries = { range: string; resolution: BatchResolution; points: BatchPoint[] };
 
 export type L1Point = {
   t: number;
@@ -165,6 +167,10 @@ export type NetworkStatus = {
   lastSampleAt: string;
   lastError: string | null;
   rateLimitEvents: number;
+  enabled?: boolean;
+  last429At?: string | null;
+  backfillCursor?: number | null;
+  arbosVersion?: number | null;
 };
 
 export type StatusResponse = { version: string; networks: NetworkStatus[] };
@@ -173,13 +179,14 @@ export type ApiErrorBody = { error: { code: string; message: string } };
 
 // WebSocket messages (section 7).
 
-export type HelloData = { network: Network; snapshot: LiveSnapshot; recentBlocks: BlockPoint[] };
+export type HelloData = { network: Network; snapshot: LiveSnapshot | null; recentBlocks: BlockPoint[] };
 
 export type ServerMessage =
   | { type: "hello"; data: HelloData }
   | { type: "tick"; data: LiveSnapshot }
   | { type: "blocks"; data: BlockPoint[] }
   | { type: "owner_action"; data: OwnerAction }
+  | { type: "error"; error: { code: string; message: string } }
   | { type: "ping" };
 
 export type ClientMessage = { type: "pong" } | { type: "subscribe"; network: string };

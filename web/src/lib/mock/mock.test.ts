@@ -153,9 +153,9 @@ describe("mock world", () => {
     if (!world) throw new Error("no world");
     const now = mockNow();
     const c = world.constraintsResponse();
-    expect(c.current.id).toBe(6);
+    expect(c.current?.id).toBe(6);
     expect(c.history).toHaveLength(6);
-    expect(c.current.constraints[1]).toEqual({ target: 40_000_000, window: 86_400, startingBacklog: 9_989_000_000_000 });
+    expect(c.current?.constraints[1]).toEqual({ target: 40_000_000, window: 86_400, startingBacklog: 9_989_000_000_000 });
     const actions = world.ownerActions();
     expect(actions[0].block).toBe(53_578_754);
     expect(actions[actions.length - 1].method).toBe("setMinimumL2BaseFee");
@@ -169,7 +169,7 @@ describe("mock world", () => {
     expect(p.batches).toBeGreaterThan(30);
     expect(BigInt(p.weiSpent)).toBe(BigInt(p.gasSpent) * BigInt(p.l1BaseFeeAvg));
     expect(p.calldataBytes).toBe(p.batches * 137);
-    expect(world.batches("1h", now).resolution).toBe("1m");
+    expect(world.batches("1h", now).resolution).toBe("batch");
     expect(world.batches("all", now).points[0].t).toBe(isoToUnix("2026-07-01T00:00:00Z"));
 
     const l1 = world.l1Series("30d", now);
@@ -219,7 +219,7 @@ describe("mock world", () => {
     expect(series.points.some((p) => BigInt(p.baseFeeMax) > 10_000_000n)).toBe(true);
     expect(series.points.some((p) => BigInt(p.baseFeeMin) === 10_000_000n)).toBe(true);
     const c = world.constraintsResponse();
-    expect(c.current.constraints).toEqual([]);
+    expect(c.current).toBeNull();
     expect(c.history).toEqual([]);
     expect(world.ownerActions()).toHaveLength(1);
     expect(world.series("all", now).ownerActions).toHaveLength(1);
