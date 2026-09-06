@@ -1,0 +1,124 @@
+// Fetch wrapper for the gascurve api: base URL from the environment, a 10 s
+// timeout per attempt, and up to two retries on 5xx or network errors with
+// exponential backoff. Every endpoint module goes through `request`.
+
+import type { ApiErrorBody } from "@/types";
+
+const DEFAULT_API_URL = "http://localhost:8080/api/v1";
+
+export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? DEFAULT_API_URL).replace(/\/+$/, "");
+
+export const DEFAULT_TIMEOUT_MS = 10_000;
+export const MAX_RETRIES = 2;
+export const RETRY_BASE_DELAY_MS = 500;
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+
+  get retryable(): boolean {
+    return this.status >= 500 || this.status === 0;
+  }
+}
+
+export type QueryValue = string | number | boolean | undefined;
+
+export type RequestOptions = {
+  query?: Record<string, QueryValue>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  retries?: number;
+  fetchImpl?: typeof fetch;
+};
+
+function isApiErrorBody(value: unknown): value is ApiErrorBody {
+  if (typeof value !== "object" || value === null) return false;
+  const error = (value as { error?: unknown }).error;
+  if (typeof error !== "object" || error === null) return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  return typeof code === "string" && typeof message === "string";
+}
+
+export function buildUrl(path: string, query?: Record<string, QueryValue>): string {
+  const url = new URL(API_BASE_URL + (path.startsWith("/") ? path : `/${path}`));
+  if (query) {
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined) url.searchParams.set(key, String(value));
+    }
+  }
+  return url.toString();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function attempt<T>(url: string, options: RequestOptions): Promise<T> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onOuterAbort = () => controller.abort();
+  options.signal?.addEventListener("abort", onOuterAbort);
+  try {
+    let response: Response;
+    try {
+      response = await fetchImpl(url, {
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      });
+    } catch (err) {
+      if (options.signal?.aborted) throw err;
+      const message = err instanceof Error ? err.message : "network error";
+      throw new ApiError(0, "network_error", message);
+    }
+    if (!response.ok) {
+      let code = `http_${response.status}`;
+      let message = response.statusText || `HTTP ${response.status}`;
+      try {
+        const body: unknown = await response.json();
+        if (isApiErrorBody(body)) {
+          code = body.error.code;
+          message = body.error.message;
+        }
+      } catch {
+        // Non-JSON error bodies keep the HTTP status text.
+      }
+      throw new ApiError(response.status, code, message);
+    }
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener("abort", onOuterAbort);
+  }
+}
+
+/** Fetch `path` under the api base URL and decode JSON, retrying transient failures. */
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  if (process.env.NEXT_PUBLIC_USE_MOCK_DATA === "true") {
+    const { mockRequest } = await import("@/lib/mock");
+    return mockRequest<T>(path, options.query);
+  }
+  const url = buildUrl(path, options.query);
+  const retries = options.retries ?? MAX_RETRIES;
+  let lastError: unknown;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await attempt<T>(url, options);
+    } catch (err) {
+      lastError = err;
+      if (options.signal?.aborted) throw err;
+      const retryable = err instanceof ApiError && err.retryable;
+      if (!retryable || i === retries) throw err;
+      await sleep(RETRY_BASE_DELAY_MS * 2 ** i);
+    }
+  }
+  throw lastError;
+}

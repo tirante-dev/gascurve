@@ -1,0 +1,195 @@
+@import "tailwindcss";
+
+/*
+  Design tokens. The bare :root block is the complete light palette; the dark
+  blocks redefine only tokens. Three viewer states are covered: an explicit
+  data-theme, and the un-stamped document following prefers-color-scheme.
+*/
+:root {
+  color-scheme: light;
+  --page: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef0f3;
+  --ink: #151a21;
+  --ink-2: #4d5561;
+  --ink-3: #7c8593;
+  --hairline: #e1e4e9;
+  --grid: #e9ebef;
+  --axis: #c9ced6;
+  --accent: #2a78d6;
+  --accent-ink: #ffffff;
+  --focus: #2a78d6;
+  --good: #006300;
+  --warning: #9a6200;
+  --critical: #b32b2b;
+
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+
+  /* Sequential ramp for "multiplier over floor": one hue, light to dark. */
+  --seq-1: #cde2fb;
+  --seq-2: #b7d3f6;
+  --seq-3: #9ec5f4;
+  --seq-4: #86b6ef;
+  --seq-5: #6da7ec;
+  --seq-6: #3987e5;
+  --seq-7: #2a78d6;
+  --seq-8: #1c5cab;
+  --seq-9: #104281;
+  --seq-ink-light: #151a21;
+  --seq-ink-dark: #ffffff;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0f1216;
+    --surface: #161a20;
+    --surface-2: #1d222a;
+    --ink: #f2f4f7;
+    --ink-2: #b5bcc7;
+    --ink-3: #7f8794;
+    --hairline: #262c35;
+    --grid: #222831;
+    --axis: #3a414c;
+    --accent: #3987e5;
+    --accent-ink: #0f1216;
+    --focus: #6da7ec;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #e66767;
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+
+    --seq-1: #86b6ef;
+    --seq-2: #6da7ec;
+    --seq-3: #5598e7;
+    --seq-4: #3987e5;
+    --seq-5: #2a78d6;
+    --seq-6: #256abf;
+    --seq-7: #1c5cab;
+    --seq-8: #184f95;
+    --seq-9: #104281;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0f1216;
+  --surface: #161a20;
+  --surface-2: #1d222a;
+  --ink: #f2f4f7;
+  --ink-2: #b5bcc7;
+  --ink-3: #7f8794;
+  --hairline: #262c35;
+  --grid: #222831;
+  --axis: #3a414c;
+  --accent: #3987e5;
+  --accent-ink: #0f1216;
+  --focus: #6da7ec;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #e66767;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+
+  --seq-1: #86b6ef;
+  --seq-2: #6da7ec;
+  --seq-3: #5598e7;
+  --seq-4: #3987e5;
+  --seq-5: #2a78d6;
+  --seq-6: #256abf;
+  --seq-7: #1c5cab;
+  --seq-8: #184f95;
+  --seq-9: #104281;
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-hairline: var(--hairline);
+  --color-grid: var(--grid);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-focus: var(--focus);
+  --color-good: var(--good);
+  --color-warning: var(--warning);
+  --color-critical: var(--critical);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+html {
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  margin: 0;
+  min-height: 100%;
+  overflow-x: hidden;
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Recharts chrome takes theme tokens so charts read in both themes. */
+.recharts-cartesian-grid line {
+  stroke: var(--grid);
+}
+.recharts-cartesian-axis line,
+.recharts-cartesian-axis-line {
+  stroke: var(--axis);
+}
+.recharts-cartesian-axis-tick-value,
+.recharts-label,
+.recharts-reference-line-label {
+  fill: var(--ink-3);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.recharts-tooltip-cursor {
+  stroke: var(--ink-3);
+}

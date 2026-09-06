@@ -1,0 +1,101 @@
+"use client";
+
+import type { ReactNode } from "react";
+import type { LiveStatus } from "@/types";
+
+export function Section({ id, title, lede, children, aside }: { id: string; title: string; lede?: string; children: ReactNode; aside?: ReactNode }) {
+  return (
+    <section id={id} className="border-t border-hairline py-8 first:border-t-0" aria-labelledby={`${id}-title`}>
+      <header className="mb-5 flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+        <div className="max-w-[65ch]">
+          <h2 id={`${id}-title`} className="text-lg font-semibold tracking-tight text-ink" style={{ textWrap: "balance" }}>
+            {title}
+          </h2>
+          {lede ? <p className="mt-1 text-sm leading-relaxed text-ink-2">{lede}</p> : null}
+        </div>
+        {aside}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+export function Label({ children }: { children: ReactNode }) {
+  return <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3">{children}</div>;
+}
+
+/** A label/value pair. Values are set in the mono face with tabular figures. */
+export function Stat({ label, value, unit, hint, size = "md" }: { label: ReactNode; value: ReactNode; unit?: ReactNode; hint?: ReactNode; size?: "sm" | "md" | "lg" }) {
+  const valueClass = size === "lg" ? "text-3xl sm:text-4xl" : size === "sm" ? "text-base" : "text-xl";
+  return (
+    <div className="min-w-0">
+      <Label>{label}</Label>
+      <div className={`num mt-1 leading-none text-ink ${valueClass}`}>
+        {value}
+        {unit ? <span className="ml-1 text-[0.6em] font-normal text-ink-2">{unit}</span> : null}
+      </div>
+      {hint ? <div className="mt-1 text-xs text-ink-3">{hint}</div> : null}
+    </div>
+  );
+}
+
+export const STATUS_COPY: Record<LiveStatus, { label: string; tone: "good" | "warning" | "critical" | "neutral"; detail: string }> = {
+  open: { label: "live", tone: "good", detail: "WebSocket connected, one update per collector tick" },
+  connecting: { label: "connecting", tone: "neutral", detail: "Opening the WebSocket" },
+  reconnecting: { label: "reconnecting", tone: "warning", detail: "Socket dropped, retrying with backoff and polling /live every 2 s" },
+  polling: { label: "polling", tone: "warning", detail: "Socket unavailable, polling /live every 2 s while retrying" },
+};
+
+export function StatusPill({ status }: { status: LiveStatus }) {
+  const copy = STATUS_COPY[status];
+  const tone =
+    copy.tone === "good" ? "bg-good" : copy.tone === "warning" ? "bg-warning" : copy.tone === "critical" ? "bg-critical" : "bg-ink-3";
+  return (
+    <span
+      className="inline-flex items-center gap-2 rounded-full border border-hairline bg-surface px-2.5 py-1 text-xs font-medium text-ink-2"
+      title={copy.detail}
+      role="status"
+      aria-live="polite"
+    >
+      <span className={`inline-block h-2 w-2 rounded-full ${tone}`} aria-hidden="true" />
+      {copy.label}
+    </span>
+  );
+}
+
+export function Swatch({ color, kind = "rect" }: { color: string; kind?: "rect" | "line" }) {
+  if (kind === "line") {
+    return <span className="inline-block h-0.5 w-4 rounded-full align-middle" style={{ background: color }} aria-hidden="true" />;
+  }
+  return <span className="inline-block h-2.5 w-2.5 rounded-[2px] align-middle" style={{ background: color }} aria-hidden="true" />;
+}
+
+export function Legend({ items }: { items: { label: string; color: string; kind?: "rect" | "line" }[] }) {
+  return (
+    <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-2">
+      {items.map((item) => (
+        <li key={item.label} className="flex items-center gap-1.5">
+          <Swatch color={item.color} kind={item.kind} />
+          <span>{item.label}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Charts scroll inside this frame on narrow screens; the page never scrolls sideways. */
+export function ChartFrame({ height, minWidth = 560, children, label }: { height: number; minWidth?: number; children: ReactNode; label: string }) {
+  return (
+    <div className="-mx-1 overflow-x-auto px-1" role="figure" aria-label={label}>
+      <div style={{ height, minWidth }}>{children}</div>
+    </div>
+  );
+}
+
+export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <div className={`rounded-md border border-hairline bg-surface p-4 ${className}`}>{children}</div>;
+}
+
+export function Prose({ children }: { children: ReactNode }) {
+  return <div className="max-w-[65ch] text-[15px] leading-relaxed text-ink-2 [&_code]:rounded [&_code]:bg-surface-2 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em] [&_code]:text-ink [&_h3]:mt-6 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-ink [&_p+p]:mt-3 [&_strong]:text-ink">{children}</div>;
+}

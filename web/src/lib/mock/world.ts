@@ -1,0 +1,722 @@
+// A deterministic world per network: synthetic demand replayed through the
+// TypeScript pricer at increasing resolution (1h buckets for the oldest
+// history, 5 s steps for the last hour, per block for the live tail).
+// Everything the api can be asked for is derived from the records this
+// produces, so live values, series and blocks always agree with each other.
+
+import {
+  addGas,
+  baseFeeFromExponent,
+  constraintExponentBips,
+  legacyAddGas,
+  legacyExponentBips,
+  legacyStep,
+  ONE_IN_BIPS,
+  step,
+  toLegacyState,
+  toState,
+  type ConstraintState,
+  type LegacyState,
+} from "@/lib/pricer";
+import type {
+  BatchSeries,
+  BlockPoint,
+  ConstraintSet,
+  ConstraintsResponse,
+  L1Series,
+  LiveSnapshot,
+  Network,
+  NetworkStatus,
+  OwnerAction,
+  Series,
+  SeriesPoint,
+  SeriesRange,
+} from "@/types";
+import type { DemandProfile, MockNetworkDef } from "./defs";
+
+export type WorldRecord = {
+  t: number;
+  dt: number;
+  blocks: number;
+  gas: number;
+  feeMin: bigint;
+  feeMax: bigint;
+  /** Sum of block base fees, so the bucket average is weighted by block count. */
+  feeSum: bigint;
+  feesWei: bigint;
+  exponent: number;
+  backlogs: number[];
+  backlogsMax: number[];
+  setId: number;
+  replayErrorBips: number;
+};
+
+export function isoToUnix(iso: string): number {
+  return Math.floor(new Date(iso).getTime() / 1000);
+}
+
+export function unixToIso(t: number): string {
+  return new Date(t * 1000).toISOString();
+}
+
+/** Deterministic hash of (seed, i) to [0, 1). */
+export function hash01(seed: number, i: number): number {
+  let h = (seed ^ Math.imul(i | 0, 0x9e3779b1)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+function alignDown(t: number, unit: number): number {
+  return Math.floor(t / unit) * unit;
+}
+
+function maxBigInt(a: bigint, b: bigint): bigint {
+  return a > b ? a : b;
+}
+
+function minBigInt(a: bigint, b: bigint): bigint {
+  return a < b ? a : b;
+}
+
+type BaselinePoint = { t: number; value: number };
+
+export class Demand {
+  private readonly points: BaselinePoint[];
+  private readonly profile: DemandProfile;
+
+  constructor(profile: DemandProfile) {
+    this.profile = profile;
+    this.points = profile.baseline.map(([iso, value]) => ({ t: isoToUnix(iso), value }));
+  }
+
+  baseline(t: number): number {
+    const pts = this.points;
+    if (t <= pts[0].t) return pts[0].value;
+    for (let i = 1; i < pts.length; i++) {
+      if (t <= pts[i].t) {
+        const a = pts[i - 1];
+        const b = pts[i];
+        const f = (t - a.t) / (b.t - a.t);
+        return a.value + (b.value - a.value) * f;
+      }
+    }
+    return pts[pts.length - 1].value;
+  }
+
+  /** Average burst gas/s over [t, t + dt], from a deterministic slot schedule. */
+  burstAverage(t: number, dt: number): number {
+    const { slotSeconds, probability, minDuration, maxDuration, minIntensity, maxIntensity } = this.profile.burst;
+    const seed = this.profile.seed;
+    const firstSlot = Math.floor((t - maxDuration) / slotSeconds);
+    const lastSlot = Math.floor((t + dt) / slotSeconds);
+    let sum = 0;
+    for (let s = firstSlot; s <= lastSlot; s++) {
+      if (hash01(seed, s) >= probability) continue;
+      const duration = minDuration + (maxDuration - minDuration) * hash01(seed + 2, s);
+      const start = s * slotSeconds + hash01(seed + 1, s) * Math.max(0, slotSeconds - duration);
+      const intensity = minIntensity + (maxIntensity - minIntensity) * hash01(seed + 3, s);
+      const overlap = Math.min(t + dt, start + duration) - Math.max(t, start);
+      if (overlap > 0) sum += overlap * intensity;
+    }
+    return sum / dt;
+  }
+
+  /** Average total demand in gas/s over [t, t + dt]. */
+  average(t: number, dt: number): number {
+    const mid = t + dt / 2;
+    const diurnal = 1 + this.profile.diurnalAmplitude * Math.sin((2 * Math.PI * mid) / 86_400 - Math.PI / 2);
+    const noise = 1 + this.profile.noiseAmplitude * (hash01(this.profile.seed + 7, Math.floor(mid / 3600)) * 2 - 1);
+    return Math.max(0, this.baseline(mid) * diurnal * noise + this.burstAverage(t, dt));
+  }
+}
+
+const RANGE_SPEC: Record<SeriesRange, { seconds: number; resolution: Series["resolution"]; span: number }> = {
+  "1h": { seconds: 5, resolution: "5s", span: 3600 },
+  "24h": { seconds: 60, resolution: "1m", span: 86_400 },
+  "30d": { seconds: 900, resolution: "15m", span: 30 * 86_400 },
+  all: { seconds: 3600, resolution: "1h", span: Number.POSITIVE_INFINITY },
+};
+
+const BATCH_RESOLUTION: Record<SeriesRange, { seconds: number; resolution: string }> = {
+  "1h": { seconds: 60, resolution: "1m" },
+  "24h": { seconds: 900, resolution: "15m" },
+  "30d": { seconds: 3600, resolution: "1h" },
+  all: { seconds: 3600, resolution: "1h" },
+};
+
+const RING_SIZE = 1000;
+const LIVE_TAIL_SECONDS = 120;
+/** Beyond this gap the world catches up with 5 s steps instead of per-block ticks. */
+const CATCH_UP_THRESHOLD = 600;
+
+export class MockWorld {
+  readonly def: MockNetworkDef;
+  readonly startAt: number;
+  readonly demand: Demand;
+  readonly records: WorldRecord[] = [];
+  readonly blocks: BlockPoint[] = [];
+  /** The next second to simulate. */
+  time: number;
+
+  private constraints: ConstraintState[] = [];
+  private legacy: LegacyState | null = null;
+  private setIndex = -1;
+  private minFee = 0n;
+  private minFeeIndex = -1;
+  private lastFee = 0n;
+  private lastExponent = 0;
+  private lastReplayError = 0;
+  private accumulatedInfra = 0n;
+  private accumulatedNetwork = 0n;
+  /** Per constraint-set index, an adjustment to the starting backlogs (see `anchor`). */
+  private startingBacklogAdjust = new Map<number, bigint[]>();
+
+  constructor(def: MockNetworkDef, now: number) {
+    this.def = def;
+    this.demand = new Demand(def.demand);
+    this.startAt = isoToUnix(def.historyStart);
+    this.time = this.startAt;
+    this.run(now);
+    this.anchor(now);
+  }
+
+  private reset(): void {
+    this.records.length = 0;
+    this.blocks.length = 0;
+    this.time = this.startAt;
+    this.constraints = [];
+    this.legacy = null;
+    this.setIndex = -1;
+    this.minFee = 0n;
+    this.minFeeIndex = -1;
+    this.lastFee = 0n;
+    this.lastExponent = 0;
+    this.lastReplayError = 0;
+    this.accumulatedInfra = 0n;
+    this.accumulatedNetwork = 0n;
+  }
+
+  private run(now: number): void {
+    this.reset();
+    if (this.def.model === "legacy" && this.def.legacy) {
+      this.legacy = toLegacyState({ ...this.def.legacy, backlog: 0 });
+    }
+    this.applyParamsAt(this.startAt);
+    this.buildHistory(now);
+    this.advanceTo(now);
+  }
+
+  /**
+   * Lands anchored constraints exactly on the desired backlog at `now`. Backlog
+   * dynamics are linear away from zero, so the difference between the natural
+   * end state and the anchor is folded into the starting backlog of the set in
+   * force and the history replayed once more; the tiny residual from per-block
+   * rounding is then snapped, the way the collector re-anchors to samples.
+   */
+  private anchor(now: number): void {
+    const anchors = this.def.anchorBacklogs;
+    if (!anchors || this.legacy || this.setIndex < 0) return;
+    const delta = this.constraints.map((c, i) => {
+      const target = anchors[i];
+      return target === null || target === undefined ? 0n : BigInt(target) - c.backlog;
+    });
+    if (delta.some((d) => d !== 0n)) {
+      this.startingBacklogAdjust.set(this.setIndex, delta);
+      this.run(now);
+    }
+    this.constraints.forEach((c, i) => {
+      const target = anchors[i];
+      if (target !== null && target !== undefined) c.backlog = BigInt(target);
+    });
+  }
+
+  // Parameters in force at t: constraint set (resetting backlogs on change) and min fee.
+
+  private applyParamsAt(t: number): void {
+    const sets = this.def.constraintSets;
+    let idx = -1;
+    for (let i = 0; i < sets.length; i++) {
+      if (isoToUnix(sets[i].effectiveAt) <= t) idx = i;
+    }
+    if (idx !== this.setIndex && idx >= 0) {
+      this.setIndex = idx;
+      const adjust = this.startingBacklogAdjust.get(idx);
+      this.constraints = toState(
+        sets[idx].constraints.map((c) => ({ target: c.target, window: c.window, backlog: c.startingBacklog })),
+      );
+      if (adjust) {
+        this.constraints.forEach((c, i) => {
+          const adjusted = c.backlog + (adjust[i] ?? 0n);
+          c.backlog = adjusted > 0n ? adjusted : 0n;
+        });
+      }
+    }
+    const fees = this.def.minFeeHistory;
+    let feeIdx = -1;
+    for (let i = 0; i < fees.length; i++) {
+      if (isoToUnix(fees[i].at) <= t) feeIdx = i;
+    }
+    if (feeIdx !== this.minFeeIndex && feeIdx >= 0) {
+      this.minFeeIndex = feeIdx;
+      this.minFee = fees[feeIdx].wei;
+    }
+  }
+
+  blockAt(t: number): number {
+    return this.def.blockAtHistoryStart + Math.floor((t - this.startAt) * this.def.blocksPerSecond);
+  }
+
+  private currentBacklogs(): number[] {
+    if (this.legacy) return [Number(this.legacy.backlog)];
+    return this.constraints.map((c) => Number(c.backlog));
+  }
+
+  private currentSetId(): number {
+    return this.legacy ? 0 : this.setIndex + 1;
+  }
+
+  /** The fee and exponent implied by the current backlogs, without draining. */
+  private priceCurrent(): { fee: bigint; exponent: number } {
+    const exponent = this.legacy ? legacyExponentBips(this.legacy) : this.constraints.reduce((sum, c) => sum + constraintExponentBips(c), 0n);
+    return { fee: baseFeeFromExponent(this.minFee, exponent), exponent: Number(exponent) };
+  }
+
+  /**
+   * Fluid update over `dt` seconds absorbing `gas`: B = max(0, B - target*dt + gas).
+   * Exact for constant demand within the step, and unlike "drain, then add a
+   * whole step of gas" it does not leave a short-window backlog holding gas
+   * that the next, finer step could never have drained.
+   */
+  private fluidUpdate(dt: bigint, gas: bigint): void {
+    if (this.legacy) {
+      const next = this.legacy.backlog - dt * this.legacy.speedLimit + gas;
+      this.legacy.backlog = next > 0n ? next : 0n;
+      return;
+    }
+    for (const c of this.constraints) {
+      const next = c.backlog - dt * c.target + gas;
+      c.backlog = next > 0n ? next : 0n;
+    }
+  }
+
+  /** One exact pricer step for a single block: drain by dt, price, then absorb the block's gas. */
+  private blockStep(dt: bigint, gas: bigint): { fee: bigint; exponent: number } {
+    if (this.legacy) {
+      const r = legacyStep(this.legacy, dt, this.minFee);
+      legacyAddGas(this.legacy, gas);
+      return { fee: r.baseFee, exponent: Number(r.exponent) };
+    }
+    const r = step(this.constraints, dt, this.minFee);
+    addGas(this.constraints, gas);
+    return { fee: r.baseFee, exponent: Number(r.exponent) };
+  }
+
+  /** A step of many blocks at once, priced from the state at its start and updated as a fluid. */
+  private coarseStep(t: number, dt: number): void {
+    this.applyParamsAt(t);
+    const gas = Math.round(this.demand.average(t, dt) * dt);
+    const blocks = this.blockAt(t + dt) - this.blockAt(t);
+    const { fee, exponent } = this.priceCurrent();
+    this.fluidUpdate(BigInt(dt), BigInt(gas));
+    const backlogs = this.currentBacklogs();
+    this.records.push({
+      t,
+      dt,
+      blocks,
+      gas,
+      feeMin: fee,
+      feeMax: fee,
+      feeSum: fee * BigInt(blocks),
+      feesWei: BigInt(gas) * fee,
+      exponent,
+      backlogs,
+      backlogsMax: backlogs,
+      setId: this.currentSetId(),
+      replayErrorBips: 0,
+    });
+    this.lastFee = fee;
+    this.lastExponent = exponent;
+    this.lastReplayError = 0;
+    this.time = t + dt;
+  }
+
+  /** One wall-clock second with individual blocks, feeding the block ring. */
+  private tick(): void {
+    const t = this.time;
+    this.applyParamsAt(t);
+    const total = this.demand.average(t, 1);
+    const first = this.blockAt(t);
+    const count = Math.max(1, this.blockAt(t + 1) - first);
+    const weights: number[] = [];
+    let weightSum = 0;
+    for (let k = 0; k < count; k++) {
+      const w = 0.5 + hash01(this.def.demand.seed + 4, first + k);
+      weights.push(w);
+      weightSum += w;
+    }
+    let feeMin = 0n;
+    let feeMax = 0n;
+    let feeSum = 0n;
+    let feesWei = 0n;
+    let gasTotal = 0;
+    const before = this.currentBacklogs();
+    let backlogsMax = before;
+    for (let k = 0; k < count; k++) {
+      const gas = Math.round((total * weights[k]) / weightSum);
+      const { fee, exponent } = this.blockStep(k === 0 ? 1n : 0n, BigInt(gas));
+      const number = first + k;
+      const err = Math.floor(hash01(this.def.demand.seed + 5, number) * 6);
+      const predicted = (fee * (ONE_IN_BIPS - BigInt(err))) / ONE_IN_BIPS;
+      const backlogs = this.currentBacklogs();
+      backlogsMax = backlogs.map((v, i) => Math.max(v, backlogsMax[i]));
+      this.blocks.push({
+        number,
+        ts: t,
+        gasUsed: gas,
+        baseFee: fee.toString(),
+        predictedBaseFee: predicted.toString(),
+        backlogs,
+        exponentBips: exponent,
+        anchored: k === 0,
+      });
+      feeMin = k === 0 ? fee : minBigInt(feeMin, fee);
+      feeMax = maxBigInt(feeMax, fee);
+      feeSum += fee;
+      feesWei += BigInt(gas) * fee;
+      gasTotal += gas;
+      this.accumulatedInfra += BigInt(gas) * this.minFee;
+      this.accumulatedNetwork += BigInt(gas) * (fee > this.minFee ? fee - this.minFee : 0n);
+      this.lastFee = fee;
+      this.lastExponent = exponent;
+      this.lastReplayError = err;
+    }
+    if (this.blocks.length > RING_SIZE) this.blocks.splice(0, this.blocks.length - RING_SIZE);
+    this.records.push({
+      t,
+      dt: 1,
+      blocks: count,
+      gas: gasTotal,
+      feeMin,
+      feeMax,
+      feeSum,
+      feesWei,
+      exponent: this.lastExponent,
+      backlogs: this.currentBacklogs(),
+      backlogsMax,
+      setId: this.currentSetId(),
+      replayErrorBips: this.lastReplayError,
+    });
+    this.time = t + 1;
+  }
+
+  private buildHistory(now: number): void {
+    const tailStart = alignDown(now - LIVE_TAIL_SECONDS, 5);
+    const boundaries = [
+      { end: alignDown(now - 30 * 86_400, 900), dt: 1200 },
+      { end: alignDown(now - 86_400, 60), dt: 300 },
+      { end: alignDown(now - 3600, 5), dt: 20 },
+      { end: tailStart, dt: 5 },
+    ];
+    for (const { end, dt } of boundaries) {
+      while (this.time < end) {
+        const stepDt = Math.min(dt, end - this.time);
+        this.coarseStep(this.time, stepDt);
+      }
+    }
+  }
+
+  /** Brings the world up to `now` (unix seconds). */
+  advanceTo(now: number): void {
+    while (this.time < now) {
+      if (now - this.time > CATCH_UP_THRESHOLD) {
+        this.coarseStep(this.time, Math.min(5, now - CATCH_UP_THRESHOLD - this.time));
+      } else {
+        this.tick();
+      }
+    }
+  }
+
+  get headBlock(): number {
+    return this.blockAt(this.time) - 1;
+  }
+
+  network(now: number): Network {
+    return {
+      name: this.def.name,
+      displayName: this.def.displayName,
+      chainId: this.def.chainId,
+      explorerUrl: this.def.explorerUrl,
+      model: this.def.model,
+      headBlock: this.headBlock,
+      headAt: unixToIso(this.time - 1),
+      lagSeconds: Math.max(0, now - (this.time - 1)),
+      enabled: true,
+    };
+  }
+
+  status(now: number): NetworkStatus {
+    return {
+      name: this.def.name,
+      chainId: this.def.chainId,
+      headBlock: this.headBlock,
+      headAt: unixToIso(this.time - 1),
+      lagSeconds: Math.max(0, now - (this.time - 1)),
+      lastSampleAt: unixToIso(this.time - 1),
+      lastError: null,
+      rateLimitEvents: 0,
+    };
+  }
+
+  private constraintSet(index: number): ConstraintSet {
+    const set = this.def.constraintSets[index];
+    return {
+      id: index + 1,
+      effectiveBlock: set.effectiveBlock,
+      effectiveAt: set.effectiveAt,
+      source: set.source,
+      constraints: set.constraints.map((c) => ({ ...c })),
+    };
+  }
+
+  private l1State(now: number) {
+    const l1 = this.def.l1;
+    const interval = this.def.batch.intervalSeconds;
+    const sinceUpdate = now % interval;
+    const wobble = 1 + 0.06 * Math.sin((2 * Math.PI * now) / 5400);
+    return {
+      baseFeeEstimate: Math.round(l1.baseFeeEstimateWei * wobble).toString(),
+      surplus: (l1.surplusWei + BigInt(Math.round(Math.sin(now / 900) * 1e12))).toString(),
+      feesAvailable: l1.feesAvailableWei.toString(),
+      unitsSinceUpdate: Math.round((sinceUpdate / interval) * this.def.batch.calldataBytes * 16),
+      lastUpdateAt: unixToIso(now - sinceUpdate),
+      equilibrationUnits: l1.equilibrationUnits,
+      perBatchGasCharge: l1.perBatchGasCharge,
+      rewardRate: l1.rewardRate,
+    };
+  }
+
+  snapshot(now: number): LiveSnapshot {
+    const last = this.blocks[this.blocks.length - 1];
+    const fee = this.lastFee;
+    const minFee = this.minFee;
+    const congestion = fee > minFee ? fee - minFee : 0n;
+    const l1 = this.l1State(now);
+    const constraints = this.legacy
+      ? []
+      : this.constraints.map((c) => ({
+          target: Number(c.target),
+          window: Number(c.window),
+          backlog: Number(c.backlog),
+          exponentBips: Number(constraintExponentBips(c)),
+        }));
+    const accounts = this.def.accounts;
+    return {
+      chainId: this.def.chainId,
+      sampledAt: unixToIso(now),
+      block: {
+        number: last.number,
+        ts: last.ts,
+        gasUsed: last.gasUsed,
+        baseFee: last.baseFee,
+        txCount: 1 + Math.max(0, Math.round(last.gasUsed / 45_000)),
+      },
+      baseFee: fee.toString(),
+      minBaseFee: minFee.toString(),
+      multiplierBips: Number((fee * ONE_IN_BIPS) / minFee),
+      exponentBips: this.lastExponent,
+      model: this.def.model,
+      constraints,
+      ...(this.legacy
+        ? {
+            legacy: {
+              speedLimit: Number(this.legacy.speedLimit),
+              inertia: Number(this.legacy.inertia),
+              tolerance: Number(this.legacy.tolerance),
+              backlog: Number(this.legacy.backlog),
+            },
+          }
+        : {}),
+      prices: {
+        perL2Tx: (BigInt(l1.baseFeeEstimate) * 100n).toString(),
+        perL1CalldataByte: (BigInt(l1.baseFeeEstimate) * 16n).toString(),
+        perL2Storage: (fee * 20_000n).toString(),
+        perArbGasBase: minFee.toString(),
+        perArbGasCongestion: congestion.toString(),
+        perArbGasTotal: fee.toString(),
+      },
+      gasPerSecond: { s10: this.gasPerSecond(10), s60: this.gasPerSecond(60) },
+      l1,
+      accounts: {
+        infra: { address: accounts.infra, balance: (accounts.infraWei + this.accumulatedInfra).toString() },
+        network: { address: accounts.network, balance: (accounts.networkWei + this.accumulatedNetwork).toString() },
+        l1Reward: { address: accounts.l1Reward, balance: accounts.l1RewardWei.toString() },
+      },
+      replayErrorBips: this.lastReplayError,
+    };
+  }
+
+  gasPerSecond(windowSeconds: number): number {
+    const from = this.time - windowSeconds;
+    let gas = 0;
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      if (b.ts < from) break;
+      gas += b.gasUsed;
+    }
+    return Math.round(gas / windowSeconds);
+  }
+
+  recentBlocks(limit: number): BlockPoint[] {
+    const n = Math.max(0, Math.min(limit, this.blocks.length));
+    return this.blocks.slice(this.blocks.length - n);
+  }
+
+  /** Blocks with a number greater than `after`, oldest first. */
+  blocksAfter(after: number): BlockPoint[] {
+    const out: BlockPoint[] = [];
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      if (this.blocks[i].number <= after) break;
+      out.push(this.blocks[i]);
+    }
+    return out.reverse();
+  }
+
+  /** Constraint sets in force at any time in [from, to]. */
+  constraintSetsFor(from: number, to: number): ConstraintSet[] {
+    const sets = this.def.constraintSets;
+    const out: ConstraintSet[] = [];
+    let lastBefore = -1;
+    for (let i = 0; i < sets.length; i++) {
+      const at = isoToUnix(sets[i].effectiveAt);
+      if (at <= from) lastBefore = i;
+      else if (at <= to) out.push(this.constraintSet(i));
+    }
+    if (lastBefore >= 0) out.unshift(this.constraintSet(lastBefore));
+    return out;
+  }
+
+  ownerActionsFor(from: number, to: number): OwnerAction[] {
+    return this.def.ownerActions
+      .filter((a) => {
+        const at = isoToUnix(a.at);
+        return at >= from && at <= to;
+      })
+      .sort((a, b) => a.block - b.block);
+  }
+
+  ownerActions(): OwnerAction[] {
+    return [...this.def.ownerActions].sort((a, b) => b.block - a.block);
+  }
+
+  constraintsResponse(): ConstraintsResponse {
+    const sets = this.def.constraintSets;
+    if (sets.length === 0) {
+      const empty: ConstraintSet = { id: 0, effectiveBlock: 0, effectiveAt: this.def.historyStart, source: "observed", constraints: [] };
+      return { current: empty, history: [] };
+    }
+    const history = sets.map((_, i) => this.constraintSet(i));
+    return { current: history[history.length - 1], history };
+  }
+
+  series(range: SeriesRange, now: number): Series {
+    const spec = RANGE_SPEC[range];
+    const from = range === "all" ? this.startAt : now - spec.span;
+    const buckets = new Map<number, WorldRecord & { duration: number }>();
+    for (let i = this.records.length - 1; i >= 0; i--) {
+      const r = this.records[i];
+      if (r.t < from) break;
+      const start = alignDown(r.t, spec.seconds);
+      const acc = buckets.get(start);
+      if (!acc) {
+        buckets.set(start, { ...r, t: start, duration: r.dt, backlogs: [...r.backlogs], backlogsMax: [...r.backlogsMax] });
+        continue;
+      }
+      // Records are visited newest first, so the first one seen carries the end-of-bucket state.
+      acc.duration += r.dt;
+      acc.blocks += r.blocks;
+      acc.gas += r.gas;
+      acc.feeMin = minBigInt(acc.feeMin, r.feeMin);
+      acc.feeMax = maxBigInt(acc.feeMax, r.feeMax);
+      acc.feeSum += r.feeSum;
+      acc.feesWei += r.feesWei;
+      acc.backlogsMax = acc.backlogsMax.map((v, j) => Math.max(v, r.backlogsMax[j] ?? 0));
+      acc.replayErrorBips = Math.max(acc.replayErrorBips, r.replayErrorBips);
+    }
+    const points: SeriesPoint[] = [...buckets.values()]
+      .sort((a, b) => a.t - b.t)
+      .map((b) => ({
+        t: b.t,
+        blocks: b.blocks,
+        gasUsed: b.gas,
+        gasPerSecond: b.duration > 0 ? Math.round(b.gas / b.duration) : 0,
+        feesWei: b.feesWei.toString(),
+        baseFeeMin: b.feeMin.toString(),
+        baseFeeAvg: (b.blocks > 0 ? b.feeSum / BigInt(b.blocks) : b.feeMin).toString(),
+        baseFeeMax: b.feeMax.toString(),
+        exponentBips: b.exponent,
+        backlogs: b.backlogs,
+        backlogsMax: b.backlogsMax,
+        constraintSetId: b.setId,
+        replayErrorBips: b.replayErrorBips,
+      }));
+    return {
+      range,
+      resolution: spec.resolution,
+      constraintSets: this.constraintSetsFor(from, now),
+      ownerActions: this.ownerActionsFor(from, now),
+      points,
+    };
+  }
+
+  batches(range: SeriesRange, now: number): BatchSeries {
+    const spec = BATCH_RESOLUTION[range];
+    const from = range === "all" ? this.startAt : now - RANGE_SPEC[range].span;
+    const batch = this.def.batch;
+    const seed = this.def.demand.seed + 9;
+    const points: BatchSeries["points"] = [];
+    for (let t = alignDown(from, spec.seconds); t < now; t += spec.seconds) {
+      const slot = Math.floor(t / spec.seconds);
+      const covered = Math.min(spec.seconds, now - t);
+      const batches = Math.max(0, Math.round((covered / batch.intervalSeconds) * (0.85 + 0.3 * hash01(seed, slot))));
+      const feeWobble = 1 + 0.35 * Math.sin((2 * Math.PI * t) / 86_400 + 1) + 0.1 * (hash01(seed + 1, slot) * 2 - 1);
+      const l1BaseFee = Math.round(batch.l1BaseFeeWei * feeWobble);
+      const gasSpent = Math.round(batches * batch.gasSpent * (0.95 + 0.1 * hash01(seed + 2, slot)));
+      points.push({
+        t,
+        batches,
+        gasSpent,
+        weiSpent: (BigInt(gasSpent) * BigInt(l1BaseFee)).toString(),
+        l1BaseFeeAvg: l1BaseFee.toString(),
+        calldataBytes: batches * batch.calldataBytes,
+      });
+    }
+    return { range, resolution: spec.resolution, points };
+  }
+
+  l1Series(range: SeriesRange, now: number): L1Series {
+    const spec = BATCH_RESOLUTION[range];
+    const from = range === "all" ? this.startAt : now - RANGE_SPEC[range].span;
+    const points: L1Series["points"] = [];
+    for (let t = alignDown(from, spec.seconds); t < now; t += spec.seconds) {
+      const s = this.l1State(t);
+      points.push({
+        t,
+        baseFeeEstimate: s.baseFeeEstimate,
+        surplus: s.surplus,
+        feesAvailable: s.feesAvailable,
+        unitsSinceUpdate: s.unitsSinceUpdate,
+      });
+    }
+    return { range, points };
+  }
+
+  /** Exponent from the live backlogs, for tests that check consistency with the pricer. */
+  liveExponentBips(): number {
+    if (this.legacy) return Number(legacyExponentBips(this.legacy));
+    let total = 0n;
+    for (const c of this.constraints) total += constraintExponentBips(c);
+    return Number(total);
+  }
+}
