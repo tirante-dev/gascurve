@@ -1,0 +1,12 @@
+# Extends the default ruleset; only the allowlists below are added.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "WebSocket handshake nonces in tests (RFC 6455 sample keys, base64 of 16 bytes)"
+regexTarget = "line"
+regexes = ['''Sec-WebSocket-Key''']
+
+[[allowlists]]
+description = "Raw eth_getLogs fixtures: hex log data, not credentials"
+paths = ['''internal/nitro/testdata/.*\.json''']
