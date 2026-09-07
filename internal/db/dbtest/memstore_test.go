@@ -358,7 +358,7 @@ func TestMemStoreFailures(t *testing.T) {
 	if err := m.Ping(ctx); !errors.Is(err, ErrInjected) {
 		t.Fatal("ping")
 	}
-	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DiscardBucketsBelowFrontier", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
+	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DiscardBucketsBelowFrontier", "BelowFrontier", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
 	for _, n := range names {
 		m.FailOn[n] = true
 	}
@@ -388,6 +388,7 @@ func TestMemStoreFailures(t *testing.T) {
 		"DeleteBlocksAfter":           func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
 		"RebuildBuckets":              func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
 		"DiscardBucketsBelowFrontier": func() error { return m.DiscardBucketsBelowFrontier(ctx, 1, "1m", nil) },
+		"BelowFrontier":               func() error { _, err := m.BelowFrontier(ctx, 1, nil); return err },
 		"DeleteBucketsBefore": func() error {
 			_, err := m.DeleteBucketsBefore(ctx, 1, now)
 			return err

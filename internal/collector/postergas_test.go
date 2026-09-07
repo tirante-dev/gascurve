@@ -916,3 +916,80 @@ func TestMinBlockRetentionCoversTheWidestBucket(t *testing.T) {
 		t.Fatalf("config.MinBlockRetention is %v, the widest bucket is %v", config.MinBlockRetention, widest)
 	}
 }
+
+// Under sustained lag the filler gets one guaranteed turn in every
+// maxRecoveryDeferrals. The repair reads and rebuilds from rows retention
+// removes, so a lag that never lifts must not hold it off for good: it gets
+// its own turn on its own count, and neither consumes the other's.
+func TestRepairGetsItsGuaranteedTurnUnderSustainedLag(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	f := repairFollower(t, rpc, store)
+	f.behind.Store(uint64(f.cfg.HeaderBatchSize) + 1)
+
+	for i := 1; i < maxRecoveryDeferrals; i++ {
+		if status, err := f.RepairStep(ctx); err != nil || status != RepairIdle {
+			t.Fatalf("turn %d: %v %v, want the repair to yield", i, status, err)
+		}
+	}
+	if len(rpc.posterGasCalls) != 0 {
+		t.Fatalf("read receipts while yielding: %v", rpc.posterGasCalls)
+	}
+	if status, err := f.RepairStep(ctx); err != nil || status != RepairProgressed {
+		t.Fatalf("the guaranteed turn: %v %v", status, err)
+	}
+	if len(rpc.posterGasCalls) != 1 {
+		t.Fatalf("the guaranteed turn read %d batches, want 1", len(rpc.posterGasCalls))
+	}
+	// The filler's count is untouched by the repair's turns.
+	if f.recoveryDeferrals.Load() != 0 {
+		t.Fatalf("the repair consumed the filler's deferrals: %d", f.recoveryDeferrals.Load())
+	}
+}
+
+// prune snapshots the live start before it takes the chain lock. A rewind
+// that cuts the chain to nothing clears the durable live_start in that gap,
+// and pruning on the stale snapshot would delete rows and record a frontier
+// the reset chain then sits below for good. The durable checkpoint is
+// rechecked inside the transaction.
+func TestPruneRechecksTheDurableLiveStartUnderTheLock(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	later := baseTime.Add(2 * time.Hour)
+	f := repairFollower(t, rpc, store, func(o *Options) { o.Now = func() time.Time { return later } })
+	f.cfg.BlockRetention = time.Hour
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	_, has := f.boundaryLocked()
+	f.mu.Unlock()
+	if !has {
+		t.Fatal("no live start loaded, so the test proves nothing")
+	}
+	// Clear the record the startup seed just made, so anything recorded
+	// from here on is prune's own doing. Then the rewind's clear of the
+	// live start lands after prune's snapshot and before its lock.
+	if err := store.DeleteState(ctx, 4663, db.StatePruneFrontier); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteState(ctx, 4663, db.StateLiveStart); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.pruneFrontier(ctx); err != nil || !got.IsZero() {
+		t.Fatalf("prune recorded a frontier on a stale live start: %v %v", got, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 900); err != nil || b == nil {
+		t.Fatalf("prune deleted rows on a stale live start: %v %v", b, err)
+	}
+}

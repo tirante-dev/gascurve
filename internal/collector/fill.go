@@ -722,6 +722,16 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	return FillProgressed, f.commitFill(ctx, gen, h, rows, filledTail, h.Next > h.To)
 }
 
+// startAmong reports whether start is one of starts.
+func startAmong(start time.Time, starts []time.Time) bool {
+	for _, s := range starts {
+		if s.Equal(start) {
+			return true
+		}
+	}
+	return false
+}
+
 // holeTail returns the stored block just after a hole, the one carrying
 // the real sampled backlogs: the replay ends on it so the error of the
 // whole reconstructed range is recorded where it can be seen. Nil when
@@ -823,10 +833,18 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db
 	}
 	f.mu.Unlock()
 	rowBacked, additive, keptBuckets := []db.Block{}, []db.Block{}, []db.Block{}
+	// Row-backed hole rows a fold may add to a bucket the store will not
+	// rebuild. Under the same watermark as the additive rows, so a retried
+	// batch cannot count them twice, and never the tail: it was already in
+	// its bucket before this fill began.
+	foldable := []db.Block{}
 	for _, r := range rows {
 		switch {
 		case hasBoundary && !r.TS.Before(boundary):
 			rowBacked = append(rowBacked, r)
+			if r.Number >= h.Folded {
+				foldable = append(foldable, r)
+			}
 		case r.Number < h.Folded:
 			f.log.Debug("skipping a bucket fold that is already committed", "block", r.Number, "folded", h.Folded)
 		default:
@@ -841,21 +859,42 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db
 		}
 	}
 	h.Folded = max(h.Folded, h.Next)
-	buckets := db.FoldBlocks(additive, func(n uint64) sql.NullInt64 { return setIDs[n] })
+	setID := func(n uint64) sql.NullInt64 { return setIDs[n] }
+	buckets := db.FoldBlocks(additive, setID)
+	rowFolds := db.FoldBlocks(foldable, setID)
 	err := f.withGeneration(ctx, gen, func(s db.Store) error {
 		if stored := append(append([]db.Block{}, rowBacked...), keptBuckets...); len(stored) > 0 {
 			if err := s.UpsertBlocks(ctx, stored); err != nil {
 				return fmt.Errorf("gap blocks: %w", err)
 			}
 		}
+		toFold := append([]db.Bucket(nil), buckets...)
 		if len(rowBacked) > 0 {
 			for _, res := range db.ResolutionOrder {
-				if err := s.RebuildBuckets(ctx, f.chainID, res, db.BucketStarts(rowBacked, res)); err != nil {
+				starts := db.BucketStarts(rowBacked, res)
+				if err := s.RebuildBuckets(ctx, f.chainID, res, starts); err != nil {
 					return fmt.Errorf("gap buckets: %w", err)
+				}
+				// A window the store declines to rebuild has lost rows to
+				// prune, and the rows recovered here were never in its
+				// bucket. Below the frontier a window is never replaced,
+				// only added to: the recovered rows are folded in, the way
+				// the region below the boundary has always been, and the
+				// stored aggregate keeps the rows prune took. Treating the
+				// silent decline as success would report the gap filled
+				// with the buckets over it unchanged.
+				declined, err := s.BelowFrontier(ctx, f.chainID, starts)
+				if err != nil {
+					return fmt.Errorf("gap buckets: %w", err)
+				}
+				for _, b := range rowFolds {
+					if b.Resolution == res && startAmong(b.BucketStart, declined) {
+						toFold = append(toFold, b)
+					}
 				}
 			}
 		}
-		if err := s.FoldBuckets(ctx, buckets); err != nil {
+		if err := s.FoldBuckets(ctx, toFold); err != nil {
 			return fmt.Errorf("gap buckets: %w", err)
 		}
 		return f.advanceHole(ctx, s, h, done)

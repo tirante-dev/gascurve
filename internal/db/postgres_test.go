@@ -209,6 +209,20 @@ func TestPostgresQueries(t *testing.T) {
 	if err := p.DiscardBucketsBelowFrontier(ctx, 4663, "1m", nil); err != nil {
 		t.Fatalf("no starts: %v", err)
 	}
+	// BelowFrontier names the starts a rebuild declines: none with no
+	// frontier, the start when the frontier is past it.
+	if below, err := p.BelowFrontier(ctx, 4663, nil); err != nil || len(below) != 0 {
+		t.Fatalf("no starts: %v %v", below, err)
+	}
+	mock.ExpectQuery("SELECT value FROM collector_state").WithArgs(4663, StatePruneFrontier).WillReturnRows(sqlmock.NewRows([]string{"value"}))
+	if below, err := p.BelowFrontier(ctx, 4663, []time.Time{now}); err != nil || len(below) != 0 {
+		t.Fatalf("no frontier: %v %v", below, err)
+	}
+	mock.ExpectQuery("SELECT value FROM collector_state").WithArgs(4663, StatePruneFrontier).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(now.Add(time.Hour).Format(time.RFC3339Nano)))
+	if below, err := p.BelowFrontier(ctx, 4663, []time.Time{now, now.Add(2 * time.Hour)}); err != nil || len(below) != 1 || !below[0].Equal(now) {
+		t.Fatalf("below the frontier: %v %v", below, err)
+	}
 	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, 0, "5", "0", "1", "2", "3", "20", 34, "{1,2}", "{3,4}", "{5,6}", "7", "8", "9", 1, 50, 100, 1))
 	bk, err := p.Buckets(ctx, 4663, "1m", now, now)
 	if err != nil || len(bk) != 1 || bk[0].BacklogsMax[1] != 4 || bk[0].ConstraintSetID.Int64 != 1 || bk[0].LastBlock != 100 {
@@ -395,6 +409,7 @@ func TestPostgresErrors(t *testing.T) {
 		{"FoldBuckets", false, func() error { return p.FoldBuckets(ctx, []Bucket{{}}) }},
 		{"RebuildBuckets", true, func() error { return p.RebuildBuckets(ctx, 1, "1m", []time.Time{now}) }},
 		{"DiscardBucketsBelowFrontier", true, func() error { return p.DiscardBucketsBelowFrontier(ctx, 1, "1m", []time.Time{now}) }},
+		{"BelowFrontier", true, func() error { _, err := p.BelowFrontier(ctx, 1, []time.Time{now}); return err }},
 		{"DeleteBucketsBefore", false, func() error { _, err := p.DeleteBucketsBefore(ctx, 1, now); return err }},
 		{"Buckets", true, func() error { _, err := p.Buckets(ctx, 1, "1m", now, now); return err }},
 		{"InsertStateSample", false, func() error { return p.InsertStateSample(ctx, StateSample{}) }},

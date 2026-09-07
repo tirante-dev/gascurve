@@ -184,7 +184,7 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 		// No block is row-backed yet, so no bucket here could be rebuilt.
 		return RepairNone, nil
 	}
-	if f.historyMustWait() {
+	if f.repairMustWait() {
 		return RepairIdle, nil
 	}
 	rows, err := f.store.BlocksMissingPosterGas(ctx, f.chainID, c.Next, f.repairBatchFor(narrowed))

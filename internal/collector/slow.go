@@ -872,6 +872,22 @@ func (f *Follower) prune(ctx context.Context) error {
 		// f.mu while it takes this lock for the seed, so taking f.mu inside
 		// it would invert that order. Samples carry no such record and are
 		// pruned regardless.
+		// The snapshot above can go stale in the gap before this lock: a
+		// rewind that cut the chain to nothing clears live_start. The
+		// durable checkpoint is authoritative and reading it here takes no
+		// f.mu, so it is safe where re-reading the follower would not be
+		// (ensureInit holds f.mu while it takes this lock for the seed).
+		// Absent means a rewind cleared it, and block rows are left alone.
+		// Present but moved is safe with the cutoff computed above: a new
+		// live start only ever pins the cutoff lower, so a stale pin
+		// deletes less and records lower, and the next prune catches up.
+		if hasBoundary {
+			if _, still, err := s.GetState(ctx, f.chainID, db.StateLiveStart); err != nil {
+				return err
+			} else if !still {
+				hasBoundary = false
+			}
+		}
 		if hasBoundary {
 			if n, err = s.PruneBlocks(ctx, f.chainID, before); err != nil {
 				return err

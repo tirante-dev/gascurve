@@ -299,6 +299,16 @@ type Store interface {
 	// as a gap. The same predicate decides both methods, in the store, so
 	// they cannot drift. Starts at or above the frontier are left alone.
 	DiscardBucketsBelowFrontier(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error
+	// BelowFrontier returns those of starts whose windows lie below the
+	// prune frontier: exactly the starts RebuildBuckets declines. Below the
+	// frontier a window is never replaced, since a recompute would sum only
+	// what survived; it may only be added to or removed. A caller that has
+	// recovered rows a stored bucket lacks folds them in through FoldBuckets
+	// for the starts named here, the same additive path the region below
+	// the live-start boundary has always used. With no frontier recorded, or
+	// one that will not parse, nothing lies below it and nothing is named,
+	// exactly as nothing is declined.
+	BelowFrontier(ctx context.Context, chainID uint64, starts []time.Time) ([]time.Time, error)
 	// Buckets returns buckets with from <= bucket_start < to, ascending.
 	Buckets(ctx context.Context, chainID uint64, resolution string, from, to time.Time) ([]Bucket, error)
 

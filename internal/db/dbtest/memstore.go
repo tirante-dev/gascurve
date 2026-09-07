@@ -658,6 +658,27 @@ func setSize(cs db.ConstraintSet) int {
 }
 
 // DeleteBucketsBefore drops buckets starting before t.
+// BelowFrontier names those of starts below the recorded prune frontier,
+// mirroring the Postgres store: the same starts RebuildBuckets declines.
+func (m *MemStore) BelowFrontier(_ context.Context, chainID uint64, starts []time.Time) ([]time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("BelowFrontier"); err != nil {
+		return nil, err
+	}
+	frontier := m.pruneFrontierLocked(chainID)
+	if frontier.IsZero() {
+		return nil, nil
+	}
+	var below []time.Time
+	for _, start := range starts {
+		if start.UTC().Before(frontier) {
+			below = append(below, start.UTC())
+		}
+	}
+	return below, nil
+}
+
 // DiscardBucketsBelowFrontier removes the buckets at the given starts that
 // lie below the recorded prune frontier, mirroring the Postgres store: the
 // same starts RebuildBuckets declines.

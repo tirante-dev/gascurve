@@ -208,6 +208,10 @@ type Follower struct {
 	// recoveryDeferrals counts consecutive missing-range turns yielded to a
 	// persistently lagging fast loop. It is reset after one recovery turn.
 	recoveryDeferrals atomic.Uint64
+	// repairDeferrals is the same count for the poster-gas repair, kept
+	// apart so the filler and the repair each get their guaranteed turn
+	// rather than sharing, and neither consumes the other's.
+	repairDeferrals atomic.Uint64
 
 	mu          sync.Mutex
 	initialized bool
@@ -1391,17 +1395,29 @@ func (f *Follower) historyMustWait() bool {
 // lagging fast loop all but one of every maxRecoveryDeferrals history turns.
 // This keeps the live reserve and dominant share while guaranteeing that a
 // durable missing range is retried eventually under sustained ingress load.
-func (f *Follower) recoveryMustWait() bool {
+func (f *Follower) recoveryMustWait() bool { return f.deferredWait(&f.recoveryDeferrals) }
+
+// repairMustWait is the same policy for the poster-gas repair, on its own
+// count. The repair reads and rebuilds from block rows that retention
+// removes, so a lag that never lifts must not hold it off for good: under
+// sustained ingress the filler and the repair each take one turn in
+// maxRecoveryDeferrals, and the live path keeps the rest.
+func (f *Follower) repairMustWait() bool { return f.deferredWait(&f.repairDeferrals) }
+
+// deferredWait is the policy behind both: absolute priority to an active
+// catch-up, and all but one of every maxRecoveryDeferrals turns to a
+// lagging fast loop, counted on the caller's own counter.
+func (f *Follower) deferredWait(deferrals *atomic.Uint64) bool {
 	if f.catchingUp.Load() {
 		return true
 	}
 	if f.behind.Load() <= uint64(f.cfg.HeaderBatchSize) {
-		f.recoveryDeferrals.Store(0)
+		deferrals.Store(0)
 		return false
 	}
-	if f.recoveryDeferrals.Add(1) < maxRecoveryDeferrals {
+	if deferrals.Add(1) < maxRecoveryDeferrals {
 		return true
 	}
-	f.recoveryDeferrals.Store(0)
+	deferrals.Store(0)
 	return false
 }

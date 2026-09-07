@@ -769,6 +769,31 @@ func (p *Postgres) DeleteBucketsBefore(ctx context.Context, chainID uint64, befo
 	return res.RowsAffected()
 }
 
+// BelowFrontier names those of starts below the prune frontier: the ones
+// rebuildable declines, by the same predicate. The single place the
+// question is answered, so a caller folding into what the store would not
+// rebuild cannot disagree with the store about which windows those are.
+func (p *Postgres) BelowFrontier(ctx context.Context, chainID uint64, starts []time.Time) ([]time.Time, error) {
+	if len(starts) == 0 {
+		return nil, nil
+	}
+	raw, recorded, err := p.GetState(ctx, chainID, StatePruneFrontier)
+	if err != nil {
+		return nil, err
+	}
+	frontier, ok := parseFrontier(raw, recorded)
+	if !ok {
+		return nil, nil
+	}
+	below := make([]time.Time, 0, len(starts))
+	for _, s := range starts {
+		if s.Before(frontier) {
+			below = append(below, s.UTC())
+		}
+	}
+	return below, nil
+}
+
 // DiscardBucketsBelowFrontier removes the buckets at the given starts that
 // lie below the prune frontier, the same starts rebuildable declines. With
 // no frontier recorded, or one that will not parse, nothing lies below it
@@ -777,22 +802,9 @@ func (p *Postgres) DiscardBucketsBelowFrontier(ctx context.Context, chainID uint
 	if _, ok := Resolutions[resolution]; !ok {
 		return fmt.Errorf("discard buckets: unknown resolution %q", resolution)
 	}
-	if len(starts) == 0 {
-		return nil
-	}
-	raw, recorded, err := p.GetState(ctx, chainID, StatePruneFrontier)
+	below, err := p.BelowFrontier(ctx, chainID, starts)
 	if err != nil {
 		return err
-	}
-	frontier, ok := parseFrontier(raw, recorded)
-	if !ok {
-		return nil
-	}
-	below := make([]time.Time, 0, len(starts))
-	for _, s := range starts {
-		if s.Before(frontier) {
-			below = append(below, s.UTC())
-		}
 	}
 	if len(below) == 0 {
 		return nil

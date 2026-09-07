@@ -1270,3 +1270,31 @@ func TestApplyActionGasClampsBoundaries(t *testing.T) {
 		t.Fatalf("backlog = %d, want the block's gas 600000", got)
 	}
 }
+
+// A row-backed hole whose window has already fallen below the prune frontier
+// by the time it is filled. The store declines to rebuild that window, and
+// treating the decline as success would report the gap filled with the
+// bucket over it never updated. The recovered rows are folded in instead,
+// so every block is counted exactly once.
+func TestFillFoldsIntoAWindowTheStoreWillNotRebuild(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	// The hole sits inside the minute bucket at 07:01 (blocks 600 through
+	// 1199). A frontier at 07:01:30 puts that window, and the quarter-hour
+	// and hour over it, below the frontier: all three are declined.
+	inside := time.Unix(int64(tsFor(900)), 0).UTC()
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, inside.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	before := blockCountIn(store, db.Resolution1m)
+	fillAll(t, f, 40)
+	if holesOf(t, store) != nil {
+		t.Fatalf("the gap must finish: %+v", holesOf(t, store))
+	}
+	if got := blockCountIn(store, db.Resolution1m); got != 151 {
+		t.Fatalf("every block counted once: %d (was %d before the fill)", got, before)
+	}
+}
