@@ -382,7 +382,7 @@ describe("FeeFlows", () => {
   });
 
   it("hatches the bucket the collector is still filling rather than stacking a total it has not finished collecting", () => {
-    const filling: Series = { ...series, points: [...series.points.slice(0, 2), { ...series.points[2], coverage: 0.4, completeness: "partial" }] };
+    const filling: Series = { ...series, to: series.points[2].t + 25, points: [...series.points.slice(0, 2), { ...series.points[2], coverage: 0.4, completeness: "partial" }] };
     const totals = feeTotals(filling);
     expect(totals.completeness).toBe("partial");
     expect(totals.perDay).toBeNull();

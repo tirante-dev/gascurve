@@ -52,9 +52,10 @@ describe("which kind of partial bucket a point is", () => {
       { t: 60, coverage: 1 },
       { t: 120, coverage: 0.2 },
     ];
-    expect(partialKinds(points, { to: 180, step: 60 })).toEqual(["leading", null, "in-progress"]);
-    // The bucket runs past the edge, which is what the one in progress does.
-    expect(partialKinds(points, { to: 150, step: 60 })).toEqual(["leading", null, "in-progress"]);
+    expect(partialKinds(points, { to: 133, step: 60 })).toEqual(["leading", null, "in-progress"]);
+    // Reaching the edge is not enough when coverage is lower than elapsed
+    // time there: that is an internal omission, not merely the live boundary.
+    expect(partialKinds(points, { to: 150, step: 60 })).toEqual(["leading", null, "leading"]);
   });
   it("calls a final partial bucket that stops short of the edge partly indexed, not in progress", () => {
     // The collector stopped part way through the bucket at 120 and the range
@@ -97,6 +98,7 @@ describe("the words", () => {
   it("does not invent a percentage when the exact share or completeness is unknown", () => {
     expect(partialNote(null, "leading")).toBe("partially indexed, coverage unknown");
     expect(partialNote(null, "unknown")).toBe("bucket completeness unknown");
+    expect(partialNote(1, "leading")).toBe("partially indexed, missing blocks share a timestamp");
     expect(partialSumNote(null, "unknown")).toBe("bucket completeness unknown; not drawn as a bucket total");
   });
   it("adds that a sum chart leaves the bucket out", () => {

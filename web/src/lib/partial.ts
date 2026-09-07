@@ -56,9 +56,19 @@ export function isPartial(point: Covered): boolean {
  */
 export type RangeEdge = { to: number; step: number };
 
-/** True when the bucket starting at `t` runs up to (or past) the right edge of the range. */
-function reachesEdge(t: number, edge: RangeEdge): boolean {
-  return t + edge.step >= edge.to;
+/**
+ * True when the bucket reaches the range edge and its coverage matches elapsed
+ * time there. The API window ends one second after its serving clock, so one
+ * bucket-second of tolerance keeps that convention from misclassifying the
+ * live bucket. A bounded internal hole near the edge has lower coverage and
+ * remains a generic partial bucket.
+ */
+function isInProgress(point: Covered, t: number, edge: RangeEdge): boolean {
+  if (t + edge.step < edge.to) return false;
+  const coverage = coverageOf(point);
+  if (coverage === null) return false;
+  const elapsed = Math.min(WHOLE, Math.max(0, (edge.to - t) / edge.step));
+  return Math.abs(coverage - elapsed) <= 1 / edge.step + Number.EPSILON;
 }
 
 /**
@@ -78,7 +88,7 @@ export function partialKinds(points: readonly (Covered & { t?: number })[], edge
     if (completeness === "complete") return null;
     if (completeness === "unknown") return "unknown";
     if (usable === null || typeof p.t !== "number") return i === points.length - 1 ? "in-progress" : "leading";
-    return reachesEdge(p.t, usable) ? "in-progress" : "leading";
+    return isInProgress(p, p.t, usable) ? "in-progress" : "leading";
   });
 }
 
@@ -104,6 +114,7 @@ export function partialBandLabel(kind: PartialKind): string {
 export function partialNote(coverage: number | null, kind: PartialKind): string {
   if (kind === "unknown") return "bucket completeness unknown";
   if (coverage === null || !Number.isFinite(coverage)) return kind === "in-progress" ? "bucket in progress, coverage unknown" : "partially indexed, coverage unknown";
+  if (kind === "leading" && coverage >= WHOLE) return "partially indexed, missing blocks share a timestamp";
   const share = formatPercent(Math.min(WHOLE, Math.max(0, coverage)), 0);
   return kind === "in-progress" ? `bucket in progress, ${share} elapsed` : `partially indexed, ${share} of the bucket`;
 }
