@@ -349,6 +349,14 @@ func TestFillYieldsWhileCatchingUp(t *testing.T) {
 		t.Fatalf("no header may be fetched while the fast loop catches up: %v", rpc.headerCalls)
 	}
 	f.catchingUp.Store(false)
+	// The same while the last tick found the stored head more than a
+	// header batch behind: the filler's batches would queue ahead of the
+	// catch-up's and turn the lag into another skipped gap.
+	f.behind.Store(uint64(f.cfg.HeaderBatchSize) + 1)
+	if st, err := f.FillStep(ctx); err != nil || st != FillIdle || len(rpc.headerCalls) != 0 {
+		t.Fatalf("behind the chain: %v %v %v", st, err, rpc.headerCalls)
+	}
+	f.behind.Store(uint64(f.cfg.HeaderBatchSize))
 	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
 		t.Fatalf("after the catch-up: %v %v", st, err)
 	}
@@ -631,4 +639,73 @@ func TestFillBrokenLinksInsideTheBatch(t *testing.T) {
 	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
 		t.Fatalf("the retry must progress: %v %v", st, err)
 	}
+}
+
+// TestFillFinishesTheHoleItStarted: a hole already being filled is
+// completed before a newer one is begun, or a network that keeps skipping
+// would start every new hole and finish none.
+func TestFillFinishesTheHoleItStarted(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("first step: %v %v", st, err)
+	}
+	first := holesOf(t, store)
+	if len(first) != 1 || first[0].Next == 0 {
+		t.Fatalf("the first hole must be in progress: %+v", first)
+	}
+	rpc.setHead(1400)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if holes := holesOf(t, store); len(holes) != 2 || holes[1].From != 1151 {
+		t.Fatalf("a second, newer gap: %+v", holes)
+	}
+	rpc.headerCalls = nil
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("next step: %v %v", st, err)
+	}
+	if calls := rpc.headerCalls; len(calls) != 1 || calls[0][0] != first[0].Start() {
+		t.Fatalf("the started hole continues at its cursor %d: %v", first[0].Start(), calls)
+	}
+	fillAll(t, f, 60)
+	if holesOf(t, store) != nil {
+		t.Fatalf("both gaps fill: %+v", holesOf(t, store))
+	}
+}
+
+// TestTickTracksHowFarBehind: the tick records the stored head's lag and
+// clears it once it has caught up or skipped, so history work resumes.
+func TestTickTracksHowFarBehind(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.behind.Load() != 0 || f.historyMustWait() {
+		t.Fatalf("caught up after a tick: behind %d", f.behind.Load())
+	}
+	rpc.setHead(gapHead)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The gap was skipped and the head seeded: caught up again.
+	if f.behind.Load() != 0 {
+		t.Fatalf("behind after a skip: %d", f.behind.Load())
+	}
+	// A failing tick leaves the lag recorded.
+	rpc.setHead(gapHead + 30)
+	rpc.errs["HeadersByNumbers"] = errRPC
+	if err := f.Tick(ctx); err == nil {
+		t.Fatal("expected the catch-up to fail")
+	}
+	if f.behind.Load() != 30 || !f.historyMustWait() {
+		t.Fatalf("behind after a failed catch-up: %d", f.behind.Load())
+	}
+	delete(rpc.errs, "HeadersByNumbers")
 }

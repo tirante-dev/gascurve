@@ -41,10 +41,18 @@ func (f *Follower) TickAt(ctx context.Context, number uint64) error {
 // head-pinned header and the state calls) is the latency critical part
 // of the tick and goes through the endpoint's fast lane; the catch-up
 // headers and everything after them are bulk work.
-func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) (*nitro.Sample, error)) error {
+func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) (*nitro.Sample, error)) (err error) {
 	if err := f.ensureInit(ctx); err != nil {
 		return f.fail(ctx, err)
 	}
+	// A tick that ends without error has the stored head at the sampled
+	// one (caught up, or the gap skipped and the head seeded): history
+	// work may have the spare budget again.
+	defer func() {
+		if err == nil {
+			f.behind.Store(0)
+		}
+	}()
 	sample, err := sampleFn(nitro.WithClass(ctx, nitro.Fast))
 	if err != nil {
 		return f.fail(ctx, fmt.Errorf("sample: %w", err))
@@ -54,6 +62,9 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 	f.mu.Lock()
 	stored, storedHash := f.head, f.headHash
 	f.mu.Unlock()
+	if head >= stored {
+		f.behind.Store(head - stored)
+	}
 
 	switch {
 	case stored == 0:

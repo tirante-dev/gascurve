@@ -99,6 +99,12 @@ func TestBackfillSegments(t *testing.T) {
 		t.Fatalf("catching up: %v %v", st, err)
 	}
 	f.catchingUp.Store(false)
+	// Nor while the last tick found the stored head over a batch behind.
+	f.behind.Store(uint64(f.cfg.HeaderBatchSize) + 1)
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
+		t.Fatalf("behind the chain: %v %v", st, err)
+	}
+	f.behind.Store(0)
 	// Without spare budget the smallest batch still goes, queued for its
 	// turn at the pacer, so a demanding fast tick slows the backfill down
 	// rather than stopping it.

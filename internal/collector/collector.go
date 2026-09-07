@@ -174,6 +174,11 @@ type Follower struct {
 	tickInterval time.Duration
 
 	catchingUp atomic.Bool
+	// behind is how many blocks the stored head trailed the sampled head at
+	// the last tick. History work (the gap filler and the backfill) waits
+	// while it exceeds a header batch: on a small budget their batches
+	// queue ahead of the catch-up's and turn a lag into a skipped gap.
+	behind atomic.Uint64
 
 	mu          sync.Mutex
 	initialized bool
@@ -1043,4 +1048,12 @@ func (f *Follower) withGeneration(ctx context.Context, gen uint64, fn func(db.St
 		}
 		return fn(s)
 	})
+}
+
+// historyMustWait reports whether the gap filler and the backfill should
+// hold off: the fast loop is catching up right now, or its last tick found
+// the stored head more than a header batch behind the chain, so every
+// spare call belongs to the live path until it has caught up.
+func (f *Follower) historyMustWait() bool {
+	return f.catchingUp.Load() || f.behind.Load() > uint64(f.cfg.HeaderBatchSize)
 }

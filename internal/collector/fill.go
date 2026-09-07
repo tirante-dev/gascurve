@@ -104,8 +104,8 @@ func (f *Follower) fillStep(ctx context.Context) (FillStatus, error) {
 	if err != nil || target == nil {
 		return FillNone, err
 	}
-	if f.catchingUp.Load() {
-		// The fast loop is spending the budget on the head: history waits.
+	if f.historyMustWait() {
+		// The fast loop needs the budget for the head: history waits.
 		return FillIdle, nil
 	}
 	return f.fillBatch(ctx, gen, target)
@@ -123,8 +123,17 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, err
 	for i := range holes {
 		order = append(order, i)
 	}
-	// Newest first: the recent charts are the ones being looked at.
-	sort.SliceStable(order, func(a, b int) bool { return holes[order[a]].From > holes[order[b]].From })
+	// A hole already being filled comes first, so one is finished before
+	// the next is begun (a network that keeps skipping would otherwise
+	// start every new hole and complete none); then newest first, since
+	// the recent charts are the ones being looked at.
+	sort.SliceStable(order, func(a, b int) bool {
+		ha, hb := holes[order[a]], holes[order[b]]
+		if (ha.Next > 0) != (hb.Next > 0) {
+			return ha.Next > 0
+		}
+		return ha.From > hb.From
+	})
 	for _, unfillable := range []bool{false, true} {
 		for _, i := range order {
 			h := holes[i]
