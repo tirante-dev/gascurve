@@ -869,8 +869,11 @@ func (c *client) close() {
 // writing to the peer that caused the overflow; CloseNow does not wait for
 // a close handshake, so it never blocks the hub lock the caller holds.
 func (c *client) drop() {
-	c.hub.metrics.WSClientDropped()
-	c.dropped.Store(true)
+	// Two goroutines can find the queue full at once, so the counter moves
+	// on the transition alone; everything after it is idempotent already.
+	if c.dropped.CompareAndSwap(false, true) {
+		c.hub.metrics.WSClientDropped()
+	}
 	c.close()
 	if c.conn != nil {
 		_ = c.conn.CloseNow()

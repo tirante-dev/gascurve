@@ -2,6 +2,17 @@
 {{- if and (not .Values.api.enabled) (not .Values.web.enabled) -}}
 {{- fail "ingress.enabled is true but both api.enabled and web.enabled are false, so this Ingress would have no HTTP paths and the API server would reject it. Enable the api or the web component, or set ingress.enabled: false. values.schema.json rejects this combination too; you are seeing this message because schema validation was skipped." -}}
 {{- end -}}
+{{- if and .Values.api.enabled (empty .Values.config.server.trusted_proxies) -}}
+{{- fail "ingress.enabled and api.enabled are true but config.server.trusted_proxies is empty. Set it to the addresses or CIDRs of every reverse proxy hop the API should trust. Forwarded client headers remain untrusted when this list is empty. values.schema.json rejects this combination too; you are seeing this message because schema validation was skipped." -}}
+{{- end -}}
+{{- if .Values.api.enabled -}}
+{{- range .Values.config.server.trusted_proxies -}}
+{{- $proxy := . | toString | trim -}}
+{{- if or (hasSuffix "/0" $proxy) (eq $proxy "0.0.0.0") (eq $proxy "::") -}}
+{{- fail (printf "config.server.trusted_proxies contains %q, which trusts every reachable peer and so lets any of them pick its own rate limit identity with X-Forwarded-For. List the ingress controller or proxy ranges the API actually sees instead. values.schema.json rejects this combination too; you are seeing this message because schema validation was skipped." $proxy) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

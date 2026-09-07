@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"net/http"
 	"strconv"
 	"time"
 
@@ -47,6 +48,20 @@ func NewAPI(reg prometheus.Registerer) *API {
 	return a
 }
 
+// otherMethod stands in for any method outside knownMethods.
+const otherMethod = "other"
+
+// knownMethods bounds the method label. An HTTP method is an arbitrary
+// token, not a closed set: net/http accepts any token and the router
+// answers 405, so a caller sending a fresh made-up method per request
+// would otherwise mint two series each time and grow the registry without
+// end. Only the methods that exist are labeled; the rest share one value.
+var knownMethods = map[string]bool{
+	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true,
+	http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
+	http.MethodConnect: true, http.MethodOptions: true, http.MethodTrace: true,
+}
+
 // ObserveListener publishes the PostgreSQL notification listener behind
 // status, read at scrape time so nothing has to push it. Without it a wedged
 // LISTEN feed is visible only to /status and to whoever notices that /ready
@@ -75,8 +90,11 @@ func (a *API) ObserveListener(status func() (ready bool, reconnects uint64)) {
 
 // ObserveRequest records one served request. route must be the router's
 // own pattern rather than the request path, or every block number in a URL
-// becomes a series of its own.
+// becomes a series of its own; method is bounded here.
 func (a *API) ObserveRequest(route, method string, status int, d time.Duration) {
+	if !knownMethods[method] {
+		method = otherMethod
+	}
 	a.requests.WithLabelValues(route, method, strconv.Itoa(status)).Inc()
 	a.duration.WithLabelValues(route, method).Observe(d.Seconds())
 }

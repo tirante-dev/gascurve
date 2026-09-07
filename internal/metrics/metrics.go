@@ -41,9 +41,16 @@ func Handler(g prometheus.Gatherer) http.Handler {
 
 // monotonic mirrors a cumulative value owned by another component (the RPC
 // pool's own counters, say) onto a Prometheus counter, which may only ever
-// be added to. It adds the growth since the last observation; a value that
-// went backwards means the source started over and is counted from zero
-// again rather than being ignored for good.
+// be added to. It adds the growth since the last observation, and a value
+// that went backwards is counted from zero again rather than ignored for
+// good.
+//
+// That recovery is a floor, not a guarantee: a source replaced by one that
+// has already passed the last value read is indistinguishable from ordinary
+// growth, and the difference is lost. Nothing here is exposed to that,
+// because the counters it mirrors live as long as the process that owns
+// this registry: a nitro.Pool builds its endpoints once, and a restarted
+// collector starts from an empty registry too.
 type monotonic struct {
 	c    prometheus.Counter
 	last uint64

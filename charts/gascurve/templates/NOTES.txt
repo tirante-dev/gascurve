@@ -65,6 +65,17 @@ Pods do not restart on their own when that Secret changes; after rotating it run
 
 WARNING: no database configured. Set database.url or database.existingSecret.
 {{- end }}
+{{- if and .Values.api.enabled (not .Values.ingress.enabled) (empty .Values.config.server.trusted_proxies) }}
+
+WARNING: config.server.trusted_proxies is empty and this release has no
+chart-managed Ingress, so the chart cannot tell whether anything fronts the
+api. If one does (a Cloudflare Tunnel, a Gateway, an Ingress outside this
+chart), the api sees that proxy as the client of every request and all
+visitors share one REST rate limit bucket and one WebSocket per-IP cap. Set
+config.server.trusted_proxies to the addresses the api pods see for that
+proxy; see Ingress client addresses in charts/gascurve/README.md. Leave it
+empty only when clients reach the api directly.
+{{- end }}
 {{- if .Values.extraEnv }}
 
 WARNING: top-level extraEnv is deprecated and was applied to the collector, api

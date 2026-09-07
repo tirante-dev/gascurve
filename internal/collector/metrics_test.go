@@ -141,6 +141,57 @@ func TestMetricsRecordSkippedGapsAndFilledHoles(t *testing.T) {
 	hasSeries(t, body, `gascurve_collector_holes_pending{chain_id="4663",network="robinhood"} 0`)
 }
 
+// TestMetricsCountASkippedGapOnlyWhenItCommits: the counter says how much
+// history the collector owes, so it must not move for a skip that was
+// never written. A database or an RPC that keeps failing would otherwise
+// report hundreds of skipped gaps while the durable checkpoint stood still.
+func TestMetricsCountASkippedGapOnlyWhenItCommits(t *testing.T) {
+	ctx := context.Background()
+	reg := metrics.NewRegistry()
+	m := metrics.NewCollector(reg)
+	rpc := newFakeRPC(1000)
+	f := newTestFollower(t, rpc, dbtest.New(), func(o *Options) { o.Metrics = m })
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A gap wider than the budget, with the owner-log read that precedes
+	// the seed failing: nothing is committed.
+	rpc.setHead(1000 + uint64(f.cfg.HeaderBatchSize*f.cfg.MaxCatchUpBatches) + 50)
+	rpc.errs["OwnerActsLogs"] = errRPC
+	if err := f.Tick(ctx); err == nil {
+		t.Fatal("the tick must fail while the owner-log read does")
+	}
+	const counter = `gascurve_collector_catch_up_gaps_skipped_total{chain_id="4663",network="robinhood"}`
+	hasSeries(t, scrapeRegistry(t, reg), counter+" 0")
+
+	delete(rpc.errs, "OwnerActsLogs")
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hasSeries(t, scrapeRegistry(t, reg), counter+" 1")
+}
+
+// TestMetricsReportEndpointsThatFailedVerification: a pool with no usable
+// endpoint stops the follower before the slow loop runs, so this is the
+// only place the endpoint gauges can come from. Without them the worst
+// case, a network that never had a working endpoint, is the one case the
+// exhausted-endpoints alert cannot see.
+func TestMetricsReportEndpointsThatFailedVerification(t *testing.T) {
+	reg := metrics.NewRegistry()
+	m := metrics.NewCollector(reg)
+	pool := &fakePool{fakeRPC: newFakeRPC(1000), verifyErr: nitro.ErrNoEndpoint, status: nitro.PoolStatus{
+		Endpoints: []nitro.EndpointStatus{{Index: 0, Disabled: true, Error: "reports chain id 1, configured 4663"}},
+	}}
+	f := newTestFollower(t, pool.fakeRPC, dbtest.New(), func(o *Options) {
+		o.RPC = pool
+		o.Metrics = m
+	})
+	if err := f.verifyChainID(context.Background()); err == nil {
+		t.Fatal("a pool with no usable endpoint must stop the follower")
+	}
+	hasSeries(t, scrapeRegistry(t, reg), `gascurve_collector_endpoint_disabled{chain_id="4663",endpoint="0",network="robinhood"} 1`)
+}
+
 func TestBackfillStateFromCursor(t *testing.T) {
 	for _, tc := range []struct {
 		name string
