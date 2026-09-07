@@ -133,7 +133,10 @@ describe("the /[network]/how-it-works route", () => {
   });
 
   it("renders the explainer for the network in the path and titles the tab with it", async () => {
-    await expect(generateMetadata({ params: Promise.resolve({ network: "robinhood" }) })).resolves.toEqual({ title: "How the robinhood fee works" });
+    await expect(generateMetadata({ params: Promise.resolve({ network: "robinhood" }) })).resolves.toMatchObject({
+      title: "How the Robinhood Chain gas fee works",
+      alternates: { canonical: "/robinhood/how-it-works" },
+    });
     render(await HowItWorksRoute({ params: Promise.resolve({ network: "robinhood" }) }));
     expect(screen.getByRole("heading", { name: "How the fee works", level: 2 })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "← Live view" })).toHaveAttribute("href", "/robinhood");
