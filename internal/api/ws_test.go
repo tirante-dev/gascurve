@@ -57,11 +57,11 @@ func (h *wsHarness) dial(t *testing.T, network string) *websocket.Conn {
 	return conn
 }
 
-func readMsg(t *testing.T, conn *websocket.Conn) (string, json.RawMessage) {
+func readMsg(t *testing.T, conn *websocket.Conn) (typ string, data json.RawMessage) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, data, err := conn.Read(ctx)
+	_, raw, err := conn.Read(ctx)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -69,8 +69,8 @@ func readMsg(t *testing.T, conn *websocket.Conn) (string, json.RawMessage) {
 		Type string          `json:"type"`
 		Data json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("decode %s: %v", data, err)
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
 	}
 	return m.Type, m.Data
 }
@@ -354,7 +354,9 @@ func TestWebSocketErrors(t *testing.T) {
 	// A slow consumer is dropped instead of blocking the hub, and nothing
 	// more is queued for it: a closing client accepts no further messages,
 	// so the write loop's flush is bounded by what is already there.
-	slow := &client{send: make(chan []byte, 1), closed: make(chan struct{})}
+	// The hub is the client's owner: it is what counts the drop, so even a
+	// hand-built client gets one.
+	slow := &client{hub: NewHub(nil, nil), send: make(chan []byte, 1), closed: make(chan struct{})}
 	slow.enqueue([]byte("a"))
 	slow.enqueue([]byte("b"))
 	select {

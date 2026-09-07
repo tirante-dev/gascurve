@@ -19,9 +19,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/logger"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
@@ -153,6 +156,10 @@ type Options struct {
 	// for the pool's WebSocket endpoint (or Network.WSURL with a plain
 	// RPC); polling when there is none.
 	Heads HeadSource
+	// Metrics is where the follower reports what it observes. Nil gives it
+	// a registry of its own, so the instrument calls are always live and
+	// never have to be guarded at the call site.
+	Metrics *metrics.Collector
 }
 
 // Follower drives one network.
@@ -174,6 +181,10 @@ type Follower struct {
 	// tickInterval is the fast loop's cadence: the network's tick_interval
 	// when set, else collector.tick_interval.
 	tickInterval time.Duration
+	// metrics is this network's slice of the process instruments. It is
+	// never nil and never blocks: a scrape reads the registry, not the
+	// follower.
+	metrics *metrics.Network
 
 	catchingUp atomic.Bool
 	// behind is how many blocks the stored head trailed the sampled head at
@@ -359,6 +370,10 @@ func NewFollower(o Options) *Follower {
 		f.ethUsd = ethUsdCacheFor(f.cfg.EthUsdSource, f.cfg.SlowInterval, f.log)
 	}
 	f.tickInterval = o.Network.EffectiveTickInterval(f.cfg)
+	if o.Metrics == nil {
+		o.Metrics = metrics.NewCollector(prometheus.NewRegistry())
+	}
+	f.metrics = o.Metrics.Network(o.Network.Name, o.Network.ChainID)
 	return f
 }
 
@@ -406,6 +421,24 @@ func endpointsStatus(st nitro.PoolStatus) model.EndpointsStatus {
 			msg := e.WSError
 			out.Endpoints[i].WSError = &msg
 		}
+	}
+	return out
+}
+
+// poolMetrics renders what the RPC reports for the instruments: the
+// aggregate counters always, and with a pool the routing state and each
+// endpoint's own counters. Endpoints are named by index alone, never by
+// URL: a URL is a credential, which is why internal/nitro scrubs one from
+// every error it returns.
+func poolMetrics(st nitro.Stats, status *nitro.PoolStatus) metrics.PoolState {
+	out := metrics.PoolState{RateLimitEvents: st.RateLimitEvents, FastCalls: st.FastCalls, BulkCalls: st.BulkCalls}
+	if status == nil {
+		return out
+	}
+	out.Active, out.Failovers = status.Active, status.Failovers
+	out.Endpoints = make([]metrics.EndpointState, len(status.Endpoints))
+	for i, e := range status.Endpoints {
+		out.Endpoints[i] = metrics.EndpointState{Index: e.Index, Disabled: e.Disabled, WSCooling: e.WSCooling, RateLimitEvents: e.RateLimitEvents}
 	}
 	return out
 }

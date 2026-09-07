@@ -163,6 +163,11 @@ type Stats struct {
 	RateLimitEvents uint64
 	Last429At       time.Time
 	Backoff         time.Duration
+	// FastCalls and BulkCalls count every JSON-RPC call sent since the
+	// client was built, by pacer class, one per item inside a batch. They
+	// only ever grow, so an observer can report them as counters.
+	FastCalls uint64
+	BulkCalls uint64
 }
 
 type rpcRequest struct {
@@ -209,9 +214,13 @@ type Client struct {
 
 	sendMu sync.Mutex // one in-flight HTTP request per network
 
-	mu              sync.Mutex
-	nextID          uint64
-	callTimes       []time.Time
+	mu        sync.Mutex
+	nextID    uint64
+	callTimes []time.Time
+	// fastCalls and bulkCalls are the cumulative call counts per pacer
+	// class, kept for observation only: nothing routes on them.
+	fastCalls       uint64
+	bulkCalls       uint64
 	rateLimitEvents uint64
 	last429         time.Time
 	backoff         time.Duration
@@ -295,7 +304,10 @@ func (c *Client) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.trimCallsLocked(c.now())
-	return Stats{CallsLast10s: len(c.callTimes), RateLimitEvents: c.rateLimitEvents, Last429At: c.last429, Backoff: c.backoff}
+	return Stats{
+		CallsLast10s: len(c.callTimes), RateLimitEvents: c.rateLimitEvents, Last429At: c.last429, Backoff: c.backoff,
+		FastCalls: c.fastCalls, BulkCalls: c.bulkCalls,
+	}
 }
 
 func (c *Client) trimCallsLocked(now time.Time) {
@@ -307,7 +319,7 @@ func (c *Client) trimCallsLocked(now time.Time) {
 	c.callTimes = c.callTimes[i:]
 }
 
-func (c *Client) recordCalls(n int) {
+func (c *Client) recordCalls(class Class, n int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
@@ -315,6 +327,11 @@ func (c *Client) recordCalls(n int) {
 	for i := 0; i < n; i++ {
 		c.callTimes = append(c.callTimes, now)
 	}
+	if class == Fast {
+		c.fastCalls += uint64(n)
+		return
+	}
+	c.bulkCalls += uint64(n)
 }
 
 func (c *Client) ids(n int) []uint64 {
@@ -449,7 +466,7 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 			return nil, false, time.Time{}, err
 		}
 	}
-	c.recordCalls(calls)
+	c.recordCalls(ClassOf(ctx), calls)
 	sentAt = c.now()
 	responses, limited, err = c.post(ctx, payload)
 	if limited {

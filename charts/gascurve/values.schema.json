@@ -140,6 +140,12 @@
         "collector": {
           "type": "object",
           "properties": {
+            "metrics_port": {
+              "description": "Port for the collector's own HTTP server, which serves /metrics and nothing else. 0 disables it, and the collector's Service and ServiceMonitor are then not rendered. Overridden by METRICS_PORT.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
             "tick_interval": { "$ref": "#/definitions/duration" },
             "slow_interval": { "$ref": "#/definitions/duration" },
             "header_batch_size": { "type": "integer", "minimum": 1, "maximum": 100 },
@@ -169,6 +175,55 @@
       "required": ["server", "networks"],
       "additionalProperties": false
     },
+    "metrics": {
+      "description": "Prometheus operator objects. Both binaries serve /metrics whatever is set here; these are the ServiceMonitor and PrometheusRule that tell an operator about them, and they need those CRDs, so both default to false.",
+      "type": "object",
+      "properties": {
+        "serviceMonitor": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": { "type": "object" },
+            "interval": { "$ref": "#/definitions/promDuration" },
+            "scrapeTimeout": { "$ref": "#/definitions/promDuration" }
+          },
+          "required": ["enabled"],
+          "additionalProperties": false
+        },
+        "prometheusRule": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": { "type": "object" },
+            "alertLabels": { "type": "object" },
+            "dedicatedNetworks": {
+              "description": "Regular expression on the network label naming the networks that follow a dedicated endpoint. They get the tight lag threshold; every other network gets the loose one.",
+              "type": "string",
+              "minLength": 1
+            },
+            "alerts": {
+              "type": "object",
+              "properties": {
+                "collectorLagDedicated": { "$ref": "#/definitions/alert" },
+                "collectorLagPublic": { "$ref": "#/definitions/alert" },
+                "collectorSampleStale": { "$ref": "#/definitions/alert" },
+                "collectorRateLimited": { "$ref": "#/definitions/alert" },
+                "collectorEndpointsExhausted": { "$ref": "#/definitions/alert" },
+                "collectorDown": { "$ref": "#/definitions/alert" },
+                "apiDown": { "$ref": "#/definitions/alert" },
+                "apiErrorRate": { "$ref": "#/definitions/alert" },
+                "databaseUnreachable": { "$ref": "#/definitions/alert" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["enabled"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["serviceMonitor", "prometheusRule"],
+      "additionalProperties": false
+    },
     "extraEnv": {
       "description": "Deprecated alias applied to the collector, api and migration containers alike. Use collector.extraEnv, api.extraEnv and migrations.extraEnv instead.",
       "$ref": "#/definitions/envVarList"
@@ -190,7 +245,7 @@
     "tolerations": { "type": "array" },
     "affinity": { "type": "object" }
   },
-  "required": ["image", "collector", "api", "web", "ingress", "database", "migrations", "config", "serviceAccount"],
+  "required": ["image", "collector", "api", "web", "ingress", "database", "migrations", "config", "metrics", "serviceAccount"],
   "additionalProperties": false,
   "allOf": [
     {
@@ -250,6 +305,25 @@
       "description": "A positive Go duration: a magnitude and a unit (ns, us, ms, s, m, h), optionally repeated, for example 500ms, 3s, 60s, 720h or 1h30m. Zero is rejected: every interval the collector uses must be positive.",
       "type": "string",
       "pattern": "^([0-9]*[1-9][0-9]*(\\.[0-9]+)?|[0-9]+\\.[0-9]*[1-9][0-9]*)(ns|us|µs|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))*$"
+    },
+    "promDuration": {
+      "title": "Prometheus duration",
+      "description": "A Prometheus duration: a magnitude and a unit (ms, s, m, h, d, w, y), optionally repeated, for example 30s, 5m or 1h30m. Zero is rejected.",
+      "type": "string",
+      "pattern": "^([0-9]*[1-9][0-9]*(ms|s|m|h|d|w|y))+$"
+    },
+    "alert": {
+      "title": "alert rule",
+      "description": "One alert of the PrometheusRule. `for` is how long the condition must hold before it fires, `threshold` the number it compares against (ignored by the alerts that compare nothing), and `severity` the label Alertmanager routes on.",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "for": { "$ref": "#/definitions/promDuration" },
+        "threshold": { "type": "number", "minimum": 0 },
+        "severity": { "type": "string", "enum": ["info", "warning", "critical"] }
+      },
+      "required": ["enabled", "for", "severity"],
+      "additionalProperties": false
     },
     "callsPerSecond": {
       "title": "JSON-RPC budget",

@@ -1,0 +1,70 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{/*
+ServiceMonitor needs the Prometheus operator's CRD, which is why
+metrics.serviceMonitor.enabled defaults to false: the chart must install on
+a cluster that has no operator. Both binaries serve /metrics whatever is set
+here, so a cluster without the operator can still be scraped by a plain
+scrape_config against the same ports.
+
+The job label an operator derives from a ServiceMonitor is the Service name,
+which is what the PrometheusRule's up{} alerts match on.
+*/}}
+{{- $sm := .Values.metrics.serviceMonitor }}
+{{- if .Values.api.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "gascurve.fullname" . }}-api
+  labels:
+    {{- include "gascurve.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "gascurve.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    # The api serves /metrics on its own port, next to the REST API and the
+    # WebSocket; it needs no port of its own.
+    - port: http
+      path: /metrics
+      interval: {{ $sm.interval }}
+      scrapeTimeout: {{ $sm.scrapeTimeout }}
+      scheme: http
+{{- end }}
+{{- if and .Values.collector.enabled (gt (int .Values.config.collector.metrics_port) 0) }}
+{{- if .Values.api.enabled }}
+---
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "gascurve.fullname" . }}-collector
+  labels:
+    {{- include "gascurve.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "gascurve.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: collector
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ $sm.interval }}
+      scrapeTimeout: {{ $sm.scrapeTimeout }}
+      scheme: http
+{{- end }}
+{{- end }}

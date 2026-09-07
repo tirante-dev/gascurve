@@ -42,6 +42,10 @@ func (f *Follower) TickAt(ctx context.Context, number uint64) error {
 // of the tick and goes through the endpoint's fast lane; the catch-up
 // headers and everything after them are bulk work.
 func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) (*nitro.Sample, error)) (err error) {
+	// The histogram covers the whole tick, a failed one included: a tick
+	// that keeps timing out is exactly what the duration is watched for.
+	start := f.now()
+	defer func() { f.metrics.ObserveTick(f.now().Sub(start)) }()
 	if err := f.ensureInit(ctx); err != nil {
 		return f.fail(ctx, err)
 	}
@@ -189,6 +193,7 @@ func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uin
 	gap := head - stored
 	skip := func() ([]nitro.Header, error) {
 		h := hole{From: from, To: head - 1}
+		f.metrics.GapSkipped()
 		f.log.Warn("catch-up gap exceeds budget, skipping blocks and restarting from the sampled head", "from", h.From, "to", h.To)
 		pending, err := f.fetchOwnerRange(ctx, from, head)
 		if err != nil {
@@ -683,6 +688,7 @@ func (f *Follower) publish(sample *nitro.Sample, st *pricer.State, headResult *p
 	if f.liveStart == nil {
 		f.liveStart = &liveStart{Block: sample.Header.Number, TS: int64(sample.Header.Timestamp)}
 	}
+	f.metrics.ObserveHead(sample.Header.Number, time.Unix(int64(sample.Header.Timestamp), 0), sample.SampledAt, f.now())
 }
 
 // observedSetLocked returns the observed constraint set to record with a

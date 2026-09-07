@@ -19,6 +19,9 @@ database:
   run_migrations: false
 
 collector:
+  metrics_port: 9090         # the collector's own HTTP server, serving /metrics and nothing else; 0 disables it.
+                             # The api has an HTTP server already and serves /metrics on server.port.
+                             # Environment: METRICS_PORT.
   tick_interval: 3s          # live sample cadence on a polled network: a sample costs five calls, so at the
                              # public budget of four per second a 1 s tick starved the header catch-up and
                              # skipped gaps; dedicated endpoints override this per network (500ms with newHeads)
