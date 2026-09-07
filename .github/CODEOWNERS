@@ -1,3 +1,7 @@
 # CI/CD workflows and ownership rules require approval from the repository owner
 .github/workflows/ @a-thomas-22
 .github/CODEOWNERS @a-thomas-22
+
+# Migration files and the checksums that protect them require owner review
+/internal/db/migrations/ @a-thomas-22
+/internal/db/migration_policy_test.go @a-thomas-22

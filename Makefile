@@ -1,4 +1,4 @@
-.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
+.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration migration-check lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
 
 GOCMD=go
 GOBUILD=$(GOCMD) build
@@ -71,6 +71,9 @@ test-race:
 # `integration` build tag so they never run by accident.
 test-integration:
 	$(GOTEST) -tags integration -count=1 -v ./internal/db/... ./internal/collector/... ./internal/api/...
+
+migration-check:
+	$(GOTEST) -count=1 -run '^TestReleasedMigrationsImmutable$$' ./internal/db
 
 lint:
 	golangci-lint run ./...
@@ -202,7 +205,7 @@ web-ci: web-lint web-typecheck web-test-coverage web-build
 #   ci-docker       docker + trivy (docker job)
 #   ci-chart        helm, optionally ct (chart-test.yml)
 # Secret scanning (secrets-scan.yml, gitleaks) has no local target.
-ci: fmt-check vet lint staticcheck govulncheck test-coverage test-race build-matrix mod-verify web-install web-ci
+ci: migration-check fmt-check vet lint staticcheck govulncheck test-coverage test-race build-matrix mod-verify web-install web-ci
 	@echo "All CI checks passed."
 
 ci-integration: test-integration

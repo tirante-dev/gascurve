@@ -35,11 +35,23 @@ func openIntegration(t *testing.T) *Postgres {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
+	p := NewPostgres(d)
+	resetIntegrationSchema(t, p, true)
+	return p
+}
+
+func resetIntegrationSchema(t *testing.T, p *Postgres, migrate bool) {
+	t.Helper()
 	// A collector running against the database holds locks the reset has
 	// to wait for and can deadlock with; retry a few times.
 	var rerr error
 	for attempt := 0; attempt < 5; attempt++ {
-		if rerr = ResetSchema(context.Background(), d); rerr == nil {
+		if migrate {
+			rerr = ResetSchema(context.Background(), p.DB())
+		} else {
+			_, rerr = p.DB().ExecContext(context.Background(), "DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+		}
+		if rerr == nil {
 			break
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -47,7 +59,6 @@ func openIntegration(t *testing.T) *Postgres {
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	return NewPostgres(d)
 }
 
 // testNetworks keeps the rows of the test's chains, in chain id order.
@@ -61,21 +72,19 @@ func testNetworks(nets []Network) []Network {
 	return out
 }
 
-func TestIntegrationMigrator(t *testing.T) {
+func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	p := openIntegration(t)
 	m, err := NewMigrator(p.DB().DB)
 	if err != nil {
 		t.Fatal(err)
 	}
 	v, dirty, err := m.Version()
-	if err != nil || dirty || v != 1 {
+	if err != nil || dirty || v < productionSchemaVersion {
 		t.Fatalf("version = %d dirty=%v err=%v", v, dirty, err)
 	}
-	// The schema is created in its final shape by one migration: nothing
-	// has been deployed from this repository, so there is no chain of
-	// upgrades to preserve and none of the rewrites an upgrade would have
-	// had to make. A nullable column means unknown, and pricing_version
-	// says which rows carry the full pricing breakdown.
+	headVersion := v
+	// A nullable column means unknown, and pricing_version says which rows
+	// carry the full pricing breakdown.
 	ctx := context.Background()
 	if _, err := p.DB().ExecContext(ctx, `INSERT INTO blocks (chain_id, number, ts, gas_used, base_fee, backlogs, pricing_version) VALUES (1, 1, now(), 0, 0, '{18446744073709551615,5}', 0)`); err != nil {
 		t.Fatal(err)
@@ -119,7 +128,7 @@ func TestIntegrationMigrator(t *testing.T) {
 		t.Fatalf("folding must not re-authorize unknown history: %+v", one)
 	}
 	// Down drops the schema, up recreates it, and Down(0) is refused.
-	if err := m.Down(1); err != nil {
+	if err := m.Down(int(headVersion)); err != nil {
 		t.Fatal(err)
 	}
 	if v, _, err := m.Version(); err != nil || v != 0 {
@@ -135,7 +144,7 @@ func TestIntegrationMigrator(t *testing.T) {
 	if err := m.Up(); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != 1 {
+	if v, _, err := m.Version(); err != nil || v != headVersion {
 		t.Fatalf("after up: %d %v", v, err)
 	}
 	if err := m.Up(); err != nil {

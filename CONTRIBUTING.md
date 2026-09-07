@@ -29,3 +29,5 @@ make web-dev                    # http://localhost:3000
 ## Releases
 
 release-please maintains a release PR on `main`. Merging it tags a release and publishes the Docker images.
+
+Database migrations have an additional release contract. Never edit a migration already on `main`; add a new, sequential forward migration and coordinate its number with other schema pull requests. The complete authoring, checksum, upgrade-test, rollout, and rollback process is in [docs/MIGRATIONS.md](docs/MIGRATIONS.md).
