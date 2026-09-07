@@ -10,9 +10,8 @@ import (
 	"github.com/tirante-dev/gascurve/internal/pricer"
 )
 
-// actionBoundary is the point immediately before an owner action's
-// transaction. GasBefore excludes that transaction, whose gas is charged
-// to the state left by the action when the transaction finishes.
+// actionBoundary is the point immediately before an owner action's transaction. GasBefore excludes that
+// transaction, whose gas is charged to the state the action leaves.
 type actionBoundary struct {
 	txIndex   uint64
 	gasBefore uint64
@@ -21,10 +20,8 @@ type actionBoundary struct {
 
 type actionBlocks map[uint64][]actionBoundary
 
-// resolveActionBlocks reads one receipt per pricing-action transaction and
-// turns cumulative receipt gas into block-local action boundaries. The
-// ordinary replay path returns without an RPC when the headers contain no
-// pricing actions.
+// resolveActionBlocks reads one receipt per pricing-action transaction and turns cumulative receipt gas
+// into block-local action boundaries. It returns without an RPC when the headers contain no actions.
 func (f *Follower) resolveActionBlocks(ctx context.Context, headers []nitro.Header, tl *timeline) (actionBlocks, error) {
 	headerByNumber := make(map[uint64]nitro.Header, len(headers))
 	changesByHash := map[string][]pricingChange{}
@@ -114,15 +111,11 @@ func (c pricingChange) setBlock() uint64 {
 	}
 }
 
-// applyActionGas applies a block's gas in transaction order. Gas before an
-// action transaction is added to the old state, the action mutates the
-// state, then that transaction and the transactions after it add gas to the
-// new state.
+// applyActionGas applies a block's gas in transaction order: gas before an action transaction goes to the
+// old state, the action mutates the state, then that transaction and the ones after it add to the new one.
 //
-// A boundary is clamped to the gas the block contributes so that a boundary
-// resolved against another gas basis can never subtract past zero and
-// saturate a backlog. Clamping preserves the non-decreasing order the
-// boundaries were validated in.
+// A boundary is clamped to the gas the block contributes, so a boundary resolved against another gas basis
+// can never subtract past zero and saturate a backlog. Clamping preserves the non-decreasing order.
 func applyActionGas(st *pricer.State, gasUsed uint64, boundaries []actionBoundary) {
 	var applied uint64
 	for _, boundary := range boundaries {

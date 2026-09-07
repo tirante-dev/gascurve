@@ -156,16 +156,11 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">, m
     if (model !== "legacy" || !series.points.some(hasConstraintData)) return [];
     return [{ key: contributionKey(0, 0), backlogKey: backlogKey(0, 0), setId: 0, index: 0, label: "legacy backlog", color: seriesColor(0), constraint: null }];
   }
-  // A set is only usable for a point when its constraint count matches the
-  // point's data; the collector can tag blocks with the latest *known* set
-  // while the owner-action scan is still catching up (a 6-constraint genesis
-  // set against a 2-constraint live model, for example). Such sets are left
-  // out and their points fall back to the unknown split.
-  // With points in hand only the sets that match one of them are drawable: a
-  // set whose shape no point agrees with would put empty C3 to C6 panels and
-  // labels that describe nothing in front of the reader. Points that match no
-  // set stay unknown instead. With no points at all there is nothing to
-  // contradict, so every set in the range keeps its segments.
+  // A set is only usable for a point when its constraint count matches the point's data: the collector can
+  // tag blocks with the latest known set while the owner-action scan is still catching up. Such sets are
+  // left out and their points fall back to the unknown split, since a set no point agrees with would put
+  // empty panels and labels that describe nothing in front of the reader. With no points at all there is
+  // nothing to contradict, so every set in the range keeps its segments.
   const usable = sets.filter((set) => series.points.some((p) => p.constraintSetId === set.id && shapeMatches(set, p)));
   const out: Segment[] = [];
   for (const set of series.points.length === 0 ? sets : usable) {
@@ -290,14 +285,10 @@ export type ChartPoint = {
 };
 
 /**
- * Flattens a Series into chart rows with numbers the axes can scale.
- * Contributions come from the api's start-of-block `constraintBips`, never
- * from end-of-block backlogs, and are divided by 10,000 only for display. A
- * point with a null split (pricing version 0 history) keeps its
- * set for backlogs and targets but puts its whole x under `cUnknown`; null
- * floor and surplus fees leave both null and put the bucket's fees under
- * `unsplitFeesEth`, never zero. One row per bucket; `withSetBoundaries` adds
- * the rows the stacked charts need.
+ * Flattens a Series into chart rows with numbers the axes can scale. Contributions come from the api's
+ * start-of-block `constraintBips`, never from end-of-block backlogs, and are divided by 10,000 only for
+ * display. A point with a null split keeps its set for backlogs and targets but puts its whole x under
+ * `cUnknown`; null floor and surplus fees put the bucket's fees under `unsplitFeesEth`, never zero.
  */
 export function buildChartPoints(series: Series, model: PricerModel): ChartPoint[] {
   const segments = segmentsFor(series, model);
@@ -369,13 +360,10 @@ function drawnSeriesOf(row: ChartPoint): string {
 }
 
 /**
- * Rows for the stacked and per-set charts: wherever the set in force changes,
- * a duplicate of the boundary bucket is inserted first, carrying the previous
- * set's contributions, backlogs and targets at the new bucket's time. The
- * outgoing series therefore ends with a vertical edge exactly where the
- * incoming one starts, an instantaneous replacement rather than a taper across
- * the bucket. Everything else on the duplicate (fee, gas, x) is the new
- * bucket's, so the shared lines gain a zero-length segment and nothing more.
+ * Rows for the stacked and per-set charts: wherever the set in force changes, a duplicate of the boundary
+ * bucket is inserted first, carrying the previous set's contributions, backlogs and targets at the new
+ * bucket's time, so the outgoing series ends with a vertical edge rather than a taper across the bucket.
+ * Everything else on the duplicate is the new bucket's, so the shared lines gain a zero-length segment.
  */
 export function withSetBoundaries(rows: readonly ChartPoint[]): ChartPoint[] {
   const out: ChartPoint[] = [];
@@ -510,16 +498,12 @@ export type LegacyGauge = {
 };
 
 /**
- * The legacy gauge. Both thresholds are the pricer's own: the free region is
- * the tolerance threshold `tolerance * speedLimit` as a plain uint64 multiply
- * that wraps exactly as nitro's does (a wrapped threshold of zero therefore
- * shows no free region, as the pricer charges from the first unit of gas),
- * and the unit of x is the saturating `inertia * speedLimit` cast into bips.
- * With a free region the span is a whole number of thresholds (at least two,
- * so the threshold sits inside the bar) and the single mark is the threshold.
- * Without one the span is whole units of x with a mark at each, like a
- * constraint gauge. Zero inertia or speed limit gives an empty gauge rather
- * than NaN.
+ * The legacy gauge. Both thresholds are the pricer's own: the free region is `tolerance * speedLimit` as a
+ * plain uint64 multiply that wraps exactly as nitro's does (a wrapped threshold of zero shows no free
+ * region, since the pricer then charges from the first unit of gas), and the unit of x is the saturating
+ * `inertia * speedLimit` cast into bips. With a free region the span is a whole number of thresholds, at
+ * least two so the threshold sits inside the bar; without one it is whole units of x with a mark at each.
+ * Zero inertia or speed limit gives an empty gauge rather than NaN.
  */
 export function legacyGauge(legacy: { speedLimit: number; inertia: number; tolerance: number }, backlog: number): LegacyGauge {
   const speedLimit = toUint64(legacy.speedLimit);

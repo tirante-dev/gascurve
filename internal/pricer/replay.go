@@ -11,10 +11,8 @@ type Block struct {
 	BaseFee   *big.Int
 }
 
-// Result is the replay output for one block. Backlogs are the end of block
-// values (after the block's gas was added and after any anchor); Exponent
-// and PerConstraint are the values that produced the block's predicted base
-// fee at the start of the block.
+// Result is the replay output for one block. Backlogs are the end of block values; Exponent and
+// PerConstraint are the values that produced the block's predicted base fee at its start.
 type Result struct {
 	Number        uint64
 	Backlogs      []uint64
@@ -25,21 +23,16 @@ type Result struct {
 	Anchored      bool
 }
 
-// Anchor is consulted after each block is processed. When it returns
-// (backlogs, true) for a block number the replay overwrites its backlogs,
-// which is how the collector pins the replay to precompile samples.
+// Anchor is consulted after each block. When it returns (backlogs, true) the replay overwrites its
+// backlogs, which is how the collector pins the replay to precompile samples.
 type Anchor func(number uint64) ([]uint64, bool)
 
-// Replay runs blocks through the state in order, exactly as ArbOS does:
-// Step(dt) first (dt is the timestamp delta from the previous block, 0 for
-// the first block when prevTimestamp is 0), then AddGas(gasUsed). The state
-// is mutated so a caller can continue the replay with later blocks.
+// Replay runs blocks through the state in order, exactly as ArbOS does: Step(dt) first, then
+// AddGas(gasUsed). The state is mutated so a caller can continue with later blocks.
 //
-// Note on the observed base fee: ArbOS stores the fee computed by Step(dt)
-// of block N and uses it as the header base fee of block N+1, so a replay
-// prediction for block N is compared against block N's own header here and
-// carries at most one block of lag. At Nitro block rates that error is far
-// below the 2% threshold the UI treats as "estimated".
+// ArbOS stores the fee computed by Step(dt) of block N and uses it as the header base fee of block N+1,
+// so a prediction for block N is compared against block N's own header here and carries at most one
+// block of lag. At Nitro block rates that error is far below the 2% threshold the UI calls estimated.
 func Replay(state *State, prevTimestamp uint64, blocks []Block, anchor Anchor) []Result {
 	results := make([]Result, 0, len(blocks))
 	prev := prevTimestamp
@@ -70,8 +63,7 @@ func Replay(state *State, prevTimestamp uint64, blocks []Block, anchor Anchor) [
 	return results
 }
 
-// ErrorBips returns |predicted - actual| * 10_000 / actual, or 0 when actual
-// is nil or zero.
+// ErrorBips returns |predicted - actual| * 10_000 / actual, or 0 when actual is nil or zero.
 func ErrorBips(predicted, actual *big.Int) int64 {
 	if actual == nil || actual.Sign() == 0 || predicted == nil {
 		return 0

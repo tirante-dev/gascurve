@@ -1,11 +1,9 @@
-// Package pricer is a pure re-implementation of the Arbitrum Nitro L2 gas
-// pricing model (arbos/l2pricing/model.go). It uses the same integer basis
-// point arithmetic as nitro, including saturation, so that a replay over
-// block headers reproduces the chain's base fee bit for bit.
+// Package pricer is a pure re-implementation of the Arbitrum Nitro L2 gas pricing model
+// (arbos/l2pricing/model.go). It uses the same integer basis point arithmetic as nitro, including
+// saturation, so a replay over block headers reproduces the chain's base fee bit for bit.
 //
-// Two models are supported: the multi-constraint model introduced with
-// ArbOS 50 (a list of {target, window, backlog} triples) and the legacy
-// single backlog model ({speedLimit, inertia, tolerance, backlog}).
+// Two models are supported: the multi-constraint model introduced with ArbOS 50 (a list of
+// {target, window, backlog} triples) and the legacy single backlog model.
 package pricer
 
 import (
@@ -19,13 +17,12 @@ type Bips int64
 // OneInBips is 100% expressed in basis points.
 const OneInBips Bips = 10_000
 
-// InitialMinimumBaseFeeWei is nitro's genesis minimum base fee (0.1 gwei,
-// arbos/l2pricing InitialMinimumBaseFeeWei), in force until the first
+// InitialMinimumBaseFeeWei is nitro's genesis minimum base fee (0.1 gwei), in force until the first
 // recorded setMinimumL2BaseFee owner action.
 const InitialMinimumBaseFeeWei = 100_000_000
 
-// Constraint is one gas pricing constraint: a gas target per second, an
-// adjustment window in seconds, and the current backlog in gas.
+// Constraint is one gas pricing constraint: a gas target per second, an adjustment window in seconds,
+// and the current backlog in gas.
 type Constraint struct {
 	Target  uint64
 	Window  uint64
@@ -48,12 +45,10 @@ type State struct {
 	MinBaseFee  *big.Int
 }
 
-// IsLegacy reports whether the legacy single backlog model is in use.
 func (s *State) IsLegacy() bool {
 	return len(s.Constraints) == 0
 }
 
-// Clone returns a deep copy of the state.
 func (s *State) Clone() *State {
 	out := &State{MinBaseFee: new(big.Int)}
 	if s.MinBaseFee != nil {
@@ -70,8 +65,7 @@ func (s *State) Clone() *State {
 	return out
 }
 
-// Backlogs returns the current backlogs, one per constraint (one element for
-// the legacy model).
+// Backlogs returns the current backlogs, one per constraint (one element for the legacy model).
 func (s *State) Backlogs() []uint64 {
 	if s.IsLegacy() {
 		if s.Legacy == nil {
@@ -86,8 +80,8 @@ func (s *State) Backlogs() []uint64 {
 	return out
 }
 
-// SetBacklogs overwrites the backlogs. Extra values are ignored and missing
-// ones leave the existing backlog in place.
+// SetBacklogs overwrites the backlogs. Extra values are ignored and missing ones leave the existing
+// backlog in place.
 func (s *State) SetBacklogs(backlogs []uint64) {
 	if s.IsLegacy() {
 		if s.Legacy != nil && len(backlogs) > 0 {
@@ -102,8 +96,7 @@ func (s *State) SetBacklogs(backlogs []uint64) {
 	}
 }
 
-// AddGas adds gas used by a transaction to every constraint backlog (or to
-// the legacy backlog), saturating.
+// AddGas adds gas used by a transaction to every constraint backlog, saturating.
 func (s *State) AddGas(gas uint64) {
 	if s.IsLegacy() {
 		if s.Legacy != nil {
@@ -116,10 +109,9 @@ func (s *State) AddGas(gas uint64) {
 	}
 }
 
-// Step advances the pricer by dt seconds as ArbOS does at the start of a
-// block: backlogs are paid down at the target rate, then the exponent and
-// base fee are computed. It returns the base fee, the total exponent and the
-// per-constraint exponents (a single element for the legacy model).
+// Step advances the pricer by dt seconds as ArbOS does at the start of a block: backlogs are paid down
+// at the target rate, then the exponent and base fee are computed. It returns the base fee, the total
+// exponent and the per-constraint exponents.
 func (s *State) Step(dt uint64) (baseFee *big.Int, exponent Bips, perConstraint []Bips) {
 	minBaseFee := s.MinBaseFee
 	if minBaseFee == nil {
@@ -151,11 +143,10 @@ func (s *State) stepLegacy(dt uint64, minBaseFee *big.Int) (baseFee *big.Int, ex
 	}
 	l := s.Legacy
 	l.Backlog = SaturatingUSub(l.Backlog, SaturatingUMul(dt, l.SpeedLimit))
-	// Mirrors nitro's updatePricingModelLegacy exactly: the tolerance
-	// threshold is a plain uint64 multiply (it wraps on overflow), the
-	// excess is cast to int64 saturating, and the inertia denominator is a
-	// saturating multiply cast to Bips saturating. Nitro would panic on a
-	// zero denominator; that case yields no exponent here.
+	// Mirrors nitro's updatePricingModelLegacy exactly: the tolerance threshold is a plain uint64
+	// multiply (it wraps on overflow), the excess is cast to int64 saturating, and the inertia
+	// denominator is a saturating multiply cast to Bips saturating. Nitro would panic on a zero
+	// denominator; that case yields no exponent here.
 	threshold := l.Tolerance * l.SpeedLimit
 	if l.Backlog > threshold {
 		inertia := saturatingCastToBips(SaturatingUMul(l.Inertia, l.SpeedLimit))
@@ -166,8 +157,8 @@ func (s *State) stepLegacy(dt uint64, minBaseFee *big.Int) (baseFee *big.Int, ex
 	return BaseFeeFromExponent(minBaseFee, exponent), exponent, []Bips{exponent}
 }
 
-// BaseFeeFromExponent is minBaseFee * approxExp(exponent) / 10_000 when the
-// exponent is positive and minBaseFee otherwise (nitro's BigMulByBips).
+// BaseFeeFromExponent is minBaseFee * approxExp(exponent) / 10_000 for a positive exponent and
+// minBaseFee otherwise (nitro's BigMulByBips).
 func BaseFeeFromExponent(minBaseFee *big.Int, exponent Bips) *big.Int {
 	if exponent <= 0 {
 		return new(big.Int).Set(minBaseFee)
@@ -177,9 +168,8 @@ func BaseFeeFromExponent(minBaseFee *big.Int, exponent Bips) *big.Int {
 	return out.Div(out, big.NewInt(int64(OneInBips)))
 }
 
-// ApproxExpBips is nitro's arbmath.ApproxExpBasisPoints: a degree
-// `accuracy` Taylor polynomial of exp evaluated in basis points with
-// saturating unsigned arithmetic. ApproxExpBips(0, n) == OneInBips.
+// ApproxExpBips is nitro's arbmath.ApproxExpBasisPoints: a degree `accuracy` Taylor polynomial of exp
+// evaluated in basis points with saturating unsigned arithmetic. ApproxExpBips(0, n) == OneInBips.
 func ApproxExpBips(x Bips, accuracy uint64) Bips {
 	if accuracy == 0 {
 		return OneInBips
@@ -200,8 +190,8 @@ func ApproxExpBips(x Bips, accuracy uint64) Bips {
 	return saturatingCastToBips(res)
 }
 
-// NaturalToBips converts a natural number into basis points, saturating at
-// MaxInt64 (nitro's NaturalToBips/SaturatingCastToBips).
+// NaturalToBips converts a natural number into basis points, saturating at MaxInt64 (nitro's
+// NaturalToBips/SaturatingCastToBips).
 func NaturalToBips(v uint64) Bips {
 	return saturatingCastToBips(SaturatingUMul(v, uint64(OneInBips)))
 }
@@ -213,7 +203,6 @@ func saturatingCastToBips(v uint64) Bips {
 	return Bips(v)
 }
 
-// SaturatingAddBips adds two Bips, saturating at the int64 bounds.
 func SaturatingAddBips(a, b Bips) Bips {
 	sum := a + b
 	if b > 0 && sum < a {
@@ -225,7 +214,6 @@ func SaturatingAddBips(a, b Bips) Bips {
 	return sum
 }
 
-// SaturatingUAdd adds two uint64s, saturating at MaxUint64.
 func SaturatingUAdd(a, b uint64) uint64 {
 	sum := a + b
 	if sum < a {
@@ -234,7 +222,6 @@ func SaturatingUAdd(a, b uint64) uint64 {
 	return sum
 }
 
-// SaturatingUSub subtracts b from a, floored at zero.
 func SaturatingUSub(a, b uint64) uint64 {
 	if b >= a {
 		return 0
@@ -242,7 +229,6 @@ func SaturatingUSub(a, b uint64) uint64 {
 	return a - b
 }
 
-// SaturatingUMul multiplies two uint64s, saturating at MaxUint64.
 func SaturatingUMul(a, b uint64) uint64 {
 	if a == 0 || b == 0 {
 		return 0

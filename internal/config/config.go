@@ -1,15 +1,8 @@
-// Package config loads gascurve configuration from a YAML file (config.yaml
-// or CONFIG_PATH) and applies environment overrides: DB_URL, PORT, LOG_LEVEL,
-// DEV_MODE, ETH_USD_SOURCE, ETH_USD_MAX_AGE and per-network
-// NETWORK_<NAME>_RPC_URL, NETWORK_<NAME>_WS_URL,
-// NETWORK_<NAME>_ENABLED, NETWORK_<NAME>_CALLS_PER_SECOND,
-// NETWORK_<NAME>_ARCHIVE, NETWORK_<NAME>_TICK_INTERVAL and
-// NETWORK_<NAME>_HISTORY_EPOCH, where NAME is
-// the network name upper-cased with dashes replaced by underscores.
-// Fallback endpoints come from the positional, comma-separated
-// NETWORK_<NAME>_FALLBACK_RPC_URLS,
-// NETWORK_<NAME>_FALLBACK_WS_URLS, NETWORK_<NAME>_FALLBACK_ARCHIVE and
-// NETWORK_<NAME>_FALLBACK_CALLS_PER_SECOND.
+// Package config loads gascurve configuration from a YAML file (config.yaml or CONFIG_PATH) and
+// applies environment overrides: DB_URL, PORT, LOG_LEVEL, DEV_MODE, ETH_USD_SOURCE,
+// ETH_USD_MAX_AGE and the per-network NETWORK_<NAME>_* variables, where NAME is the network name
+// upper-cased with dashes replaced by underscores. Fallback endpoints come from the positional,
+// comma-separated NETWORK_<NAME>_FALLBACK_* lists.
 package config
 
 import (
@@ -45,9 +38,8 @@ type ServerConfig struct {
 	// RateLimitPerSecond is the per-IP request budget; RateLimitBurst the bucket size.
 	RateLimitPerSecond float64 `mapstructure:"rate_limit_per_second"`
 	RateLimitBurst     int     `mapstructure:"rate_limit_burst"`
-	// TrustedProxies lists the CIDRs (or single addresses) of reverse
-	// proxies whose X-Forwarded-For is believed. Empty means the peer
-	// address is always the client address.
+	// TrustedProxies lists the CIDRs (or single addresses) of reverse proxies whose
+	// X-Forwarded-For is believed. Empty means the peer address is always the client address.
 	TrustedProxies []string `mapstructure:"trusted_proxies"`
 	// WSMaxPerIP and WSMaxTotal cap concurrent WebSocket connections per
 	// client address and across the process.
@@ -95,10 +87,9 @@ type DatabaseConfig struct {
 
 // CollectorConfig configures the follower loops.
 type CollectorConfig struct {
-	// TickInterval is the fast loop cadence when polling. With a ws_url the
-	// fast loop runs on every newHeads event instead and the timer only
-	// fires while the subscription is down. A network's own tick_interval
-	// overrides it for that network.
+	// TickInterval is the fast loop cadence when polling. With a ws_url the loop runs on each
+	// newHeads event and the timer only fires while the subscription is down. A network's own
+	// tick_interval overrides it.
 	TickInterval time.Duration `mapstructure:"tick_interval"`
 	// SlowInterval is the cadence of the L1, balances, owner action and
 	// batch report loop.
@@ -107,34 +98,26 @@ type CollectorConfig struct {
 	BlockRetention  time.Duration `mapstructure:"block_retention"`
 	SampleRetention time.Duration `mapstructure:"sample_retention"`
 	BackfillDepth   time.Duration `mapstructure:"backfill_depth"`
-	// BackfillAnchorInterval is how many blocks the backfill replays
-	// between two state anchors on archive: true networks (default 1000).
-	// Networks without archive ignore it: their backfill is a pure replay.
+	// BackfillAnchorInterval is how many blocks the backfill replays between two state anchors on
+	// archive networks (default 1000). Networks without archive ignore it.
 	BackfillAnchorInterval int `mapstructure:"backfill_anchor_interval"`
-	// MaxCatchUpBatches bounds one fast tick's catch-up to this many header
-	// batches on a budgeted network (default 10); a larger gap is skipped so
-	// the follower never falls behind forever on a budget below the chain's
-	// block rate. Unlimited networks (calls_per_second: 0) never skip.
+	// MaxCatchUpBatches bounds one fast tick's catch-up on a budgeted network (default 10); a
+	// larger gap is skipped so the follower never falls behind forever on a budget below the
+	// chain's block rate. Unlimited networks never skip.
 	MaxCatchUpBatches int `mapstructure:"max_catch_up_batches"`
-	// FailoverCooldown is how long a network stays on a fallback endpoint
-	// after the active one failed before the primary is probed again with
-	// one eth_chainId (default 60s).
+	// FailoverCooldown is how long a network stays on a fallback before the primary is probed
+	// again with one eth_chainId (default 60s).
 	FailoverCooldown time.Duration `mapstructure:"failover_cooldown"`
-	// EthUsdSource names the ETH/USD spot provider the slow loop reads once
-	// per slow_interval for the whole process (not once per network):
-	// "coinbase" (default), "coingecko", or an https URL answering JSON
-	// with a top-level price holding a string or a number. An empty value
-	// disables the fetch and every snapshot then reports ethUsd: null.
+	// EthUsdSource names the ETH/USD spot provider the slow loop reads once per slow_interval for
+	// the whole process: "coinbase" (default), "coingecko", or an https URL answering JSON with a
+	// top-level price. Empty disables the fetch and every snapshot reports ethUsd: null.
 	// Environment: ETH_USD_SOURCE.
 	EthUsdSource string `mapstructure:"eth_usd_source"`
-	// EthUsdMaxAge is how long a fetched spot stays in the snapshot: past
-	// it the tick and /live report ethUsd: null rather than a stale price
-	// (default 10m). Environment: ETH_USD_MAX_AGE.
+	// EthUsdMaxAge is how long a fetched spot stays in the snapshot; past it ethUsd is null rather
+	// than stale (default 10m). Environment: ETH_USD_MAX_AGE.
 	EthUsdMaxAge time.Duration `mapstructure:"eth_usd_max_age"`
-	// MetricsPort is the port the collector serves Prometheus metrics on
-	// (default 9090). Its only HTTP server also answers startup, liveness and
-	// readiness probes. Zero disables the server and those probes. The api
-	// has an HTTP server already and serves /metrics on server.port.
+	// MetricsPort is the port the collector serves Prometheus metrics and its probes on (default
+	// 9090); zero disables both. The api serves /metrics on server.port instead.
 	// Environment: METRICS_PORT.
 	MetricsPort int `mapstructure:"metrics_port"`
 }
@@ -142,17 +125,14 @@ type CollectorConfig struct {
 // DefaultMetricsPort is the fallback for collector.metrics_port.
 const DefaultMetricsPort = 9090
 
-// MetricsEnabled reports whether the collector should run its metrics
-// server.
+// MetricsEnabled reports whether the collector should run its metrics server.
 func (c CollectorConfig) MetricsEnabled() bool { return c.MetricsPort > 0 }
 
-// DefaultEthUsdMaxAge is the fallback for collector.eth_usd_max_age, used
-// by the API when it is not configured.
+// DefaultEthUsdMaxAge is the fallback for collector.eth_usd_max_age, also used by the API.
 const DefaultEthUsdMaxAge = 10 * time.Minute
 
-// EndpointConfig is one JSON-RPC endpoint of a network. The primary is
-// described by the network's own rpc_url, ws_url, archive and
-// calls_per_second; fallbacks carry the same four fields.
+// EndpointConfig is one JSON-RPC endpoint of a network. The primary is described by the network's
+// own rpc_url, ws_url, archive and calls_per_second; fallbacks carry the same four fields.
 type EndpointConfig struct {
 	RPCURL string `mapstructure:"rpc_url"`
 	// WSURL is an optional ws:// or wss:// endpoint for the newHeads
@@ -172,48 +152,31 @@ type NetworkConfig struct {
 	DisplayName string `mapstructure:"display_name"`
 	ChainID     uint64 `mapstructure:"chain_id"`
 	RPCURL      string `mapstructure:"rpc_url"`
-	// WSURL is an optional ws:// or wss:// endpoint. When set the follower
-	// subscribes to newHeads and samples state at each head's block number
-	// instead of polling every tick_interval; while the socket is down it
-	// falls back to the timer.
+	// WSURL is an optional ws:// or wss:// endpoint. When set the follower subscribes to newHeads
+	// and samples at each head instead of polling, falling back to the timer while it is down.
 	WSURL       string `mapstructure:"ws_url"`
 	ExplorerURL string `mapstructure:"explorer_url"`
-	// CallsPerSecond is the JSON-RPC budget, counting every item inside a
-	// batch. 0 means unlimited (a dedicated node): the pacer never waits,
-	// catch-up never skips blocks and the batch report scan reads every
-	// block. Batches stay capped at 100 items and 429 back-off still applies.
-	// Must be finite and at most MaxCallsPerSecond.
+	// CallsPerSecond is the JSON-RPC budget, counting every item inside a batch. 0 means unlimited
+	// (a dedicated node): the pacer never waits and catch-up never skips blocks. Batches stay capped
+	// at 100 items and 429 back-off still applies. Must be at most MaxCallsPerSecond.
 	CallsPerSecond float64 `mapstructure:"calls_per_second"`
-	// Archive is true when the node serves historical eth_call. The backfill
-	// then anchors its replay to the real backlogs every
-	// collector.backfill_anchor_interval blocks.
+	// Archive is true when the node serves historical eth_call. The backfill then anchors its replay
+	// to the real backlogs every collector.backfill_anchor_interval blocks.
 	Archive bool `mapstructure:"archive"`
-	// TickInterval overrides collector.tick_interval for this network: the
-	// fast loop's polling cadence and, with a ws_url, the safety timer
-	// that polls while the subscription is down. Zero means the
-	// collector-wide value. A dedicated endpoint can run at 250ms; a
-	// public one should stay at 1s, since every tick costs about five
-	// calls against its budget.
+	// TickInterval overrides collector.tick_interval for this network. Zero means the collector-wide
+	// value. A dedicated endpoint can run at 250ms; a public one should stay at 1s, since every tick
+	// costs about five calls against its budget.
 	TickInterval time.Duration `mapstructure:"tick_interval"`
 	Enabled      bool          `mapstructure:"enabled"`
-	// HistoryEpoch requests a rebuild of this network's reconstructed
-	// history. The collector stores the epoch it last rebuilt at and
-	// compares it at start: a value above the stored one drops the
-	// backfill's buckets and checkpoints once and lets the history loop
-	// replay them again, a value equal to it does nothing. It is a
-	// counter rather than a flag so a restarted pod carrying the same
-	// configuration does not rebuild again; raise it (0 to 1, 1 to 2)
-	// after giving the network an archive endpoint, so the replay is
-	// anchored to real state instead of running blind. Lowering it is
-	// ignored. Zero (the default) never rebuilds.
+	// HistoryEpoch requests a rebuild of this network's reconstructed history: a value above the
+	// stored one drops the backfill's buckets and checkpoints once and replays them. It is a counter
+	// rather than a flag so a restarted pod carrying the same configuration does not rebuild again.
+	// Raise it after giving the network an archive endpoint. Lowering it is ignored.
 	HistoryEpoch int `mapstructure:"history_epoch"`
-	// Fallbacks are further endpoints for the same chain, tried in order
-	// when the active endpoint fails (see collector.failover_cooldown).
-	// Capabilities are routed independently of the order: the first
-	// endpoint with a ws_url serves newHeads, the first with archive: true
-	// serves the backfill anchors. URLs that carry keys belong in the
-	// environment (NETWORK_<NAME>_FALLBACK_RPC_URLS and friends), never in
-	// config.yaml.
+	// Fallbacks are further endpoints for the same chain, tried in order when the active one fails.
+	// Capabilities are routed independently: the first endpoint with a ws_url serves newHeads, the
+	// first with archive: true serves the backfill anchors. URLs that carry keys belong in the
+	// environment, never in config.yaml.
 	Fallbacks []EndpointConfig `mapstructure:"fallbacks"`
 }
 
@@ -221,10 +184,8 @@ type NetworkConfig struct {
 // rather than a budget (set 0 for a dedicated node).
 const MaxCallsPerSecond = 10_000
 
-// MinCallsPerSecond is the smallest accepted budget, one call every ten
-// seconds. Below it a single token takes longer than any request timeout
-// and the pacer's waits stop being meaningful, so such a value is a
-// mistake rather than a budget: set 0 for a dedicated node instead.
+// MinCallsPerSecond is the smallest accepted budget, one call every ten seconds. Below it a single
+// token takes longer than any request timeout; set 0 for a dedicated node instead.
 const MinCallsPerSecond = 0.1
 
 // Unlimited reports whether the network has no call budget.
@@ -239,22 +200,18 @@ func (n NetworkConfig) EffectiveTickInterval(c CollectorConfig) time.Duration {
 	return c.TickInterval
 }
 
-// Primary returns the network's primary endpoint.
 func (n NetworkConfig) Primary() EndpointConfig {
 	return EndpointConfig{RPCURL: n.RPCURL, WSURL: n.WSURL, Archive: n.Archive, CallsPerSecond: n.CallsPerSecond}
 }
 
-// Endpoints returns the primary endpoint followed by the fallbacks.
 func (n NetworkConfig) Endpoints() []EndpointConfig {
 	out := make([]EndpointConfig, 0, 1+len(n.Fallbacks))
 	out = append(out, n.Primary())
 	return append(out, n.Fallbacks...)
 }
 
-// HasArchive reports whether any of the network's endpoints serves
-// historical state. It reads the configuration rather than the endpoint
-// the follower ends up bound to, so it answers before the pool has been
-// verified.
+// HasArchive reports whether any of the network's endpoints serves historical state. It reads the
+// configuration, not the bound endpoint, so it answers before the pool has been verified.
 func (n NetworkConfig) HasArchive() bool {
 	for _, e := range n.Endpoints() {
 		if e.Archive {
@@ -300,7 +257,6 @@ func LoadForAPI() (*Config, error) {
 	return LoadWith(Options{RequireRPC: false})
 }
 
-// LoadWith reads configuration according to opts.
 func LoadWith(opts Options) (*Config, error) {
 	getenv := opts.Getenv
 	if getenv == nil {
@@ -448,10 +404,9 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 	return nil
 }
 
-// applyFallbackEnv applies the positional fallback lists. Every list is
-// comma-separated and position i addresses fallbacks[i], which is created
-// with zero values when the YAML has fewer; an empty item leaves that
-// position's field alone.
+// applyFallbackEnv applies the positional fallback lists. Every list is comma-separated and
+// position i addresses fallbacks[i], created with zero values when the YAML has fewer; an empty
+// item leaves that position's field alone.
 func applyFallbackEnv(n *NetworkConfig, getenv func(string) (string, bool)) error {
 	key := n.EnvKey() + "_FALLBACK_"
 	for i, v := range envList(getenv, key+"RPC_URLS") {
@@ -501,11 +456,9 @@ func envList(getenv func(string) (string, bool), name string) []string {
 	return items
 }
 
-// Validate checks invariants: unique names and chain IDs, positive
-// intervals (a network's tick_interval may also be zero, meaning the
-// collector-wide one), sane batch sizes, non-negative call budgets, ws://
-// or wss:// ws_url values and, when requireRPC is set, an RPC URL for
-// every enabled network.
+// Validate checks invariants: unique names and chain IDs, positive intervals (a network's
+// tick_interval may be zero, meaning the collector-wide one), sane batch sizes, non-negative
+// budgets, ws:// or wss:// ws_url values and, with requireRPC, an RPC URL for every enabled network.
 func (c *Config) Validate(requireRPC bool) error {
 	var errs []error
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
@@ -591,10 +544,9 @@ func (c *Config) Validate(requireRPC bool) error {
 	return errors.Join(errs...)
 }
 
-// validateEndpoint checks an endpoint's budget and its URL schemes. An
-// endpoint URL is a credential (providers put the key in the userinfo, in
-// a path segment or in the query), so a rejection says which setting is
-// wrong and never quotes the value.
+// validateEndpoint checks an endpoint's budget and URL schemes. An endpoint URL is a credential
+// (providers put the key in the userinfo, a path segment or the query), so a rejection says which
+// setting is wrong and never quotes the value.
 func validateEndpoint(where string, e EndpointConfig) []error {
 	var errs []error
 	switch {
@@ -614,11 +566,9 @@ func validateEndpoint(where string, e EndpointConfig) []error {
 	return errs
 }
 
-// validateURLScheme checks that a configured URL, when set, starts with
-// one of the allowed schemes and parses as an absolute URL with a host. A
-// wrong scheme is worth catching before the first call: an https RPC URL
-// given as a WebSocket, or the reverse, fails at every attempt, and a
-// scheme such as file:// would point the client somewhere it must never go.
+// validateURLScheme checks that a configured URL starts with an allowed scheme and parses as an
+// absolute URL with a host. Worth catching before the first call: a swapped http/ws URL fails at
+// every attempt, and a scheme such as file:// would point the client somewhere it must never go.
 func validateURLScheme(where, field, raw string, schemes ...string) error {
 	if raw == "" {
 		return nil
@@ -641,7 +591,6 @@ func validateURLScheme(where, field, raw string, schemes ...string) error {
 	return nil
 }
 
-// EnabledNetworks returns the networks with enabled: true.
 func (c *Config) EnabledNetworks() []NetworkConfig {
 	out := make([]NetworkConfig, 0, len(c.Networks))
 	for _, n := range c.Networks {

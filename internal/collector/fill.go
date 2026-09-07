@@ -20,29 +20,22 @@ import (
 // FillStatus is the outcome of one gap fill step.
 type FillStatus int
 
-// Gap fill step outcomes.
 const (
-	// FillProgressed means one batch of a hole was fetched, replayed and
-	// committed, or a finished hole was removed.
+	// One batch was fetched, replayed and committed, or a finished hole removed.
 	FillProgressed FillStatus = iota
-	// FillIdle means there is fillable work but this step did none: the
-	// fast loop is catching up and history yields to it.
+	// There is fillable work, but the fast loop is catching up and history yields.
 	FillIdle
-	// FillNone means no recorded hole can be filled, so the caller is free
-	// to spend the step on the backfill.
+	// No hole can be filled, so the caller may spend the step on the backfill.
 	FillNone
 )
 
-// holesState summarizes the recorded holes for the instruments, the same
-// way /status summarizes them.
 func holesState(holes []hole) metrics.HolesState {
 	s := model.SummarizeHoles(holes)
 	return metrics.HolesState{Pending: s.Pending, Blocks: s.Blocks, Unfillable: s.Unfillable}
 }
 
-// loadHoles reads every durable missing range. A replay state or timestamp
-// that cannot be decoded is an error: the row remains in place and recovery
-// stops instead of silently treating incomplete history as complete.
+// loadHoles reads every durable missing range. A row that cannot be decoded stops
+// recovery rather than letting incomplete history look complete.
 func (f *Follower) loadHoles(ctx context.Context, s db.Store) ([]hole, error) {
 	rows, err := s.MissingRanges(ctx, f.chainID)
 	if err != nil {
@@ -59,9 +52,8 @@ func (f *Follower) loadHoles(ctx context.Context, s db.Store) ([]hole, error) {
 	return holes, nil
 }
 
-// saveHoles writes normalized durable rows. Every field is encoded before the
-// replacement starts, so a malformed in-memory checkpoint cannot remove the
-// rows already committed. Collector callers hold the chain transaction.
+// saveHoles replaces the durable rows under the caller's chain transaction. Every field
+// is encoded before the replacement starts, so a malformed hole cannot drop committed rows.
 func (f *Follower) saveHoles(ctx context.Context, s db.Store, holes []hole) error {
 	holes = f.normalizeHoles(holes)
 	rows := make([]db.MissingRange, len(holes))
@@ -163,10 +155,9 @@ func formatNullTime(v sql.NullTime) string {
 	return v.Time.UTC().Format(time.RFC3339)
 }
 
-// importLegacyHoles moves the old JSON checkpoint into durable rows under the
-// chain lock. The checkpoint is deleted only after every range and replay
-// state decoded and the replacement succeeded. An unreadable document is a
-// startup error and remains available for repair instead of being overwritten.
+// importLegacyHoles moves the old JSON checkpoint into durable rows. The checkpoint is
+// deleted only once everything decoded and the replacement succeeded, so an unreadable
+// document stays available for repair.
 func (f *Follower) importLegacyHoles(ctx context.Context) error {
 	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		raw, ok, err := s.GetState(ctx, f.chainID, db.StateHoles)
@@ -189,8 +180,7 @@ func (f *Follower) importLegacyHoles(ctx context.Context) error {
 			case reasonNoState:
 				legacy[i].Lifecycle = rangeBlocked
 			case reasonExpired:
-				// The old queue cap made this range permanently unfillable even
-				// when it had an anchor. Durable storage restores it to work.
+				// The old queue cap made this range unfillable even when it had an anchor.
 				legacy[i].Lifecycle = rangePending
 				legacy[i].Reason = reasonCatchUpLimit
 			default:
@@ -204,14 +194,10 @@ func (f *Follower) importLegacyHoles(ctx context.Context) error {
 	})
 }
 
-// normalizeHoles orders the recorded ranges by start and merges the ones that
-// overlap or touch. Only ranges in the same recovery class and with the same
-// reason are merged (fillable work with fillable work, blocked with blocked),
-// so a range nothing can be replayed into never swallows fillable work. A reorg
-// or a second skip that records a range overlapping one already queued
-// therefore merges into it instead of duplicating it, and the merged entry
-// keeps the progress of the range it starts at together with the highest
-// fold watermark of the entries, so nothing is folded into a bucket twice.
+// normalizeHoles sorts by start and merges overlapping or touching ranges, but only within
+// the same recovery class and reason, so blocked work never swallows fillable work. The
+// merged entry keeps the progress of the range it starts at and the highest fold watermark,
+// so no block is folded into a bucket twice.
 func (f *Follower) normalizeHoles(holes []hole) []hole {
 	out := make([]hole, 0, len(holes))
 	for _, h := range holes {
@@ -249,18 +235,14 @@ func effectiveLifecycle(h hole) string {
 	return rangePending
 }
 
-// compatibleLifecycle treats pending and retrying as the same recovery class.
-// A repeated skip can overlap a range whose last attempt failed, and those
-// intervals must still normalize into one row. Blocked work stays separate.
+// compatibleLifecycle treats pending and retrying as one recovery class, so a repeated skip
+// merges with a range whose last attempt failed. Blocked work stays separate.
 func compatibleLifecycle(a, b hole) bool {
 	return (effectiveLifecycle(a) == rangeBlocked) == (effectiveLifecycle(b) == rangeBlocked)
 }
 
-// mergeHole folds h into the entry that starts at or before it. The cursor
-// and its replay state belong to that earlier entry, since the blocks
-// below its cursor are the ones already filled; the fold watermark is the
-// higher of the two, because a block folded into an additive bucket by
-// either entry must not be folded again.
+// mergeHole folds h into the entry starting at or before it. The cursor belongs to that
+// earlier entry; the fold watermark is the higher of the two, so no block is folded twice.
 func mergeHole(into *hole, h hole) {
 	oldTo := into.To
 	into.To = max(into.To, h.To)
@@ -276,9 +258,8 @@ func mergeHole(into *hole, h hole) {
 	if into.At == "" || (h.At != "" && h.At < into.At) {
 		into.At = h.At
 	}
-	// PredecessorAt describes the block below From. The merged entry starts at
-	// into.From, so the incoming bound only applies when both ranges start at
-	// the same block. Otherwise it names a block inside the merged interval.
+	// PredecessorAt describes the block below From, so it only carries over when both ranges
+	// start at the same block.
 	if into.PredecessorAt == "" && h.From == into.From {
 		into.PredecessorAt = h.PredecessorAt
 	}
@@ -291,11 +272,8 @@ func mergeHole(into *hole, h hole) {
 	into.RetryCount = max(into.RetryCount, h.RetryCount)
 }
 
-// fillTarget is the hole the next fill step works on: the block the replay
-// continues from (its number, hash and timestamp) and the pricer state in
-// force at the end of it. The block is the stored one before the range
-// when it is still there, otherwise the one the hole's own replay state
-// describes.
+// fillTarget is the hole the next fill step works on: the block the replay continues from
+// and the pricer state at the end of it.
 type fillTarget struct {
 	h      hole
 	prev   uint64
@@ -304,19 +282,13 @@ type fillTarget struct {
 	state  *pricer.State
 }
 
-// FillStep advances the newest fillable hole by at most one header batch.
-// Skipped ranges are queued work: the headers come back through the bulk
-// lane (the fast tick's reserve is untouched), the pricer replays forward
-// from the state at the block before the range exactly as the live path
-// does, and the blocks and their buckets are written under the chain lock
-// with the generation re-checked, so a rewind during the fetch discards
-// the work instead of writing it on top of the canonical chain.
+// FillStep advances the newest fillable hole by at most one header batch, through the bulk
+// lane. The commit re-checks the generation, so a rewind during the fetch discards the work
+// instead of writing it over the canonical chain.
 func (f *Follower) FillStep(ctx context.Context) (FillStatus, error) {
 	status, err := f.fillStep(ctx)
 	if errors.Is(err, errStaleGeneration) {
-		// The fast loop rewound while this step was fetching: its headers
-		// describe the old fork, so nothing is written and the next step
-		// starts again from the committed cursor.
+		// The headers describe the old fork, so nothing is written.
 		f.log.Warn("gap fill step discarded after a rewind", "err", err.Error())
 		return FillIdle, nil
 	}
@@ -327,8 +299,7 @@ func (f *Follower) fillStep(ctx context.Context) (FillStatus, error) {
 	if err := f.ensureInit(ctx); err != nil {
 		return FillNone, err
 	}
-	// The generation is captured before any network call and compared
-	// inside the transaction that commits this step.
+	// Captured before any network call and compared inside the commit transaction.
 	gen, err := f.generation(ctx, f.store)
 	if err != nil {
 		return FillNone, err
@@ -346,10 +317,8 @@ func (f *Follower) fillStep(ctx context.Context) (FillStatus, error) {
 		return FillNone, err
 	}
 	if len(reasons) > 0 {
-		// A range whose anchor is gone is reclassified straight away, so
-		// it stops being counted as work that will never be done. It is
-		// still examined once per pass and takes the mark off again if a
-		// state ever appears before it.
+		// Reclassify straight away so it stops counting as work that will never be done. It is
+		// still examined once per pass and loses the mark if a state appears before it.
 		if err := f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 			return f.markHoles(ctx, s, reasons)
 		}); err != nil {
@@ -373,24 +342,17 @@ func (f *Follower) fillStep(ctx context.Context) (FillStatus, error) {
 	return status, err
 }
 
-// pickHole chooses the newest hole that can be filled: the state at the
-// block before the range (the last filled one once the cursor has moved)
-// must be known, either from the hole's own replay checkpoint or from the
-// stored block there. Holes recorded as unfillable are examined only once
-// nothing else is fillable, and one whose state has since appeared (the
-// backfill reached it, or an archive endpoint arrived) loses that mark.
-// Deciding costs database reads only, never an RPC call. The second return
-// value carries the ranges that must be marked unfillable, keyed by their
-// start.
+// pickHole chooses the newest hole whose predecessor state is known, from the hole's own
+// replay checkpoint or the stored block there. Holes marked unfillable are examined only
+// when nothing else is, and lose the mark once a state appears. Costs database reads only.
+// The second return carries the ranges to mark unfillable, keyed by start.
 func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map[uint64]string, error) {
 	order := make([]int, 0, len(holes))
 	for i := range holes {
 		order = append(order, i)
 	}
-	// A hole already being filled comes first, so one is finished before
-	// the next is begun (a network that keeps skipping would otherwise
-	// start every new hole and complete none); then newest first, since
-	// the recent charts are the ones being looked at.
+	// A hole already being filled comes first, so a network that keeps skipping finishes one
+	// instead of starting every new hole; then newest first.
 	sort.SliceStable(order, func(a, b int) bool {
 		ha, hb := holes[order[a]], holes[order[b]]
 		if (ha.Next > 0) != (hb.Next > 0) {
@@ -440,8 +402,8 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 	return nil, reasons, nil
 }
 
-// markHoles records the reasons pickHole decided on, matching entries by
-// their start so a range recorded meanwhile is left alone.
+// markHoles applies the reasons pickHole decided on, matching entries by start so a range
+// recorded meanwhile is left alone.
 func (f *Follower) markHoles(ctx context.Context, s db.Store, reasons map[uint64]string) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil {
@@ -464,10 +426,9 @@ func (f *Follower) markHoles(ctx context.Context, s db.Store, reasons map[uint64
 	return f.saveHoles(ctx, s, holes)
 }
 
-// recordFillFailure moves one range into a durable retry lifecycle. It matches
-// the interval that still contains the attempted range under the chain lock,
-// so a concurrent extension or merge cannot resurrect stale cursor state. The
-// backoff is bounded and survives restart with the count, time and RPC error.
+// recordFillFailure moves one range into a durable retry lifecycle, matching the interval
+// that still contains the attempted range under the chain lock so a concurrent extension
+// cannot resurrect stale cursor state.
 func (f *Follower) recordFillFailure(ctx context.Context, attempted hole, cause error) error {
 	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		holes, err := f.loadHoles(ctx, s)
@@ -503,14 +464,10 @@ func retryDelay(count uint64) time.Duration {
 	return min(delay, 5*time.Minute)
 }
 
-// targetFor reports whether one hole can be filled now, returning the
-// state to replay forward from. The stored block before the range is
-// preferred when it is still there, since it is the chain's own record,
-// and the hole's carried replay state is cross-checked against its hash: a
-// checkpoint describing another block at that height came from a fork that
-// is gone. When the row has been pruned the carried state stands on its
-// own, which is the whole point of carrying it. Nil with stranded set
-// means neither exists and the range is not work any more.
+// targetFor reports whether one hole can be filled now and returns the state to replay
+// forward from. The stored block before the range wins when it is still there; the hole's
+// carried state is cross-checked against its hash, since a checkpoint at that height with
+// another hash came from a fork that is gone. Nil with stranded set means neither exists.
 func (f *Follower) targetFor(ctx context.Context, h hole) (target *fillTarget, stranded bool, err error) {
 	start := h.Start()
 	if start == 0 || h.To < start {
@@ -544,21 +501,16 @@ func (f *Follower) targetFor(ctx context.Context, h hole) (target *fillTarget, s
 			return &fillTarget{h: h, prev: carried.Block, hash: carried.Hash, prevTs: carried.PrevTS, state: st}, false, nil
 		}
 	}
-	// A stored predecessor whose state cannot be built yet is a wait, not
-	// a dead end: the shape may still be recorded. A predecessor that is
-	// not there at all never comes back, so the range is reclassified.
+	// A stored predecessor whose state cannot be built yet is a wait: the shape may still be
+	// recorded. One that is not there at all never comes back, so the range is reclassified.
 	return nil, prev == nil, nil
 }
 
-// storedFillState builds the pricer state at the end of a stored block:
-// the shape that was really in force there, the row's end-of-block
-// backlogs and the row's floor. The shape comes from the recorded
-// constraint set covering the block, or from the newest state sample taken
-// at or before it, never from the live sample: a legacy chain whose speed
-// limit, inertia or backlog tolerance changed after the gap would
-// otherwise be replayed with today's parameters, and the recorded changes
-// can only be applied forward, never reversed. Nil when nothing describes
-// the pricer there.
+// storedFillState builds the pricer state at the end of a stored block: the shape really in force
+// there, the row's end-of-block backlogs and its floor. The shape comes from the recorded constraint
+// set or the newest state sample at or before the block, never from the live sample: a legacy chain
+// whose parameters changed after the gap would otherwise be replayed with today's. Nil when nothing
+// describes the pricer there.
 func (f *Follower) storedFillState(ctx context.Context, prev db.Block) (*pricer.State, error) {
 	sample, err := f.store.StateSampleAt(ctx, f.chainID, prev.Number)
 	if err != nil {
@@ -611,8 +563,7 @@ func (f *Follower) shapeAtLocked(number uint64, sample *db.StateSample) *pricer.
 	return st
 }
 
-// carriedFillState rebuilds the pricer state a hole carries. Nil when the
-// checkpoint describes no model at all.
+// carriedFillState rebuilds the pricer state a hole carries. Nil when it describes no model.
 func carriedFillState(s *model.HoleState) *pricer.State {
 	st := &pricer.State{MinBaseFee: new(big.Int)}
 	if s.MinBaseFee != "" {
@@ -637,8 +588,8 @@ func carriedFillState(s *model.HoleState) *pricer.State {
 	return st
 }
 
-// holeStateOf captures the replay state at the end of a filled batch, so
-// the next one continues from it without reading a stored block.
+// holeStateOf captures the replay state at the end of a batch, so the next one continues
+// from it without reading a stored block.
 func holeStateOf(st *pricer.State, last nitro.Header, setID int64) *model.HoleState {
 	out := &model.HoleState{Block: last.Number, Hash: last.Hash, PrevTS: last.Timestamp, SetID: setID}
 	if st.MinBaseFee != nil {
@@ -656,12 +607,9 @@ func holeStateOf(st *pricer.State, last nitro.Header, setID int64) *model.HoleSt
 	return out
 }
 
-// fillBatch fetches, replays and commits one batch of a hole. The batch is
-// sized to the budget the other loops leave spare, exactly like the
-// backfill, so the filler never holds the pacer's turnstile through a long
-// sleep. The headers must link to the block the replay continues from and,
-// on the last batch, to the stored block after the range: a chain that
-// does not link is retried rather than written.
+// fillBatch fetches, replays and commits one batch of a hole. The batch is sized to the
+// budget the other loops leave spare, so the filler never holds the pacer's turnstile
+// through a long sleep. Headers that do not link up are retried rather than written.
 func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (FillStatus, error) {
 	h := t.h
 	from := h.Start()
@@ -684,9 +632,8 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	if len(headers) == 0 {
 		return FillIdle, fmt.Errorf("gap headers %d..%d: none returned", from, from+n-1)
 	}
-	// The cursor tracks what was actually replayed, so an endpoint that
-	// answers with less than the batch asked for shortens the step rather
-	// than leaving a hole inside the hole.
+	// The cursor tracks what was actually replayed, so a short answer shortens the step
+	// instead of leaving a hole inside the hole.
 	n = uint64(len(headers))
 	if headers[0].Number != from {
 		return FillIdle, fmt.Errorf("gap headers start at %d, asked for %d, retrying", headers[0].Number, from)
@@ -722,12 +669,9 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	return FillProgressed, f.commitFill(ctx, gen, h, rows, filledTail, h.Next > h.To)
 }
 
-// holeTail returns the stored block just after a hole, the one carrying
-// the real sampled backlogs: the replay ends on it so the error of the
-// whole reconstructed range is recorded where it can be seen. Nil when
-// that block is not stored (a rewind cut the chain there, or retention
-// pruned it). A block whose parent is not the last header of the range is
-// an error: the range and the stored head belong to different chains.
+// holeTail returns the stored block just after a hole, the one carrying the real sampled
+// backlogs the replay ends on. Nil when it is not stored. A parent that is not the last
+// header of the range means the two belong to different chains.
 func (f *Follower) holeTail(ctx context.Context, h hole, prevHeader nitro.Header) (*db.Block, error) {
 	row, err := f.store.BlockByNumber(ctx, f.chainID, h.To+1)
 	if err != nil {
@@ -742,17 +686,11 @@ func (f *Follower) holeTail(ctx context.Context, h hole, prevHeader nitro.Header
 	return row, nil
 }
 
-// replayHole replays a batch of a hole forward from the state at the block
-// before it, splitting at the owner actions the range crosses exactly as
-// the catch-up does, and returns the replay state at the end of the batch
-// for the hole's checkpoint. When the batch ends the hole, the stored
-// block after it is replayed too, anchored to its sampled backlogs, and
-// the prediction and start-of-block exponents of that replay are written
-// back onto it (its own header fields, floor and sampled backlogs stay as
-// they are), so the error of the whole reconstruction is recorded against
-// a block whose state was really sampled. A stored block carrying another
-// pricer shape than the replay ends on cannot be joined to it: the range
-// is still written, its error simply stays unrecorded.
+// replayHole replays one batch forward from the state before the hole, splitting at owner
+// actions as the catch-up does, and returns the replay state at the end of the batch. On the
+// last batch the stored block after the range is replayed too, anchored to its sampled
+// backlogs, and gains the prediction and exponents, so the error of the whole reconstruction
+// is recorded against a block whose state was really sampled.
 func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Block, tl *timeline, actions actionBlocks) (rows []db.Block, filled *db.Block, end *model.HoleState) {
 	st := t.state
 	rows, _ = replayForward(f.chainID, st, t.prevTs, headers, tl, nil, actions)
@@ -763,8 +701,7 @@ func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Bl
 		setID = cs.ID
 	}
 	f.mu.Unlock()
-	// The checkpoint is taken before the tail is replayed through the same
-	// state: the tail belongs to the block after the range, not to it.
+	// Taken before the tail is replayed: the tail belongs to the block after the range.
 	end = holeStateOf(st, lastHeader, setID)
 	if tail == nil {
 		return rows, nil, end
@@ -785,13 +722,9 @@ func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Bl
 	return rows, &merged, end
 }
 
-// headerOf synthesizes a header from a stored block. Poster gas is
-// deliberately left nil: a stored row carries the block total, never the
-// per-transaction cumulative compute gas the receipt set gives, so an owner
-// action inside the block would be placed at a total-gas boundary while the
-// block contributed compute gas, mixing the two units. Total gas on both
-// sides keeps the split consistent, and the only use of a synthesized header
-// is the tail replay, whose backlogs are overwritten by the sampled anchor.
+// headerOf synthesizes a header from a stored block. Poster gas is deliberately nil: a row
+// carries the block total, never per-transaction cumulative compute gas, so an owner action
+// inside the block would otherwise be split at a boundary in the wrong unit.
 func headerOf(block db.Block) nitro.Header {
 	return nitro.Header{
 		Number: block.Number, Hash: block.Hash, ParentHash: block.ParentHash, Timestamp: uint64(block.TS.Unix()),
@@ -799,19 +732,11 @@ func headerOf(block db.Block) nitro.Header {
 	}
 }
 
-// commitFill writes one batch of a hole and its progress in one chain
-// transaction, but only when the chain has not been rewound since the
-// headers were fetched. Blocks from the hour of the first live block on
-// are rows the buckets are rebuilt from, exactly as the live path writes
-// them; anything older folds additively, so a hole that has aged past that
-// boundary cannot wipe the backfill's folds. A block below the hole's fold
-// watermark was already counted into its bucket before a rewind reset the
-// cursor: it is replayed for the state it carries forward but never folded
-// twice. The stored block after the range is classified by the same
-// boundary rule as the rest: above it, it is a row whose bucket is rebuilt
-// from rows; below it, its gas is already in an additive bucket, so only
-// the row is rewritten and the bucket is left alone. The hole entry gains
-// its cursor and replay state, or disappears when the range is complete.
+// commitFill writes one batch of a hole and its progress in one chain transaction, but only
+// when the chain has not been rewound since the headers were fetched. Blocks from the hour of
+// the first live block on are rows the buckets are rebuilt from; anything older folds
+// additively, so an aged hole cannot wipe the backfill's folds. Blocks below the hole's fold
+// watermark are replayed for the state they carry but never folded twice.
 func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db.Block, tail *db.Block, done bool) error {
 	f.mu.Lock()
 	boundary, hasBoundary := f.boundaryLocked()
@@ -870,13 +795,8 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db
 	return nil
 }
 
-// advanceHole records a hole's progress inside the commit: the entry is
-// found again in the stored checkpoint (another writer may have appended
-// one meanwhile, and normalizing may have merged a newer range into it, so
-// it is matched by its start and may have grown), then updated with the
-// cursor, the replay state and the fold watermark, or removed when the
-// range it covers is complete. An entry another writer already completed
-// is not recreated.
+// advanceHole records a hole's progress inside the commit. The entry is matched by start
+// because another writer may have appended or merged one meanwhile, so it may have grown.
 func (f *Follower) advanceHole(ctx context.Context, s db.Store, h hole, done bool) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil {
@@ -900,15 +820,10 @@ func (f *Follower) advanceHole(ctx context.Context, s db.Store, h hole, done boo
 	return f.saveHoles(ctx, s, out)
 }
 
-// rewindHoles restarts every hole a rewind reached into: a filler had
-// written the blocks below the hole's cursor, and the ones above the
-// ancestor went with the rest of the orphaned chain, so the cursor and the
-// replay state describing them go back to the start of the range and the
-// whole gap is fetched again from the canonical chain. The fold watermark
-// deliberately survives that reset: the additive buckets below the bucket
-// boundary are not rebuilt from rows, so the blocks already counted into
-// them must not be counted again when the range is refilled. It is cleared
-// only when the rewind deleted those buckets with the backfill's.
+// rewindHoles sends every hole the rewind reached into back to the start of its range: the
+// blocks above the ancestor went with the orphaned chain. The fold watermark deliberately
+// survives, since additive buckets are not rebuilt from rows and their blocks must not be
+// counted twice. It is cleared only when the rewind deleted those buckets too.
 func (f *Follower) rewindHoles(ctx context.Context, s db.Store, ancestor uint64, bucketsCleared bool) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil || len(holes) == 0 {

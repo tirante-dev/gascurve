@@ -29,12 +29,9 @@ const (
 	cacheAll     = "public, max-age=600"
 )
 
-// degradedErrorStreak is how many consecutive failures of one collector
-// loop mark a network degraded. It matches the collector's own readiness
-// rule: a single error against a metered public RPC is routine and the
-// loop recovers on its next tick, while a loop that keeps failing is also
-// caught by its freshness window. A collector too old to report the streak
-// sends zero, so such a deployment degrades on staleness alone.
+// degradedErrorStreak is how many consecutive failures of one collector loop mark a network
+// degraded. It matches the collector's own readiness rule: a single error against a metered public
+// RPC is routine, while a loop that keeps failing is also caught by its freshness window.
 const degradedErrorStreak = 3
 
 var errNoData = errors.New("no data yet")
@@ -75,8 +72,7 @@ func (s *Server) internal(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusInternalServerError, "internal", "internal error")
 }
 
-// networkModel renders a network row, deriving the model from the latest
-// sample.
+// networkModel renders a network row, deriving the model from the latest sample.
 func (s *Server) networkModel(ctx context.Context, n db.Network) (model.Network, error) {
 	out := model.Network{
 		Name: n.Name, DisplayName: n.DisplayName, ChainID: n.ChainID, ExplorerURL: n.ExplorerURL,
@@ -149,10 +145,9 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cacheNetwork, m)
 }
 
-// buildLive assembles the LiveSnapshot from the latest sample and the
-// block that sample was taken at, inside one repeatable-read transaction,
-// so every field describes the same database moment: the tick that wrote
-// the selected sample, even when the collector commits meanwhile.
+// buildLive assembles the LiveSnapshot from the latest sample and the block it was taken at, inside
+// one repeatable-read transaction, so every field describes the same database moment even when the
+// collector commits meanwhile.
 func (s *Server) buildLive(ctx context.Context, chainID uint64) (*model.LiveSnapshot, error) {
 	var snap *model.LiveSnapshot
 	err := s.store.WithSnapshotTx(ctx, func(st db.Store) error {
@@ -163,8 +158,8 @@ func (s *Server) buildLive(ctx context.Context, chainID uint64) (*model.LiveSnap
 	return snap, err
 }
 
-// buildLiveIn is buildLive against one store view. now and maxAge apply the
-// collector's staleness rule to the recorded ETH/USD spot.
+// buildLiveIn is buildLive against one store view, applying the collector's staleness rule to the
+// recorded ETH/USD spot.
 func buildLiveIn(ctx context.Context, store db.Store, chainID uint64, now time.Time, maxAge time.Duration) (*model.LiveSnapshot, error) {
 	sample, err := store.LatestStateSample(ctx, chainID, false)
 	if err != nil {
@@ -205,8 +200,7 @@ func buildLiveIn(ctx context.Context, store db.Store, chainID uint64, now time.T
 		if err := sample.Legacy.Unmarshal(snap.Legacy); err != nil {
 			return nil, fmt.Errorf("decode legacy: %w", err)
 		}
-		// The exponent the sampled backlog yields, exactly as the collector
-		// computes it for the WebSocket tick.
+		// The exponent the sampled backlog yields, exactly as the collector computes it for the tick.
 		snap.ExponentBips = legacyExponent(snap.Legacy)
 	}
 	if err := sample.Prices.Unmarshal(&snap.Prices); err != nil {
@@ -247,11 +241,9 @@ func buildLiveIn(ctx context.Context, store db.Store, chainID uint64, now time.T
 	return snap, nil
 }
 
-// ethUsdFutureSkew is how far ahead of the serving clock a recorded quote
-// may be stamped before it is unusable. The collector and the API can run
-// on different hosts, so a small difference is expected; a quote from
-// materially later than now says the two clocks disagree, and its age
-// cannot be judged at all.
+// ethUsdFutureSkew is how far ahead of the serving clock a recorded quote may be stamped before it is
+// unusable. The collector and the API can run on different hosts, so a small difference is expected;
+// a quote from materially later than now means the clocks disagree and its age cannot be judged.
 const ethUsdFutureSkew = 5 * time.Minute
 
 // staleEthUsd reports whether a quote taken at cannot be served as live:
@@ -260,10 +252,8 @@ func staleEthUsd(at, now time.Time, maxAge time.Duration) bool {
 	return now.Sub(at) > maxAge || at.Sub(now) > ethUsdFutureSkew
 }
 
-// ethUsdFromState reads the ETH/USD spot the collector recorded for a chain
-// and applies the same rule as the tick: a quote older than maxAge, or one
-// from materially later than the serving clock, is null rather than served
-// as live. The API never fetches a price itself.
+// ethUsdFromState reads the ETH/USD spot the collector recorded for a chain and applies the same rule
+// as the tick. The API never fetches a price itself.
 func ethUsdFromState(ctx context.Context, store db.Store, chainID uint64, now time.Time, maxAge time.Duration) (*model.EthUsd, error) {
 	raw, ok, err := store.GetState(ctx, chainID, db.StateEthUsd)
 	if err != nil || !ok {
@@ -414,8 +404,7 @@ func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {
 				L1BaseFeeAvg: br.L1BaseFee.String(), CalldataBytes: br.CalldataLen,
 			})
 		}
-		// The bounds are the response's window, exactly as the grouped
-		// resolutions report it.
+		// The bounds are the response's window, exactly as the grouped resolutions report it.
 		out.From, out.To = rng.bounds(from, to, firstBatch(out.Points), len(out.Points) > 0)
 		writeJSON(w, http.StatusOK, rng.cache, out)
 		return
@@ -531,9 +520,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cacheNone, out)
 }
 
-// holesStatus summarizes durable missing ranges. During a rolling upgrade it
-// also reads the legacy checkpoint until the collector imports it. A malformed
-// checkpoint sets an explicit degradation signal instead of looking empty.
+// holesStatus summarizes durable missing ranges. During a rolling upgrade it also reads the legacy
+// checkpoint until the collector imports it. A malformed checkpoint degrades rather than looks empty.
 func (s *Server) holesStatus(ctx context.Context, chainID uint64, st map[string]string) (model.HolesStatus, error) {
 	rows, err := s.store.MissingRanges(ctx, chainID)
 	if err != nil {
@@ -542,8 +530,7 @@ func (s *Server) holesStatus(ctx context.Context, chainID uint64, st map[string]
 	holes := make([]model.Hole, 0, len(rows))
 	checkpointError := false
 	for _, row := range rows {
-		// The decode only detects corruption. Once one row is malformed the
-		// remaining ones add nothing, and /status is polled often.
+		// The decode only detects corruption; once one row is malformed the rest add nothing.
 		if !checkpointError && row.ReplayState != nil {
 			var state model.HoleState
 			if err := row.ReplayState.Unmarshal(&state); err != nil {
@@ -687,9 +674,8 @@ func parseStatusTime(raw *string) time.Time {
 	return at
 }
 
-// endpointsStatus decodes the collector's endpoint routing state; a
-// network without one (or with an unreadable one) reports the primary
-// alone with no endpoints listed.
+// endpointsStatus decodes the collector's endpoint routing state; a network without a readable one
+// reports the primary alone with no endpoints listed.
 func endpointsStatus(st map[string]string) model.EndpointsStatus {
 	out := model.EndpointsStatus{Endpoints: []model.EndpointStatus{}}
 	if raw, ok := st[db.StateEndpoints]; ok {
@@ -744,8 +730,7 @@ func dividedPtr(v *uint64, divisor uint64) *uint64 {
 	return uint64ValuePtr(*v / divisor)
 }
 
-// int64s copies a BIGINT[]: a stored array (even empty) becomes a JSON
-// array, a NULL (nil, a value that was never recorded) stays null.
+// int64s copies a BIGINT[]: a stored array (even empty) becomes a JSON array, a NULL stays null.
 func int64s(v []int64) []int64 {
 	if v == nil {
 		return nil
@@ -753,8 +738,8 @@ func int64s(v []int64) []int64 {
 	return append([]int64{}, v...)
 }
 
-// legacyExponent is the pricer exponent the legacy parameters and backlog
-// yield at the start of the next block, the value the collector publishes.
+// legacyExponent is the pricer exponent the legacy parameters and backlog yield at the start of the
+// next block, the value the collector publishes.
 func legacyExponent(l *model.LegacyParams) int64 {
 	st := &pricer.State{MinBaseFee: new(big.Int), Legacy: &pricer.Legacy{SpeedLimit: l.SpeedLimit, Inertia: l.Inertia, Tolerance: l.Tolerance, Backlog: l.Backlog}}
 	_, exponent, _ := st.Step(0)

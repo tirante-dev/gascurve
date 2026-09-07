@@ -59,8 +59,8 @@ const (
 	SigBatchPostingReportV1      = "batchPostingReport(uint256,address,uint64,uint64,uint256)"
 )
 
-// Constraint is one gas pricing constraint as returned by
-// getGasPricingConstraints: the third element is the live backlog.
+// Constraint is one gas pricing constraint as returned by getGasPricingConstraints: the third element
+// is the live backlog.
 type Constraint struct {
 	Target  uint64
 	Window  uint64
@@ -112,30 +112,25 @@ type FeeAccounts struct {
 	L1Reward Account
 }
 
-// CallRequest builds an eth_call against a precompile at the latest block.
 func CallRequest(to string, data []byte) Request {
 	return CallRequestAt(to, data, latestTag)
 }
 
-// CallRequestAt builds an eth_call against a precompile at a block tag
-// ("latest" or a hex block number).
+// CallRequestAt builds an eth_call against a precompile at a block tag.
 func CallRequestAt(to string, data []byte, tag string) Request {
 	return Request{Method: "eth_call", Params: []any{map[string]string{"to": to, "data": EncodeHex(data)}, tag}}
 }
 
-// SelectorCall builds an eth_call for a no-argument function at the latest
-// block.
+// SelectorCall builds an eth_call for a no-argument function at the latest block.
 func SelectorCall(to, sig string) Request {
 	return SelectorCallAt(to, sig, latestTag)
 }
 
-// SelectorCallAt builds an eth_call for a no-argument function at a block tag.
 func SelectorCallAt(to, sig, tag string) Request {
 	s := Selector(sig)
 	return CallRequestAt(to, s[:], tag)
 }
 
-// DecodeConstraints decodes a getGasPricingConstraints() return value.
 func DecodeConstraints(data []byte) ([]Constraint, error) {
 	if len(data) == 0 {
 		return nil, nil
@@ -151,7 +146,6 @@ func DecodeConstraints(data []byte) ([]Constraint, error) {
 	return out, nil
 }
 
-// DecodePrices decodes a getPricesInWei() return value.
 func DecodePrices(data []byte) (*Prices, error) {
 	vals := make([]*big.Int, 6)
 	for i := range vals {
@@ -167,27 +161,22 @@ func DecodePrices(data []byte) (*Prices, error) {
 	}, nil
 }
 
-// DecodeUint256 decodes a single uint256 return value.
 func DecodeUint256(data []byte) (*big.Int, error) {
 	return wordBig(data, 0)
 }
 
-// DecodeInt256 decodes a single int256 return value.
 func DecodeInt256(data []byte) (*big.Int, error) {
 	return wordInt256(data, 0)
 }
 
-// DecodeUint64 decodes a single uint64 return value.
 func DecodeUint64(data []byte) (uint64, error) {
 	return wordUint64(data, 0)
 }
 
-// DecodeInt64 decodes a single int64 return value.
 func DecodeInt64(data []byte) (int64, error) {
 	return wordInt64(data, 0)
 }
 
-// DecodeAddress decodes a single address return value.
 func DecodeAddress(data []byte) (string, error) {
 	return wordAddress(data, 0)
 }

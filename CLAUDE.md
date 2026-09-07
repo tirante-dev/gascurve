@@ -14,7 +14,7 @@ gascurve shows live and historical gas pricing for Arbitrum Nitro chains (Robinh
 
 ```bash
 make tools              # install the hosted CI versions of required Go tools under .tools/bin
-make ci                 # the CI workflow locally: fmt-check, vet, lint, staticcheck, govulncheck, test-coverage, test-race, build, mod-verify, web-install, web-ci
+make ci                 # the CI workflow locally: fmt-check, comment-check, vet, lint, staticcheck, govulncheck, test-coverage, test-race, build, mod-verify, web-install, web-ci
 make ci-integration     # go-integration job, needs TEST_DB_URL (Postgres)
 make ci-docker          # docker job: build the three images and Trivy-scan them (needs docker, trivy)
 make ci-chart           # chart-test workflow: helm lint --strict, template checks, ct lint if installed
@@ -25,11 +25,12 @@ make test-race          # go test -race
 make test-integration   # needs TEST_DB_URL (Postgres); tagged `integration`
 make lint / lint-fix    # golangci-lint (.golangci.yml)
 make fmt / fmt-check    # gofmt -s + goimports -local github.com/tirante-dev/gascurve (fmt-check never writes)
+make comment-check      # the comment budget, over Go and web alike (see Comments)
 make db-up / db-migrate / db-rollback
 make web-dev / web-lint / web-typecheck / web-test / web-test-coverage / web-build
 ```
 
-After any Go change run at least `make fmt && make lint && make test-coverage`. After any web change run `make web-lint && make web-typecheck && make web-test-coverage`.
+After any Go change run at least `make fmt && make lint && make test-coverage`. After any web change run `make web-lint && make web-typecheck && make web-test-coverage`. After either, `make comment-check`.
 
 ## Go conventions
 
@@ -46,6 +47,14 @@ After any Go change run at least `make fmt && make lint && make test-coverage`. 
 - Network-aware routes: `/[network]`. API client in `src/lib/api/` (`core.ts` does timeout and retry). Live data via `useLive` (WebSocket with reconnect, polling fallback). Shapes in `src/types/` follow `docs/ARCHITECTURE.md`, narrowed to the fields the client reads: the operator-only parts of `/status` are deliberately absent.
 - Tailwind utility classes only, no CSS modules. Dark and light both supported.
 - Coverage gate (90% lines) covers `src/lib/**`, `src/hooks/**`, `src/utils/**`.
+
+## Comments
+
+Comment only what the code cannot say: a constraint, a hazard, a decision whose alternative was tried and discarded, an invariant a reader would otherwise break. Everything else is noise that goes stale.
+
+Do not write a comment that restates the name (`// Close closes the client`), narrates the next line, or recaps what a function plainly does. Prefer a better name to a comment explaining a bad one. Explanations longer than a few lines belong in `docs/`, not above a function.
+
+Two or three lines is a normal comment. `make comment-check` enforces the budget over Go and web sources alike, in CI: no run of consecutive comment lines may exceed 8 (a `//` paragraph separator does not break the run), and no file over 40 lines may be more than 30% comments. Raising a threshold to pass is the same as lowering any other CI gate: fix the comment instead.
 
 ## Writing style
 

@@ -24,20 +24,16 @@ type Network struct {
 
 // PricingVersion values of a blocks or buckets row.
 const (
-	// PricingUnknown marks history written before the pricing breakdown
-	// existed: no per-constraint exponents, no floor in force, so no exact
-	// fee split can be derived from it.
+	// PricingUnknown marks history written before the pricing breakdown existed: no per-constraint
+	// exponents and no floor, so no exact fee split can be derived from it.
 	PricingUnknown int16 = 0
 	// PricingFull marks a row written with the whole breakdown.
 	PricingFull int16 = 1
 )
 
-// Block is a row of the blocks table. Backlogs are the end-of-block
-// values, ConstraintBips the start-of-block per-constraint exponents (nil
-// for rows written before they were recorded, an empty array for a legacy
-// block) and MinBaseFee the floor in force at the block, unknown (NULL)
-// for that same history. PricingVersion says which: PricingUnknown for
-// history without a breakdown, PricingFull for rows written with one.
+// Block is a row of the blocks table. Backlogs are end-of-block values, ConstraintBips the
+// start-of-block per-constraint exponents (nil for rows written before they were recorded, empty for
+// a legacy block) and MinBaseFee the floor in force. PricingVersion says which.
 type Block struct {
 	ChainID          uint64        `db:"chain_id"`
 	Number           uint64        `db:"number"`
@@ -58,8 +54,8 @@ type Block struct {
 	PricingVersion   int16         `db:"pricing_version"`
 }
 
-// Known reports whether the block carries the full pricing breakdown, so
-// its floor and fee split are exact rather than unknown history.
+// Known reports whether the block carries the full pricing breakdown, so its floor and fee split are
+// exact rather than unknown history.
 func (b Block) Known() bool { return b.PricingVersion >= PricingFull && b.MinBaseFee.Valid }
 
 // DestinationsKnown reports whether the block has both the pricing floor
@@ -82,13 +78,10 @@ var Resolutions = map[string]time.Duration{
 	Resolution1h:  time.Hour,
 }
 
-// Bucket is a row of the buckets table. FoldBuckets merges a Bucket into
-// the stored row: counters and sums add, min/max combine, the average is
-// derived from the exact sum, and the *_end fields are replaced.
-// RebuildBuckets instead recomputes a row from the block rows in its
-// window. Pricing fields are unknown for rows written before they were
-// recorded. PosterGas and all three destination sums are independently
-// unknown for any window whose source blocks lack authoritative receipts.
+// Bucket is a row of the buckets table. FoldBuckets merges a Bucket into the stored row: counters and
+// sums add, min/max combine, the average is derived from the exact sum, and the *_end fields are
+// replaced. RebuildBuckets instead recomputes a row from the block rows in its window. PosterGas and
+// the three destination sums are independently unknown for a window whose blocks lack receipts.
 type Bucket struct {
 	ChainID           uint64        `db:"chain_id"`
 	Resolution        string        `db:"resolution"`
@@ -133,14 +126,11 @@ type StateSample struct {
 	Accounts    JSONB     `db:"accounts"`
 }
 
-// MissingRange is a durable interval the collector has not indexed yet.
-// Lifecycle is pending, retrying or blocked. Cursor is the first block still
-// missing, or zero before recovery starts. ReplayState describes Cursor-1 and
-// CursorAt is its timestamp, so recovery can resume after block retention and
-// the API can map the remaining suffix to time buckets without decoding the
-// replay state. PredecessorAt and SuccessorAt bound the original interval when
-// those neighboring blocks were observed. DetectedAt is the range's age
-// anchor. Retry fields survive restarts and make delayed work visible.
+// MissingRange is a durable interval the collector has not indexed yet. Cursor is the first block
+// still missing, or zero before recovery starts. ReplayState describes Cursor-1 and CursorAt is its
+// timestamp, so recovery can resume after block retention and the API can map the remaining suffix to
+// time buckets without decoding the replay state. PredecessorAt and SuccessorAt bound the original
+// interval when those neighboring blocks were observed.
 type MissingRange struct {
 	ChainID       uint64         `db:"chain_id"`
 	From          uint64         `db:"from_block"`
@@ -215,18 +205,15 @@ type BatchBucket struct {
 	CalldataBytes uint64    `db:"calldata_bytes"`
 }
 
-// Store is everything the collector and the API need from Postgres. Both
-// are unit-tested against fakes of this interface.
+// Store is everything the collector and the API need from Postgres. Both are unit-tested against fakes.
 type Store interface {
 	Ping(ctx context.Context) error
 	// WithTx runs fn inside a transaction; the Store passed to fn is bound
 	// to that transaction.
 	WithTx(ctx context.Context, fn func(Store) error) error
-	// WithChainTx is WithTx holding the chain's transaction-scoped advisory
-	// lock (pg_advisory_xact_lock(chain_id)) from the start, so the live
-	// tick, the slow loop, the backfill and a reorg rewind never interleave
-	// their writes for one chain and no rebuild sees another writer's
-	// uncommitted rows. Nested calls reuse the outer transaction.
+	// WithChainTx is WithTx holding the chain's transaction-scoped advisory lock from the start, so the
+	// live tick, the slow loop, the backfill and a reorg rewind never interleave their writes for one
+	// chain and no rebuild sees another writer's uncommitted rows. Nested calls reuse the outer tx.
 	WithChainTx(ctx context.Context, chainID uint64, fn func(Store) error) error
 	// WithSnapshotTx runs fn in a read-only repeatable-read transaction, so
 	// every read inside it sees one database moment.
@@ -238,21 +225,16 @@ type Store interface {
 	// when unknown.
 	NetworkByRef(ctx context.Context, ref string) (*Network, error)
 	UpdateNetworkHead(ctx context.Context, chainID, headBlock uint64, headAt, sampledAt time.Time) error
-	// SetNetworkHead records the head after a reorg rewind, where every
-	// field may be unknown: a nil headBlock nulls head_block and head_at
-	// (no block survived) and a nil sampledAt nulls last_sample_at (no
-	// state sample survived). Unlike UpdateNetworkHead it does not clear
-	// last_error, since a rewind is not a successful sample.
+	// SetNetworkHead records the head after a reorg rewind, where every field may be unknown: a nil
+	// headBlock nulls head_block and head_at, a nil sampledAt nulls last_sample_at. Unlike
+	// UpdateNetworkHead it does not clear last_error, since a rewind is not a successful sample.
 	SetNetworkHead(ctx context.Context, chainID uint64, headBlock *uint64, headAt, sampledAt *time.Time) error
 	// SetNetworkError records the last collector error; empty clears it.
 	SetNetworkError(ctx context.Context, chainID uint64, msg string) error
 
 	UpsertBlocks(ctx context.Context, blocks []Block) error
-	// BlockByNumber returns one block or nil.
 	BlockByNumber(ctx context.Context, chainID, number uint64) (*Block, error)
-	// LatestBlock returns the highest stored block or nil.
 	LatestBlock(ctx context.Context, chainID uint64) (*Block, error)
-	// OldestBlock returns the lowest stored block or nil.
 	OldestBlock(ctx context.Context, chainID uint64) (*Block, error)
 	// RecentBlocks returns up to limit blocks, newest first.
 	RecentBlocks(ctx context.Context, chainID uint64, limit int) ([]Block, error)
@@ -284,10 +266,8 @@ type Store interface {
 	// LatestStateSample returns the newest sample, optionally only among
 	// those carrying L1 data. Nil when none.
 	LatestStateSample(ctx context.Context, chainID uint64, withL1 bool) (*StateSample, error)
-	// StateSampleAt returns the newest sample taken at or below a block,
-	// nil when none. Historical replay needs the pricer parameters that
-	// were really in force there, which the sample carries, never the
-	// live ones.
+	// StateSampleAt returns the newest sample taken at or below a block, nil when none. Historical
+	// replay needs the parameters really in force there, which the sample carries, never the live ones.
 	StateSampleAt(ctx context.Context, chainID, block uint64) (*StateSample, error)
 	// L1Samples returns one L1-carrying sample per step over [from, to).
 	L1Samples(ctx context.Context, chainID uint64, from, to time.Time, step time.Duration) ([]StateSample, error)
@@ -298,9 +278,8 @@ type Store interface {
 
 	// MissingRanges lists every durable missing interval ordered by block.
 	MissingRanges(ctx context.Context, chainID uint64) ([]MissingRange, error)
-	// ReplaceMissingRanges replaces one chain's normalized set. Collector
-	// callers use the chain transaction so the delete and inserts are atomic
-	// and concurrent loops cannot erase a range another loop just recorded.
+	// ReplaceMissingRanges replaces one chain's normalized set. Collector callers use the chain
+	// transaction so concurrent loops cannot erase a range another loop just recorded.
 	ReplaceMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error
 
 	// InsertOwnerActions inserts new actions, ignoring duplicates, and

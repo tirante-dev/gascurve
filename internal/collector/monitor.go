@@ -26,12 +26,10 @@ const (
 	minimumFastFreshness     = 30 * time.Second
 	minimumHistoryFreshness  = 2 * time.Minute
 	monitorStatusKey         = "status"
-	// readinessErrorStreak is how many consecutive fast-loop failures
-	// remove readiness. A public RPC answers the occasional call with 429
-	// and the loop recovers on its next tick, so a single failure says
-	// nothing about whether the collector is keeping up. A sustained
-	// outage still removes readiness here, and would anyway once the loop
-	// passes its freshness window.
+	// readinessErrorStreak is how many consecutive fast-loop failures remove readiness. A public RPC
+	// answers the occasional call with 429 and the loop recovers on its next tick, so one failure says
+	// nothing. A sustained outage still removes readiness here, and would anyway once the loop passes
+	// its freshness window.
 	readinessErrorStreak = 3
 )
 
@@ -77,12 +75,10 @@ type Monitor struct {
 // MonitorOption customizes a Monitor.
 type MonitorOption func(*Monitor)
 
-// WithMonitorClock overrides the monitor clock for tests.
 func WithMonitorClock(now func() time.Time) MonitorOption {
 	return func(m *Monitor) { m.now = now }
 }
 
-// WithHeartbeatInterval overrides the durable heartbeat cadence for tests.
 func WithHeartbeatInterval(d time.Duration) MonitorOption {
 	return func(m *Monitor) {
 		if d > 0 {
@@ -91,8 +87,8 @@ func WithHeartbeatInterval(d time.Duration) MonitorOption {
 	}
 }
 
-// NewMonitor builds the process-wide collector monitor. database may be nil
-// for a store without local query accounting, such as a unit-test fake.
+// NewMonitor builds the process-wide collector monitor. database may be nil for a store without local
+// query accounting, such as a unit-test fake.
 func NewMonitor(store db.Store, database databaseStats, instruments *metrics.Collector, log *logger.Logger, opts ...MonitorOption) *Monitor {
 	if log == nil {
 		log = logger.Nop()
@@ -158,8 +154,8 @@ func (m *Monitor) observeHead(chainID, observed, indexed uint64) {
 	}
 }
 
-// Run refreshes and persists collector telemetry until ctx ends. A database
-// failure cannot stop this loop or process liveness; readiness reports it.
+// Run refreshes and persists collector telemetry until ctx ends. A database failure cannot stop this
+// loop or process liveness; readiness reports it.
 func (m *Monitor) Run(ctx context.Context) {
 	m.started.Store(true)
 	m.persist(ctx)
@@ -216,8 +212,8 @@ func (m *Monitor) refreshHoles(ctx context.Context, chainID uint64, now time.Tim
 			Lifecycle: row.Lifecycle, Next: row.Cursor, Reason: row.Reason,
 		})
 	}
-	// The legacy checkpoint still holds every range until the fill loop
-	// imports it, so freshness stays reported across a rolling upgrade.
+	// The legacy checkpoint still holds every range until the fill loop imports it, so freshness stays
+	// reported across a rolling upgrade.
 	raw, ok, err := m.store.GetState(ctx, chainID, db.StateHoles)
 	if err != nil {
 		return
@@ -338,8 +334,7 @@ func databaseMetrics(st db.Stats) metrics.DatabaseState {
 	return out
 }
 
-// Handler serves collector startup, shallow liveness and operational
-// readiness. The process observability server mounts it alongside /metrics.
+// Handler serves collector startup, shallow liveness and operational readiness.
 func (m *Monitor) Handler(version string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /startup", func(w http.ResponseWriter, _ *http.Request) {

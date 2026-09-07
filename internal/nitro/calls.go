@@ -32,12 +32,10 @@ func callBytes(r Result) ([]byte, error) {
 	return DecodeHex(s)
 }
 
-// BlockNumber returns the latest block number.
 func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
 	return c.quantity(ctx, "eth_blockNumber")
 }
 
-// ChainID returns the chain id the node reports (eth_chainId).
 func (c *Client) ChainID(ctx context.Context) (uint64, error) {
 	return c.quantity(ctx, "eth_chainId")
 }
@@ -58,7 +56,6 @@ func blockTag(number uint64) string {
 	return fmt.Sprintf("0x%x", number)
 }
 
-// HeaderByNumber fetches one header (transaction hashes only).
 func (c *Client) HeaderByNumber(ctx context.Context, number uint64) (*Header, error) {
 	raw, err := c.Call(ctx, methodGetBlockByNumber, blockTag(number), false)
 	if err != nil {
@@ -71,13 +68,11 @@ func (c *Client) HeaderByNumber(ctx context.Context, number uint64) (*Header, er
 	return &b.Header, nil
 }
 
-// HeadersByNumbers fetches headers and their receipt-backed poster gas in
-// batches of at most MaxBatch RPC items, in order.
+// HeadersByNumbers fetches headers and their receipt-backed poster gas, in order.
 func (c *Client) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
 	return headersByNumbers(ctx, numbers, c.chunk)
 }
 
-// BlockWithTxs fetches a block including full transactions.
 func (c *Client) BlockWithTxs(ctx context.Context, number uint64) (*Block, error) {
 	blocks, err := c.BlocksWithTxs(ctx, []uint64{number})
 	if err != nil {
@@ -86,25 +81,22 @@ func (c *Client) BlockWithTxs(ctx context.Context, number uint64) (*Block, error
 	return &blocks[0], nil
 }
 
-// BlocksWithTxs fetches several blocks with full transactions in one batch
-// per MaxBatch items.
+// BlocksWithTxs fetches several blocks with full transactions.
 func (c *Client) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, error) {
 	return blocksByNumbers(ctx, numbers, true, c.chunk)
 }
 
-// TransactionReceipts fetches receipts in batches of at most MaxBatch, in
-// the same order as hashes.
+// TransactionReceipts fetches receipts in the same order as hashes.
 func (c *Client) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
 	return transactionReceipts(ctx, hashes, c.chunk)
 }
 
-// batcher sends a request list of any length, splitting it into HTTP
-// batches as it sees fit, and returns one Result per request in order.
+// batcher sends a request list of any length, splitting it into HTTP batches as it sees fit, and
+// returns one Result per request in order.
 type batcher func(ctx context.Context, reqs []Request) ([]Result, error)
 
-// batchCapped is the Client's batcher: batches of at most what the pacer
-// can hold at once for the calling class, so a typed request list longer
-// than the budget is split instead of overdrawing the bucket.
+// batchCapped is the Client's batcher: batches of at most what the pacer can hold at once for the
+// calling class, so a long typed request list is split instead of overdrawing the bucket.
 func (c *Client) batchCapped(ctx context.Context, reqs []Request) ([]Result, error) {
 	out := make([]Result, 0, len(reqs))
 	class := ClassOf(ctx)
@@ -120,8 +112,7 @@ func (c *Client) batchCapped(ctx context.Context, reqs []Request) ([]Result, err
 	return out, nil
 }
 
-// blocksByNumbers fetches eth_getBlockByNumber for every number through
-// send, with or without full transactions, and parses the results.
+// blocksByNumbers fetches eth_getBlockByNumber for every number through send and parses the results.
 func blocksByNumbers(ctx context.Context, numbers []uint64, full bool, send batcher) ([]Block, error) {
 	reqs := make([]Request, len(numbers))
 	for i, n := range numbers {
@@ -174,8 +165,8 @@ func transactionReceipts(ctx context.Context, hashes []string, send batcher) ([]
 	return out, nil
 }
 
-// headersByNumbers fetches each header beside eth_getBlockReceipts and joins
-// them only after the receipt set has been validated against that header.
+// headersByNumbers fetches each header beside eth_getBlockReceipts and joins them only after the
+// receipt set has been validated against that header.
 func headersByNumbers(ctx context.Context, numbers []uint64, send batcher) ([]Header, error) {
 	reqs := make([]Request, 0, len(numbers)*2)
 	for _, n := range numbers {
@@ -236,7 +227,6 @@ func (c *Client) Logs(ctx context.Context, from, to uint64, address string, topi
 	return parseLogs(raw)
 }
 
-// Balance returns an account balance at the latest block.
 func (c *Client) Balance(ctx context.Context, address string) (*big.Int, error) {
 	raw, err := c.Call(ctx, "eth_getBalance", address, latestTag)
 	if err != nil {
@@ -249,8 +239,7 @@ func (c *Client) Balance(ctx context.Context, address string) (*big.Int, error) 
 	return HexBig(s)
 }
 
-// Call performs eth_call against `to` with calldata at the latest block and
-// returns the raw return data.
+// Call performs eth_call against `to` with calldata at the latest block and returns the raw return data.
 func (c *Client) CallContract(ctx context.Context, to string, data []byte) ([]byte, error) {
 	r := CallRequest(to, data)
 	results, err := c.chunk(ctx, []Request{r})
@@ -281,12 +270,10 @@ func decodeArbOSVersion(data []byte) (uint64, error) {
 	return v - ArbOSVersionOffset, nil
 }
 
-// FastSample performs the fast tick: it resolves the head number first
-// (eth_blockNumber) and then samples header, receipts, constraints, prices
-// and minimum base fee pinned to that block, so a batch whose items execute
-// at different "latest" heights can never mix two blocks. When the
-// constraints call reverts or returns an empty list a second batch reads
-// the legacy pricer parameters at the same block.
+// FastSample performs the fast tick: it resolves the head number first and then samples header,
+// receipts, constraints, prices and minimum base fee pinned to that block, so a batch whose items
+// execute at different "latest" heights can never mix two blocks. When the constraints call reverts or
+// returns an empty list a second batch reads the legacy pricer parameters at the same block.
 func (c *Client) FastSample(ctx context.Context) (*Sample, error) {
 	head, err := c.BlockNumber(ctx)
 	if err != nil {
@@ -295,16 +282,14 @@ func (c *Client) FastSample(ctx context.Context) (*Sample, error) {
 	return c.sampleAt(ctx, blockTag(head))
 }
 
-// FastSampleAt is FastSample with every call pinned to one block number, so
-// the header and the state belong to the same block. Used when following
-// newHeads over WebSocket and by the archive backfill anchors.
+// FastSampleAt is FastSample with every call pinned to one block number. Used when following newHeads
+// and by the archive backfill anchors.
 func (c *Client) FastSampleAt(ctx context.Context, number uint64) (*Sample, error) {
 	return c.sampleAt(ctx, blockTag(number))
 }
 
-// PricingSampleAt reads only the block and pricer state needed for a
-// historical anchor. Receipt poster gas is fetched with the ordinary header
-// path, so an archive anchor does not duplicate that metered call.
+// PricingSampleAt reads only the block and pricer state needed for a historical anchor. Receipt poster
+// gas comes through the ordinary header path, so an archive anchor does not duplicate that call.
 func (c *Client) PricingSampleAt(ctx context.Context, number uint64) (*Sample, error) {
 	tag := blockTag(number)
 	results, err := c.chunk(ctx, []Request{
@@ -429,8 +414,7 @@ func (c *Client) sampleAt(ctx context.Context, tag string) (*Sample, error) {
 	return s, nil
 }
 
-// LegacyParams reads the legacy pricer parameters in one batch at the
-// latest block.
+// LegacyParams reads the legacy pricer parameters in one batch at the latest block.
 func (c *Client) LegacyParams(ctx context.Context) (*LegacyParams, error) {
 	return c.legacyParamsAt(ctx, latestTag)
 }
@@ -473,9 +457,8 @@ func (c *Client) L1Sample(ctx context.Context) (*L1Sample, error) {
 	return c.l1SampleAt(ctx, latestTag)
 }
 
-// L1SampleAt reads the L1 pricer getters and batch-cost parameters at one
-// block. The historical parameter snapshot is used to anchor report-cost
-// reconstruction without making one state call per report.
+// L1SampleAt reads the L1 pricer getters and batch-cost parameters at one block, so report costs can be
+// reconstructed without one state call per report.
 func (c *Client) L1SampleAt(ctx context.Context, number uint64) (*L1Sample, error) {
 	return c.l1SampleAt(ctx, blockTag(number))
 }
@@ -505,8 +488,8 @@ func (c *Client) l1SampleAt(ctx context.Context, tag string) (*L1Sample, error) 
 		return nil, err
 	}
 	datas := make([][]byte, len(results))
-	// The parent floor getter is unavailable before ArbOS 50. Decode every
-	// earlier result first, including the version that controls that gate.
+	// The parent floor getter is unavailable before ArbOS 50, so decode every earlier result first,
+	// including the version that controls that gate.
 	for i, r := range results[:len(results)-1] {
 		if datas[i], err = callBytes(r); err != nil {
 			return nil, fmt.Errorf("%s: %w", calls[i].sig, err)
@@ -552,8 +535,7 @@ func (c *Client) l1SampleAt(ctx context.Context, tag string) (*L1Sample, error) 
 	return l, nil
 }
 
-// FeeAccounts reads the infra, network and L1 reward accounts and their
-// balances (two batches: addresses, then balances).
+// FeeAccounts reads the infra, network and L1 reward accounts and their balances.
 func (c *Client) FeeAccounts(ctx context.Context) (*FeeAccounts, error) {
 	results, err := c.chunk(ctx, []Request{
 		SelectorCall(ArbOwnerPublicAddress, SigGetInfraFeeAccount),
@@ -600,8 +582,7 @@ func (c *Client) FeeAccounts(ctx context.Context) (*FeeAccounts, error) {
 	return &FeeAccounts{Infra: accounts[0], Network: accounts[1], L1Reward: accounts[2]}, nil
 }
 
-// OwnerActsLogs fetches OwnerActs events from the ArbOwner precompile over
-// [from, to].
+// OwnerActsLogs fetches OwnerActs events from the ArbOwner precompile over [from, to].
 func (c *Client) OwnerActsLogs(ctx context.Context, from, to uint64) ([]Log, error) {
 	return c.Logs(ctx, from, to, ArbOwnerAddress, []string{OwnerActsTopic})
 }

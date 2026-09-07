@@ -154,18 +154,11 @@ func TestPacer(t *testing.T) {
 	}
 }
 
-// TestPacerTimeSharedLanes: below one call per second the bulk share is
-// empty, so the two lanes alternate whole tokens instead of the bulk lane
-// running a debt. Both lanes make progress and the bucket never goes
-// negative.
-//
-// The clock is manual: a token arrives only when the test fires it, and the
-// test fires only once both lanes are waiting, which is how real time has
-// them at half a call per second (a lane re-enters within microseconds of
-// leaving, the next token is two seconds away). An instant fake sleep let
-// one goroutine loop through several tokens before the other was scheduled,
-// which made the count ratio a matter of scheduling rather than of the turn
-// rule under test.
+// TestPacerTimeSharedLanes: below one call per second the bulk share is empty, so the two lanes
+// alternate whole tokens instead of the bulk lane running a debt. The clock is manual and fires only
+// once both lanes are waiting, which is how real time has them at half a call per second; an instant
+// fake sleep let one goroutine loop through several tokens first, making the ratio a matter of
+// scheduling rather than of the turn rule under test.
 func TestPacerTimeSharedLanes(t *testing.T) {
 	clock := newManualClock()
 	p := NewPacer(0.5).withClock(clock.Now, clock.Sleep)

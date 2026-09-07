@@ -61,10 +61,8 @@ func run() error {
 	reg := metrics.NewRegistry()
 	collectorMetrics := metrics.NewCollector(reg)
 	monitor := collector.NewMonitor(store, store, collectorMetrics, log)
-	// The metrics server lives exactly as long as the followers do: its own
-	// context is canceled when collector.Run returns, so a process with no
-	// enabled network still exits instead of waiting on a server nobody
-	// asked for.
+	// The metrics server lives exactly as long as the followers do, so a process with no enabled network
+	// still exits instead of waiting on a server nobody asked for.
 	mctx, stopMetrics := context.WithCancel(ctx)
 	defer stopMetrics()
 	var wg sync.WaitGroup
@@ -72,9 +70,8 @@ func run() error {
 	case !cfg.Collector.MetricsEnabled():
 		log.Info("metrics server disabled", "reason", "collector.metrics_port is 0")
 	default:
-		// A bind failure is a process configuration error now that Kubernetes
-		// probes this listener. Dependency failures are handled by readiness
-		// and never make the shallow liveness route fail.
+		// A bind failure is a configuration error now that Kubernetes probes this listener. Dependency
+		// failures are handled by readiness and never fail the shallow liveness route.
 		srv, err := metrics.NewServer(ctx, metrics.Addr(cfg.Collector.MetricsPort), reg, log, monitor.Handler(version.Version))
 		if err != nil {
 			return fmt.Errorf("collector observability: %w", err)

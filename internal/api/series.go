@@ -61,10 +61,8 @@ func (r seriesRange) window(now time.Time) (from, to time.Time) {
 	return now.Add(-r.duration), to
 }
 
-// bounds is the window as the response reports it, in unix seconds: the
-// requested window for a bounded range; for the all range, which has no
-// start of its own, the first indexed point (or the end when there is
-// none), so a chart never draws an axis from 1970.
+// bounds is the window as the response reports it, in unix seconds. The all range has no start of
+// its own, so it reports the first indexed point instead, and a chart never draws an axis from 1970.
 func (r seriesRange) bounds(from, to time.Time, first int64, indexed bool) (start, end int64) {
 	if r.duration == 0 {
 		if !indexed {
@@ -75,10 +73,9 @@ func (r seriesRange) bounds(from, to time.Time, first int64, indexed bool) (star
 	return from.Unix(), to.Unix()
 }
 
-// buildSeries assembles a Series inside one repeatable-read transaction. The
-// bucket rows and the missing ranges that qualify them must describe the same
-// database moment, because the collector rebuilds buckets and removes a
-// completed range in one commit.
+// buildSeries assembles a Series inside one repeatable-read transaction: the bucket rows and the
+// missing ranges that qualify them must describe the same database moment, because the collector
+// rebuilds buckets and removes a completed range in one commit.
 func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRange) (*model.Series, error) {
 	var series *model.Series
 	err := s.store.WithSnapshotTx(ctx, func(store db.Store) error {
@@ -89,7 +86,6 @@ func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRang
 	return series, err
 }
 
-// buildSeriesIn is buildSeries against one store view.
 func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seriesRange, now time.Time) (*model.Series, error) {
 	from, to := rng.window(now)
 	sets, err := store.ConstraintSets(ctx, chainID)
@@ -156,20 +152,16 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 	return out, nil
 }
 
-// missingInterval is the time envelope between the indexed blocks on either
-// side of a durable missing block range. The interval can have zero duration
-// when multiple blocks share a timestamp, but it still makes that bucket
-// partial.
+// missingInterval is the time envelope between the indexed blocks on either side of a durable missing
+// range. It can have zero duration when blocks share a timestamp, but still makes that bucket partial.
 type missingInterval struct {
 	from time.Time
 	to   time.Time
 }
 
-// missingTimeline is the durable gap ledger reduced to time. Bounded ranges
-// can reduce numeric coverage. A range with only a lower or upper bound makes
-// the corresponding suffix or prefix unknown, and a range with no usable
-// bounds makes every point unknown unless a bounded range already proves it
-// partial.
+// missingTimeline is the durable gap ledger reduced to time. A range with only a lower or upper bound
+// makes the corresponding suffix or prefix unknown, and one with no usable bounds makes every point
+// unknown unless a bounded range already proves it partial.
 type missingTimeline struct {
 	bounded       []missingInterval
 	unknownAfter  *time.Time
@@ -208,9 +200,8 @@ func newMissingTimeline(ranges []db.MissingRange) missingTimeline {
 	return out
 }
 
-// remainingMissingBounds chooses the lower time bound for the still-missing
-// suffix. Once Cursor advances, CursorAt describes Cursor-1 and supersedes the
-// original predecessor. A cursor beyond To means the range is already filled.
+// remainingMissingBounds chooses the lower time bound for the still-missing suffix. Once Cursor
+// advances, CursorAt describes Cursor-1 and supersedes the original predecessor.
 func remainingMissingBounds(r db.MissingRange) (lower time.Time, lowerOK bool, upper time.Time, upperOK, active bool) {
 	start := r.From
 	lowerBound := r.PredecessorAt
@@ -244,18 +235,15 @@ func mergeMissingIntervals(intervals []missingInterval) []missingInterval {
 	return merged
 }
 
-// apply qualifies aggregate points that span width. Numeric coverage can be
-// adjusted only when its original boundary span was whole and all overlapping
-// gap envelopes are bounded. Otherwise coverage becomes null rather than
-// combining spans whose overlap is not measurable from the response point
-// alone.
+// apply qualifies aggregate points that span width. Numeric coverage can only be adjusted when the
+// original boundary span was whole and every overlapping gap envelope is bounded; otherwise coverage
+// becomes null rather than combining spans whose overlap is not measurable.
 func (m missingTimeline) apply(points []model.SeriesPoint, width time.Duration) {
 	m.qualify(points, width, true)
 }
 
-// mark qualifies per-block points. A block covers itself, and its rate is the
-// gas of every block sharing its second, so a neighboring gap changes neither
-// value: it only makes the point's completeness partial or unknown.
+// mark qualifies per-block points. A block covers itself and its rate is the gas of every block in
+// its second, so a neighboring gap only changes completeness, never a value.
 func (m missingTimeline) mark(points []model.SeriesPoint, width time.Duration) {
 	m.qualify(points, width, false)
 }
@@ -356,9 +344,8 @@ func setsInForce(sets []db.ConstraintSet, from time.Time) []db.ConstraintSet {
 	return out
 }
 
-// setIDAt returns the set in force at a block among those whose constraint
-// count matches the block's backlogs (its live model); a block is never
-// tagged with a set of another shape. 0 when none.
+// setIDAt returns the set in force at a block among those whose constraint count matches the block's
+// backlogs, so a block is never tagged with a set of another shape. 0 when none.
 func setIDAt(sets []db.ConstraintSet, number uint64, backlogs int) int64 {
 	var id int64
 	for _, cs := range sets {
@@ -369,8 +356,7 @@ func setIDAt(sets []db.ConstraintSet, number uint64, backlogs int) int64 {
 	return id
 }
 
-// setSize is the number of constraints in a set document, -1 when it
-// cannot be read (which matches nothing).
+// setSize is the number of constraints in a set document, -1 when it cannot be read.
 func setSize(cs db.ConstraintSet) int {
 	var entries []json.RawMessage
 	if err := cs.Constraints.Unmarshal(&entries); err != nil {
@@ -379,11 +365,9 @@ func setSize(cs db.ConstraintSet) int {
 	return len(entries)
 }
 
-// bucketPoint renders a bucket. The average comes from the exact sum when
-// the bucket carries one and from the stored average otherwise; the fee
-// split and the exponents are null when the required inputs were not recorded.
-// liveStart is when the collector's live loop started storing this chain,
-// from the live_start checkpoint; the zero time when there is none.
+// bucketPoint renders a bucket. The average comes from the exact sum when the bucket carries one;
+// the fee split and exponents are null when the inputs were not recorded. liveStart is when the
+// collector's live loop started storing this chain, the zero time when there is none.
 func liveStart(ctx context.Context, store db.Store, chainID uint64) (time.Time, error) {
 	raw, ok, err := store.GetState(ctx, chainID, db.StateLiveStart)
 	if err != nil {
@@ -403,21 +387,12 @@ func liveStart(ctx context.Context, store db.Store, chainID uint64) (time.Time, 
 	return time.Unix(v.TS, 0).UTC(), nil
 }
 
-// coveredSpan is the part of a bucket the collector has indexed: what lies
-// before now, and, for the one bucket the live start falls inside, what
-// lies after that start. Rates are taken over that span, so the bucket in
-// progress, or the bucket the collector started in, reads as the rate the
-// chain ran at rather than as a fraction of a full bucket.
-//
-// A bucket that ends at or before the live start has a whole boundary span:
-// it was written by the backfiller or gap filler, which index history the
-// live loop never saw, and trimming it to the live start would report a
-// complete hour as a fraction of a second. Missing-range metadata is applied
-// separately because a whole boundary span does not prove the bucket has no
-// internal block hole.
-//
-// A zero or negative span means the bucket lies entirely at or after now.
-// Such a bucket is not a point and is not returned.
+// coveredSpan is the part of a bucket the collector has indexed: what lies before now, and, for the
+// bucket the live start falls inside, what lies after that start. Rates are taken over that span, so a
+// bucket in progress reads as the rate the chain ran at rather than a fraction of a full bucket. A
+// bucket ending at or before the live start keeps a whole span: it came from the backfiller, and
+// trimming it to the live start would report a complete hour as a fraction of a second. A zero or
+// negative span means the bucket is entirely in the future and is not returned.
 func coveredSpan(start time.Time, width time.Duration, now, liveStart time.Time) time.Duration {
 	covStart, covEnd := start, start.Add(width)
 	if liveStart.After(covStart) && liveStart.Before(covEnd) {
@@ -429,17 +404,14 @@ func coveredSpan(start time.Time, width time.Duration, now, liveStart time.Time)
 	return min(covEnd.Sub(covStart), width)
 }
 
-// coverage renders a positive covered span: the divisor a rate is taken
-// over, and the share of the bucket the span is, which a chart uses to
-// mark the bucket as partial. The divisor is never zero, so a span shorter
-// than a second still counts as one.
+// coverage renders a positive covered span: the divisor a rate is taken over, and the share of the
+// bucket it is. The divisor is never zero, so a span shorter than a second still counts as one.
 func coverage(covered, width time.Duration) (secs uint64, share float64) {
 	return max(uint64(covered/time.Second), 1), float64(covered) / float64(width)
 }
 
-// measuredCoverage pairs a known time share with the aggregate state clients
-// use. A share below one is partial even when every block observed so far is
-// present, because the bucket itself is not finished.
+// measuredCoverage pairs a known time share with the aggregate state clients use. A share below one
+// is partial even when every block so far is present, because the bucket itself is not finished.
 func measuredCoverage(share float64) (coverage *float64, completeness string) {
 	state := model.SeriesComplete
 	if share < 1 {
@@ -448,8 +420,7 @@ func measuredCoverage(share float64) (coverage *float64, completeness string) {
 	return &share, state
 }
 
-// bucketPoint renders a bucket, or reports false for one that lies
-// entirely in the future.
+// bucketPoint renders a bucket, or reports false for one entirely in the future.
 func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) (model.SeriesPoint, bool) {
 	covered := coveredSpan(b.BucketStart, width, now, liveStart)
 	if covered <= 0 {
@@ -479,11 +450,9 @@ func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) (mo
 	}, true
 }
 
-// blockPoints renders one point per block. gasPerSecond is the total gas of
-// all blocks sharing the block's timestamp second; computeGasPerSecond is
-// the receipt-backed pricer input for that second. A block stored before
-// its exponents and floor were recorded (pricing version 0) has no known
-// floor and therefore no known fee split.
+// blockPoints renders one point per block. gasPerSecond is the total gas of all blocks sharing the
+// block's timestamp second; computeGasPerSecond is the receipt-backed pricer input for that second.
+// A block stored before its exponents and floor were recorded has no known fee split.
 func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint {
 	perSecond := map[int64]uint64{}
 	computePerSecond := map[int64]uint64{}
@@ -571,10 +540,8 @@ func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration, n
 
 type acc struct {
 	start int64
-	// last is the newest block second the step carries: a step whose
-	// blocks reach the serving clock, or pass it when the collector's
-	// clock runs ahead, is covered to the end of that second rather than
-	// truncated to nothing.
+	// last is the newest block second the step carries: a step whose blocks reach or pass the serving
+	// clock is covered to the end of that second rather than truncated to nothing.
 	last                int64
 	blocks              int64
 	gas                 uint64
@@ -642,12 +609,9 @@ func (a *acc) add(b db.Block, setID int64) {
 	a.errBips = max(a.errBips, replayError(b))
 }
 
-// point renders the step; the rate covers the part of the step before now
-// (the blocks are the whole coverage, so no live start applies here). A
-// step exists only because a block fell inside it, and the second that
-// block is in is covered whether or not the serving clock has reached it,
-// so a step always has a positive span: the clock only shortens a step
-// whose blocks are older than it.
+// point renders the step; the rate covers the part of the step before now. A step exists only because
+// a block fell inside it, and that block's second is covered whether or not the serving clock has
+// reached it, so a step always has a positive span.
 func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
 	end := time.Unix(a.last+1, 0)
 	if end.Before(now) {
@@ -680,8 +644,7 @@ func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
 		p.ComputeGasPerSecond = uint64ValuePtr((a.gas - a.posterGas) / secs)
 	}
 	if a.unknownPricing {
-		// One block of history without a recorded floor makes the whole
-		// step's floor, split and exponents unknown.
+		// One block of history without a recorded floor makes the whole step's pricing unknown.
 		p.MinBaseFee, p.ConstraintBips = nil, nil
 	}
 	if !a.unknownDestinations {

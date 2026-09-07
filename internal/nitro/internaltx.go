@@ -46,9 +46,8 @@ const (
 	sstoreSetGas               = 20_000
 )
 
-// BatchPostingCostParams is the ArbOS state used when a report executes.
-// These values are not encoded in the internal transaction and must be
-// retained with the decoded report for later recomputation.
+// BatchPostingCostParams is the ArbOS state used when a report executes. These values are not encoded in
+// the internal transaction and must be retained with the decoded report for later recomputation.
 type BatchPostingCostParams struct {
 	ArbOSVersion           uint64 `json:"arbosVersion"`
 	PerBatchGasCharge      int64  `json:"perBatchGasCharge"`
@@ -61,19 +60,15 @@ type BatchPostingCost struct {
 	WeiSpent *big.Int
 }
 
-// MaxAttributedGasSpent is the largest gas figure Cost reports. Attributed
-// gas is persisted in a signed 64-bit column, so a malformed report whose
-// saturating arithmetic runs past it clamps here rather than failing the
-// write and stalling the scan. No report Nitro can produce comes near it.
+// MaxAttributedGasSpent is the largest gas figure Cost reports. Attributed gas is persisted in a signed
+// 64-bit column, so a malformed report whose saturating arithmetic runs past it clamps here rather than
+// failing the write and stalling the scan.
 const MaxAttributedGasSpent uint64 = math.MaxInt64
 
-// Cost reproduces Nitro's ApplyInternalTxUpdate batch-report accounting. V1
-// uses its signed saturating calculation. V2 uses LegacyCostForStats, adds
-// extra gas and a nonnegative per-batch charge, then applies the ArbOS 50+
-// parent calldata floor. Saturating arithmetic preserves Nitro's behavior at
-// its explicit saturation points and prevents malformed uint64 inputs from
-// wrapping in the remaining multiplications; the result is then clamped to
-// MaxAttributedGasSpent.
+// Cost reproduces Nitro's ApplyInternalTxUpdate batch-report accounting. V1 uses its signed saturating
+// calculation; V2 uses LegacyCostForStats, adds extra gas and a nonnegative per-batch charge, then applies
+// the ArbOS 50+ parent calldata floor. Saturating arithmetic preserves Nitro's behavior at its explicit
+// saturation points and stops malformed uint64 inputs wrapping in the remaining multiplications.
 func (r *BatchPostingReport) Cost(p BatchPostingCostParams) (BatchPostingCost, error) {
 	var gas uint64
 	switch r.Version {
@@ -155,13 +150,12 @@ var (
 	selBatchV1    = Selector(SigBatchPostingReportV1)
 )
 
-// IsInternalTx reports whether tx is an ArbOS internal transaction.
 func IsInternalTx(tx Tx) bool {
 	return tx.Type == InternalTxType && strings.EqualFold(tx.To, ArbosAddress)
 }
 
-// DecodeInternalTx decodes startBlock and batchPostingReport calldata. It
-// returns *StartBlock or *BatchPostingReport.
+// DecodeInternalTx decodes startBlock and batchPostingReport calldata into *StartBlock or
+// *BatchPostingReport.
 func DecodeInternalTx(input []byte) (any, error) {
 	if len(input) < 4 {
 		return nil, ErrNotInternal
@@ -259,8 +253,7 @@ func EncodeStartBlock(s StartBlock) []byte {
 	return out
 }
 
-// EncodeBatchPostingReport builds V2 (or V1 when r.Version == 1) calldata,
-// for tests and tooling.
+// EncodeBatchPostingReport builds V2 (or V1 when r.Version == 1) calldata, for tests and tooling.
 func EncodeBatchPostingReport(r BatchPostingReport) []byte {
 	addr, _ := DecodeHex(r.Poster)
 	if r.Version == 1 {
