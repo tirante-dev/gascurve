@@ -154,7 +154,7 @@ Both binaries serve Prometheus metrics at `/metrics` whatever this chart is told
 
 The Ingress does not expose either endpoint: it routes `/api` to the api and everything else to web, so `/metrics` is reachable from inside the cluster only.
 
-Whenever the collector is enabled and `config.collector.metrics_port` is not `0`, the chart renders a headless Service for it (`<release>-collector`, port `metrics`), whether or not the operator objects are on, so a plain `scrape_config` can find it without the Prometheus operator. Setting `metrics_port: 0` takes the collector's server, probes, Service and ServiceMonitor away together. What is opt in is the operator's own objects, which need the `ServiceMonitor` and `PrometheusRule` CRDs:
+Whenever the collector is enabled and `config.collector.metrics_port` is not `0`, the chart renders a headless Service for it (`<release>-collector`, port `metrics`), whether or not the operator objects are on, so a plain `scrape_config` can find it without the Prometheus operator. That Service sets `publishNotReadyAddresses`, so the readiness drop an RPC or database outage causes does not also take the pod out of the scrape: the metrics that explain the outage keep flowing. Setting `metrics_port: 0` takes the collector's server, probes, Service and ServiceMonitor away together. What is opt in is the operator's own objects, which need the `ServiceMonitor` and `PrometheusRule` CRDs:
 
 ```bash
 helm upgrade gascurve … \

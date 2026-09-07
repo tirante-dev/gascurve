@@ -424,6 +424,11 @@ if render "secret-rpc" "${work}/rpc-collector.yaml" --values "${ci}/secret-rpc-v
   has "${work}/rpc-collector.yaml" 'containerPort: 9090' "collector: observability port is not exposed"
   ok "collector has the RPC Secret"
 fi
+if render "secret-rpc" "${work}/rpc-collector-svc.yaml" --values "${ci}/secret-rpc-values.yaml" \
+  --show-only templates/collector-service.yaml; then
+  has "${work}/rpc-collector-svc.yaml" 'publishNotReadyAddresses: true' "collector: a NotReady collector must stay scrapable"
+  ok "collector Service keeps the scrape through a readiness drop"
+fi
 if render "secret-rpc" "${work}/rpc-api.yaml" --values "${ci}/secret-rpc-values.yaml" \
   --show-only templates/api-deployment.yaml; then
   lacks "${work}/rpc-api.yaml" 'NETWORK_ROBINHOOD_RPC_URL' "secret-rpc: the RPC Secret leaked into the api pod (container or migrate init container)"
