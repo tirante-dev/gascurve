@@ -283,8 +283,13 @@ func TestRepairStepPassesOverBlocksRetentionIsAboutToDrop(t *testing.T) {
 	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
 	f := repairFollower(t, rpc, store)
 	// Retention so short that every seeded block is already past the margin
-	// a rebuild needs, so reading their receipts would buy nothing.
+	// a rebuild needs, so reading their receipts would buy nothing. The
+	// backfill has to be finished for retention to be what prune goes by;
+	// while it runs prune holds these rows and they are still repairable.
 	f.cfg.BlockRetention = time.Second
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
 
 	status, err := f.RepairStep(ctx)
 	if err != nil || status != RepairProgressed {
@@ -455,6 +460,10 @@ func TestRepairStepRebuildsTheResolutionsThatAreStillWhole(t *testing.T) {
 	// minute bucket are whole, the hour started well before it.
 	horizon := ts.Truncate(15 * time.Minute)
 	f.cfg.BlockRetention = now.Sub(horizon) + repairPruneSlack
+	// Retention is what prune goes by only once the backfill is finished.
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
 	if got := wholeResolutions(ts, horizon); len(got) != 2 {
 		t.Fatalf("resolutions still whole: %v, want the minute and quarter-hour ones", got)
 	}
@@ -485,6 +494,48 @@ func TestRepairStepRebuildsTheResolutionsThatAreStillWhole(t *testing.T) {
 		if b.PosterGas.Valid {
 			t.Fatalf("an hour whose window is short was rebuilt anyway: %s", b.BucketStart)
 		}
+	}
+}
+
+// prune keeps every row from the boundary hour up while the backfill is
+// unfinished, whatever retention says. Reading the nominal retention window
+// instead of prune's own cutoff would step the cursor past buckets whose
+// rows are all still there, and they would never be repaired.
+func TestRepairStepFollowsPrunesCutoffWhileTheBackfillRuns(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	f := repairFollower(t, rpc, store)
+	// Older than retention, so the nominal window would call every row
+	// stale, but the backfill has not finished and prune is holding them.
+	f.cfg.BlockRetention = time.Minute
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: false, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if status, err := f.RepairStep(ctx); err != nil || status != RepairProgressed {
+		t.Fatalf("repair: %v %v", status, err)
+	}
+	if got := posterGasOf(t, store, 900); !got.Valid {
+		t.Fatal("a row prune is still holding was passed over as stale")
+	}
+
+	// Once the backfill is done prune drops to the retention window and
+	// those rows really are going, so the pass stops spending calls on them.
+	rpc.posterGasCalls = nil
+	store2 := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store2, 900, 905)
+	g := repairFollower(t, rpc, store2)
+	g.cfg.BlockRetention = time.Minute
+	if err := g.saveCursor(ctx, store2, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := g.RepairStep(ctx); err != nil || status != RepairProgressed {
+		t.Fatalf("repair after the backfill: %v %v", status, err)
+	}
+	if len(rpc.posterGasCalls) != 0 {
+		t.Fatalf("read receipts for rows retention is dropping: %v", rpc.posterGasCalls)
 	}
 }
 

@@ -733,21 +733,40 @@ func batchReportOf(chainID uint64, b nitro.Block, resolver *batchCostResolver) (
 
 // prune drops per-block rows and raw samples beyond retention. Rows in the
 // hour of the first live block are kept while the backfill is still
+// pruneCutoff is the timestamp block rows are dropped below. Ordinarily it
+// is the retention window, but while the backfill is unfinished the rows of
+// the boundary hour and everything above it are kept whatever retention says,
+// because the backfill's last segment rebuilds those buckets from them.
+//
+// The poster-gas repair reads it too, so the two cannot drift: the repair
+// decides a bucket is beyond saving when its rows are about to go, and
+// answering that from the nominal retention window while the backfill is
+// still holding those rows would step its cursor past buckets it could have
+// repaired, permanently.
+// pinned is true when the answer is the boundary rather than the retention
+// window: a fixed point that does not walk forward with the clock, which is
+// what tells the repair it needs no slack against prune advancing under it.
+func (f *Follower) pruneCutoff(ctx context.Context, boundary time.Time, hasBoundary bool) (cutoff time.Time, pinned bool, err error) {
+	before := f.now().Add(-f.cfg.BlockRetention)
+	c, err := f.loadCursor(ctx)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if !c.Done && hasBoundary && boundary.Before(before) {
+		return boundary, true, nil
+	}
+	return before, false, nil
+}
+
 // running: its last segment rebuilds those buckets from rows.
 func (f *Follower) prune(ctx context.Context) error {
 	now := f.now()
-	before := now.Add(-f.cfg.BlockRetention)
-	c, err := f.loadCursor(ctx)
+	f.mu.Lock()
+	boundary, hasBoundary := f.boundaryLocked()
+	f.mu.Unlock()
+	before, _, err := f.pruneCutoff(ctx, boundary, hasBoundary)
 	if err != nil {
 		return err
-	}
-	if !c.Done {
-		f.mu.Lock()
-		boundary, ok := f.boundaryLocked()
-		f.mu.Unlock()
-		if ok && boundary.Before(before) {
-			before = boundary
-		}
 	}
 	var n, m int64
 	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {

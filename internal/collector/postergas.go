@@ -14,12 +14,15 @@
 // recomputes poster gas, the compute-gas rate and the floor, surplus and
 // poster fee columns from the rows underneath it.
 //
-// It is bounded on both ends. Below, it starts at the first live block,
-// because only buckets from there on are rebuilt from rows; the ones under
-// that belong to the backfill, which owns them additively and rebuilds them
-// through history_epoch instead. Above, it stops where block retention is
-// about to remove the rows a rebuild would read, since repairing a block whose
-// bucket can no longer be rebuilt would spend a call for nothing.
+// It is bounded on both ends, and both bounds are read off the bucket a row
+// falls in rather than off the row, because the bucket is what gets rebuilt.
+// Below, buckets starting before the live-start boundary belong to the
+// backfill, which owns them additively and rebuilds them through
+// history_epoch instead. Above, it stops where prune is about to remove the
+// rows a rebuild would read, since repairing a block whose bucket can no
+// longer be rebuilt would spend a call for nothing. That upper bound is
+// prune's own cutoff and not the nominal retention window, because the two
+// differ while the backfill is unfinished.
 
 package collector
 
@@ -215,14 +218,29 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 	// timestamp, the same split commitFill makes, so the rows of the
 	// boundary hour that sit below the first live block stay in scope.
 	//
-	// Past the retention horizon a window is losing the rows a rebuild would
-	// read, and that falls per resolution rather than all at once: a
-	// horizon inside an hour leaves that hour's bucket short while the
-	// minute and quarter-hour buckets after it are whole. Taking the hour
-	// as the answer for all three would step the cursor past those rows and
-	// leave the finer buckets blank for good, so a row is read when any
-	// resolution can still use it and only those resolutions are rebuilt.
-	horizon := f.now().Add(-f.cfg.BlockRetention).Add(repairPruneSlack)
+	// Past the horizon a window is losing the rows a rebuild would read, and
+	// that falls per resolution rather than all at once: a horizon inside an
+	// hour leaves that hour's bucket short while the minute and quarter-hour
+	// buckets after it are whole. Taking the hour as the answer for all
+	// three would step the cursor past those rows and leave the finer
+	// buckets blank for good, so a row is read when any resolution can still
+	// use it and only those resolutions are rebuilt.
+	//
+	// The horizon is prune's own cutoff, not the nominal retention window.
+	// While the backfill is unfinished prune keeps every row from the
+	// boundary hour up, however old, and reading retention literally would
+	// abandon buckets whose rows are all still there.
+	cutoff, pinned, err := f.pruneCutoff(ctx, boundary, true)
+	if err != nil {
+		return RepairIdle, err
+	}
+	// The slack is for a cutoff that walks forward with the clock while the
+	// step reads. A cutoff pinned to the boundary does not move at all, so
+	// it takes none: adding any there would abandon the rows just above it.
+	horizon := cutoff
+	if !pinned {
+		horizon = cutoff.Add(repairPruneSlack)
+	}
 	targets := make([]nitro.ReceiptTarget, 0, len(rows))
 	repairable := make([]db.Block, 0, len(rows))
 	byResolution := make(map[string][]db.Block, len(db.ResolutionOrder))
