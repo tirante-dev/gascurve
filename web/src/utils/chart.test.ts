@@ -171,12 +171,12 @@ describe("colours and ramps", () => {
 
 describe("labels", () => {
   it("describes constraints and sets", () => {
-    expect(constraintLabel({ target: 60_000_000, window: 15 })).toBe("60M gas/s over 15 s");
-    expect(shortConstraintLabel({ target: 40_000_000, window: 86_400 })).toBe("40M/s · 24 h");
+    expect(constraintLabel({ target: 60_000_000, window: 15 })).toBe("60 Mgas/s over 15 s");
+    expect(shortConstraintLabel({ target: 40_000_000, window: 86_400 })).toBe("40 Mgas/s · 24 h");
     expect(setLabel({ id: 6, effectiveBlock: 53_578_754 })).toBe("set 6 (from block 53,578,754)");
   });
   it("labels backlog slots with every definition the slot had, oldest first", () => {
-    expect(slotLabel(series, 1, "constraints")).toBe("C2 · 30M/s · 24 h (set 5) then 40M/s · 24 h (set 6)");
+    expect(slotLabel(series, 1, "constraints")).toBe("C2 · 30 Mgas/s · 24 h (set 5) then 40 Mgas/s · 24 h (set 6)");
     expect(slotLabel(series, 4, "constraints")).toBe("C5 · definition unknown");
     expect(slotLabel({ constraintSets: [], points: [point({ backlogs: [1] })] }, 0, "legacy")).toBe("legacy backlog");
     // No sets and a constraints (or unknown) model: the panel is unlabelled, never called legacy.
@@ -191,8 +191,8 @@ describe("segments", () => {
     const segments = segmentsFor(series, "constraints");
     expect(segments.map((s) => s.key)).toEqual(["c5_0", "c5_1", "c6_0", "c6_1"]);
     expect(segments.map((s) => s.backlogKey)).toEqual(["b5_0", "b5_1", "b6_0", "b6_1"]);
-    expect(segments[1].label).toBe("C2 · 30M/s · 24 h · set 5 (from block 10)");
-    expect(segments[3].label).toBe("C2 · 40M/s · 24 h · set 6 (from block 20)");
+    expect(segments[1].label).toBe("C2 · 30 Mgas/s · 24 h · set 5 (from block 10)");
+    expect(segments[3].label).toBe("C2 · 40 Mgas/s · 24 h · set 6 (from block 20)");
     expect(segments[3].color).toBe(seriesColor(1));
     expect(segments[3].constraint?.target).toBe(40_000_000);
     expect(contributionKey(6, 1)).toBe("c6_1");

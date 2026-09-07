@@ -79,6 +79,25 @@ describe("palette", () => {
     }
   });
 
+  it("gives the wordmark a line box that holds the g's descender", () => {
+    // Gradient text is painted through the text's own box, so a tight line
+    // box cuts the descender off. The box has to be an inline-block with room
+    // below the baseline, and nothing above it may clip.
+    const at = css.indexOf("@utility vw-wordmark {");
+    expect(at).toBeGreaterThanOrEqual(0);
+    const rule = css.slice(at, css.indexOf("\n}", at));
+    expect(rule).toContain("display: inline-block;");
+    expect(rule).toContain("padding-bottom:");
+    expect(rule).not.toContain("overflow: hidden");
+    const lineHeight = /line-height:\s*([\d.]+)/.exec(rule);
+    expect(lineHeight).not.toBeNull();
+    expect(Number(lineHeight?.[1])).toBeGreaterThanOrEqual(1.2);
+    // A utility class on the mark itself must not put the tight line box back.
+    const header = readFileSync(path.join(components, "PageHeader.tsx"), "utf8");
+    expect(header).toContain("vw-wordmark");
+    expect(/vw-wordmark[^"]*leading-none/.test(header)).toBe(false);
+  });
+
   it("never sets text in the graphical cyan", () => {
     const sources = readFileSync(path.join(components, "DataFooter.tsx"), "utf8") + readFileSync(path.join(components, "ThemeToggle.tsx"), "utf8");
     expect(sources).toContain("accent-2-text");

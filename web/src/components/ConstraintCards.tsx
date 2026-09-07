@@ -6,9 +6,9 @@ import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
 import { AVERAGE_WINDOW_S, isShortWindow, SAWTOOTH_WINDOW_S, sawtoothChart, sawtoothSamples, SHORT_WINDOW_S, targetValues, type LiveValues, type SawtoothSample } from "@/lib/smoothing";
 import type { BlockPoint, Constraint, LegacyParams, LiveSnapshot } from "@/types";
 import { constraintGauge, contributionRampStep, legacyGauge, seriesColor } from "@/utils/chart";
-import { FIXED_WIDTH_CH, formatDuration, formatGas, formatGasFixed, formatInteger, formatPercent, formatSecondsOfTarget } from "@/utils/format";
+import { FIXED_WIDTH_CH, formatDrainEquivalence, formatDuration, formatGas, formatGasPerSecond, formatInteger, formatPercent, gasParts, gasPerSecondParts, unbroken } from "@/utils/format";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
-import { RESYNC_COPY, WAITING_COPY } from "./LiveStrip";
+import { RESYNC_COPY, WAITING_COPY } from "./LiveHero";
 import { Card, ChartFrame, Figure, Label, Swatch } from "./primitives";
 
 /** A meter whose fill carries magnitude on the sequential ramp; the track is an inset of the surface. */
@@ -24,10 +24,16 @@ export function Gauge({ fraction, step, label, marks = [] }: { fraction: number;
   );
 }
 
-/** "drains 60M/s at each second": what the dashed line on the chart is. */
+/** What a backlog figure is, in one line, wherever one is shown. */
+export const BACKLOG_TITLE = "gas above the target rate that has not yet drained";
+
+/** "drains 60 Mgas/s at each second": what the dashed line on the chart is. */
 export function drainLabel(target: number): string {
-  return `drains ${formatGas(target)}/s at each second`;
+  return `drains ${formatGasPerSecond(target)} at each second`;
 }
+
+/** Gas ticks carry their unit ("30 Mgas"), so the axis reserves the width for one. */
+const GAS_AXIS_WIDTH = 62;
 
 /** Y ticks of the backlog chart: zero, the midpoint and the top, so the scale reads in gas without crowding a card. */
 export function backlogTicks(max: number): number[] {
@@ -47,9 +53,9 @@ export function secondsAgoLabel(x: number): string {
 export function sawtoothTooltipRows(color: string): TooltipRow[] {
   return [
     { label: "block", value: (r) => formatInteger(Number(r.number)) },
-    { label: "gas used", value: (r) => `${formatGas(Number(r.gasUsed))} gas` },
-    { label: "backlog", color, value: (r) => `${formatGas(Number(r.backlog))} gas` },
-    { label: `${AVERAGE_WINDOW_S} s average`, color: AVERAGE_COLOR, value: (r) => `${formatGas(Number(r.average))} gas` },
+    { label: "gas used", value: (r) => formatGas(Number(r.gasUsed)) },
+    { label: "backlog", color, value: (r) => formatGas(Number(r.backlog)) },
+    { label: `${AVERAGE_WINDOW_S} s average`, color: AVERAGE_COLOR, value: (r) => formatGas(Number(r.average)) },
   ];
 }
 
@@ -76,7 +82,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index }
     <ChartFrame
       height={SAWTOOTH_HEIGHT}
       minWidth={260}
-      label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(max)} gas, with the ${AVERAGE_WINDOW_S} s average and a dashed threshold at ${formatGas(target)} gas: it ${drainLabel(target)} boundary`}
+      label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(max)}, with the ${AVERAGE_WINDOW_S} s average and a dashed threshold at ${formatGas(target)}: it ${drainLabel(target)} boundary`}
     >
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data} margin={{ top: 8, right: 8, bottom: 2, left: 0 }}>
@@ -91,7 +97,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index }
             axisLine={false}
             height={18}
           />
-          <YAxis domain={[0, max]} ticks={backlogTicks(max)} tickFormatter={(v: number) => formatGas(v)} tickLine={false} axisLine={false} width={44} />
+          <YAxis domain={[0, max]} ticks={backlogTicks(max)} tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
           {/* One second of target: the gas the constraint sheds at every second boundary. */}
           <ReferenceLine y={target} stroke={THRESHOLD_COLOR} strokeDasharray="4 3" strokeWidth={1} label={{ value: drainLabel(target), position: "insideTopRight" }} />
           <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={secondsAgoLabel} rows={sawtoothTooltipRows(color)} />} />
@@ -130,19 +136,21 @@ function ConstraintCard({ c, index, backlog, bips, share, samples }: { c: Constr
         <div>
           <Label>Target</Label>
           <dd className="num mt-0.5 text-ink">
-            {formatGas(c.target)} <span className="text-xs text-ink-2">gas/s</span>
+            {gasPerSecondParts(c.target).value} <span className="text-xs text-ink-2">{gasPerSecondParts(c.target).unit}</span>
           </dd>
         </div>
         <div>
           <Label>Window</Label>
           <dd className="num mt-0.5 text-ink">{formatDuration(c.window)}</dd>
         </div>
-        <div>
+        <div title={BACKLOG_TITLE}>
           <Label>{short ? `Backlog (avg ${AVERAGE_WINDOW_S} s)` : "Backlog"}</Label>
           <dd className="num mt-0.5 text-ink">
-            <Figure ch={FIXED_WIDTH_CH.gas}>{formatGasFixed(backlog)}</Figure>
+            <Figure ch={FIXED_WIDTH_CH.gas}>{gasParts(backlog, true).value}</Figure>{" "}
+            <span className="text-xs text-ink-2">{gasParts(backlog, true).unit}</span>
           </dd>
-          <dd className="num text-xs text-ink-3">{formatSecondsOfTarget(backlog, c.target)} of target</dd>
+          {/* What the figure means: how long the chain must run at exactly the target to drain it. */}
+          <dd className="num text-xs text-ink-3">{formatDrainEquivalence(backlog, c.target)}</dd>
         </div>
         <div>
           <Label>x{index + 1}</Label>
@@ -163,7 +171,7 @@ function ConstraintCard({ c, index, backlog, bips, share, samples }: { c: Constr
         <div className="num mt-1 flex justify-between text-[11px] text-ink-3">
           <span>0</span>
           <span>
-            {formatInteger(scale)} × {formatGas(denominator)} gas
+            {formatInteger(scale)} × {formatGas(denominator)}
           </span>
         </div>
       </div>
@@ -184,7 +192,7 @@ function LegacyCard({ legacy, backlog, bips }: { legacy: LegacyParams; backlog: 
         <div>
           <Label>Speed limit</Label>
           <dd className="num mt-0.5 text-ink">
-            {formatGas(legacy.speedLimit)} <span className="text-xs text-ink-2">gas/s</span>
+            {gasPerSecondParts(legacy.speedLimit).value} <span className="text-xs text-ink-2">{gasPerSecondParts(legacy.speedLimit).unit}</span>
           </dd>
         </div>
         <div>
@@ -194,14 +202,16 @@ function LegacyCard({ legacy, backlog, bips }: { legacy: LegacyParams; backlog: 
         <div>
           <Label>Tolerance</Label>
           <dd className="num mt-0.5 text-ink">{legacy.tolerance}</dd>
-          <dd className="num text-xs text-ink-3">{gauge.free > 0 ? `${formatGas(gauge.free)} gas free` : "no free gas: every unit prices"}</dd>
+          <dd className="num text-xs text-ink-3">{gauge.free > 0 ? `${formatGas(gauge.free)} free` : "no free gas: every unit prices"}</dd>
         </div>
-        <div>
+        <div title={BACKLOG_TITLE}>
           <Label>Backlog</Label>
           <dd className="num mt-0.5 text-ink">
-            <Figure ch={FIXED_WIDTH_CH.gas}>{formatGasFixed(backlog)}</Figure>
+            <Figure ch={FIXED_WIDTH_CH.gas}>{gasParts(backlog, true).value}</Figure>{" "}
+            <span className="text-xs text-ink-2">{gasParts(backlog, true).unit}</span>
           </dd>
-          <dd className="num text-xs text-ink-3">{formatSecondsOfTarget(backlog, legacy.speedLimit)} of speed limit · x = {x.toFixed(4)}</dd>
+          {/* The legacy pricer drains at the speed limit, so that is the rate the equivalence quotes. */}
+          <dd className="num text-xs text-ink-3">{formatDrainEquivalence(backlog, legacy.speedLimit)} · x = {x.toFixed(4)}</dd>
         </div>
       </dl>
       <div className="mt-4">

@@ -68,7 +68,7 @@ vi.mock("@/lib/api/series", async (importOriginal) => {
 
 import { appendBlocks, applyReorg, feedMatches, isNewerSnapshot, useLive } from "./useLive";
 import { useApi } from "./useApi";
-import { refetchIntervalFor, useSeries } from "./useSeries";
+import { fetchSharedSeries, refetchIntervalFor, resetSharedSeries, seriesKey, useSeries } from "./useSeries";
 import { DEFAULT_NETWORK, isValidNetworkName, NETWORK_STORAGE_KEY, readStoredNetwork, storeNetwork, useNetwork } from "./useNetwork";
 import { useDocumentVisible } from "./useDocumentVisible";
 
@@ -496,6 +496,7 @@ describe("useApi and useSeries", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     getSeriesMock.mockReset();
+    resetSharedSeries();
     setHidden(false);
   });
   afterEach(() => {
@@ -513,7 +514,7 @@ describe("useApi and useSeries", () => {
     expect(result.current.data?.range).toBe("1h");
     expect(result.current.loading).toBe(false);
     expect(result.current.updatedAt).not.toBeNull();
-    expect(getSeriesMock).toHaveBeenCalledWith("robinhood", "1h", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(getSeriesMock).toHaveBeenCalledWith("robinhood", "1h");
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
@@ -539,6 +540,58 @@ describe("useApi and useSeries", () => {
     act(() => result.current.refresh());
     await flush();
     expect(result.current.error).toBe("string failure");
+  });
+
+  it("shares one request per network and range, and holds nothing once it settles", async () => {
+    const resolvers: ((value: Series) => void)[] = [];
+    const answer: Series = { range: "24h", resolution: "1m", constraintSets: [], ownerActions: [], points: [] };
+    getSeriesMock.mockImplementation(() => new Promise<Series>((resolve) => resolvers.push(resolve)));
+    expect(seriesKey("robinhood", "24h")).toBe("robinhood:24h");
+    // Two views on the same range wait on one request.
+    const first = fetchSharedSeries("robinhood", "24h");
+    expect(fetchSharedSeries("robinhood", "24h")).toBe(first);
+    expect(getSeriesMock).toHaveBeenCalledTimes(1);
+    // A different range, or a different network, is a different request.
+    fetchSharedSeries("robinhood", "1h");
+    fetchSharedSeries("arbitrum-one", "24h");
+    expect(getSeriesMock).toHaveBeenCalledTimes(3);
+    resolvers.forEach((resolve) => resolve(answer));
+    await expect(first).resolves.toBe(answer);
+    // Nothing is kept: the next ask is a fresh request, so the refetch
+    // interval is still what decides when data is refreshed.
+    fetchSharedSeries("robinhood", "24h");
+    expect(getSeriesMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not hold on to a request that failed", async () => {
+    const answer: Series = { range: "30d", resolution: "1h", constraintSets: [], ownerActions: [], points: [] };
+    getSeriesMock.mockRejectedValueOnce(new Error("boom"));
+    await expect(fetchSharedSeries("robinhood", "30d")).rejects.toThrow("boom");
+    getSeriesMock.mockResolvedValueOnce(answer);
+    await expect(fetchSharedSeries("robinhood", "30d")).resolves.toBe(answer);
+  });
+
+  it("makes one request when the hero and the history section land on the same range", async () => {
+    getSeriesMock.mockResolvedValue({ range: "24h", resolution: "1m", constraintSets: [], ownerActions: [], points: [] });
+    renderHook(() => {
+      useSeries("robinhood", "24h");
+      useSeries("robinhood", "24h");
+      useSeries("robinhood", "1h");
+    });
+    await flush();
+    expect(getSeriesMock).toHaveBeenCalledTimes(2);
+    expect(getSeriesMock.mock.calls.map((c) => c[1]).sort()).toEqual(["1h", "24h"]);
+  });
+
+  it("asks for nothing at all without a range, which is how the hero says it is live", async () => {
+    getSeriesMock.mockResolvedValue({ range: "24h", resolution: "1m", constraintSets: [], ownerActions: [], points: [] });
+    const { result, rerender } = renderHook(({ range }) => useSeries("robinhood", range), { initialProps: { range: null as Series["range"] | null } });
+    expect(getSeriesMock).not.toHaveBeenCalled();
+    expect(result.current.data).toBeNull();
+    expect(result.current.loading).toBe(false);
+    rerender({ range: "24h" });
+    await flush();
+    expect(getSeriesMock).toHaveBeenCalledTimes(1);
   });
 
   it("does nothing without a network and pauses the interval while hidden", async () => {

@@ -1,7 +1,7 @@
 "use client";
 
 import type { LiveSnapshot } from "@/types";
-import { formatDuration, formatGas, formatGwei } from "@/utils/format";
+import { formatDuration, formatGas, formatGasPerSecond, formatGwei } from "@/utils/format";
 import { Prose } from "./primitives";
 
 /** The mechanics in plain words, with the live parameters filled in where they matter. */
@@ -31,15 +31,15 @@ export function Explainer({ snapshot }: { snapshot: LiveSnapshot | null }) {
         <>
           <h3>The {formatDuration(longest.window)} window is a ratchet</h3>
           <p>
-            The {formatGas(longest.target)} gas/s constraint has a capacity of {formatGas(longCapacity)} gas per unit of x. Whenever demand averages above {formatGas(longest.target)} gas/s
+            The {formatGasPerSecond(longest.target)} constraint has a capacity of {formatGas(longCapacity)} per unit of x. Whenever demand averages above {formatGasPerSecond(longest.target)}
             the backlog grows all day long, and it takes a full day below target to shed one day of excess. That is why the fee can sit at the floor for weeks and then climb for eleven days
             straight: the average, not the peak, is what moves it.
           </p>
 
           <h3>The {formatDuration(shortest.window)} window is the spike engine</h3>
           <p>
-            The {formatGas(shortest.target)} gas/s constraint reaches x = 1 after only {formatGas(shortCapacity)} gas of backlog. A burst of a few blocks fills it, and it drains at{" "}
-            {formatGas(shortest.target)} gas/s, so it is usually back to zero within seconds of demand dropping. It produces the short spikes on top of the slow curve.
+            The {formatGasPerSecond(shortest.target)} constraint reaches x = 1 after only {formatGas(shortCapacity)} of backlog. A burst of a few blocks fills it, and it drains at{" "}
+            {formatGasPerSecond(shortest.target)}, so it is usually back to zero within seconds of demand dropping. It produces the short spikes on top of the slow curve.
           </p>
         </>
       ) : (

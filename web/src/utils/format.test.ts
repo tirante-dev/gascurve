@@ -13,6 +13,7 @@ import {
   formatEthFixed,
   formatGas,
   formatGasFixed,
+  formatGasPerSecond,
   formatGasPerSecondFixed,
   formatGwei,
   formatGweiFixed,
@@ -20,7 +21,8 @@ import {
   FIXED_WIDTH_CH,
   formatInteger,
   formatPercent,
-  formatSecondsOfTarget,
+  formatDrainEquivalence,
+  formatDrainTime,
   formatSignificant,
   formatTick,
   formatTime,
@@ -28,13 +30,17 @@ import {
   formatUtcOffset,
   formatZone,
   formatX,
+  gasParts,
+  gasPerSecondParts,
   roundDecimal,
   secondsOfTarget,
   shortAddress,
   shortHash,
   toBigInt,
   weiToEthNumber,
+  unbroken,
   weiToGweiNumber,
+  withUnit,
 } from "./format";
 
 describe("toBigInt", () => {
@@ -69,16 +75,34 @@ describe("formatSignificant", () => {
 });
 
 describe("formatGas", () => {
-  it("uses separators below a million and suffixes above", () => {
-    expect(formatGas(402113)).toBe("402,113");
-    expect(formatGas(60_000_000)).toBe("60M");
-    expect(formatGas(3_111_506)).toBe("3.11M");
-    expect(formatGas(2_970_000_000)).toBe("2.97G");
-    expect(formatGas(11_194_391_810_886)).toBe("11.2T");
-    expect(formatGas(123_456_789)).toBe("123M");
-    expect(formatGas(-1500)).toBe("-1,500");
+  it("carries the SI prefix on the unit and never on the number", () => {
+    expect(formatGas(402113)).toBe("402,113 gas");
+    expect(formatGas(60_000_000)).toBe("60 Mgas");
+    expect(formatGas(3_111_506)).toBe("3.11 Mgas");
+    expect(formatGas(2_970_000_000)).toBe("2.97 Ggas");
+    expect(formatGas(11_194_391_810_886)).toBe("11.2 Tgas");
+    expect(formatGas(123_456_789)).toBe("123 Mgas");
+    expect(formatGas(-1500)).toBe("-1,500 gas");
     expect(formatGas(Number.POSITIVE_INFINITY)).toBe("n/a");
-    expect(formatGas(0)).toBe("0");
+    expect(formatGas(0)).toBe("0 gas");
+  });
+  it("splits a figure from its unit so a tile can set the two apart", () => {
+    expect(gasParts(11_194_391_810_886)).toEqual({ value: "11.2", unit: "Tgas" });
+    expect(gasParts(60_000_000, true)).toEqual({ value: "60.0", unit: "Mgas" });
+    expect(gasParts(812_345)).toEqual({ value: "812,345", unit: "gas" });
+    expect(gasParts(Number.NaN)).toEqual({ value: "n/a", unit: "" });
+    expect(withUnit({ value: "n/a", unit: "" })).toBe("n/a");
+    // A chart axis tick wraps on ordinary spaces, so its figure and unit are
+    // held together by a non-breaking one.
+    expect(unbroken(formatGas(60_000_000))).toBe("60\u00a0Mgas");
+    expect(unbroken("402,113 gas")).toBe("402,113\u00a0gas");
+  });
+  it("puts the rate on the unit too, so no letter is ever stranded beside a number", () => {
+    expect(formatGasPerSecond(60_000_000)).toBe("60 Mgas/s");
+    expect(formatGasPerSecond(1_300_000_000)).toBe("1.3 Ggas/s");
+    expect(formatGasPerSecond(812_345)).toBe("812,345 gas/s");
+    expect(formatGasPerSecond(Number.NaN)).toBe("n/a");
+    expect(gasPerSecondParts(40_000_000, true)).toEqual({ value: "40.0", unit: "Mgas/s" });
   });
 });
 
@@ -103,7 +127,31 @@ describe("formatDuration and seconds of target", () => {
   it("converts backlog to seconds of target", () => {
     expect(secondsOfTarget(3_111_506, 60_000_000)).toBeCloseTo(0.0519, 3);
     expect(secondsOfTarget(100, 0)).toBe(0);
-    expect(formatSecondsOfTarget(11_194_391_810_886, 40_000_000)).toBe("77.7 h");
+  });
+  it("puts a drain time in the band its magnitude asks for, with a fixed decimal count per band", () => {
+    expect(formatDrainTime(0.35)).toBe("0.35 s");
+    expect(formatDrainTime(0)).toBe("0.00 s");
+    expect(formatDrainTime(0.999)).toBe("1.00 s");
+    expect(formatDrainTime(12.34)).toBe("12.3 s");
+    expect(formatDrainTime(59.9)).toBe("59.9 s");
+    expect(formatDrainTime(270)).toBe("4.5 min");
+    expect(formatDrainTime(3599)).toBe("60.0 min");
+    // Hours never roll over into days: a backlog is read against a working span.
+    expect(formatDrainTime(3600 * 77.75)).toBe("77.8 h");
+    expect(formatDrainTime(86_400 * 5.2)).toBe("124.8 h");
+    expect(formatDrainTime(-5)).toBe("0.00 s");
+    expect(formatDrainTime(Number.NaN)).toBe("n/a");
+  });
+  it("says what a backlog means as time at the target rate", () => {
+    // The long window: 11.2 Tgas is more than three days of running at 40 Mgas/s.
+    expect(formatDrainEquivalence(11_200_000_000_000, 40_000_000)).toBe("= 77.8 h at 40 Mgas/s");
+    // The short one: a fraction of a second, which is why it drains between blocks.
+    expect(formatDrainEquivalence(21_000_000, 60_000_000)).toBe("= 0.35 s at 60 Mgas/s");
+    expect(formatDrainEquivalence(0, 60_000_000)).toBe("= 0.00 s at 60 Mgas/s");
+    // Without a rate there is nothing to drain at and nothing to say.
+    expect(formatDrainEquivalence(21_000_000, 0)).toBe("n/a");
+    expect(formatDrainEquivalence(Number.NaN, 60_000_000)).toBe("n/a");
+    expect(formatDrainEquivalence(21_000_000, Number.POSITIVE_INFINITY)).toBe("n/a");
   });
 });
 
@@ -252,7 +300,7 @@ describe("fixed-width formatters", () => {
     expect(formatGweiFixed(9.9995)).toHaveLength(5);
     expect(formatGweiFixed(9.99949)).toBe("9.999");
     expect(formatMultiplierFixed(1.005)).toBe("1.01");
-    expect(formatGasPerSecondFixed(9_950_000)).toBe("10.0");
+    expect(gasPerSecondParts(9_950_000, true).value).toBe("9.95");
   });
 
   it("rounds decimal strings as scaled integers, in and out of exponent notation", () => {
@@ -297,12 +345,15 @@ describe("fixed-width formatters", () => {
     for (let m = 10; m < 100; m += 0.7) expect(formatMultiplierFixed(m)).toHaveLength(5);
   });
 
-  it("formats gas per second in millions with one decimal", () => {
-    expect(formatGasPerSecondFixed(44_100_000)).toBe("44.1");
-    expect(formatGasPerSecondFixed(960_000)).toBe("1.0");
-    expect(formatGasPerSecondFixed(0)).toBe("0.0");
-    expect(formatGasPerSecondFixed(123_456_789)).toBe("123.5");
-    for (let g = 10e6; g < 100e6; g += 3.3e6) expect(formatGasPerSecondFixed(g)).toHaveLength(4);
+  it("formats a gas rate at one character count per band, with the unit beside it", () => {
+    expect(formatGasPerSecondFixed(44_100_000)).toBe("44.1 Mgas/s");
+    expect(formatGasPerSecondFixed(960_000)).toBe("960,000 gas/s");
+    expect(formatGasPerSecondFixed(0)).toBe("0 gas/s");
+    expect(formatGasPerSecondFixed(123_456_789)).toBe("123 Mgas/s");
+    // The figure the animated tile reserves room for keeps its width across
+    // the whole band, so a moving rate never shifts what sits beside it.
+    for (let g = 10e6; g < 100e6; g += 3.3e6) expect(gasPerSecondParts(g, true).value).toHaveLength(4);
+    for (let g = 1e6; g < 10e6; g += 0.3e6) expect(gasPerSecondParts(g, true).value).toHaveLength(4);
   });
 
   it("formats ETH with a fixed decimal count per decade", () => {
@@ -318,19 +369,19 @@ describe("fixed-width formatters", () => {
   });
 
   it("formats gas without stripping zeros and re-bands at the edges", () => {
-    expect(formatGasFixed(60_000_000)).toBe("60.0M");
-    expect(formatGasFixed(3_111_506)).toBe("3.11M");
-    expect(formatGasFixed(9_996_000)).toBe("10.0M");
-    expect(formatGasFixed(99_960_000)).toBe("100M");
-    expect(formatGasFixed(999_600_000)).toBe("1.00G");
-    expect(formatGasFixed(11_194_391_810_886)).toBe("11.2T");
-    expect(formatGasFixed(1_500_000_000_000_000)).toBe("1500T");
-    expect(formatGasFixed(402_113)).toBe("402,113");
-    expect(formatGasFixed(-2_500_000)).toBe("-2.50M");
+    expect(formatGasFixed(60_000_000)).toBe("60.0 Mgas");
+    expect(formatGasFixed(3_111_506)).toBe("3.11 Mgas");
+    expect(formatGasFixed(9_996_000)).toBe("10.0 Mgas");
+    expect(formatGasFixed(99_960_000)).toBe("100 Mgas");
+    expect(formatGasFixed(999_600_000)).toBe("1.00 Ggas");
+    expect(formatGasFixed(11_194_391_810_886)).toBe("11.2 Tgas");
+    expect(formatGasFixed(1_500_000_000_000_000)).toBe("1500 Tgas");
+    expect(formatGasFixed(402_113)).toBe("402,113 gas");
+    expect(formatGasFixed(-2_500_000)).toBe("-2.50 Mgas");
     expect(formatGasFixed(Number.NaN)).toBe("n/a");
-    expect(formatGas(999_600_000)).toBe("1G");
-    expect(formatGas(9_996_000)).toBe("10M");
-    for (let g = 10e6; g < 100e6; g += 2.1e6) expect(formatGasFixed(g)).toHaveLength(5);
+    expect(formatGas(999_600_000)).toBe("1 Ggas");
+    expect(formatGas(9_996_000)).toBe("10 Mgas");
+    for (let g = 10e6; g < 100e6; g += 2.1e6) expect(gasParts(g, true).value).toHaveLength(4);
   });
   it("formats dollars at two decimals below a hundred and one above, so a band keeps its width", () => {
     expect(formatUsdFixed(0.0352)).toBe("0.04");

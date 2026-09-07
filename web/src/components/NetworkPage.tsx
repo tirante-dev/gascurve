@@ -16,7 +16,7 @@ import { DataFooter } from "./DataFooter";
 import { FeeFlows } from "./FeeFlows";
 import { HistoryTabs } from "./HistoryTabs";
 import { L1Section } from "./L1Section";
-import { LiveStrip } from "./LiveStrip";
+import { LiveHero } from "./LiveHero";
 import { NetworkSwitcher } from "./NetworkSwitcher";
 import { OwnerActionTimeline } from "./OwnerActionTimeline";
 import { HowItWorksLink, PageHeader } from "./PageHeader";
@@ -92,7 +92,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         <div className="relative isolate">
           <div className="vw-horizon" aria-hidden="true" />
           <Section id="live" title="Live">
-            <LiveStrip live={smooth} status={live.status} />
+            <LiveHero network={name} live={smooth} status={live.status} model={model} />
           </Section>
         </div>
 

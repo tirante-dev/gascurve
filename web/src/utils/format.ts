@@ -71,45 +71,86 @@ const GAS_UNITS: [number, string][] = [
 ];
 
 /**
- * A gas amount scaled to its unit with the decimals of its band (two below
- * 10, one below 100, none above), before any zero stripping. Rounding that
- * carries the value into the next band or unit ("999.6M", "9.996M") is
- * re-banded so the result always has the band's character count.
+ * A gas amount scaled into its band, with the decimals that band prescribes
+ * (two below 10, one below 100, none above) before any zero stripping, and the
+ * SI prefix of the band it landed in. Rounding that carries the value into the
+ * next band or prefix ("999.6M", "9.996M") is re-banded, so the result always
+ * has the band's character count.
  */
-function gasParts(abs: number): { text: string; suffix: string } {
-  if (abs < 1_000_000) return { text: withThousands(Math.round(abs).toString()), suffix: "" };
-  for (const [scale, suffix] of GAS_UNITS) {
+function scaleGas(abs: number): { text: string; prefix: string } {
+  if (abs < 1_000_000) return { text: withThousands(Math.round(abs).toString()), prefix: "" };
+  for (const [scale, prefix] of GAS_UNITS) {
     if (abs < scale) continue;
     const scaled = abs / scale;
     const text = scaled.toFixed(gasDecimals(scaled));
     const rounded = Number(text);
-    if (rounded >= 1000 && scale < 1e12) return gasParts(rounded * scale);
-    return { text: gasDecimals(rounded) === gasDecimals(scaled) ? text : rounded.toFixed(gasDecimals(rounded)), suffix };
+    if (rounded >= 1000 && scale < 1e12) return scaleGas(rounded * scale);
+    return { text: gasDecimals(rounded) === gasDecimals(scaled) ? text : rounded.toFixed(gasDecimals(rounded)), prefix };
   }
-  return { text: withThousands(Math.round(abs).toString()), suffix: "" };
+  return { text: withThousands(Math.round(abs).toString()), prefix: "" };
 }
 
 function gasDecimals(scaled: number): number {
   return scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
 }
 
-/** Gas amounts: thousands separators below 1M, then M, G and T suffixes. */
-export function formatGas(gas: number): string {
-  if (!Number.isFinite(gas)) return "n/a";
-  const sign = gas < 0 ? "-" : "";
-  const { text, suffix } = gasParts(Math.abs(gas));
-  return sign + (suffix === "" ? text : stripTrailingZeros(text)) + suffix;
+/** A figure and the unit it is in, kept apart so a tile can set the two at different sizes. */
+export type UnitParts = { value: string; unit: string };
+
+/** A figure and its unit joined by the space that always sits between them. */
+export function withUnit(parts: UnitParts): string {
+  return parts.unit === "" ? parts.value : `${parts.value} ${parts.unit}`;
 }
 
 /**
- * formatGas without zero stripping ("60.0M", not "60M"), so an animated
- * backlog keeps one character count per band and never shifts its neighbours.
+ * The same text with every space made non-breaking. Chart axis ticks are laid
+ * out by a renderer that wraps on ordinary spaces, and "60 Mgas" split over
+ * two lines is not a tick label; this keeps a figure and its unit together.
+ */
+export function unbroken(text: string): string {
+  return text.replace(/ /g, "\u00a0");
+}
+
+/**
+ * A gas amount as its figure and its unit, the SI prefix on the unit and never
+ * on the number: 11.2 and "Tgas", 20.5 and "Mgas", 812,345 and "gas". `fixed`
+ * keeps the band's trailing zeros ("60.0", not "60"), so an animated figure
+ * holds one character count per band and never shifts its neighbours.
+ */
+export function gasParts(gas: number, fixed = false): UnitParts {
+  if (!Number.isFinite(gas)) return { value: "n/a", unit: "" };
+  const sign = gas < 0 ? "-" : "";
+  const { text, prefix } = scaleGas(Math.abs(gas));
+  return { value: sign + (fixed || prefix === "" ? text : stripTrailingZeros(text)), unit: `${prefix}gas` };
+}
+
+/** Gas amounts with the SI prefix on the unit: "812,345 gas", "20.5 Mgas", "11.2 Tgas". */
+export function formatGas(gas: number): string {
+  return withUnit(gasParts(gas));
+}
+
+/**
+ * formatGas without zero stripping ("60.0 Mgas", not "60 Mgas"), so an
+ * animated backlog keeps one character count per band.
  */
 export function formatGasFixed(gas: number): string {
-  if (!Number.isFinite(gas)) return "n/a";
-  const sign = gas < 0 ? "-" : "";
-  const { text, suffix } = gasParts(Math.abs(gas));
-  return sign + text + suffix;
+  return withUnit(gasParts(gas, true));
+}
+
+/** A gas rate as its figure and its unit: 40.0 and "Mgas/s". */
+export function gasPerSecondParts(gasPerSecond: number, fixed = false): UnitParts {
+  const parts = gasParts(gasPerSecond, fixed);
+  return { value: parts.value, unit: parts.unit === "" ? "" : `${parts.unit}/s` };
+}
+
+/** A gas rate with the SI prefix on the unit: "60 Mgas/s", "812,345 gas/s". */
+export function formatGasPerSecond(gasPerSecond: number): string {
+  return withUnit(gasPerSecondParts(gasPerSecond));
+}
+
+/** formatGasPerSecond without zero stripping: "40.0 Mgas/s". */
+export function formatGasPerSecondFixed(gasPerSecond: number): string {
+  return withUnit(gasPerSecondParts(gasPerSecond, true));
 }
 
 /**
@@ -186,7 +227,7 @@ function fixedByBand(value: number, decimals: (abs: number) => number): string {
 }
 
 /** Reserved widths in ch for the fixed formatters: the widest band their live values move in. */
-export const FIXED_WIDTH_CH = { gwei: 6, multiplier: 5, gasPerSecond: 4, eth: 10, gas: 6, x: 6, usd: 6 } as const;
+export const FIXED_WIDTH_CH = { gwei: 6, multiplier: 5, gasPerSecond: 4, eth: 10, gas: 5, x: 6, usd: 6 } as const;
 
 /** Decimals of a gwei figure by band: below 1 four, 1 to 10 three, 10 to 100 two, otherwise one. */
 function gweiDecimals(gwei: number): number {
@@ -208,11 +249,6 @@ export function formatGweiFixed(gwei: number): string {
 /** A multiplier over the floor with two decimals always: "19.99". The × sits outside. */
 export function formatMultiplierFixed(multiplier: number): string {
   return fixedByBand(multiplier, () => 2);
-}
-
-/** Gas per second in millions with one decimal always: "44.1" for 44,100,000. The "M" sits outside. */
-export function formatGasPerSecondFixed(gasPerSecond: number): string {
-  return fixedByBand(gasPerSecond / 1e6, () => 1);
 }
 
 /** Decimals for three significant digits at a fixed count per decade: 8.39e-6 → 8, 0.0599 → 4, 1.5 → 2. */
@@ -277,8 +313,31 @@ export function secondsOfTarget(backlog: number, target: number): number {
   return backlog / target;
 }
 
-export function formatSecondsOfTarget(backlog: number, target: number): string {
-  return formatDuration(secondsOfTarget(backlog, target));
+/**
+ * How long a rate needs to clear an amount, in the band the value asks for:
+ * seconds below a minute (two decimals under one second, where a short
+ * window's backlog lives), then minutes, then hours. Hours never roll over
+ * into days: a backlog is read against a working span, not a calendar. The
+ * decimal count is fixed per band, so an animated figure keeps one character
+ * count and never shifts what sits beside it.
+ */
+export function formatDrainTime(seconds: number): string {
+  if (!Number.isFinite(seconds)) return "n/a";
+  const s = Math.max(0, seconds);
+  if (s < 1) return `${s.toFixed(2)} s`;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  if (s < 3600) return `${(s / 60).toFixed(1)} min`;
+  return `${(s / 3600).toFixed(1)} h`;
+}
+
+/**
+ * What a backlog figure means, as time: "= 77.8 h at 40 Mgas/s", the span the
+ * chain would have to run at exactly the target for to drain it. Without a
+ * positive target there is no rate to drain at and nothing to say.
+ */
+export function formatDrainEquivalence(backlog: number, target: number): string {
+  if (!Number.isFinite(backlog) || !Number.isFinite(target) || target <= 0) return "n/a";
+  return `= ${formatDrainTime(secondsOfTarget(backlog, target))} at ${formatGasPerSecond(target)}`;
 }
 
 /** Multiplier over the floor from basis points: 19.99x. */

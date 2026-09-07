@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { approxExpBips, baseFeeFromExponent, contributionsBips, legacyExponentBips, toLegacyState, trueExpMultiplier } from "@/lib/pricer";
+import { approxExpBips, baseFeeFromExponent, contributionsBips, legacyExponentBips, toLegacyState } from "@/lib/pricer";
 import type { LiveSnapshot } from "@/types";
 import { seriesColor } from "@/utils/chart";
 import { formatGwei, formatInteger } from "@/utils/format";
@@ -93,8 +93,7 @@ export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) 
         <p className="mt-3 max-w-[65ch] text-sm text-ink-2">
           The chain priced block {formatInteger(snapshot.block.number)} at <span className="num text-ink">{formatGwei(snapshot.baseFee)} gwei</span>. The sampled backlogs already include that block&apos;s gas; the
           value above is the fee they imply with dt = 0, that is if the next block carried the same timestamp. When the next header&apos;s timestamp advances, every backlog is first paid down by
-          dt × target, so the fee the next block actually opens with can be lower and is not known until that timestamp is. True e<sup>x</sup> at this x would give{" "}
-          <span className="num text-ink">{trueExpMultiplier(x).toFixed(1)}×</span> instead of <span className="num text-ink">{live?.multiplier.toFixed(2)}×</span>.
+          dt × target, so the fee the next block actually opens with can be lower and is not known until that timestamp is.
         </p>
       ) : null}
     </div>

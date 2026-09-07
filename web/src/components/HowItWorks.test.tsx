@@ -82,8 +82,8 @@ describe("HowItWorks", () => {
     expect(screen.getByText(/the floor \(0.02 gwei\) multiplied by/)).toBeInTheDocument();
     // The quoted floor and the set in force, from the api.
     expect(screen.getByText("0.02 gwei")).toBeInTheDocument();
-    expect(screen.getByText("60M/s · 15 s")).toBeInTheDocument();
-    expect(screen.getByText("40M/s · 24 h")).toBeInTheDocument();
+    expect(screen.getByText("60 Mgas/s · 15 s")).toBeInTheDocument();
+    expect(screen.getByText("40 Mgas/s · 24 h")).toBeInTheDocument();
     expect(screen.getByText(/in force since block 53,578,754, 2026-09-03 17:08 UTC \(owner action\)/)).toBeInTheDocument();
     // The chart moved here with its live marker.
     expect(screen.getByRole("figure", { name: /Degree-4 Taylor polynomial/ })).toBeInTheDocument();
@@ -110,7 +110,7 @@ describe("HowItWorks", () => {
   it("falls back to the live snapshot's own definition when the constraint endpoint has nothing", () => {
     answers = { "robinhood:live-quote": snapshot, networks };
     render(<HowItWorks network="robinhood" />);
-    expect(screen.getByText("60M/s · 15 s")).toBeInTheDocument();
+    expect(screen.getByText("60 Mgas/s · 15 s")).toBeInTheDocument();
     expect(screen.queryByText(/in force since block/)).toBeNull();
     // And a legacy chain has no set to quote at all.
     expect(quotedConstraints(null, { ...snapshot, model: "legacy", constraints: [] })).toBeNull();

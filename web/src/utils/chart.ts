@@ -2,7 +2,7 @@
 
 import { saturatingCastToBips, saturatingUMul, toUint64 } from "@/lib/pricer";
 import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesPoint } from "@/types";
-import { formatDuration, formatGas, weiToEthNumber, weiToGweiNumber } from "./format";
+import { formatDuration, formatGasPerSecond, weiToEthNumber, weiToGweiNumber } from "./format";
 
 export const MAX_SERIES = 6;
 
@@ -46,13 +46,13 @@ export function contributionRampStep(exponentBips: number): number {
   return 1 + Math.round(Math.min(1, x / 4) * 8);
 }
 
-/** "60M gas/s over 15 s". */
+/** "60 Mgas/s over 15 s". */
 export function constraintLabel(c: Pick<ConstraintSetEntry, "target" | "window">): string {
-  return `${formatGas(c.target)} gas/s over ${formatDuration(c.window)}`;
+  return `${formatGasPerSecond(c.target)} over ${formatDuration(c.window)}`;
 }
 
 export function shortConstraintLabel(c: Pick<ConstraintSetEntry, "target" | "window">): string {
-  return `${formatGas(c.target)}/s · ${formatDuration(c.window)}`;
+  return `${formatGasPerSecond(c.target)} · ${formatDuration(c.window)}`;
 }
 
 /** Integer bips into x for display. Contributions are only ever divided here. */

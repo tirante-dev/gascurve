@@ -9,7 +9,7 @@ export function PageHeader({ name, info, children }: { name: string; info: Netwo
   return (
     <header className="flex flex-wrap items-center justify-between gap-3 py-4">
       <div className="flex min-w-0 flex-col gap-1">
-        <Link href="/" className="vw-wordmark text-lg leading-none sm:text-xl">
+        <Link href="/" className="vw-wordmark text-lg sm:text-xl">
           gascurve
         </Link>
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">

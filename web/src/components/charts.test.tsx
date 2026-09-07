@@ -83,12 +83,11 @@ const snapshot: LiveSnapshot = {
 describe("SeriesCharts", () => {
   it("draws one series per constraint set with set-aware legends and an explicit unknown-split series", () => {
     render(<SeriesCharts series={series} loading={false} model="constraints" />);
-    expect(screen.getAllByText("C2 · 30M/s · 24 h · set 5 (from block 10)").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("C2 · 40M/s · 24 h · set 6 (from block 20)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("C2 · 30 Mgas/s · 24 h · set 5 (from block 10)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("C2 · 40 Mgas/s · 24 h · set 6 (from block 20)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("unknown split (total x, constraint set unknown)").length).toBeGreaterThan(0);
-    expect(screen.getByText("floor in force (stepped)")).toBeInTheDocument();
-    expect(screen.getByText("target C2 (stepped, per set)")).toBeInTheDocument();
-    expect(screen.getByText("C2 · 30M/s · 24 h (set 5) then 40M/s · 24 h (set 6)")).toBeInTheDocument();
+        expect(screen.getByText("target C2 (stepped, per set)")).toBeInTheDocument();
+    expect(screen.getByText("C2 · 30 Mgas/s · 24 h (set 5) then 40 Mgas/s · 24 h (set 6)")).toBeInTheDocument();
     // The owner action is listed with a zoned timestamp.
     expect(screen.getByText("2026-09-06 02:21 CDT")).toBeInTheDocument();
   });
@@ -105,10 +104,10 @@ describe("SeriesCharts", () => {
     expect(within(table).getAllByRole("row")).toHaveLength(4);
     expect(within(table).getByText("C1 0.0034 · C2 3.2391 (set 6)")).toBeInTheDocument();
     const unknownCell = within(table).getByText("unknown split (total x, constraint set unknown): 0.5000 (unknown set)");
-    expect(within(table).getByText("11.2T")).toBeInTheDocument();
+    expect(within(table).getByText("11.2 Tgas")).toBeInTheDocument();
     // The unknown set's backlogs are still listed, under the unlabelled slots.
     const cells = Array.from((unknownCell.closest("tr") as HTMLTableRowElement).querySelectorAll("td")).map((td) => td.textContent);
-    expect(cells.slice(7, 9)).toEqual(["1", "1"]);
+    expect(cells.slice(7, 9)).toEqual(["1 gas", "1 gas"]);
     expect(within(table).queryByText("n/a")).toBeNull();
 
     const slider = screen.getByRole("slider", { name: /Select a bucket/ });
@@ -119,8 +118,8 @@ describe("SeriesCharts", () => {
     expect(screen.getByText("Owner action at block 20: setMinimumL2BaseFee: 0.02 gwei")).toBeInTheDocument();
     fireEvent.change(slider, { target: { value: "0" } });
     expect(screen.getByText("0.4000")).toBeInTheDocument();
-    expect(screen.getByText("30M gas/s")).toBeInTheDocument();
-    expect(screen.queryByText("40M gas/s")).toBeNull();
+    expect(screen.getByText("30 Mgas/s")).toBeInTheDocument();
+    expect(screen.queryByText("40 Mgas/s")).toBeNull();
   });
 
   it("handles empty, loading and legacy series", () => {
@@ -148,8 +147,8 @@ describe("SeriesCharts", () => {
     expect(within(details).getByText("unknown split (total x, constraint set unknown): 3.2425 (unknown set)")).toBeInTheDocument();
     expect(within(details).queryByText("n/a")).toBeNull();
     // Both backlog panels carry data: the second is not left empty.
-    expect(screen.getByText("11.2T gas")).toBeInTheDocument();
-    expect(screen.getByText("3.11M gas")).toBeInTheDocument();
+    expect(screen.getAllByText("11.2 Tgas").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("3.11 Mgas").length).toBeGreaterThan(0);
     rerender(<SeriesCharts series={early} loading={false} model="unknown" />);
     expect(screen.queryByText("legacy backlog")).toBeNull();
     expect(screen.getByText("C1 · definition unknown")).toBeInTheDocument();
@@ -179,7 +178,7 @@ describe("SeriesCharts", () => {
     const cell = within(table).getByText("unknown split (total x, split not recorded): 1.0000 (set 5)");
     const cells = Array.from((cell.closest("tr") as HTMLTableRowElement).querySelectorAll("td")).map((td) => td.textContent);
     // The backlogs are still listed under the set; the fee parts are not known, the total is.
-    expect(cells.slice(7, 9)).toEqual(["1", "2"]);
+    expect(cells.slice(7, 9)).toEqual(["1 gas", "2 gas"]);
     expect(cells.slice(9, 12)).toEqual(["2", "n/a", "n/a"]);
     expect(within(table).getAllByText("n/a")).toHaveLength(2);
     // The inspector reads the whole x out under the unrecorded split for that bucket, and under the set for a recorded one.
@@ -200,12 +199,12 @@ describe("SeriesCharts", () => {
     const slider = screen.getByRole("slider", { name: /Select a bucket/ });
     fireEvent.change(slider, { target: { value: "0" } });
     expect(screen.getByText("unknown split (total x, split not recorded)", { selector: "dt" })).toBeInTheDocument();
-    expect(screen.queryByText("C1 · 60M/s · 15 s · set 5 (from block 10)", { selector: "dt" })).toBeNull();
-    expect(screen.queryByText("C2 · 30M/s · 24 h · set 5 (from block 10)", { selector: "dt" })).toBeNull();
+    expect(screen.queryByText("C1 · 60 Mgas/s · 15 s · set 5 (from block 10)", { selector: "dt" })).toBeNull();
+    expect(screen.queryByText("C2 · 30 Mgas/s · 24 h · set 5 (from block 10)", { selector: "dt" })).toBeNull();
     expect(screen.queryByText("0.0000", { selector: "dd" })).toBeNull();
     // The bucket next to it, with a recorded split, still lists every constraint.
     fireEvent.change(slider, { target: { value: "1" } });
-    expect(screen.getByText("C1 · 60M/s · 15 s · set 5 (from block 10)", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.getByText("C1 · 60 Mgas/s · 15 s · set 5 (from block 10)", { selector: "dt" })).toBeInTheDocument();
     expect(screen.queryByText("unknown split (total x, split not recorded)", { selector: "dt" })).toBeNull();
   });
 
@@ -374,8 +373,8 @@ describe("ConstraintCards", () => {
   it("defines the legacy gauge for zero tolerance and for a zero denominator", () => {
     const { rerender } = render(<ConstraintCardsView snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 0, backlog: 1_000_000_000 } }} values={null} blocks={[]} />);
     expect(screen.getByText("no free gas: every unit prices")).toBeInTheDocument();
-    expect(screen.getByText("x = 1 at 714M")).toBeInTheDocument();
-    expect(screen.getByText("1.43G")).toBeInTheDocument();
+    expect(screen.getByText("x = 1 at 714 Mgas")).toBeInTheDocument();
+    expect(screen.getByText("1.43 Ggas")).toBeInTheDocument();
     const meter = screen.getByRole("meter", { name: /units of inertia/ });
     expect(meter).toHaveAttribute("aria-valuenow", "70");
     expect(meter.querySelectorAll("span")).toHaveLength(1);
@@ -395,7 +394,7 @@ describe("ConstraintCards", () => {
     rerender(<ConstraintCardsView snapshot={legacy} values={targetValues(legacy, [], 10)} blocks={[]} />);
     // 70M drained: (90M - 70M) * 10000 / 714M = 280 bips.
     expect(screen.getByText(/x = 0.0280/)).toBeInTheDocument();
-    expect(screen.getByText("90.0M")).toBeInTheDocument();
+    expect(screen.getByText("90.0")).toBeInTheDocument();
   });
 });
 
@@ -406,6 +405,11 @@ describe("PricerEquation", () => {
     expect(screen.queryByText(/predicted/i)).toBeNull();
     expect(screen.getByText(/fee they imply with dt = 0/)).toBeInTheDocument();
     expect(screen.getByText(/not known until that timestamp is/)).toBeInTheDocument();
+    // The P4 against e^x comparison belongs to the explainer page; the live
+    // equation states what the chain did, not what another curve would have.
+    expect(screen.queryByText(/True e/)).toBeNull();
+    expect(screen.queryByText(/would give/)).toBeNull();
+    expect(screen.queryByText(/instead of/)).toBeNull();
   });
   it("renders the legacy form and the empty state", () => {
     const { rerender } = render(<PricerEquation snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 160_000_000 } }} />);

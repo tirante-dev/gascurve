@@ -309,11 +309,21 @@ body {
   }
 }
 
-/* The wordmark: the display face, letter-spaced, in a magenta to cyan chrome. */
+/*
+  The wordmark: the display face, letter-spaced, in a magenta to cyan chrome.
+  Gradient text is painted through the text's own box, so the box has to hold
+  the whole glyph: an inline-block with room below the baseline for the g's
+  descender, and no ancestor clipping it. The trailing letter-spacing is part
+  of the box's width, so the last letter keeps its space too.
+*/
 @utility vw-wordmark {
+  display: inline-block;
   font-family: var(--font-display);
   font-weight: 700;
+  line-height: 1.25;
   letter-spacing: 0.42em;
+  padding-bottom: 0.18em;
+  overflow: visible;
   text-transform: lowercase;
   background: var(--chrome-text);
   -webkit-background-clip: text;
