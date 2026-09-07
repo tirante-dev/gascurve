@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math/big"
 	"testing"
@@ -388,6 +389,14 @@ func TestFillYieldsWhileCatchingUp(t *testing.T) {
 	}
 	if calls := rpc.headerCalls; len(calls) != 1 || len(calls[0]) != minBackfillBatch {
 		t.Fatalf("the smallest batch goes without spare budget: %v", calls)
+	}
+	rpc.available = 14
+	rpc.headerCalls = nil
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("receipt-weighted spare budget: %v %v", st, err)
+	}
+	if calls := rpc.headerCalls; len(calls) != 1 || len(calls[0]) != 7 {
+		t.Fatalf("14 spare calls must fetch 7 blocks: %v", calls)
 	}
 }
 
@@ -1220,5 +1229,44 @@ func TestFillStateFromRecords(t *testing.T) {
 	cons := carriedFillState(&model.HoleState{Constraints: []model.Constraint{{Target: 1, Window: 2, Backlog: 3}}})
 	if cons == nil || len(cons.Constraints) != 1 || cons.Constraints[0].Backlog != 3 {
 		t.Fatalf("carried constraint state: %+v", cons)
+	}
+}
+
+// TestHeaderOfKeepsGasUnitsConsistent: a header synthesized from a stored
+// block carries no poster gas, because the row has no per-transaction
+// compute boundaries to place an owner action at. Total gas on both sides
+// keeps applyActionGas from subtracting a total-gas boundary out of a
+// compute-gas block and saturating every backlog.
+func TestHeaderOfKeepsGasUnitsConsistent(t *testing.T) {
+	block := db.Block{
+		Number: 1005, Hash: "0xaa", ParentHash: "0xa9", TS: time.Unix(1_700_000_000, 0).UTC(),
+		GasUsed: 1_000_000, BaseFee: db.WeiFromUint64(20_000_000),
+		L1Block: 42, TxCount: 3, PosterGas: sql.NullInt64{Int64: 400_000, Valid: true},
+	}
+	header := headerOf(block)
+	if header.PosterGas != nil {
+		t.Fatalf("synthesized headers must not carry poster gas: %d", *header.PosterGas)
+	}
+	if header.ComputeGas() != block.GasUsed {
+		t.Fatalf("compute gas = %d, want the stored total %d", header.ComputeGas(), block.GasUsed)
+	}
+	if _, ok := header.ComputeGasBeforeTx(0); ok {
+		t.Fatal("a stored block has no per-transaction compute boundaries")
+	}
+	st := &pricer.State{MinBaseFee: big.NewInt(1), Constraints: []pricer.Constraint{{Target: 60_000_000, Window: 15}}}
+	applyActionGas(st, header.ComputeGas(), []actionBoundary{{txIndex: 2, gasBefore: 900_000}})
+	if got := st.Backlogs()[0]; got != block.GasUsed {
+		t.Fatalf("backlog = %d, want %d", got, block.GasUsed)
+	}
+}
+
+// TestApplyActionGasClampsBoundaries: a boundary past the gas the block
+// contributes is clamped instead of underflowing, so no backlog is
+// saturated by a boundary resolved against another gas basis.
+func TestApplyActionGasClampsBoundaries(t *testing.T) {
+	st := &pricer.State{MinBaseFee: big.NewInt(1), Constraints: []pricer.Constraint{{Target: 60_000_000, Window: 15}}}
+	applyActionGas(st, 600_000, []actionBoundary{{txIndex: 1, gasBefore: 900_000}, {txIndex: 2, gasBefore: 950_000}})
+	if got := st.Backlogs()[0]; got != 600_000 {
+		t.Fatalf("backlog = %d, want the block's gas 600000", got)
 	}
 }

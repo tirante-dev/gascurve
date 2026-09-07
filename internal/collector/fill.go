@@ -670,7 +670,7 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	}
 	remaining := h.To - from + 1
 	n := min(uint64(f.cfg.HeaderBatchSize), remaining)
-	if avail := uint64(max(f.rpc.Available(), 0)); avail < n {
+	if avail := uint64(max(f.rpc.Available(), 0)) / 2; avail < n {
 		n = max(avail, min(minBackfillBatch, remaining))
 	}
 	numbers := make([]uint64, 0, n)
@@ -785,6 +785,13 @@ func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Bl
 	return rows, &merged, end
 }
 
+// headerOf synthesizes a header from a stored block. Poster gas is
+// deliberately left nil: a stored row carries the block total, never the
+// per-transaction cumulative compute gas the receipt set gives, so an owner
+// action inside the block would be placed at a total-gas boundary while the
+// block contributed compute gas, mixing the two units. Total gas on both
+// sides keeps the split consistent, and the only use of a synthesized header
+// is the tail replay, whose backlogs are overwritten by the sampled anchor.
 func headerOf(block db.Block) nitro.Header {
 	return nitro.Header{
 		Number: block.Number, Hash: block.Hash, ParentHash: block.ParentHash, Timestamp: uint64(block.TS.Unix()),

@@ -209,7 +209,7 @@ func TestTickPersistsRPCCapacity(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &capacity); err != nil {
 		t.Fatal(err)
 	}
-	if !capacity.Saturated || capacity.ConfiguredCallsPerSecond != 4 || capacity.RequiredCallsPerSecond != 154 || capacity.HeadroomCallsPerSecond == nil || *capacity.HeadroomCallsPerSecond != -150 {
+	if !capacity.Saturated || capacity.ConfiguredCallsPerSecond != 4 || capacity.RequiredCallsPerSecond != 304 || capacity.HeadroomCallsPerSecond == nil || *capacity.HeadroomCallsPerSecond != -300 {
 		t.Fatalf("rpc capacity: %+v", capacity)
 	}
 }
@@ -728,7 +728,7 @@ func TestTickErrors(t *testing.T) {
 	}
 	delete(rpc.errs, "FastSample")
 
-	for _, method := range []string{"UpsertBlocks", "RebuildBuckets", "GasUsedBetween", "InsertStateSample", "UpdateNetworkHead", "SetState", "Notify"} {
+	for _, method := range []string{"UpsertBlocks", "RebuildBuckets", "GasBetween", "InsertStateSample", "UpdateNetworkHead", "SetState", "Notify"} {
 		store.FailOn[method] = true
 		if err := f.Tick(ctx); !errors.Is(err, dbtest.ErrInjected) {
 			t.Fatalf("%s: expected injected error, got %v", method, err)
@@ -812,6 +812,42 @@ func TestTickErrors(t *testing.T) {
 	bad2.FailOn["SetState"] = true
 	if err := newTestFollower(t, rpc, bad2).Tick(ctx); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("save live start failure: %v", err)
+	}
+}
+
+func TestTickUsesReceiptPosterGasForReplay(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seed, err := store.BlockByNumber(ctx, 4663, 1000)
+	if err != nil || seed == nil {
+		t.Fatalf("seed: %+v %v", seed, err)
+	}
+	rpc.posterGas = func(n uint64) uint64 {
+		if n == 1001 {
+			return 767
+		}
+		return 0
+	}
+	rpc.setHead(1002)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.BlockByNumber(ctx, 4663, 1001)
+	if err != nil || row == nil {
+		t.Fatalf("block 1001: %+v %v", row, err)
+	}
+	want := seed.Backlogs[0] + gasFor(1001) - 767
+	if row.Backlogs[0] != want || !row.PosterGas.Valid || row.PosterGas.Int64 != 767 {
+		t.Fatalf("compute-gas replay: %+v, want backlog %d", row, want)
+	}
+	snap := lastSnapshot(t, store)
+	if snap.ComputeGasPerSecond.S10 == nil || snap.GasPerSecond.S10 <= *snap.ComputeGasPerSecond.S10 {
+		t.Fatalf("live rates must preserve total beside compute: %+v", snap)
 	}
 }
 
@@ -1178,12 +1214,12 @@ func TestHelpers(t *testing.T) {
 	if weiString(nil) != "0" || weiString(big.NewInt(7)) != "7" || bigOrZero(nil).Sign() != 0 || bigOrZero(big.NewInt(3)).Int64() != 3 {
 		t.Fatal("weiString / bigOrZero")
 	}
-	snap := buildSnapshot(1, s, &pricer.Result{ErrorBips: 3}, model.GasPerSecond{}, nil, nil, nil)
+	snap := buildSnapshot(1, s, &pricer.Result{ErrorBips: 3}, model.GasPerSecond{}, model.NullableGasPerSecond{}, nil, nil, nil)
 	if snap.ReplayErrorBips != 3 || snap.MultiplierBips != 0 || snap.MinBaseFee != "9" {
 		t.Fatalf("buildSnapshot: %+v", snap)
 	}
 	nilFee := &nitro.Sample{Constraints: []nitro.Constraint{{Target: 1, Window: 2, Backlog: 3}}}
-	if snap := buildSnapshot(1, nilFee, &pricer.Result{}, model.GasPerSecond{}, nil, nil, nil); snap.MinBaseFee != "0" {
+	if snap := buildSnapshot(1, nilFee, &pricer.Result{}, model.GasPerSecond{}, model.NullableGasPerSecond{}, nil, nil, nil); snap.MinBaseFee != "0" {
 		t.Fatalf("nil min fee: %+v", snap)
 	}
 	f := newTestFollower(t, newFakeRPC(1), dbtest.New())

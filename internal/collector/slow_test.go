@@ -250,14 +250,14 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	if err := fb.ensureInit(ctx); err != nil || fb.scanOrigin == nil || fb.scanOrigin.MinBaseFee != "30000000" {
 		t.Fatalf("reloaded origin: %+v %v", fb.scanOrigin, err)
 	}
-	archive.errs["FastSampleAt"] = errRPC
+	archive.errs["PricingSampleAt"] = errRPC
 	fc := newTestFollower(t, rpc, dbtest.New())
 	depthPastCutoff(fc)
 	fc.archive = archive
 	if err := fc.SlowTick(ctx); !errors.Is(err, errRPC) || fc.scanOrigin != nil {
 		t.Fatalf("origin sample failure: %v", err)
 	}
-	delete(archive.errs, "FastSampleAt")
+	delete(archive.errs, "PricingSampleAt")
 	failing := dbtest.New()
 	failing.FailOn["WithChainTx"] = true
 	fd := newTestFollower(t, rpc, failing)

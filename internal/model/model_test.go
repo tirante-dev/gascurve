@@ -16,7 +16,7 @@ func TestLiveSnapshotJSONShape(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"chainId", "sampledAt", "block", "baseFee", "minBaseFee", "multiplierBips", "exponentBips", "model", "constraints", "prices", "gasPerSecond", "replayErrorBips"} {
+	for _, key := range []string{"chainId", "sampledAt", "block", "baseFee", "minBaseFee", "multiplierBips", "exponentBips", "model", "constraints", "prices", "gasPerSecond", "computeGasPerSecond", "replayErrorBips"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("missing key %s", key)
 		}
@@ -66,7 +66,7 @@ func TestNullableTimestamps(t *testing.T) {
 	b, _ = json.Marshal(BlockPoint{Backlogs: []uint64{}, ConstraintBips: []int64{}})
 	m = nil
 	_ = json.Unmarshal(b, &m)
-	for _, key := range []string{"constraintBips", "minBaseFee", "backlogs"} {
+	for _, key := range []string{"constraintBips", "minBaseFee", "posterGas", "backlogs"} {
 		if _, ok := m[key]; !ok {
 			t.Fatalf("BlockPoint missing %s: %v", key, m)
 		}
@@ -74,7 +74,7 @@ func TestNullableTimestamps(t *testing.T) {
 	b, _ = json.Marshal(SeriesPoint{})
 	m = nil
 	_ = json.Unmarshal(b, &m)
-	for _, key := range []string{"coverage", "completeness", "constraintBips", "minBaseFee", "floorFeesWei", "surplusFeesWei"} {
+	for _, key := range []string{"coverage", "completeness", "constraintBips", "minBaseFee", "posterGas", "computeGasPerSecond", "floorFeesWei", "surplusFeesWei", "posterFeesWei"} {
 		if _, ok := m[key]; !ok {
 			t.Fatalf("SeriesPoint missing %s: %v", key, m)
 		}

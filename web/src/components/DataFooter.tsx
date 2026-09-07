@@ -16,14 +16,14 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
         <div>
           <h2 className="mb-2 text-sm font-semibold text-ink">What is live</h2>
           <p>
-            Base fee, backlogs, prices and gas per second update on new heads when a WebSocket head feed is configured, or every 3 s by default on public RPC networks. Fee-account balances and
-            L1 pricer values refresh from a separate slow sample every 60 s. Live snapshots are pushed over a WebSocket ({STATUS_COPY[status].label}).
+            Base fee, backlogs, prices, and compute gas per second update on new heads when a WebSocket head feed is configured, or every 3 s by default on public RPC networks. Compute gas comes
+            from receipt-backed block history. Fee-account balances and L1 pricer values refresh from a separate slow sample every 60 s. Live snapshots are pushed over a WebSocket ({STATUS_COPY[status].label}).
           </p>
         </div>
         <div>
           <h2 className="mb-2 text-sm font-semibold text-ink">What is replayed</h2>
           <p>
-            Per-constraint backlogs in history are reconstructed by replaying block headers through the pricer and re-anchoring to sampled backlogs whenever a sample exists. The replay error
+            Per-constraint backlogs in history are reconstructed from block headers and receipt poster gas, then re-anchored to sampled backlogs whenever a sample exists. The replay error
             is the gap between the predicted and the actual base fee.
           </p>
           <dl className="num mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-ink">

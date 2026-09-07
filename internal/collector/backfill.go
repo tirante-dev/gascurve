@@ -47,6 +47,7 @@ type backfillCursor struct {
 	Next                uint64   `json:"next"`
 	End                 uint64   `json:"end"`
 	PrevTs              uint64   `json:"prevTs"`
+	PrevHash            string   `json:"prevHash,omitempty"`
 	Backlogs            []uint64 `json:"backlogs"`
 	SetID               int64    `json:"setId"`
 	LastAnchor          uint64   `json:"lastAnchor,omitempty"`
@@ -156,7 +157,7 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	// for that it queues first come, first served with the other bulk
 	// work. The fast tick keeps its reserve either way.
 	n := min(uint64(f.cfg.HeaderBatchSize), remaining)
-	if avail := uint64(max(f.rpc.Available(), 0)); avail < n {
+	if avail := uint64(max(f.rpc.Available(), 0)) / 2; avail < n {
 		n = max(avail, min(minBackfillBatch, remaining))
 	}
 	numbers := make([]uint64, 0, n)
@@ -167,11 +168,23 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err != nil {
 		return BackfillIdle, fmt.Errorf("backfill headers %d..%d: %w", c.Next, c.Next+n-1, err)
 	}
+	if len(headers) != len(numbers) {
+		return BackfillIdle, fmt.Errorf("backfill headers %d..%d: got %d of %d", c.Next, c.Next+n-1, len(headers), len(numbers))
+	}
+	if headers[0].Number != c.Next {
+		return BackfillIdle, fmt.Errorf("backfill headers start at %d, asked for %d", headers[0].Number, c.Next)
+	}
+	if err := verifyChain(headers); err != nil {
+		return BackfillIdle, err
+	}
+	if hashMismatch(c.PrevHash, headers[0].ParentHash) {
+		return BackfillIdle, fmt.Errorf("backfill header %d does not build on the prior batch, retrying", headers[0].Number)
+	}
 	st, setID, err := f.segmentState(ctx, c)
 	if err != nil {
 		return BackfillIdle, err
 	}
-	anchor, anchorFees, err := f.backfillAnchors(ctx, st, numbers)
+	anchor, anchorFees, err := f.backfillAnchors(ctx, st, headers)
 	if err != nil {
 		return BackfillIdle, err
 	}
@@ -203,6 +216,7 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 
 	c.Next += n
 	c.PrevTs = headers[len(headers)-1].Timestamp
+	c.PrevHash = headers[len(headers)-1].Hash
 	c.Backlogs = st.Backlogs()
 	if c.Next >= c.End {
 		c.Active = false
@@ -276,20 +290,24 @@ func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor, gen uint6
 // in range. An anchor whose model differs from the segment's constraint
 // set is skipped with a warning: the replay state cannot change shape mid
 // segment.
-func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, numbers []uint64) (pricer.Anchor, map[uint64]*big.Int, error) {
+func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, headers []nitro.Header) (pricer.Anchor, map[uint64]*big.Int, error) {
 	if f.archive == nil {
 		return nil, nil, nil
 	}
 	interval := uint64(f.cfg.BackfillAnchorInterval)
 	backlogs := map[uint64][]uint64{}
 	fees := map[uint64]*big.Int{}
-	for _, n := range numbers {
+	for _, header := range headers {
+		n := header.Number
 		if n%interval != 0 {
 			continue
 		}
-		sample, err := f.archive.FastSampleAt(ctx, n)
+		sample, err := f.archive.PricingSampleAt(ctx, n)
 		if err != nil {
 			return nil, nil, fmt.Errorf("backfill anchor %d: %w", n, err)
+		}
+		if hashMismatch(header.Hash, sample.Header.Hash) {
+			return nil, nil, fmt.Errorf("backfill anchor %d hash does not match replay headers", n)
 		}
 		if !sameShape(st, sample) {
 			f.log.Warn("backfill anchor skipped, sampled model differs from the segment's set", "block", n)
@@ -476,6 +494,7 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 	c.Verified = true
 	c.Next = c.SegStart
 	c.PrevTs = 0
+	c.PrevHash = ""
 	c.LastAnchor, c.LastAnchorErrorBips, c.AnchorMinFee = 0, 0, ""
 	f.log.Info("backfill segment", "from", c.SegStart, "to", c.End, "setId", c.SetID)
 	return BackfillProgressed, f.withGeneration(ctx, gen, func(s db.Store) error { return f.saveCursor(ctx, s, c) })

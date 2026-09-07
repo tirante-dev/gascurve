@@ -252,17 +252,10 @@ func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) 
 	return out, nil
 }
 
-// HeadersByNumbers fetches headers in batches of at most the adaptive cap.
+// HeadersByNumbers fetches headers and receipt-backed poster gas in batches
+// of at most the adaptive cap.
 func (e *Endpoint) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
-	blocks, err := blocksByNumbers(ctx, numbers, false, e.batch)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Header, len(blocks))
-	for i := range blocks {
-		out[i] = blocks[i].Header
-	}
-	return out, nil
+	return headersByNumbers(ctx, numbers, e.batch)
 }
 
 // BlocksWithTxs fetches full blocks in batches of at most the adaptive cap.

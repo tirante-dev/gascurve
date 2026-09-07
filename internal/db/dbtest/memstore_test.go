@@ -70,7 +70,11 @@ func TestMemStore(t *testing.T) {
 		if i == 3 {
 			txc = 2
 		}
-		if err := m.UpsertBlocks(ctx, []db.Block{{ChainID: 1, Number: i, TS: base.Add(time.Duration(i) * time.Second), GasUsed: i, TxCount: txc}}); err != nil {
+		posterGas := int64(0)
+		if i == 3 {
+			posterGas = 1
+		}
+		if err := m.UpsertBlocks(ctx, []db.Block{{ChainID: 1, Number: i, TS: base.Add(time.Duration(i) * time.Second), GasUsed: i, PosterGas: sql.NullInt64{Int64: posterGas, Valid: true}, TxCount: txc}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -95,8 +99,8 @@ func TestMemStore(t *testing.T) {
 	if bs, _ := m.BlocksBetween(ctx, 1, base.Add(2*time.Second), base.Add(4*time.Second)); len(bs) != 2 {
 		t.Fatal("between")
 	}
-	if g, _ := m.GasUsedBetween(ctx, 1, base.Add(time.Second), base.Add(3*time.Second)); g != 5 {
-		t.Fatalf("gas = %d", g)
+	if total, compute, _ := m.GasBetween(ctx, 1, base.Add(time.Second), base.Add(3*time.Second)); total != 5 || compute == nil || *compute != 4 {
+		t.Fatalf("gas = %d, compute = %v", total, compute)
 	}
 	if nums, _ := m.TwoTxBlocks(ctx, 1, 0, 10); len(nums) != 1 || nums[0] != 3 {
 		t.Fatal("two tx")
@@ -354,7 +358,7 @@ func TestMemStoreFailures(t *testing.T) {
 	if err := m.Ping(ctx); !errors.Is(err, ErrInjected) {
 		t.Fatal("ping")
 	}
-	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasUsedBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
+	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
 	for _, n := range names {
 		m.FailOn[n] = true
 	}
@@ -395,7 +399,7 @@ func TestMemStoreFailures(t *testing.T) {
 		"RecentBlocks":       func() error { _, err := m.RecentBlocks(ctx, 1, 1); return err },
 		"BlocksAfter":        func() error { _, err := m.BlocksAfter(ctx, 1, 1, 1); return err },
 		"BlocksBetween":      func() error { _, err := m.BlocksBetween(ctx, 1, now, now); return err },
-		"GasUsedBetween":     func() error { _, err := m.GasUsedBetween(ctx, 1, now, now); return err },
+		"GasBetween":         func() error { _, _, err := m.GasBetween(ctx, 1, now, now); return err },
 		"TwoTxBlocks":        func() error { _, err := m.TwoTxBlocks(ctx, 1, 1, 1); return err },
 		"PruneBlocks":        func() error { _, err := m.PruneBlocks(ctx, 1, now); return err },
 		"FoldBuckets":        func() error { return m.FoldBuckets(ctx, nil) },

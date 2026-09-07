@@ -118,14 +118,20 @@ func (c pricingChange) setBlock() uint64 {
 // action transaction is added to the old state, the action mutates the
 // state, then that transaction and the transactions after it add gas to the
 // new state.
+//
+// A boundary is clamped to the gas the block contributes so that a boundary
+// resolved against another gas basis can never subtract past zero and
+// saturate a backlog. Clamping preserves the non-decreasing order the
+// boundaries were validated in.
 func applyActionGas(st *pricer.State, gasUsed uint64, boundaries []actionBoundary) {
 	var applied uint64
 	for _, boundary := range boundaries {
-		st.AddGas(boundary.gasBefore - applied)
+		gasBefore := min(boundary.gasBefore, gasUsed)
+		st.AddGas(gasBefore - applied)
 		for _, change := range boundary.changes {
 			applyPricingChange(st, change)
 		}
-		applied = boundary.gasBefore
+		applied = gasBefore
 	}
 	st.AddGas(gasUsed - applied)
 }

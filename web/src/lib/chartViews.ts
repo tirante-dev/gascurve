@@ -112,7 +112,7 @@ export const CHART_VIEWS: readonly ChartView[] = [
     id: "fee-flows",
     title: "Fees collected per bucket",
     shortTitle: "Fee flows",
-    description: "Fees paid in every bucket in ETH, stacked by where they went: the floor part to the infra account and the congestion part above it to the network account.",
+    description: "Fees paid in every bucket in ETH, stacked by destination: compute floor to infrastructure, compute congestion to the network account, and poster fees to the L1 pricer pool.",
     section: "fees",
     range: "series",
     live: false,

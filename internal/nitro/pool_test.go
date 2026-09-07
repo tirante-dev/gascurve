@@ -541,9 +541,9 @@ func TestEndpointBatchCap(t *testing.T) {
 	if err != nil || len(hs) != 100 || hs[99].Number != 199 {
 		t.Fatalf("headers: %d %v", len(hs), err)
 	}
-	// After eth_chainId: 100 items rejected, then two batches of 50 after
-	// the 2 s back-off.
-	if e.BatchCap() != 50 || f.requestCount() != 4 || fmt.Sprint(clock.Sleeps()) != "[2s]" {
+	// After eth_chainId: 100 items rejected, then four batches of 50 after
+	// the 2 s back-off (one header and one receipt call per block).
+	if e.BatchCap() != 50 || f.requestCount() != 6 || fmt.Sprint(clock.Sleeps()) != "[2s]" {
 		t.Fatalf("after 429: cap=%d requests=%d sleeps=%v", e.BatchCap(), f.requestCount(), clock.Sleeps())
 	}
 	// No recovery before a successful minute has passed.
@@ -713,9 +713,9 @@ func TestEndpointBatchCapJSONRPC(t *testing.T) {
 	if err != nil || len(hs) != 100 || hs[99].Number != 199 {
 		t.Fatalf("headers: %d %v", len(hs), err)
 	}
-	// After eth_chainId: 100 items rejected by one item's error, then two
-	// batches of 50 after the 2 s back-off.
-	if e.BatchCap() != 50 || f.requestCount() != 4 || fmt.Sprint(clock.Sleeps()) != "[2s]" || p.Stats().RateLimitEvents != 1 {
+	// After eth_chainId: 200 header and receipt items rejected in two
+	// batches, then four batches of 50 after the 2 s back-off.
+	if e.BatchCap() != 50 || f.requestCount() != 6 || fmt.Sprint(clock.Sleeps()) != "[2s]" || p.Stats().RateLimitEvents != 1 {
 		t.Fatalf("after a JSON-RPC limit: cap=%d requests=%d sleeps=%v stats=%+v", e.BatchCap(), f.requestCount(), clock.Sleeps(), p.Stats())
 	}
 	// A persistent limit at the floor is an endpoint failure.

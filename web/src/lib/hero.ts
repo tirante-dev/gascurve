@@ -165,10 +165,16 @@ function sameAxis(a: FeeAxis, b: FeeAxis): boolean {
  * One second of the live throughput chart: all the gas the blocks with that
  * timestamp carried. `x` is seconds before now, as on the fee chart, and the
  * second sits at its own end because that is when its gas is complete. `gas`
- * and `blocks` are null for a second the ring cannot speak for, which breaks
- * the line rather than drawing a rate nobody measured.
+ * is null when poster gas was not recorded. `blocks` remains known in that
+ * case and is null only where the ring itself has a gap.
  */
 export type ThroughputPoint = { x: number; ts: number; gas: number | null; blocks: number | null };
+
+/** Nitro pricer input for one block. Null or absent poster gas is unknown. */
+export function blockComputeGas(block: Pick<BlockPoint, "gasUsed" | "posterGas">): number | null {
+  if (block.posterGas === null || block.posterGas === undefined) return null;
+  return Math.max(0, block.gasUsed - block.posterGas);
+}
 
 /**
  * Gas per second from the block ring, against the same clock-anchored axis
@@ -197,11 +203,13 @@ export function heroThroughputData(blocks: readonly BlockPoint[], places: BlockP
   const now = liveNow(nowMs, placeOf(places, blocks[blocks.length - 1]));
   const newest = blocks[blocks.length - 1].ts;
   const oldest = blocks[0].ts;
-  const perSecond = new Map<number, { gas: number; blocks: number }>();
+  const perSecond = new Map<number, { gas: number; blocks: number; known: boolean }>();
   for (const b of blocks) {
     if (b.ts >= newest || b.ts <= oldest) continue;
-    const acc = perSecond.get(b.ts) ?? { gas: 0, blocks: 0 };
-    acc.gas += b.gasUsed;
+    const acc = perSecond.get(b.ts) ?? { gas: 0, blocks: 0, known: true };
+    const compute = blockComputeGas(b);
+    if (compute === null) acc.known = false;
+    else acc.gas += compute;
     acc.blocks += 1;
     perSecond.set(b.ts, acc);
   }
@@ -218,7 +226,7 @@ export function heroThroughputData(blocks: readonly BlockPoint[], places: BlockP
     const x = ts + 1 - now;
     const acc = perSecond.get(ts);
     if (acc !== undefined) {
-      out.push({ x, ts, gas: acc.gas, blocks: acc.blocks });
+      out.push({ x, ts, gas: acc.known ? acc.gas : null, blocks: acc.blocks });
       continue;
     }
     const complete = before + 1 < blocks.length && blocks[before + 1].number === blocks[before].number + 1;

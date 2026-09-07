@@ -27,7 +27,7 @@ import {
 } from "./smoothing";
 
 function block(number: number, ts: number, backlogs: number[]): BlockPoint {
-  return { number, ts, gasUsed: 4_000_000, baseFee: "399726000", predictedBaseFee: "399726000", backlogs, constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: false };
+  return { number, ts, gasUsed: 4_000_000, posterGas: 0, baseFee: "399726000", predictedBaseFee: "399726000", backlogs, constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: false };
 }
 
 const snapshot: LiveSnapshot = {
@@ -45,6 +45,7 @@ const snapshot: LiveSnapshot = {
   ],
   prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "379726000", perArbGasTotal: "399726000" },
   gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
+  computeGasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
   replayErrorBips: 2,
   ethUsd: null,
 };
@@ -223,7 +224,7 @@ describe("tweenValues", () => {
   const target = targetValues(snapshot, blocks, 0);
 
   it("eases every field toward the target and returns the same object when nothing moves", () => {
-    const start = targetValues({ ...snapshot, baseFee: "200000000", multiplierBips: 100_000, exponentBips: 20_000, gasPerSecond: { s10: 1, s60: 2 } }, [], 0);
+    const start = targetValues({ ...snapshot, baseFee: "200000000", multiplierBips: 100_000, exponentBips: 20_000, gasPerSecond: { s10: 1, s60: 2 }, computeGasPerSecond: { s10: 1, s60: 2 } }, [], 0);
     const mid = tweenValues(start, target, 300);
     const k = 1 - Math.exp(-1);
     expect(mid.baseFeeGwei).toBeCloseTo(0.2 + (0.399726 - 0.2) * k);
