@@ -11,6 +11,8 @@ import {
   DISPLAY_INTERVAL_MS,
   drained,
   isShortWindow,
+  liveNow,
+  placeBlocks,
   SAWTOOTH_WINDOW_S,
   sawtoothChart,
   sawtoothSamples,
@@ -120,12 +122,13 @@ describe("averageBacklog and sawtoothSamples", () => {
     expect(sawtoothSamples(blocks, 5, 1000)).toEqual([]);
   });
 
-  it("places the sawtooth on a time axis and carries the trailing average with it", () => {
+  it("places the sawtooth on a clock-anchored axis and carries the trailing average with it", () => {
     const samples = sawtoothSamples(blocks, 0, 1000);
-    const chart = sawtoothChart(samples, 1000);
+    // The wall clock at the start of the second after the newest block.
+    const chart = sawtoothChart(samples, 1_001_000);
     expect(chart).toHaveLength(samples.length);
-    // The span reaches back a whole window and ends at the newest block: the
-    // ten blocks of a second are spread evenly across the second they belong to.
+    // The span reaches back a whole window: the ten blocks of a second are
+    // spread evenly across the second they belong to.
     expect(chart[0].x).toBeCloseTo(-SAWTOOTH_WINDOW_S);
     expect(chart[1].x).toBeCloseTo(-SAWTOOTH_WINDOW_S + 0.1);
     expect(chart[chart.length - 1].x).toBeCloseTo(-0.1);
@@ -135,9 +138,16 @@ describe("averageBacklog and sawtoothSamples", () => {
     expect(chart[chart.length - 1].average).toBe(averageBacklog(blocks, 0, 1000));
     // The first sample has only its own second to average over.
     expect(chart[0].average).toBe(4_000_000);
-    // A single block sits at the end of its own second, and its average is itself.
-    expect(sawtoothChart([{ number: 1, ts: 1000, gasUsed: 5, backlog: 7 }], 1000)).toEqual([{ x: -1, number: 1, ts: 1000, gasUsed: 5, backlog: 7, average: 7 }]);
+    // A single block sits at the start of its second, and its average is itself.
+    expect(sawtoothChart([{ number: 1, ts: 1000, gasUsed: 5, backlog: 7 }], 1_001_000)).toEqual([{ x: -1, number: 1, ts: 1000, gasUsed: 5, backlog: 7, average: 7 }]);
     expect(sawtoothChart([], 1000)).toEqual([]);
+  });
+
+  it("never moves a placed sample when another lands in the newest second", () => {
+    const samples = sawtoothSamples(blocks, 0, 1000);
+    const before = sawtoothChart(samples.slice(0, 143), 1_001_000).map((p) => p.x);
+    const after = sawtoothChart(samples.slice(0, 144), 1_001_000).map((p) => p.x);
+    expect(after.slice(0, 143)).toEqual(before);
   });
 });
 
@@ -304,5 +314,29 @@ describe("createFrameStore", () => {
     stop();
     store.set({ ...next, nowMs: 7 });
     expect(seen).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("placeBlocks and liveNow", () => {
+  const at = (...ts: number[]) => ts.map((t) => ({ ts: t }));
+  it("spreads a complete second by its own count and a lone newest second by its count", () => {
+    expect(placeBlocks([])).toEqual([]);
+    expect(placeBlocks(at(5, 5, 5))).toEqual([5, 5 + 1 / 3, 5 + 2 / 3]);
+    expect(placeBlocks(at(4, 4, 5, 5, 5, 5))).toEqual([4, 4.5, 5, 5.25, 5.5, 5.75]);
+  });
+  it("spreads the newest second by the rate of the second before it, so early blocks keep their place", () => {
+    // Two blocks a second so far: the first block of the new second sits at
+    // its start, the next at the half, whether or not more have arrived.
+    expect(placeBlocks(at(4, 4, 5))).toEqual([4, 4.5, 5]);
+    expect(placeBlocks(at(4, 4, 5, 5))).toEqual([4, 4.5, 5, 5.5]);
+    // Overtaking the rate widens the spread only from that block on.
+    expect(placeBlocks(at(4, 4, 5, 5, 5))).toEqual([4, 4.5, 5, 5 + 1 / 3, 5 + 2 / 3]);
+    // An empty second between them is skipped when looking for the rate.
+    expect(placeBlocks(at(3, 3, 5))).toEqual([3, 3.5, 5]);
+  });
+  it("puts now at the wall clock unless the newest block is already past it", () => {
+    expect(liveNow(1_000_500, undefined)).toBe(1000.5);
+    expect(liveNow(1_000_500, 999)).toBe(1000.5);
+    expect(liveNow(1_000_500, 1000.9)).toBe(1000.9);
   });
 });

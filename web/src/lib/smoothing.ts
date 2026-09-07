@@ -180,10 +180,10 @@ export function sawtoothSamples(blocks: readonly BlockPoint[], index: number, la
 }
 
 /**
- * A sample placed on a time axis, in seconds before the end of the newest
- * block's second: 0 is now and the span reaches back to minus the window.
- * `average` is the same trailing mean the card's backlog figure shows, so the
- * chart carries both the raw sawtooth and the number beside it.
+ * A sample placed on a time axis, in seconds before now: 0 is the right edge
+ * and the span reaches back to minus the window. `average` is the same
+ * trailing mean the card's backlog figure shows, so the chart carries both
+ * the raw sawtooth and the number beside it.
  */
 export type SawtoothPoint = { x: number; number: number; ts: number; gasUsed: number; backlog: number; average: number };
 
@@ -201,20 +201,59 @@ function trailingMean(samples: readonly SawtoothSample[], i: number, seconds: nu
 }
 
 /**
- * The short-window chart's series. Blocks that share a timestamp are spread
- * evenly across the second they belong to, so the sawtooth keeps its shape
- * against a real time axis instead of stacking on one tick.
+ * Where each block sits on a time axis, in seconds of block timestamp with a
+ * fraction for its place within its second, in the order given (oldest
+ * first). Headers carry whole seconds and a Nitro chain makes several blocks a
+ * second, so the k-th block of a second is placed at ts + k/N, spread across
+ * the second it belongs to rather than stacked on one tick.
+ *
+ * N is the count of the block's own second for every second but the newest,
+ * which is still filling: its count grows with each block that lands, and a
+ * point that moved every time a sibling arrived is exactly the jitter the
+ * charts must not show. The newest second is spread by the count of the
+ * second before it (the rate the chain just ran at), widened to its own count
+ * only when it has already overtaken that, so each placement stays inside its
+ * second and is fixed from the moment the block arrives.
  */
-export function sawtoothChart(samples: readonly SawtoothSample[], lastTs: number, averageSeconds = AVERAGE_WINDOW_S): SawtoothPoint[] {
+export function placeBlocks(blocks: readonly { ts: number }[]): number[] {
+  if (blocks.length === 0) return [];
   const counts = new Map<number, number>();
-  for (const s of samples) counts.set(s.ts, (counts.get(s.ts) ?? 0) + 1);
+  for (const b of blocks) counts.set(b.ts, (counts.get(b.ts) ?? 0) + 1);
+  const newest = blocks[blocks.length - 1].ts;
+  let previous = 0;
+  for (const ts of counts.keys()) {
+    if (ts < newest && ts > previous) previous = ts;
+  }
+  const newestN = Math.max(counts.get(newest) ?? 1, previous > 0 ? (counts.get(previous) ?? 1) : 1);
   const placed = new Map<number, number>();
-  return samples.map((s, i) => {
-    const k = placed.get(s.ts) ?? 0;
-    placed.set(s.ts, k + 1);
-    const n = counts.get(s.ts) ?? 1;
-    return { x: s.ts - lastTs - 1 + k / n, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog, average: trailingMean(samples, i, averageSeconds) };
+  return blocks.map((b) => {
+    const k = placed.get(b.ts) ?? 0;
+    placed.set(b.ts, k + 1);
+    const n = b.ts === newest ? newestN : (counts.get(b.ts) ?? 1);
+    return b.ts + k / n;
   });
+}
+
+/**
+ * The right edge of a live time axis, in seconds: the wall clock, or the
+ * newest block's place when a slow browser clock would put that block in the
+ * future. Blocks then sit left of the edge by their real age, and the axis
+ * slides with the clock instead of stepping once a second.
+ */
+export function liveNow(nowMs: number, newestPlace: number | undefined): number {
+  const wall = nowMs / 1000;
+  return newestPlace === undefined ? wall : Math.max(wall, newestPlace);
+}
+
+/**
+ * The short-window chart's series against a wall-clock axis ending at
+ * `nowMs`. Each block keeps the place `placeBlocks` gives it, so the sawtooth
+ * slides left as time passes and never rearranges itself.
+ */
+export function sawtoothChart(samples: readonly SawtoothSample[], nowMs: number, averageSeconds = AVERAGE_WINDOW_S): SawtoothPoint[] {
+  const places = placeBlocks(samples);
+  const now = liveNow(nowMs, places[places.length - 1]);
+  return samples.map((s, i) => ({ x: places[i] - now, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog, average: trailingMean(samples, i, averageSeconds) }));
 }
 
 /** A backlog paid down at `rate` gas per second for `seconds`, floored at zero. */

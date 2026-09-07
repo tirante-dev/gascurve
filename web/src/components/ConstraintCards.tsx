@@ -5,6 +5,7 @@ import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Too
 import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
 import { AVERAGE_WINDOW_S, isShortWindow, SAWTOOTH_WINDOW_S, sawtoothChart, sawtoothSamples, SHORT_WINDOW_S, targetValues, type LiveValues, type SawtoothSample } from "@/lib/smoothing";
 import type { BlockPoint, Constraint, LegacyParams, LiveSnapshot } from "@/types";
+import { niceStep } from "@/lib/hero";
 import { constraintGauge, contributionRampStep, legacyGauge, seriesColor } from "@/utils/chart";
 import { FIXED_WIDTH_CH, formatDrainEquivalence, formatDuration, formatGas, formatGasPerSecond, formatInteger, formatPercent, gasParts, gasPerSecondParts, unbroken } from "@/utils/format";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
@@ -35,9 +36,16 @@ export function drainLabel(target: number): string {
 /** Gas ticks carry their unit ("30 Mgas"), so the axis reserves the width for one. */
 const GAS_AXIS_WIDTH = 62;
 
-/** Y ticks of the backlog chart: zero, the midpoint and the top, so the scale reads in gas without crowding a card. */
-export function backlogTicks(max: number): number[] {
-  return [0, max / 2, max];
+/**
+ * The backlog chart's y axis: a round top strictly above the tallest value
+ * (the peak or the threshold), so the top tick label and the threshold's
+ * label have headroom instead of sitting on the frame, and ticks at zero, the
+ * midpoint and the top, so the scale reads in gas without crowding a card.
+ */
+export function backlogAxis(max: number): { top: number; ticks: number[] } {
+  const step = niceStep(Math.max(max, 1) / 4);
+  const top = Math.max(step, Math.ceil((max * 1.15) / step) * step);
+  return { top, ticks: [0, top / 2, top] };
 }
 
 /** The average and the threshold are drawn in ink, never in a constraint colour: a short window can sit at any index in the set. */
@@ -72,20 +80,20 @@ const SAWTOOTH_TICKS = [-SAWTOOTH_WINDOW_S, -10, -5, 0];
  * Memoised on the samples: they change when blocks arrive, the card
  * re-renders every frame.
  */
-export const Sawtooth = memo(function Sawtooth({ samples, color, target, index }: { samples: SawtoothSample[]; color: string; target: number; index: number }) {
-  const lastTs = samples.length > 0 ? samples[samples.length - 1].ts : 0;
-  const data = useMemo(() => sawtoothChart(samples, lastTs), [samples, lastTs]);
+export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, nowMs = 0 }: { samples: SawtoothSample[]; color: string; target: number; index: number; nowMs?: number }) {
+  const data = useMemo(() => sawtoothChart(samples, nowMs), [samples, nowMs]);
   if (data.length < 2) return <div className="w-full rounded-sm bg-chart" style={{ height: SAWTOOTH_HEIGHT }} aria-hidden="true" />;
   const peak = Math.max(...data.map((d) => d.backlog));
   const max = Math.max(peak, target);
+  const axis = backlogAxis(max);
   return (
     <ChartFrame
       height={SAWTOOTH_HEIGHT}
       minWidth={260}
-      label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(max)}, with the ${AVERAGE_WINDOW_S} s average and a dashed threshold at ${formatGas(target)}: it ${drainLabel(target)} boundary`}
+      label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(axis.top)}, with the ${AVERAGE_WINDOW_S} s average and a dashed threshold at ${formatGas(target)}: it ${drainLabel(target)} boundary`}
     >
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 8, right: 8, bottom: 2, left: 0 }}>
+        <LineChart data={data} margin={{ top: 12, right: 8, bottom: 2, left: 0 }}>
           <CartesianGrid vertical={false} />
           <XAxis
             dataKey="x"
@@ -97,7 +105,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index }
             axisLine={false}
             height={18}
           />
-          <YAxis domain={[0, max]} ticks={backlogTicks(max)} tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
+          <YAxis domain={[0, axis.top]} ticks={axis.ticks} tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
           {/* One second of target: the gas the constraint sheds at every second boundary. */}
           <ReferenceLine y={target} stroke={THRESHOLD_COLOR} strokeDasharray="4 3" strokeWidth={1} label={{ value: drainLabel(target), position: "insideTopRight" }} />
           <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={secondsAgoLabel} rows={sawtoothTooltipRows(color)} />} />
@@ -109,7 +117,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index }
   );
 });
 
-function ConstraintCard({ c, index, backlog, bips, share, samples }: { c: Constraint; index: number; backlog: number; bips: number; share: number; samples: SawtoothSample[] | null }) {
+function ConstraintCard({ c, index, backlog, bips, share, samples, nowMs }: { c: Constraint; index: number; backlog: number; bips: number; share: number; samples: SawtoothSample[] | null; nowMs: number }) {
   // The gauge spans whole windows of target; marks are capped so a huge
   // backlog over a tiny window cannot ask for a billion elements.
   const gauge = constraintGauge(c, backlog);
@@ -162,7 +170,7 @@ function ConstraintCard({ c, index, backlog, bips, share, samples }: { c: Constr
       </dl>
       {samples ? (
         <div className="mt-4">
-          <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} />
+          <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} nowMs={nowMs} />
           <p className="mt-1 text-[11px] text-ink-3">{drainLabel(c.target)} boundary; bursts show as sawteeth. The thin line is the {AVERAGE_WINDOW_S} s average.</p>
         </div>
       ) : null}
@@ -232,11 +240,11 @@ const SAWTOOTH_NOTE = `Windows of ${formatDuration(SHORT_WINDOW_S)} or less are 
 /** One card per constraint, subscribed to the frame store: the figures move every frame, the page around them does not. */
 export function ConstraintCards({ live }: { live: SmoothedLive }) {
   const frame = useLiveFrame(live.frame);
-  return <ConstraintCardsView snapshot={live.display} values={frame.values} blocks={frame.blocks} resyncing={live.resyncing} />;
+  return <ConstraintCardsView snapshot={live.display} values={frame.values} blocks={frame.blocks} nowMs={frame.nowMs} resyncing={live.resyncing} />;
 }
 
 /** The cards with everything they show as plain props; until the first frame has eased values the sample stands in. */
-export function ConstraintCardsView({ snapshot, values, blocks, resyncing = false }: { snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[]; resyncing?: boolean }) {
+export function ConstraintCardsView({ snapshot, values, blocks, nowMs = 0, resyncing = false }: { snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[]; nowMs?: number; resyncing?: boolean }) {
   const samples = useMemo(() => {
     if (!snapshot || snapshot.model === "legacy") return [];
     return snapshot.constraints.map((c, i) => (isShortWindow(c.window) ? sawtoothSamples(blocks, i, snapshot.block.ts) : null));
@@ -258,7 +266,7 @@ export function ConstraintCardsView({ snapshot, values, blocks, resyncing = fals
     <div>
       <div className={`grid gap-4 sm:grid-cols-2 ${cols}`}>
         {constraints.map((c, i) => (
-          <ConstraintCard key={`${c.target}-${c.window}-${i}`} c={c} index={i} backlog={v.backlogs[i] ?? c.backlog} bips={v.bips[i] ?? c.exponentBips} share={v.shares[i] ?? 0} samples={samples[i] ?? null} />
+          <ConstraintCard key={`${c.target}-${c.window}-${i}`} c={c} index={i} backlog={v.backlogs[i] ?? c.backlog} bips={v.bips[i] ?? c.exponentBips} share={v.shares[i] ?? 0} samples={samples[i] ?? null} nowMs={nowMs} />
         ))}
       </div>
       <p className="mt-2 text-xs text-ink-3">

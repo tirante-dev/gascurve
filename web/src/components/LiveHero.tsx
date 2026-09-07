@@ -1,11 +1,11 @@
 "use client";
 
-import { memo, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import { memo, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
 import { useSeries } from "@/hooks/useSeries";
 import { feeChartCaption, feeChartData, feeChartLabel, feeTooltipRows, ownerActionNote, type FeeChartData } from "@/lib/feeChart";
-import { heroChartData, heroFeeAxis, heroPointTitle, heroRange, heroRangeOnServer, heroSpan, heroTicks, heroTimeLabel, setHeroRange, subscribeHeroRange, HERO_RANGE_LABELS, HERO_RANGES, type HeroPoint, type HeroRange } from "@/lib/hero";
+import { heroChartData, heroFeeAxis, heroPointTitle, stableFeeAxis, heroRange, heroRangeOnServer, heroSpan, heroTicks, heroTimeLabel, setHeroRange, subscribeHeroRange, HERO_RANGE_LABELS, HERO_RANGES, type HeroPoint, type HeroRange } from "@/lib/hero";
 import { SWAP_GAS, targetValues, TRANSFER_GAS, type LiveValues } from "@/lib/smoothing";
 import type { BlockPoint, LiveSnapshot, LiveStatus, PricerModel, Series } from "@/types";
 import { FLOOR_COLOR, MARKER_COLOR, rampColor, rampInk, rampStep } from "@/utils/chart";
@@ -89,13 +89,17 @@ const HERO_AXIS_WIDTH = 56;
  * heading names it. The floor is a dashed cyan rule because it is a
  * threshold, not a series, and the fill is a flat low-alpha tint of the line
  * colour rather than a gradient, so the mark carries no meaning the data does
- * not. Memoised: the hero re-renders every frame while its figures move, and
- * the chart only changes when a block arrives.
+ * not. Memoised on its points, which move with the frame clock.
  */
 export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText }: { points: HeroPoint[]; floorGwei: number; floorText: string }) {
-  const span = heroSpan(points);
+  const span = heroSpan();
   const ticks = useMemo(() => heroTicks(span), [span]);
-  const axis = useMemo(() => heroFeeAxis(points, floorGwei), [points, floorGwei]);
+  // The axis from the previous render stands while the data still fits it
+  // (hysteresis, see stableFeeAxis); derived state, so it is settled during
+  // render rather than one frame late.
+  const [axis, setAxis] = useState(() => heroFeeAxis(points, floorGwei));
+  const next = stableFeeAxis(axis, points, floorGwei);
+  if (next !== axis) setAxis(next);
   const fees = points.map((p) => p.fee);
   const label =
     points.length < 2
@@ -337,8 +341,8 @@ export function LiveHeroView({
   seriesError?: string | null;
   model?: PricerModel;
 }) {
-  const lastTs = snapshot?.block.ts ?? 0;
-  const points = useMemo(() => (snapshot ? heroChartData(blocks, lastTs) : []), [snapshot, blocks, lastTs]);
+  // Against the frame's wall clock: the chart slides every frame, and a block keeps its place.
+  const points = useMemo(() => (snapshot ? heroChartData(blocks, nowMs) : []), [snapshot, blocks, nowMs]);
   const data = useMemo(() => feeChartData(range === "live" ? null : series, model), [range, series, model]);
   if (!snapshot) {
     return (

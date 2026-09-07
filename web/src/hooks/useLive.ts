@@ -10,7 +10,8 @@ import { useDocumentVisible } from "./useDocumentVisible";
  * Blocks kept for the sparklines. The short-window sawtooth needs fifteen
  * seconds of per-block backlogs, and Robinhood produces about ten a second.
  */
-export const RECENT_BLOCKS_RING = 240;
+/** Blocks kept client-side: two minutes of a ten blocks per second chain, the hero chart window. */
+export const RECENT_BLOCKS_RING = 1500;
 export const LIVE_POLL_MS = 2000;
 
 export type LiveState = {

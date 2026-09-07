@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { BlockPoint, LiveSnapshot, Network, OwnerAction, Series } from "@/types";
 import { createFrameStore, targetValues } from "@/lib/smoothing";
 import { applyReorg } from "@/hooks/useLive";
-import { BACKLOG_TITLE, backlogTicks, ConstraintCards, ConstraintCardsView, drainLabel, Sawtooth, sawtoothTooltipRows, secondsAgoLabel } from "./ConstraintCards";
+import { BACKLOG_TITLE, backlogAxis, ConstraintCards, ConstraintCardsView, drainLabel, Sawtooth, sawtoothTooltipRows, secondsAgoLabel } from "./ConstraintCards";
 import { ChartTooltip } from "./ChartTooltip";
 import { DataFooter } from "./DataFooter";
 import { COLLECTOR_LAG_S, CostTile, FeeSplitBar, HeroChart, heroTooltipRows, LiveHero, LiveHeroView, sampleAge } from "./LiveHero";
@@ -134,9 +134,10 @@ describe("LiveHero", () => {
   });
   it("charts the block ring against the floor, with a relative time axis", () => {
     render(<LiveHeroView snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    const chart = screen.getByRole("figure", { name: "Base fee per block over the last 10 seconds, 20 blocks, 0.3997 to 0.3997 gwei, with the floor at 0.0200 gwei" });
-    // Two minutes on a full ring, the covered span when the ring is shorter; either way the axis reads in relative time.
-    expect(within(chart).getByText("-0:10")).toBeInTheDocument();
+    const chart = screen.getByRole("figure", { name: "Base fee per block over the last 120 seconds, 20 blocks, 0.3997 to 0.3997 gwei, with the floor at 0.0200 gwei" });
+    // Always two minutes, whatever the ring covers, so a filling ring never rescales the axis; it reads in relative time.
+    expect(within(chart).getByText("-2:00")).toBeInTheDocument();
+    expect(within(chart).getByText("-0:30")).toBeInTheDocument();
     expect(within(chart).getByText("now")).toBeInTheDocument();
     // The gwei axis and the cyan floor rule, which is a threshold and so the one dashed mark.
     expect(within(chart).getByText("floor 0.02 gwei")).toBeInTheDocument();
@@ -201,7 +202,7 @@ describe("LiveHero", () => {
     expect(screen.getByText("38.0")).toBeInTheDocument();
 
     rerender(<LiveHeroView snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="live" onRangeChange={onRangeChange} series={history} model="constraints" />);
-    expect(screen.getByRole("figure", { name: /^Base fee per block over the last 10 seconds/ })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /^Base fee per block over the last 120 seconds/ })).toBeInTheDocument();
     expect(screen.queryByRole("figure", { name: /log scale/ })).toBeNull();
   });
 
@@ -334,13 +335,13 @@ describe("ConstraintCards", () => {
     // readable without seeing it: the peak is 40M, the threshold 60M, and the
     // axis tops out at the larger of the two.
     const chart = screen.getByRole("figure", {
-      name: "Constraint 1 backlog per block over the last 15 s, 150 blocks, 0 to 60 Mgas, with the 2 s average and a dashed threshold at 60 Mgas: it drains 60 Mgas/s at each second boundary",
+      name: "Constraint 1 backlog per block over the last 15 s, 150 blocks, 0 to 80 Mgas, with the 2 s average and a dashed threshold at 60 Mgas: it drains 60 Mgas/s at each second boundary",
     });
     // Two thin lines: the per-block backlog and the 2 s average.
     expect(chart.querySelectorAll("path.recharts-curve.recharts-line-curve")).toHaveLength(2);
     // The y axis reads in gas with the SI prefix on the unit, the x axis in seconds before now.
-    expect(within(chart).getByText("30 Mgas")).toBeInTheDocument();
-    expect(within(chart).getByText("60 Mgas")).toBeInTheDocument();
+    expect(within(chart).getByText("40 Mgas")).toBeInTheDocument();
+    expect(within(chart).getByText("80 Mgas")).toBeInTheDocument();
     expect(within(chart).getByText("-15s")).toBeInTheDocument();
     expect(within(chart).getByText("now")).toBeInTheDocument();
     // And the threshold line carries its own label.
@@ -389,8 +390,11 @@ describe("ConstraintCards", () => {
     );
     expect(screen.getByRole("figure", { name: /^Constraint 2 backlog per block/ })).toBeInTheDocument();
     expect(container.querySelector("path.recharts-line-curve")).toHaveAttribute("stroke", "red");
-    // Ticks are zero, the midpoint and the top; the top is the threshold here because the backlog never reached it.
-    expect(backlogTicks(60_000_000)).toEqual([0, 30_000_000, 60_000_000]);
+    // Ticks are zero, the midpoint and the top; the top is a round step above
+    // the threshold (the tallest value here) so its label has headroom.
+    expect(backlogAxis(60_000_000)).toEqual({ top: 80_000_000, ticks: [0, 40_000_000, 80_000_000] });
+    expect(backlogAxis(100_000_000).top).toBe(125_000_000);
+    expect(backlogAxis(0).top).toBeGreaterThan(0);
     expect(drainLabel(60_000_000)).toBe("drains 60 Mgas/s at each second");
   });
   it("reads a hovered block out as its number, its gas and the backlog it left", () => {

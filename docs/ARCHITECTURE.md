@@ -238,7 +238,7 @@ type L1Series = { range: string; points: { t: number; baseFeeEstimate: string; s
 Server to client, one JSON object per message:
 
 ```ts
-{ type: 'hello', data: { network: Network; snapshot: LiveSnapshot | null; recentBlocks: BlockPoint[] } }   // on connect; snapshot null until the collector has sampled
+{ type: 'hello', data: { network: Network; snapshot: LiveSnapshot | null; recentBlocks: BlockPoint[] } }   // on connect; snapshot null until the collector has sampled; recentBlocks is the newest 1200 blocks (two minutes of a ten blocks per second chain, the hero chart window)
 { type: 'error', error: { code: string; message: string } }   // e.g. unknown subscribe target; the socket stays open
 { type: 'reorg', data: { chainId: number; ancestor: number; blocks: BlockPoint[] } }   // sent before the next tick: drop every block above ancestor, append blocks (canonical, oldest first)
 { type: 'tick',  data: LiveSnapshot }                    // every collector tick, ~1/s

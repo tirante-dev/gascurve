@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	ringSize        = 1000
-	helloBlocks     = 120
+	ringSize        = 1500
+	helloBlocks     = 1200
 	clientQueue     = 64
 	defaultPingGap  = 30 * time.Second
 	missedPingLimit = 2

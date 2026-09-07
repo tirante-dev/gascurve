@@ -1,9 +1,10 @@
 // What the live hero draws: the last two minutes of per-block base fee from
-// the smoothing store's block ring, and which range its chart is set to. Kept
+// the smoothing store's block ring against the wall clock, and which range its chart is set to. Kept
 // pure so the chart component is only a renderer and the axis, the domain and
 // the range control can be tested without a DOM.
 
 import { isSeriesRange, SERIES_RANGES } from "@/lib/api/series";
+import { liveNow, placeBlocks } from "@/lib/smoothing";
 import type { BlockPoint, SeriesRange } from "@/types";
 import { weiToGweiNumber } from "@/utils/format";
 
@@ -17,43 +18,41 @@ export const HERO_TICK_STEPS = [10, 15, 30, 60];
 const HERO_MAX_TICKS = 5;
 
 /**
- * One block on the hero chart. `x` is seconds before the end of the newest
- * block's second, so 0 is now and the axis runs negative to the left; blocks
- * that share a timestamp are spread evenly across the second they belong to,
- * as the constraint sawtooth does, so a burst keeps its shape instead of
- * stacking on one tick.
+ * One block on the hero chart. `x` is seconds before now (the right edge), so
+ * the axis runs negative to the left. Blocks that share a timestamp are spread
+ * across the second they belong to by `placeBlocks`, so a burst keeps its
+ * shape instead of stacking on one tick, and a block never moves once placed.
  */
 export type HeroPoint = { x: number; number: number; ts: number; fee: number; gasUsed: number };
 
 /**
- * The per-block base fee of the blocks within `seconds` of `lastTs`, oldest
- * first, in gwei. Blocks outside the window (and any that claim a timestamp
- * above the newest one) are left out.
+ * The per-block base fee of the blocks within `seconds` of the wall clock
+ * `nowMs`, oldest first, in gwei. The axis is anchored to the clock, not to
+ * the newest block's whole-second timestamp, so the chart slides continuously
+ * instead of stepping once a second; a block sits left of the edge by its
+ * real age, which is also what the freshness pill reports.
  */
-export function heroChartData(blocks: readonly BlockPoint[], lastTs: number, seconds = HERO_WINDOW_S): HeroPoint[] {
-  const from = lastTs - seconds + 1;
-  const inWindow = blocks.filter((b) => b.ts >= from && b.ts <= lastTs);
-  const counts = new Map<number, number>();
-  for (const b of inWindow) counts.set(b.ts, (counts.get(b.ts) ?? 0) + 1);
-  const placed = new Map<number, number>();
-  return inWindow.map((b) => {
-    const k = placed.get(b.ts) ?? 0;
-    placed.set(b.ts, k + 1);
-    const n = counts.get(b.ts) ?? 1;
-    return { x: b.ts - lastTs - 1 + k / n, number: b.number, ts: b.ts, fee: weiToGweiNumber(b.baseFee), gasUsed: b.gasUsed };
+export function heroChartData(blocks: readonly BlockPoint[], nowMs: number, seconds = HERO_WINDOW_S): HeroPoint[] {
+  const places = placeBlocks(blocks);
+  const now = liveNow(nowMs, places[places.length - 1]);
+  const out: HeroPoint[] = [];
+  blocks.forEach((b, i) => {
+    const x = places[i] - now;
+    if (x < -seconds) return;
+    out.push({ x, number: b.number, ts: b.ts, fee: weiToGweiNumber(b.baseFee), gasUsed: b.gasUsed });
   });
+  return out;
 }
 
 /**
- * The span the axis covers: the two-minute window when the ring reaches that
- * far back, otherwise the coverage rounded up to a whole ten seconds, so a
- * short ring draws over the width it has rather than against a mostly empty
- * axis. Never below ten seconds, never above the window.
+ * The span the axis covers: always the whole window. A ring that does not
+ * yet reach back that far draws over the right part of the axis and fills in
+ * as blocks arrive; an axis that grew with the coverage rescaled the whole
+ * chart every time the oldest block crossed a tick, which read as the chart
+ * jumping back and forth.
  */
-export function heroSpan(points: readonly HeroPoint[], seconds = HERO_WINDOW_S): number {
-  if (points.length === 0) return seconds;
-  const oldest = Math.abs(points[0].x);
-  return Math.min(seconds, Math.max(10, Math.ceil(oldest / 10) * 10));
+export function heroSpan(seconds = HERO_WINDOW_S): number {
+  return seconds;
 }
 
 /** The tick spacing for a span: the smallest step that keeps the axis to five ticks. */
@@ -130,6 +129,32 @@ export function heroFeeAxis(points: readonly HeroPoint[], floorGwei: number): { 
   const ticks: number[] = [];
   for (let i = 0; min + i * step <= max + step / 2; i++) ticks.push(Number((min + i * step).toPrecision(12)));
   return { domain: [ticks[0], ticks[ticks.length - 1]], ticks };
+}
+
+export type FeeAxis = ReturnType<typeof heroFeeAxis>;
+
+/**
+ * The axis to draw this frame, with hysteresis: the previous axis stands while
+ * the padded band of the data still fits inside it and still covers at least
+ * half of it. Otherwise the axis is recomputed. Without this the domain
+ * snapped to a new set of ticks on small moves of the fee, and the whole plot
+ * rescaled under the reader several times a minute.
+ */
+export function stableFeeAxis(previous: FeeAxis | null, points: readonly HeroPoint[], floorGwei: number): FeeAxis {
+  if (previous === null) return heroFeeAxis(points, floorGwei);
+  const [lo, hi] = heroFeeDomain(points, floorGwei);
+  const [plo, phi] = previous.domain;
+  const inside = lo >= plo && hi <= phi;
+  const covers = hi - lo >= (phi - plo) / 2;
+  if (inside && covers) return previous;
+  const fresh = heroFeeAxis(points, floorGwei);
+  // The same axis again (a flat or empty series recomputes to what it had):
+  // hand back the previous object, so a renderer comparing identities settles.
+  return sameAxis(previous, fresh) ? previous : fresh;
+}
+
+function sameAxis(a: FeeAxis, b: FeeAxis): boolean {
+  return a.domain[0] === b.domain[0] && a.domain[1] === b.domain[1] && a.ticks.length === b.ticks.length && a.ticks.every((t, i) => t === b.ticks[i]);
 }
 
 /**
