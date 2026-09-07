@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { LiveStatus } from "@/types";
 
 /** A titled section. The heading stands alone: sections carry no description line. */
@@ -65,29 +65,44 @@ export type NoteAlign = "start" | "end";
  * `description` states the same facts in the accessible name for a reader that
  * gets neither. The panel is `aria-hidden` because that description already
  * carries it: announcing both would say everything twice.
+ *
+ * WCAG 1.4.13 asks that content shown on hover or focus be hoverable and
+ * dismissable, so the panel takes the pointer (with the gap above the figure
+ * bridged, or crossing it would close the panel on the way in) and Escape
+ * closes it.
+ *
+ * Escape is undone on the way in, by the pointer or the focus arriving, rather
+ * than on the way out. Both edges would do in the ordinary case; arriving is
+ * the one to hang it on because of how the two fail. A missed leave leaves the
+ * note permanently unopenable, which is worse than what it was fixing; a
+ * missed arrival costs nothing, because the next one clears it.
  */
 export function HoverNote({ children, lines, description, align = "start" }: { children: ReactNode; lines: readonly string[]; description: string; align?: NoteAlign }) {
+  const [dismissed, setDismissed] = useState(false);
   return (
     /* The panel is placed against the tile, not against the figure: a note wider
        than the digits it explains has the whole tile to open into, which is what
        keeps the right-hand one of a pair on screen at a phone's width. */
-    <span className="group relative block">
+    <span className="group relative block" onMouseEnter={() => setDismissed(false)} onFocus={() => setDismissed(false)}>
       {/* A border, not `underline`: the figure inside is an inline-block, which
           text-decoration does not reach, so an underline would rule the dollar
           sign and stop there. */}
-      <span tabIndex={0} className="inline-block cursor-help border-b border-dotted border-ink-3 pb-0.5">
+      <span tabIndex={0} className="inline-block cursor-help border-b border-dotted border-ink-3 pb-0.5" onKeyDown={(e) => e.key === "Escape" && setDismissed(true)}>
         <span aria-hidden="true">{children}</span>
         <span className="sr-only">{description}</span>
       </span>
-      <span
-        aria-hidden="true"
-        className={`pointer-events-none absolute bottom-full z-20 mb-2 hidden w-max max-w-[42ch] rounded-md border border-hairline bg-surface px-3 py-2 text-left text-xs font-normal leading-snug shadow-lg group-focus-within:block group-hover:block ${align === "end" ? "right-0" : "left-0"}`}
-      >
-        {lines.map((line, i) => (
-          <span key={line} className={i === 0 ? "num block text-ink" : "block text-ink-2"}>
-            {line}
-          </span>
-        ))}
+      {/* The outer box carries the gap as padding rather than margin, so the
+          pointer crosses live ground on its way from the figure to the panel. */}
+      <span aria-hidden="true" className={`absolute bottom-full z-20 hidden pb-2 ${dismissed ? "" : "group-focus-within:block group-hover:block"} ${align === "end" ? "right-0" : "left-0"}`}>
+        {/* Never wider than the viewport leaves room for: at 320 px, or at 400%
+            zoom, the equation wraps rather than running off the card. */}
+        <span className="block w-max max-w-[min(42ch,calc(100vw_-_5rem))] rounded-md border border-hairline bg-surface px-3 py-2 text-left text-xs font-normal leading-snug shadow-lg">
+          {lines.map((line, i) => (
+            <span key={line} className={i === 0 ? "num block text-ink" : "block text-ink-2"}>
+              {line}
+            </span>
+          ))}
+        </span>
       </span>
     </span>
   );

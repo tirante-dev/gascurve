@@ -437,6 +437,23 @@ describe("LiveHero", () => {
     expect(trigger).not.toBeNull();
     expect(trigger).toHaveAttribute("tabindex", "0");
   });
+  it("closes the note on Escape and offers it again the next time the reader asks for it", async () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    render(<CostTile label="21k transfer" eth={0.0000084} ethUsd={{ price: "4200.00", at: "2026-09-06T07:19:26Z", source: "coinbase" }} nowMs={now} />);
+    const trigger = screen.getByText("0.04").closest(".cursor-help") as HTMLElement;
+    const note = screen.getByText("0.00000840 ETH × $4,200.0/ETH = $0.04").parentElement?.parentElement as HTMLElement;
+    // Hover and focus are what open it, so those are the classes to watch.
+    const opens = () => note.className.includes("group-hover:block");
+    trigger.focus();
+    expect(opens()).toBe(true);
+    // WCAG 1.4.13 wants content shown on focus to be dismissable without moving focus.
+    await userEvent.keyboard("{Escape}");
+    expect(opens()).toBe(false);
+    expect(trigger).toHaveFocus();
+    // And asking for it again brings it back, rather than the tile losing its working for good.
+    fireEvent.mouseEnter(trigger.parentElement as HTMLElement);
+    expect(opens()).toBe(true);
+  });
   it("measures the sample age from the wall clock", () => {
     expect(COLLECTOR_LAG_S).toBe(5);
     expect(sampleAge("2026-09-06T07:20:00Z", Date.parse("2026-09-06T07:20:07.9Z"))).toBeCloseTo(7.9);
