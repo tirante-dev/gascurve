@@ -131,11 +131,14 @@ func TestMetricsEndpointServesWebSocketSeries(t *testing.T) {
 	if typ, _ := readMsg(t, conn); typ != "hello" {
 		t.Fatalf("first message = %q", typ)
 	}
-	// The hello has been written, so a client and a frame are both counted
-	// while the socket is up.
-	body := scrapeHarness(t, h)
-	hasSeries(t, body, "gascurve_api_ws_clients 1")
-	hasSeries(t, body, "gascurve_api_ws_frames_sent_total 1")
+	// The client is counted before the write loop starts, so reading the
+	// hello proves that gauge. The frame counter is incremented after
+	// conn.Write returns, which the client's read orders nothing against, so
+	// it has to be waited for rather than asserted outright.
+	hasSeries(t, scrapeHarness(t, h), "gascurve_api_ws_clients 1")
+	waitFor(t, func() bool {
+		return strings.Contains(scrapeHarness(t, h), "gascurve_api_ws_frames_sent_total 1")
+	}, "the hello frame must be counted")
 
 	_ = conn.Close(websocket.StatusNormalClosure, "bye")
 	waitFor(t, func() bool {

@@ -43,7 +43,7 @@ After any Go change run at least `make fmt && make lint && make test-coverage`. 
 ## Web conventions
 
 - Next.js App Router, React 19, TypeScript strict, Tailwind, Recharts, Vitest with jsdom. `@/*` maps to `src/*`.
-- Network-aware routes: `/[network]`. API client in `src/lib/api/` (`core.ts` does timeout and retry). Live data via `useLive` (WebSocket with reconnect, polling fallback). Shapes in `src/types/` mirror `docs/ARCHITECTURE.md` exactly.
+- Network-aware routes: `/[network]`. API client in `src/lib/api/` (`core.ts` does timeout and retry). Live data via `useLive` (WebSocket with reconnect, polling fallback). Shapes in `src/types/` follow `docs/ARCHITECTURE.md`, narrowed to the fields the client reads: the operator-only parts of `/status` are deliberately absent.
 - Tailwind utility classes only, no CSS modules. Dark and light both supported.
 - Coverage gate (90% lines) covers `src/lib/**`, `src/hooks/**`, `src/utils/**`.
 

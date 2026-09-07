@@ -231,6 +231,7 @@
                 "collectorDown": { "$ref": "#/definitions/alert" },
                 "apiDown": { "$ref": "#/definitions/alert" },
                 "apiErrorRate": { "$ref": "#/definitions/thresholdAlert" },
+                "apiListenerDown": { "$ref": "#/definitions/alert" },
                 "databaseUnreachable": { "$ref": "#/definitions/alert" }
               },
               "additionalProperties": false

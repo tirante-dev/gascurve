@@ -112,7 +112,8 @@ func newServer(t *testing.T, store db.Store) *httptest.Server {
 	t.Helper()
 	cfg := config.ServerConfig{CORSOrigins: []string{"http://localhost:3000"}, RateLimitPerSecond: 1000, RateLimitBurst: 1000}
 	hub := NewHub(store, logger.Nop(), WithPingInterval(50*time.Millisecond), WithOrigins(nil))
-	s := New(store, cfg, hub, logger.Nop(), WithClock(func() time.Time { return now }), WithVersion("test"))
+	listener := &fakeListener{ch: make(chan db.Notification), status: db.ListenerStatus{Ready: true}}
+	s := New(store, cfg, hub, logger.Nop(), WithListener(listener), WithClock(func() time.Time { return now }), WithVersion("test"))
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -383,7 +384,7 @@ func TestEndpoints(t *testing.T) {
 		{"/api/v1/status", 200, cacheNone, func(t *testing.T, b []byte) {
 			var s model.Status
 			decode(t, b, &s)
-			if s.Version != "test" || len(s.Networks) != 3 {
+			if s.Version != "test" || s.Listener == nil || !s.Listener.Ready || s.Listener.Reconnects != 0 || s.Listener.LastError != nil || len(s.Networks) != 3 {
 				t.Fatalf("status: %+v", s)
 			}
 			rh := s.Networks[0]
@@ -449,6 +450,32 @@ func TestEndpoints(t *testing.T) {
 				tc.check(t, body)
 			}
 		})
+	}
+}
+
+func TestReadyAndStatusExposeListenerFailure(t *testing.T) {
+	store := seed(t)
+	cfg := config.ServerConfig{RateLimitPerSecond: 1000, RateLimitBurst: 1000}
+	listener := &fakeListener{ch: make(chan db.Notification), status: db.ListenerStatus{
+		Reconnects: 2,
+		Error:      "connection lost",
+	}}
+	s := New(store, cfg, nil, logger.Nop(), WithListener(listener), WithVersion("test"))
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, body := get(t, ts, "/ready")
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "notification listener unavailable") {
+		t.Fatalf("readiness during listener outage: %d %s", resp.StatusCode, body)
+	}
+	resp, body = get(t, ts, "/api/v1/status")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status during listener outage: %d %s", resp.StatusCode, body)
+	}
+	var status model.Status
+	decode(t, body, &status)
+	if status.Listener == nil || status.Listener.Ready || status.Listener.Reconnects != 2 || status.Listener.LastError == nil || *status.Listener.LastError != "connection lost" {
+		t.Fatalf("listener status: %+v", status.Listener)
 	}
 }
 

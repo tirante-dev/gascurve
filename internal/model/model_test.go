@@ -56,6 +56,12 @@ func TestNullableTimestamps(t *testing.T) {
 			t.Fatalf("%s should be present and null: %v", key, m)
 		}
 	}
+	b, _ = json.Marshal(ListenerStatus{})
+	m = nil
+	_ = json.Unmarshal(b, &m)
+	if v, ok := m["lastError"]; !ok || v != nil {
+		t.Fatalf("listener lastError should be present and null: %v", m)
+	}
 	b, _ = json.Marshal(BlockPoint{Backlogs: []uint64{}, ConstraintBips: []int64{}})
 	m = nil
 	_ = json.Unmarshal(b, &m)
