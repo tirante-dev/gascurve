@@ -254,6 +254,32 @@ func (m *MemStore) UpdateNetworkHead(_ context.Context, chainID, headBlock uint6
 	return nil
 }
 
+// SetNetworkHead records the head after a rewind, leaving the fields
+// without a value null and the last error alone.
+func (m *MemStore) SetNetworkHead(_ context.Context, chainID uint64, headBlock *uint64, headAt, sampledAt *time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("SetNetworkHead"); err != nil {
+		return err
+	}
+	n := m.NetworkRows[chainID]
+	n.ChainID = chainID
+	n.HeadBlock = sql.NullInt64{}
+	n.HeadAt = sql.NullTime{}
+	n.LastSampleAt = sql.NullTime{}
+	if headBlock != nil {
+		n.HeadBlock = sql.NullInt64{Int64: int64(*headBlock), Valid: true}
+	}
+	if headAt != nil {
+		n.HeadAt = sql.NullTime{Time: *headAt, Valid: true}
+	}
+	if sampledAt != nil {
+		n.LastSampleAt = sql.NullTime{Time: *sampledAt, Valid: true}
+	}
+	m.NetworkRows[chainID] = n
+	return nil
+}
+
 // SetNetworkError records the error.
 func (m *MemStore) SetNetworkError(_ context.Context, chainID uint64, msg string) error {
 	m.mu.Lock()
@@ -594,6 +620,31 @@ func (m *MemStore) LatestStateSample(_ context.Context, chainID uint64, withL1 b
 			continue
 		}
 		if best == nil || s.SampledAt.After(best.SampledAt) {
+			best = s
+		}
+	}
+	if best == nil {
+		return nil, nil
+	}
+	out := *best
+	return &out, nil
+}
+
+// StateSampleAt returns the newest sample taken at or below a block.
+func (m *MemStore) StateSampleAt(_ context.Context, chainID, block uint64) (*db.StateSample, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("StateSampleAt"); err != nil {
+		return nil, err
+	}
+	var best *db.StateSample
+	for i := range m.SampleRows {
+		s := &m.SampleRows[i]
+		if s.ChainID != chainID || s.BlockNumber > block {
+			continue
+		}
+		if best == nil || s.BlockNumber > best.BlockNumber ||
+			(s.BlockNumber == best.BlockNumber && s.SampledAt.After(best.SampledAt)) {
 			best = s
 		}
 	}

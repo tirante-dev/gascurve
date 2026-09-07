@@ -359,6 +359,10 @@ func TestEndpoints(t *testing.T) {
 			if s.Points[1].T != s.Points[2].T || s.Points[1].WeiSpent != "1500" || s.Points[2].WeiSpent != "77" || s.Points[2].L1BaseFeeAvg != "9" || s.Points[2].CalldataBytes != 8 {
 				t.Fatalf("batches per report: %+v", s.Points)
 			}
+			// The per-report resolution reports its window like every other.
+			if s.From != now.Add(-time.Hour).Unix() || s.To != now.Add(time.Second).Unix() {
+				t.Fatalf("batches 1h window: %d..%d", s.From, s.To)
+			}
 		}},
 		{"/api/v1/networks/robinhood/batches?range=x", 400, cacheNone, nil},
 		{"/api/v1/networks/robinhood/l1?range=24h", 200, cacheDay, func(t *testing.T, b []byte) {
@@ -504,8 +508,9 @@ func TestSeriesStepDown(t *testing.T) {
 }
 
 // TestUnknownHistoryIsNull: buckets and blocks written before the fee
-// split and the exponents were recorded (NULL after migration 000006)
-// report them as null, never as fabricated zeros or empty arrays; the
+// split and the exponents were recorded (pricing version 0, whose unknown
+// columns are NULL) report them as null, never as fabricated zeros or
+// empty arrays; the
 // average of such a bucket comes from its stored value.
 func TestUnknownHistoryIsNull(t *testing.T) {
 	ctx := context.Background()
@@ -557,8 +562,9 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 }
 
 // TestLiveEthUsd: /live applies the collector's staleness rule to the
-// recorded spot, serves null when there is none and refuses to invent one
-// from a row it cannot read.
+// recorded spot, rejects one stamped materially later than the serving
+// clock, serves null when there is none and refuses to invent one from a
+// row it cannot read.
 func TestLiveEthUsd(t *testing.T) {
 	ctx := context.Background()
 	liveSpot := func(t *testing.T, ts *httptest.Server) (*model.EthUsd, int) {
@@ -580,6 +586,11 @@ func TestLiveEthUsd(t *testing.T) {
 	}{
 		{"at the cutoff", config.DefaultEthUsdMaxAge, true},
 		{"past the cutoff", config.DefaultEthUsdMaxAge + time.Second, false},
+		// A quote stamped later than the serving clock comes from a clock
+		// that disagrees with this one: a small skew is tolerated, a large
+		// one makes the age unknowable and the quote unusable.
+		{"slightly ahead of the clock", -time.Minute, true},
+		{"materially ahead of the clock", -(ethUsdFutureSkew + time.Minute), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := seed(t)
@@ -1039,10 +1050,12 @@ func TestRangeBounds(t *testing.T) {
 	}
 }
 
-// TestSeriesCoverage: a bucket still in progress, and the first bucket
-// after the collector started, report their rate over the span they cover
-// and the share that span is, so a chart neither dips at its right edge
-// nor reads a partial bucket as a quiet one.
+// TestSeriesCoverage: a bucket still in progress, and the bucket the
+// collector started inside, report their rate over the span they cover and
+// the share that span is, so a chart neither dips at its right edge nor
+// reads a partial bucket as a quiet one. A bucket that ends before the
+// live start was written by the backfiller or the gap filler and is whole,
+// and a bucket entirely in the future is not a point at all.
 func TestSeriesCoverage(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
@@ -1051,13 +1064,14 @@ func TestSeriesCoverage(t *testing.T) {
 	}
 	clock := now.Add(20 * time.Second) // twenty seconds into the minute that starts at now
 	inProgress := now.Truncate(time.Minute)
+	backfilled := inProgress.Add(-3 * time.Minute)
 	first := inProgress.Add(-2 * time.Minute)
 	full := inProgress.Add(-time.Minute)
 	bucket := func(start time.Time) db.Bucket {
 		return db.Bucket{ChainID: robinhood, Resolution: db.Resolution1m, BucketStart: start, Blocks: 3, GasUsed: 300, FeesWei: db.WeiFromUint64(90),
 			BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1), BacklogsEnd: db.Uint64Array{}, BacklogsMax: db.Uint64Array{}, PricingVersion: db.PricingFull}
 	}
-	if err := store.FoldBuckets(ctx, []db.Bucket{bucket(first), bucket(full), bucket(inProgress)}); err != nil {
+	if err := store.FoldBuckets(ctx, []db.Bucket{bucket(backfilled), bucket(first), bucket(full), bucket(inProgress)}); err != nil {
 		t.Fatal(err)
 	}
 	// The collector started forty-five seconds into the first bucket.
@@ -1074,19 +1088,25 @@ func TestSeriesCoverage(t *testing.T) {
 	}
 	var out model.Series
 	decode(t, body, &out)
-	if len(out.Points) != 3 {
+	if len(out.Points) != 4 {
 		t.Fatalf("points: %+v", out.Points)
 	}
-	// First bucket: fifteen seconds covered of sixty.
-	if p := out.Points[0]; p.GasPerSecond != 20 || p.Coverage != 0.25 {
-		t.Fatalf("first bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
+	// A bucket that ends before the live start is backfilled history, and
+	// whole: the live start must not trim it to a single second, which
+	// would multiply its rate by the width.
+	if p := out.Points[0]; p.GasPerSecond != 5 || p.Coverage != 1 {
+		t.Fatalf("backfilled bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
+	}
+	// The bucket the live start falls inside: fifteen seconds of sixty.
+	if p := out.Points[1]; p.GasPerSecond != 20 || p.Coverage != 0.25 {
+		t.Fatalf("first live bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// A whole bucket.
-	if p := out.Points[1]; p.GasPerSecond != 5 || p.Coverage != 1 {
+	if p := out.Points[2]; p.GasPerSecond != 5 || p.Coverage != 1 {
 		t.Fatalf("full bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// The bucket in progress: twenty seconds covered.
-	if p := out.Points[2]; p.GasPerSecond != 15 || p.Coverage < 0.33 || p.Coverage > 0.34 {
+	if p := out.Points[3]; p.GasPerSecond != 15 || p.Coverage < 0.33 || p.Coverage > 0.34 {
 		t.Fatalf("bucket in progress: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// An unreadable live_start is ignored, not an error.
@@ -1096,19 +1116,70 @@ func TestSeriesCoverage(t *testing.T) {
 	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/series?range=24h"); resp.StatusCode != 200 {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
-	// The span never drops below a second nor rises above the width.
-	if secs, share := coverage(now, time.Minute, now, time.Time{}); secs != 1 || share != 1.0/60 {
-		t.Fatalf("clamped low: %d %v", secs, share)
+	// A bucket whose whole width is at or after the serving clock has no
+	// span at all and is not returned; nothing is ever clamped up to a
+	// second from nothing.
+	if span := coveredSpan(now, time.Minute, now, time.Time{}); span > 0 {
+		t.Fatalf("a bucket starting at now has no span: %v", span)
 	}
-	if secs, share := coverage(now, time.Minute, now.Add(time.Hour), now.Add(-time.Hour)); secs != 60 || share != 1 {
-		t.Fatalf("clamped high: %d %v", secs, share)
+	if _, ok := bucketPoint(db.Bucket{BucketStart: now.Add(time.Minute), BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(1),
+		BaseFeeMax: db.WeiFromUint64(1), FeesWei: db.WeiFromUint64(1)}, time.Minute, now, time.Time{}); ok {
+		t.Fatal("a bucket in the future must not be a point")
 	}
-	// A live start after the bucket's end still leaves a one-second span.
-	if secs, _ := coverage(now, time.Minute, now.Add(time.Hour), now.Add(2*time.Minute)); secs != 1 {
-		t.Fatalf("live start past the bucket: %d", secs)
+	// The span never rises above the width, and a sub-second span still
+	// counts as one second so a rate is never divided by zero.
+	if span := coveredSpan(now, time.Minute, now.Add(time.Hour), now.Add(-time.Hour)); span != time.Minute {
+		t.Fatalf("clamped high: %v", span)
+	}
+	if secs, share := coverage(time.Minute, time.Minute); secs != 60 || share != 1 {
+		t.Fatalf("whole bucket: %d %v", secs, share)
+	}
+	if secs, share := coverage(500*time.Millisecond, time.Minute); secs != 1 || share > 0.01 {
+		t.Fatalf("sub-second span: %d %v", secs, share)
+	}
+	// A live start outside the bucket does not trim it: a bucket entirely
+	// before it is backfilled history, one entirely after it cannot exist.
+	if span := coveredSpan(now, time.Minute, now.Add(time.Hour), now.Add(2*time.Minute)); span != time.Minute {
+		t.Fatalf("live start past the bucket: %v", span)
+	}
+	if span := coveredSpan(now, time.Minute, now.Add(time.Hour), now.Add(-time.Second)); span != time.Minute {
+		t.Fatalf("live start before the bucket: %v", span)
 	}
 	// Per-block points are whole by definition.
 	if p := blockPoints([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull}}, nil); p[0].Coverage != 1 {
 		t.Fatalf("block coverage: %v", p[0].Coverage)
+	}
+}
+
+// TestBatchesOneHourBounds: the per-report batch resolution reports the
+// window it was asked for, exactly as the grouped resolutions do, whether
+// or not any report falls inside it.
+func TestBatchesOneHourBounds(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+		t.Fatal(err)
+	}
+	ts := newServer(t, store)
+	batches := func(t *testing.T) model.BatchSeries {
+		t.Helper()
+		resp, body := get(t, ts, "/api/v1/networks/robinhood/batches?range=1h")
+		if resp.StatusCode != 200 {
+			t.Fatalf("status %d: %s", resp.StatusCode, body)
+		}
+		var out model.BatchSeries
+		decode(t, body, &out)
+		return out
+	}
+	from, to := now.Add(-time.Hour).Unix(), now.Add(time.Second).Unix()
+	if s := batches(t); len(s.Points) != 0 || s.From != from || s.To != to {
+		t.Fatalf("empty one hour window: %d..%d %+v", s.From, s.To, s.Points)
+	}
+	if err := store.UpsertBatchReports(ctx, []db.BatchReport{{ChainID: robinhood, BlockNumber: 10, BatchNumber: 1, BatchTS: now.Add(-time.Minute),
+		Poster: "0x1", CalldataLen: 8, L1BaseFee: db.WeiFromUint64(9), GasSpent: 3, WeiSpent: db.WeiFromUint64(77)}}); err != nil {
+		t.Fatal(err)
+	}
+	if s := batches(t); len(s.Points) != 1 || s.From != from || s.To != to {
+		t.Fatalf("one hour window with a report: %d..%d %+v", s.From, s.To, s.Points)
 	}
 }

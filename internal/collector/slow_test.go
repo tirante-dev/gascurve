@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
+	"github.com/tirante-dev/gascurve/internal/logger"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
@@ -28,6 +30,10 @@ func TestSlowTickOwnerActions(t *testing.T) {
 	}
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
+	// A chain younger than the configured history depth is scanned from
+	// genesis: the fake chain runs at ten blocks a second, so a day of
+	// history covers all 250k of its blocks.
+	f.cfg.BackfillDepth = 24 * time.Hour
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -155,20 +161,24 @@ func TestSlowTickOwnerActions(t *testing.T) {
 // to start at.
 const scanCutoff = 70_000_000
 
-// clockPastDepth sets the follower's clock so that backfill_depth plus the
-// origin margin reaches back exactly to scanCutoff: a fresh owner scan then
-// starts there rather than at genesis.
-func clockPastDepth(f *Follower) {
-	at := time.Unix(int64(tsFor(scanCutoff)), 0).Add(f.cfg.BackfillDepth + originMargin)
-	f.now = func() time.Time { return at }
+// largeChainHead is the head of the large-chain tests' fake chain.
+const largeChainHead = 120_000_000
+
+// depthPastCutoff sets backfill_depth so that the history window, measured
+// back from the head's own timestamp with the origin margin added, reaches
+// exactly scanCutoff: a fresh owner scan then starts there rather than at
+// genesis. The window comes from the chain, never from the host clock, so
+// the clock is left alone.
+func depthPastCutoff(f *Follower) {
+	f.cfg.BackfillDepth = time.Duration(tsFor(largeChainHead)-tsFor(scanCutoff))*time.Second - originMargin
 }
 
 func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	ctx := context.Background()
-	rpc := newFakeRPC(120_000_000)
+	rpc := newFakeRPC(largeChainHead)
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
-	clockPastDepth(f)
+	depthPastCutoff(f)
 	// Without a fast tick the head comes from eth_blockNumber. The scan
 	// starts at the block backfill_depth (and a margin) before now, found by
 	// a header search, never at genesis of a chain this long. Without an
@@ -195,11 +205,11 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	// With an archive endpoint the state at the cutoff is sampled once:
 	// its fee is the baseline from the cutoff on and its constraints an
 	// observed set there; a second pass does not sample again.
-	archive := newFakeRPC(120_000_000)
+	archive := newFakeRPC(largeChainHead)
 	archive.minFee = big.NewInt(30_000_000)
 	storeA := dbtest.New()
 	fa := newTestFollower(t, rpc, storeA)
-	clockPastDepth(fa)
+	depthPastCutoff(fa)
 	fa.archive = archive
 	rpc.logRanges = nil
 	if err := fa.SlowTick(ctx); err != nil {
@@ -239,7 +249,7 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	}
 	archive.errs["FastSampleAt"] = errRPC
 	fc := newTestFollower(t, rpc, dbtest.New())
-	clockPastDepth(fc)
+	depthPastCutoff(fc)
 	fc.archive = archive
 	if err := fc.SlowTick(ctx); !errors.Is(err, errRPC) || fc.scanOrigin != nil {
 		t.Fatalf("origin sample failure: %v", err)
@@ -248,7 +258,7 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	failing := dbtest.New()
 	failing.FailOn["WithChainTx"] = true
 	fd := newTestFollower(t, rpc, failing)
-	clockPastDepth(fd)
+	depthPastCutoff(fd)
 	if err := fd.SlowTick(ctx); !errors.Is(err, dbtest.ErrInjected) || fd.scanOrigin != nil {
 		t.Fatalf("origin write failure: %v", err)
 	}
@@ -288,14 +298,14 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 // current parameters, which have nothing to do with what was in force.
 func TestOriginRecordsLegacyState(t *testing.T) {
 	ctx := context.Background()
-	rpc := newFakeRPC(120_000_000)
+	rpc := newFakeRPC(largeChainHead)
 	rpc.legacy = &nitro.LegacyParams{SpeedLimit: 7_000_000, Inertia: 102, Tolerance: 10, Backlog: 42}
-	archive := newFakeRPC(120_000_000)
+	archive := newFakeRPC(largeChainHead)
 	archive.legacy = &nitro.LegacyParams{SpeedLimit: 3_000_000, Inertia: 50, Tolerance: 5, Backlog: 900_000}
 	archive.minFee = big.NewInt(30_000_000)
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
-	clockPastDepth(f)
+	depthPastCutoff(f)
 	f.archive = archive
 	if err := f.SlowTick(ctx); err != nil {
 		t.Fatal(err)
@@ -337,7 +347,7 @@ func TestOriginRecordsLegacyState(t *testing.T) {
 	archive.legacy = nil
 	archive.constraints = nil
 	bad := newTestFollower(t, rpc, dbtest.New())
-	clockPastDepth(bad)
+	depthPastCutoff(bad)
 	bad.archive = archive
 	if err := bad.SlowTick(ctx); err == nil || bad.scanOrigin != nil {
 		t.Fatalf("a legacy origin without parameters must fail: %v", err)
@@ -660,5 +670,57 @@ func TestScanBatchReportsUnlimited(t *testing.T) {
 	store.FailOn["BlocksAfter"] = true
 	if err := f.scanBatchReports(ctx); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("BlocksAfter failure: %v", err)
+	}
+}
+
+// TestBatchScanReEvaluatesAfterFailover: a batch scan decided on an
+// unlimited endpoint that fails over to a paced one stops reading every
+// block with full transactions and goes back to the two-transaction
+// prefilter, so the public fallback does not pay for the fast endpoint's
+// decision.
+func TestBatchScanReEvaluatesAfterFailover(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	pool := &fakePool{fakeRPC: rpc, pol: nitro.Policy{Unlimited: true}}
+	store := dbtest.New()
+	f := NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, CallsPerSecond: 4, Enabled: true},
+		Collector: testConfig(), RPC: pool, Store: store, Log: logger.Nop(),
+		Now:   func() time.Time { return baseTime.Add(140 * time.Second) },
+		Sleep: func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
+	})
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// An unlimited catch-up stores enough blocks for the scan to need more
+	// than one round.
+	rpc.setHead(1400)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The pool moves to a paced endpoint while the first round is reading
+	// its blocks.
+	rpc.hooks["BlocksWithTxs"] = func() {
+		pool.pol = nitro.Policy{Unlimited: false, Rate: 4}
+		pool.status = nitro.PoolStatus{Active: 1, Failovers: 1}
+	}
+	if err := f.scanBatchReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); v != "1099" {
+		t.Fatalf("the scan must stop after the round the failover landed in, cursor = %q", v)
+	}
+	if calls := rpc.calledTimes("BlocksWithTxs"); calls != 1 {
+		t.Fatalf("no further full-transaction round may run on the paced endpoint: %d", calls)
+	}
+	// Back on an unlimited endpoint the scan catches up again.
+	delete(rpc.hooks, "BlocksWithTxs")
+	pool.pol = nitro.Policy{Unlimited: true}
+	pool.status = nitro.PoolStatus{Active: 0, Failovers: 2}
+	if err := f.scanBatchReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); v != "1400" {
+		t.Fatalf("cursor after catching up = %q", v)
 	}
 }

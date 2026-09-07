@@ -14,8 +14,14 @@ import (
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
 	"github.com/tirante-dev/gascurve/internal/logger"
+	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 )
+
+// The pool the collector routes through is chosen with a runtime type
+// assertion, so a fake that stops satisfying the interface would silently
+// take the plain-client path instead of failing to build.
+var _ EndpointPool = (*fakePool)(nil)
 
 // fakePool is an EndpointPool over a fakeRPC with scripted verification,
 // capabilities, policy and status.
@@ -35,11 +41,16 @@ func (p *fakePool) Verify(context.Context) error {
 	p.verified++
 	return p.verifyErr
 }
-func (p *fakePool) HasWS() bool                           { return p.hasWS }
-func (p *fakePool) WSURL(context.Context) (string, error) { return p.wsURL, p.wsErr }
-func (p *fakePool) Archive() *nitro.ArchivePool           { return p.archive }
-func (p *fakePool) Status() nitro.PoolStatus              { return p.status }
-func (p *fakePool) Policy() nitro.Policy                  { return p.pol }
+func (p *fakePool) HasWS() bool { return p.hasWS }
+func (p *fakePool) WSEndpoint(context.Context) (*nitro.WSLease, error) {
+	if p.wsErr != nil {
+		return nil, p.wsErr
+	}
+	return &nitro.WSLease{URL: p.wsURL}, nil
+}
+func (p *fakePool) Archive() *nitro.ArchivePool { return p.archive }
+func (p *fakePool) Status() nitro.PoolStatus    { return p.status }
+func (p *fakePool) Policy() nitro.Policy        { return p.pol }
 
 // chainIDServer is a JSON-RPC server that only answers eth_chainId.
 func chainIDServer(t *testing.T, id string) *httptest.Server {
@@ -102,9 +113,22 @@ func TestFollowerWithPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, ok, _ := store.GetState(ctx, 4663, db.StateEndpoints)
-	want := `{"activeEndpoint":1,"failovers":2,"endpoints":[{"index":0,"ws":false,"archive":false,"disabled":true,"error":"reports chain id 1, configured 4663"},{"index":1,"ws":true,"archive":true,"disabled":false,"error":null}]}`
-	if !ok || raw != want {
+	if !ok {
+		t.Fatal("the routing state must be persisted for /status")
+	}
+	var got model.EndpointsStatus
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("the routing state must be the documented shape: %v (%s)", err, raw)
+	}
+	if got.ActiveEndpoint != 1 || got.Failovers != 2 || len(got.Endpoints) != 2 {
 		t.Fatalf("endpoints state = %s", raw)
+	}
+	e0, e1 := got.Endpoints[0], got.Endpoints[1]
+	if e0.Index != 0 || !e0.Disabled || e0.Error == nil || *e0.Error != "reports chain id 1, configured 4663" {
+		t.Fatalf("disabled endpoint = %s", raw)
+	}
+	if e1.Index != 1 || !e1.WS || !e1.Archive || e1.Disabled || e1.Error != nil {
+		t.Fatalf("usable endpoint = %s", raw)
 	}
 	// A disabled endpoint is an error on the network row even though the
 	// network keeps running on the other one.

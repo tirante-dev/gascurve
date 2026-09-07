@@ -47,6 +47,71 @@ type Endpoint struct {
 	logRange        uint64
 	lastLogRefusal  time.Time
 	lastLogRecovery time.Time
+	// WebSocket health, tracked apart from HTTP verification: an endpoint
+	// whose JSON-RPC answers can still have a socket that cannot be
+	// dialed, cannot be subscribed to, or will not stay up. wsUntil is
+	// when its socket may be tried again, wsReason says why it was cooled
+	// down, wsDrops counts subscriptions lost soon after connecting and
+	// wsUpAt is when the last one connected.
+	wsUntil  time.Time
+	wsReason string
+	wsDrops  int
+	wsUpAt   time.Time
+}
+
+const (
+	// wsDropLimit is how many subscriptions may be lost in quick
+	// succession before the endpoint's WebSocket is cooled down. A dial or
+	// subscribe failure cools it down at once: nothing about it worked.
+	wsDropLimit = 3
+	// wsHealthyFor is how long a subscription must hold before the drops
+	// before it stop counting against the endpoint.
+	wsHealthyFor = time.Minute
+)
+
+// noteWSConnected records a live subscription on the endpoint.
+func (e *Endpoint) noteWSConnected() {
+	now := e.now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.wsUpAt = now
+	e.wsUntil, e.wsReason = time.Time{}, ""
+}
+
+// noteWSFailure records a WebSocket failure and reports whether it cooled
+// the endpoint's socket down for cooldown. subscribed says whether the
+// subscription had been acknowledged before it broke: a dial or subscribe
+// failure cools the endpoint down at once, while a subscription that was
+// live is only held against it when it keeps dropping soon after
+// connecting, so an ordinary reconnect does not move a follower off a
+// working endpoint.
+func (e *Endpoint) noteWSFailure(subscribed bool, cooldown time.Duration, reason string) bool {
+	now := e.now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if subscribed {
+		if !e.wsUpAt.IsZero() && now.Sub(e.wsUpAt) >= wsHealthyFor {
+			e.wsDrops = 0
+		}
+		e.wsDrops++
+		if e.wsDrops < wsDropLimit {
+			return false
+		}
+	}
+	e.wsDrops = 0
+	e.wsUntil, e.wsReason = now.Add(cooldown), reason
+	return true
+}
+
+// wsCooling returns when the endpoint's WebSocket may be tried again and
+// why it was cooled down. A zero until means it is usable now.
+func (e *Endpoint) wsCooling() (until time.Time, reason string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.now().Before(e.wsUntil) {
+		return e.wsUntil, e.wsReason
+	}
+	return time.Time{}, ""
 }
 
 // newEndpoint builds an endpoint at index for cfg with a starting batch cap
@@ -65,8 +130,11 @@ func newEndpoint(index int, cfg config.EndpointConfig, batchSize int, log *logge
 		maxBatchCap: batchSize,
 		minBatchCap: min(minBatchCap, batchSize),
 	}
-	opts = append(append([]Option{WithLogger(e.log)}, opts...), withBatchObserver(e.observe), withBatcher(e.batch))
+	opts = append(append([]Option{WithLogger(e.log)}, opts...), withBatchObserver(e.observe), withBatcher(e.batch), withEndpointIndex(index))
 	e.Client = NewClient(cfg.RPCURL, cfg.CallsPerSecond, opts...)
+	// The endpoint's WebSocket URL is a credential too, and the subscriber
+	// reports its failures through this endpoint.
+	e.scrub = newScrubber(index, cfg.RPCURL, cfg.WSURL)
 	return e
 }
 
@@ -207,13 +275,17 @@ func (e *Endpoint) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block
 // to.
 const MaxLogRange = 100_000
 
-// minLogRange is the floor the learned range halves down to: below this a
-// scan of a long chain would take more calls than the budget can carry, so
-// a refusal at this width is the caller's error.
-const minLogRange = 100
+// minLogRange is the floor the learned range halves down to. One block is
+// the narrowest question there is: an endpoint that refuses it is not
+// serving logs at all, which is an endpoint failure rather than a range
+// the caller asked too much for.
+const minLogRange = 1
 
-// logRefusalBackoff is the pause before re-asking a refused getLogs range in
-// narrower pieces; it doubles per consecutive refusal within one call, up to
+// logRefusalBackoff is the pause before re-asking a refused getLogs range
+// in narrower pieces. It is paid once per piece, not once per halving: the
+// halvings that follow a refusal are a smaller ask rather than the same
+// request again, and waiting for each of them would stall a scan for
+// minutes. It doubles per consecutive refused piece, up to
 // maxLogRefusalBackoff, so an endpoint that keeps refusing is asked less
 // often as well as for less.
 const (
@@ -242,35 +314,32 @@ func (e *Endpoint) logRangeLocked() uint64 {
 // minLogRange) and stamps the refusal; an accepted call after a quiet
 // capRecoveryInterval doubles it again (ceiling MaxLogRange), so the
 // endpoint's real limit is found without being told, and probed again now
-// and then in case it moved. Returns the width to use next.
-func (e *Endpoint) observeLogRange(width uint64, refused bool) uint64 {
+// and then in case it moved. The next call reads the new width with
+// LogRange.
+func (e *Endpoint) observeLogRange(width uint64, refused bool) {
 	now := e.now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if refused {
 		e.lastLogRefusal = now
-		cur := e.logRangeLocked()
-		if width < cur {
-			cur = width
-		}
+		cur := min(e.logRangeLocked(), width)
 		e.logRange = max(cur/2, minLogRange)
 		e.log.Warn("eth_getLogs range refused, halving", "refused", width, "range", e.logRange)
-		return e.logRange
+		return
 	}
 	if e.logRange == 0 || e.logRange >= MaxLogRange {
-		return e.logRangeLocked()
+		return
 	}
 	since := e.lastLogRefusal
 	if e.lastLogRecovery.After(since) {
 		since = e.lastLogRecovery
 	}
 	if now.Sub(since) < capRecoveryInterval {
-		return e.logRange
+		return
 	}
 	e.lastLogRecovery = now
 	e.logRange = min(e.logRange*2, MaxLogRange)
 	e.log.Info("eth_getLogs range recovered one step", "range", e.logRange)
-	return e.logRange
 }
 
 // logsRefused reports whether err is the endpoint declining the request it
@@ -286,14 +355,24 @@ func logsRefused(err error) bool {
 
 // OwnerActsLogs fetches OwnerActs events over [from, to] in pieces of at
 // most the endpoint's getLogs range. A refused piece wider than one block
-// narrows the range and, after a back-off, is re-asked in smaller pieces;
-// the accepted width is kept for later calls and probed upward again after
-// a quiet minute. Logs come back in block order, as one call would return
-// them.
+// narrows the range and is re-asked in smaller pieces; the accepted width
+// is kept for later calls and probed upward again after a quiet minute.
+// Logs come back in block order, as one call would return them.
+//
+// A refusal of a single block is not a range the caller asked too much
+// for: this endpoint cannot answer the question at all, so it comes back
+// as an EndpointError and the pool tries the next endpoint. The provider's
+// own error stays underneath it, so the last endpoint's refusal still
+// surfaces as the JSON-RPC error it was.
+//
+// The back-off is paid at most once per piece and honors the context, so
+// narrowing a range from a hundred thousand blocks to one costs seventeen
+// calls rather than seventeen waits.
 func (e *Endpoint) OwnerActsLogs(ctx context.Context, from, to uint64) ([]Log, error) {
 	fetch := func(a, b uint64) ([]Log, error) { return e.Client.OwnerActsLogs(ctx, a, b) }
 	var out []Log
 	backoff := logRefusalBackoff
+	waited := false
 	for start := from; start <= to; {
 		width := e.LogRange()
 		end := start + width - 1
@@ -308,19 +387,30 @@ func (e *Endpoint) OwnerActsLogs(ctx context.Context, from, to uint64) ([]Log, e
 				break
 			}
 			start = end + 1
-			backoff = logRefusalBackoff
+			if !waited {
+				// A piece taken at the first ask clears the back-off; one
+				// that had to be narrowed keeps the longer pause for the
+				// next piece.
+				backoff = logRefusalBackoff
+			}
+			waited = false
 			continue
 		}
-		if ctx.Err() != nil || end == start || !logsRefused(err) {
+		if ctx.Err() != nil || !logsRefused(err) {
 			return nil, err
 		}
-		if e.observeLogRange(end-start+1, true) >= end-start+1 {
-			// Already at the floor: narrower is not on offer.
-			return nil, err
+		asked := end - start + 1
+		if asked <= 1 {
+			return nil, &EndpointError{Err: e.scrub.errorf("endpoint %d: eth_getLogs refused a single block %d: %w", e.index, start, err)}
+		}
+		e.observeLogRange(asked, true)
+		if waited {
+			continue
 		}
 		if err := e.sleep(ctx, backoff); err != nil {
 			return nil, err
 		}
+		waited = true
 		backoff = min(backoff*2, maxLogRefusalBackoff)
 	}
 	return out, nil

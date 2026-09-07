@@ -66,9 +66,11 @@ type EndpointPool interface {
 	Verify(ctx context.Context) error
 	// HasWS reports whether any endpoint is configured with a ws_url.
 	HasWS() bool
-	// WSURL resolves the WebSocket endpoint to dial next, verifying it
-	// first, so a subscriber rebinds when its endpoint is disabled.
-	WSURL(ctx context.Context) (string, error)
+	// WSEndpoint leases the WebSocket endpoint to dial next, verifying it
+	// first, so a subscriber rebinds when its endpoint is disabled. The
+	// lease carries the failures back, so an endpoint whose socket does
+	// not work is cooled down and the next attempt resolves another one.
+	WSEndpoint(ctx context.Context) (*nitro.WSLease, error)
 	// Archive returns the managed historical-state path, nil when no
 	// endpoint serves it.
 	Archive() *nitro.ArchivePool
@@ -249,13 +251,18 @@ type liveStart struct {
 
 // hole is a block range the collector did not index (collector_state
 // holes). A hole without a reason is queued work: the gap filler replays
-// it forward from the stored block before it, tracking its progress in
-// Next. A hole with reasonNoState has nothing to replay from and is only
-// re-examined when a stored state appears before it.
+// it forward from the state at the block before it, tracking its progress
+// in Next and carrying the replay state in State. A hole with
+// reasonNoState has nothing to replay from and is only re-examined when a
+// stored state appears before it; one with reasonExpired left the queue
+// because it was full.
 type hole = model.Hole
 
-// reasonNoState marks a hole no replay can fill.
-const reasonNoState = model.HoleReasonNoState
+// Reasons a hole is not queued work.
+const (
+	reasonNoState = model.HoleReasonNoState
+	reasonExpired = model.HoleReasonExpired
+)
 
 // scanOrigin is where a deliberately truncated owner scan began
 // (collector_state owner_scan_origin). With Archive the complete pricer
@@ -368,7 +375,7 @@ func (f *Follower) TickInterval() time.Duration { return f.tickInterval }
 func (f *Follower) bindPool() {
 	if f.heads == nil {
 		if f.pool.HasWS() {
-			f.heads = nitro.NewHeadSubscriber("", nitro.WithHeadLogger(f.log), nitro.WithHeadURL(f.pool.WSURL))
+			f.heads = nitro.NewHeadSubscriber("", nitro.WithHeadLogger(f.log), nitro.WithHeadLease(f.pool.WSEndpoint))
 			f.log.Info("newHeads routed to the pool's verified WebSocket endpoints")
 		} else {
 			f.log.Info("no endpoint has a ws_url, polling on the timer")
@@ -390,10 +397,14 @@ func (f *Follower) bindPool() {
 func endpointsStatus(st nitro.PoolStatus) model.EndpointsStatus {
 	out := model.EndpointsStatus{ActiveEndpoint: st.Active, Failovers: st.Failovers, Endpoints: make([]model.EndpointStatus, len(st.Endpoints))}
 	for i, e := range st.Endpoints {
-		out.Endpoints[i] = model.EndpointStatus{Index: e.Index, WS: e.WS, Archive: e.Archive, Disabled: e.Disabled}
+		out.Endpoints[i] = model.EndpointStatus{Index: e.Index, WS: e.WS, Archive: e.Archive, Disabled: e.Disabled, WSCooling: e.WSCooling}
 		if e.Error != "" {
 			msg := e.Error
 			out.Endpoints[i].Error = &msg
+		}
+		if e.WSError != "" {
+			msg := e.WSError
+			out.Endpoints[i].WSError = &msg
 		}
 	}
 	return out
@@ -413,12 +424,25 @@ func endpointError(st nitro.PoolStatus) string {
 	return strings.Join(parts, "; ")
 }
 
-// policy is the call policy one operation works to: taken once from the
-// active endpoint, so a tick, a scan or a backfill step never mixes two
-// endpoints' budgets halfway through.
+// endpointGen identifies the endpoint an operation's policy came from:
+// the pool's active index together with its failover counter, so both a
+// failover and a return to the probed primary change it. A plain client
+// has one endpoint and the zero value never changes.
+type endpointGen struct {
+	active    int
+	failovers uint64
+}
+
+// policy is the call policy one operation works to: taken from the active
+// endpoint, so a tick, a scan or a backfill step never mixes two
+// endpoints' budgets halfway through, and bound to the endpoint
+// generation it came from, so an operation whose endpoint changed under
+// it can decide again rather than run an unlimited catch-up on a paced
+// fallback.
 type policy struct {
 	unlimited bool
 	rate      float64
+	gen       endpointGen
 }
 
 // policy snapshots the active endpoint's policy, falling back to the
@@ -426,9 +450,22 @@ type policy struct {
 func (f *Follower) policy() policy {
 	if f.pool != nil {
 		p := f.pool.Policy()
-		return policy{unlimited: p.Unlimited, rate: p.Rate}
+		st := f.pool.Status()
+		return policy{unlimited: p.Unlimited, rate: p.Rate, gen: endpointGen{active: st.Active, failovers: st.Failovers}}
 	}
 	return policy{unlimited: f.net.Unlimited(), rate: f.net.CallsPerSecond}
+}
+
+// repolicy re-reads the policy when the pool has moved to another endpoint
+// since pol was taken, so the rest of a multi-step operation works to the
+// budget of the endpoint that will actually serve it. It reports whether
+// the endpoint changed.
+func (f *Follower) repolicy(pol policy) (policy, bool) {
+	cur := f.policy()
+	if cur.gen == pol.gen {
+		return pol, false
+	}
+	return cur, true
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
@@ -621,9 +658,11 @@ func (f *Follower) boundaryLocked() (time.Time, bool) {
 	return time.Unix(f.liveStart.TS, 0).UTC().Truncate(boundaryWidth), true
 }
 
-// recordHole appends an un-indexed range to collector_state holes. A hole
-// without a reason is queued for the gap filler; one recorded with
-// reasonNoState is only work if a state ever appears before it.
+// recordHole appends an un-indexed range to collector_state holes, where
+// saveHoles merges it into any queued range it overlaps or touches rather
+// than duplicating it. A hole without a reason is queued for the gap
+// filler; one recorded with reasonNoState is only work if a state ever
+// appears before it.
 func (f *Follower) recordHole(ctx context.Context, s db.Store, h hole) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil {

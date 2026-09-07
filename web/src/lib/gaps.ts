@@ -40,10 +40,41 @@ export const DEFAULT_STEP_SECONDS = 60;
  */
 const STEP_SECONDS: Record<SeriesResolution, number> = { block: BLOCK_GAP_S, "5s": 5, "1m": 60, "15m": 900, "1h": 3600 };
 
-function knownStep(resolution: string | undefined): number | null {
+/**
+ * The width of one bucket at each resolution, which is a different question
+ * from how far apart two points may be before the space between them is a
+ * gap: a per-block range carries one point per block, so its bucket is the
+ * finest grain a header has (a second) while its gap threshold is BLOCK_GAP_S.
+ */
+const BUCKET_SECONDS: Record<SeriesResolution, number> = { block: 1, "5s": 5, "1m": 60, "15m": 900, "1h": 3600 };
+
+function known(table: Record<SeriesResolution, number>, resolution: string | undefined): number | null {
   if (resolution === undefined) return null;
-  const step: number | undefined = STEP_SECONDS[resolution as SeriesResolution];
+  const step: number | undefined = table[resolution as SeriesResolution];
   return step === undefined ? null : step;
+}
+
+function knownStep(resolution: string | undefined): number | null {
+  return known(STEP_SECONDS, resolution);
+}
+
+/**
+ * The width of one bucket of a range: the resolution's own, never inferred
+ * from the spacing of the first two points. Two per-block points sharing a
+ * timestamp used to make a zero-width bucket, a missing second point inflated
+ * the bucket to the size of the hole, and a singleton 15-minute series read as
+ * a minute. Only a resolution the client does not know falls back to the
+ * points, and to DEFAULT_STEP_SECONDS when they say nothing either.
+ */
+export function bucketSeconds(resolution: string | undefined, points: readonly { t: number }[] = []): number {
+  const width = known(BUCKET_SECONDS, resolution);
+  if (width !== null) return width;
+  let smallest = Number.POSITIVE_INFINITY;
+  for (let i = 1; i < points.length; i++) {
+    const delta = points[i].t - points[i - 1].t;
+    if (delta > 0 && delta < smallest) smallest = delta;
+  }
+  return Number.isFinite(smallest) ? smallest : DEFAULT_STEP_SECONDS;
 }
 
 /**
@@ -96,28 +127,38 @@ export function windowOf(range: { from?: number; to?: number }, points: readonly
 }
 
 /**
- * The spans of `window` that carry no data. Points must be sorted, oldest
- * first, and `step` is the spacing they are expected at: two points further
- * apart than one step have a hole between them, and the hole starts one step
- * after the earlier point, which is the first slot that should have carried
- * something. A window with no points at all is one leading gap.
+ * The spans of `window` that carry no data. Points arrive sorted, oldest
+ * first (the client boundary normalises them), and `step` is the spacing they
+ * are expected at: two points further apart than one step have a hole between
+ * them, and the hole starts one step after the earlier point, which is the
+ * first slot that should have carried something. A window with no points at
+ * all is one leading gap.
+ *
+ * Every span is clamped to the window before it is returned, so a point that
+ * sits outside the range the api answered (history the collector kept either
+ * side of it) can never shade a stretch of axis the chart does not draw.
  */
 export function findGaps(points: readonly { t: number }[], window: GapWindow, step: number): Gap[] {
   const { from, to } = window;
   if (!Number.isFinite(step) || step <= 0 || !(to > from)) return [];
   if (points.length === 0) return [{ from, to, kind: "leading" }];
   const out: Gap[] = [];
+  const clamp = (start: number, end: number, kind: GapKind) => {
+    const lo = Math.max(from, start);
+    const hi = Math.min(to, end);
+    if (hi > lo) out.push({ from: lo, to: hi, kind });
+  };
   const first = points[0].t;
   const last = points[points.length - 1].t;
   // A window is not aligned to the bucket grid, so a first point less than one
   // step after the start is the grid and not a gap.
-  if (first - from >= step) out.push({ from, to: first, kind: "leading" });
+  if (first - from >= step) clamp(from, first, "leading");
   for (let i = 1; i < points.length; i++) {
     const before = points[i - 1].t;
     const after = points[i].t;
-    if (after - before > step) out.push({ from: before + step, to: after, kind: "interior" });
+    if (after - before > step) clamp(before + step, after, "interior");
   }
-  if (to - last > step) out.push({ from: last + step, to, kind: "trailing" });
+  if (to - last > step) clamp(last + step, to, "trailing");
   return out;
 }
 

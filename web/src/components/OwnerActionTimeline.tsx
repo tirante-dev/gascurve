@@ -1,28 +1,9 @@
 "use client";
 
+import { parseConstraintArg, rawConstraintArg } from "@/lib/ownerActions";
 import type { OwnerAction } from "@/types";
 import { shortConstraintLabel } from "@/utils/chart";
 import { formatGas, formatGwei, formatInteger, formatUtc, shortHash } from "@/utils/format";
-
-/**
- * The API decodes setGasPricingConstraints as objects
- * ({ gasTargetPerSecond, adjustmentWindowSeconds, startingBacklog }); older
- * fixtures and the raw ABI shape are [target, window, backlog] triples.
- */
-export function parseConstraintArg(c: unknown): { target: number; window: number; backlog: number } | null {
-  if (Array.isArray(c) && c.length >= 3) {
-    const [target, window, backlog] = c.map(Number);
-    return Number.isFinite(target) && Number.isFinite(window) && Number.isFinite(backlog) ? { target, window, backlog } : null;
-  }
-  if (typeof c === "object" && c !== null) {
-    const o = c as Record<string, unknown>;
-    const target = Number(o.gasTargetPerSecond ?? o.target);
-    const window = Number(o.adjustmentWindowSeconds ?? o.window);
-    const backlog = Number(o.startingBacklog ?? o.backlog ?? 0);
-    return Number.isFinite(target) && Number.isFinite(window) && Number.isFinite(backlog) ? { target, window, backlog } : null;
-  }
-  return null;
-}
 
 function ArgsView({ action }: { action: OwnerAction }) {
   if (action.method === "setGasPricingConstraints" && Array.isArray(action.args.constraints)) {
@@ -30,7 +11,7 @@ function ArgsView({ action }: { action: OwnerAction }) {
       <ul className="flex flex-wrap gap-1.5">
         {action.args.constraints.map((c, i) => {
           const parsed = parseConstraintArg(c);
-          if (!parsed) return <li key={i} className="num rounded bg-surface-2 px-2 py-0.5 text-xs text-ink">{typeof c === "string" ? c : JSON.stringify(c)}</li>;
+          if (!parsed) return <li key={i} className="num rounded bg-surface-2 px-2 py-0.5 text-xs text-ink">{rawConstraintArg(c)}</li>;
           return (
             <li key={i} className="num rounded bg-surface-2 px-2 py-0.5 text-xs text-ink">
               {shortConstraintLabel({ target: parsed.target, window: parsed.window })} · start {formatGas(parsed.backlog)}

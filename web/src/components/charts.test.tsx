@@ -211,6 +211,25 @@ describe("SeriesCharts", () => {
     expect(screen.queryByText("unknown split (total x, split not recorded)", { selector: "dt" })).toBeNull();
   });
 
+  it("draws no floor for a bucket that recorded none, and reads it out as n/a", () => {
+    // Pricing version 0 history: the contract makes minBaseFee nullable, and
+    // a null floor used to take the whole history section down.
+    const noFloor = point({ t: 1788679140, minBaseFee: null, floorFeesWei: null, surplusFeesWei: null, baseFeeMin: "100000000", baseFeeAvg: "100000000", baseFeeMax: "100000000", constraintBips: [4_000, 6_000], backlogs: [1, 2], backlogsMax: [1, 2], constraintSetId: 5 });
+    render(<SeriesCharts network="robinhood" range="24h" series={{ ...series, points: [noFloor, ...series.points] }} loading={false} model="constraints" />);
+    const slider = screen.getByRole("slider", { name: /Select a bucket/ });
+    fireEvent.change(slider, { target: { value: "0" } });
+    // The inspector says the floor is unknown rather than quoting a zero.
+    const floorTerm = screen.getByText("floor in force", { selector: "dt" });
+    expect(floorTerm.nextElementSibling).toHaveTextContent("n/a");
+    // And so does the table.
+    const details = screen.getByText(/Data table \(4 buckets/).closest("details") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    const table = within(details).getByRole("table");
+    const first = within(table).getAllByRole("row")[1];
+    expect(Array.from(first.querySelectorAll("td")).map((td) => td.textContent)[3]).toBe("n/a");
+  });
+
   it("never reads a null split as a zero contribution, and never contradicts itself in the same readout", () => {
     // A bucket whose set is known but whose per-constraint split was never
     // recorded: the tooltip and the inspector may say that, and must not also

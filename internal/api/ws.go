@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 	"golang.org/x/time/rate"
 
+	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/logger"
 	"github.com/tirante-dev/gascurve/internal/model"
@@ -55,6 +57,12 @@ type Hub struct {
 	now          func() time.Time
 	maxPerIP     int
 	maxTotal     int
+	// ethUsdMaxAge mirrors the server's: the cached snapshot a hello
+	// serves is re-aged against it, so a quote that aged out since the
+	// tick was published is not handed to a new client as live.
+	ethUsdMaxAge time.Duration
+	// queueSize is the per-client outbound queue depth.
+	queueSize int
 
 	mu       sync.Mutex
 	networks map[uint64]*netState
@@ -120,6 +128,16 @@ type HubOption func(*Hub)
 // WithPingInterval sets the ping cadence (tests use a short one).
 func WithPingInterval(d time.Duration) HubOption { return func(h *Hub) { h.pingInterval = d } }
 
+// withClientQueue sets the per-client outbound queue depth (tests use a
+// short one to reach the overflow path).
+func withClientQueue(n int) HubOption {
+	return func(h *Hub) {
+		if n > 0 {
+			h.queueSize = n
+		}
+	}
+}
+
 // WithOrigins sets the allowed WebSocket origin patterns.
 func WithOrigins(origins []string) HubOption {
 	return func(h *Hub) { h.origins = originPatterns(origins) }
@@ -140,6 +158,7 @@ func NewHub(store db.Store, log *logger.Logger, opts ...HubOption) *Hub {
 		store: store, log: log, pingInterval: defaultPingGap, networks: map[uint64]*netState{},
 		perIP: map[string]int{}, cache: map[string]cachedNetwork{}, now: time.Now,
 		maxPerIP: defaultWSPerIP, maxTotal: defaultWSTotal,
+		ethUsdMaxAge: config.DefaultEthUsdMaxAge, queueSize: clientQueue,
 	}
 	for _, o := range opts {
 		o(h)
@@ -640,10 +659,44 @@ func (h *Hub) subscribe(c *client, chainID uint64, p *prepared) {
 	}
 	if snapshot == nil {
 		snapshot = json.RawMessage("null")
+	} else {
+		snapshot = freshenEthUsd(snapshot, h.now(), h.ethUsdMaxAge)
 	}
 	data := map[string]any{networkParam: p.net, "snapshot": snapshot, "recentBlocks": blocks}
 	hello, _ := json.Marshal(wsMessage{Type: msgHello, Data: mustJSON(data)})
 	c.enqueue(hello)
+}
+
+// freshenEthUsd re-applies the ETH/USD staleness rule to a snapshot the
+// hub cached. The cache holds the last tick a network published, which a
+// hello can serve much later: by then its quote may have aged past
+// collector.eth_usd_max_age, and a snapshot must never present an aged
+// out quote as live. A quote stamped materially later than the serving
+// clock is unusable for the same reason /live rejects it. Anything that
+// cannot be read is left exactly as it is.
+func freshenEthUsd(raw json.RawMessage, now time.Time, maxAge time.Duration) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return raw
+	}
+	quote, ok := fields["ethUsd"]
+	if !ok || string(quote) == "null" {
+		return raw
+	}
+	var v model.EthUsd
+	if err := json.Unmarshal(quote, &v); err != nil {
+		return raw
+	}
+	at, err := time.Parse(time.RFC3339, v.At)
+	if err != nil || !staleEthUsd(at, now, maxAge) {
+		return raw
+	}
+	fields["ethUsd"] = json.RawMessage("null")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 func (h *Hub) unsubscribe(c *client) {
@@ -747,6 +800,9 @@ type client struct {
 	watermark uint64
 	once      sync.Once
 	closed    chan struct{}
+	// dropped marks a client the hub gave up on (an overflowed queue):
+	// nothing more is written, not even what is still queued.
+	dropped atomic.Bool
 }
 
 // deliver queues a fan-out item for the client, dropping blocks its hello
@@ -768,17 +824,41 @@ func (c *client) deliver(o outbound) {
 	c.enqueue(msg)
 }
 
+// enqueue queues one message. A client that is already closing accepts
+// nothing more, so the flush that follows a protocol error is bounded by
+// what is queued at that moment and a steady live feed cannot keep the
+// socket alive indefinitely. A full queue means the peer is not reading
+// fast enough: the client is dropped rather than allowed to hold a
+// connection slot while it falls further behind.
 func (c *client) enqueue(msg []byte) {
+	select {
+	case <-c.closed:
+		return
+	default:
+	}
 	select {
 	case c.send <- msg:
 	default:
-		// Slow consumer: drop the connection rather than block the hub.
-		c.close()
+		c.drop()
 	}
 }
 
+// close ends the client once the write loop has flushed what is queued.
+// It is the path for the few protocol errors that merit a final frame.
 func (c *client) close() {
 	c.once.Do(func() { close(c.closed) })
+}
+
+// drop ends the client at once, writing nothing further. The socket is
+// closed here rather than by the write loop, which is very likely blocked
+// writing to the peer that caused the overflow; CloseNow does not wait for
+// a close handshake, so it never blocks the hub lock the caller holds.
+func (c *client) drop() {
+	c.dropped.Store(true)
+	c.close()
+	if c.conn != nil {
+		_ = c.conn.CloseNow()
+	}
 }
 
 // ServeWS upgrades the connection and runs the client until it goes away.
@@ -829,7 +909,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(wsReadLimit)
-	c := &client{hub: h, conn: conn, send: make(chan []byte, clientQueue), closed: make(chan struct{}), limiter: rate.NewLimiter(msgRate, msgBurst)}
+	c := &client{hub: h, conn: conn, send: make(chan []byte, h.queueSize), closed: make(chan struct{}), limiter: rate.NewLimiter(msgRate, msgBurst)}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -973,7 +1053,14 @@ func (c *client) writeLoop(ctx context.Context, pongs <-chan struct{}) {
 		case <-ctx.Done():
 			return
 		case <-c.closed:
+			if c.dropped.Load() {
+				// The queue overflowed: the peer is not reading, so there is
+				// nothing to flush to it and the socket is already closed.
+				return
+			}
 			// Flush what was queued (an error message, say) before closing.
+			// Nothing more is accepted once the client is closing, so this
+			// drains what is there and returns.
 			for {
 				select {
 				case msg := <-c.send:

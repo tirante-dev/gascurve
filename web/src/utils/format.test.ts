@@ -391,6 +391,22 @@ describe("fixed-width formatters", () => {
     expect(formatGas(9_996_000)).toBe("10 Mgas");
     for (let g = 10e6; g < 100e6; g += 2.1e6) expect(gasParts(g, true).value).toHaveLength(4);
   });
+  it("rounds gas on the decimal it reads as, and re-bands the carry", () => {
+    // A prefixless figure that rounds up over a million takes the band above:
+    // "1,000,000 gas" is the same quantity written the long way.
+    expect(formatGas(999_999.5)).toBe("1 Mgas");
+    expect(formatGasFixed(999_999.5)).toBe("1.00 Mgas");
+    expect(formatGas(999_999.4)).toBe("999,999 gas");
+    // 9.995 is stored a fraction below the half in binary, so toFixed(2) gave
+    // "9.99"; the decimal rounding takes it to 10.00, which is the 10 to 100
+    // band and so one decimal.
+    expect(gasParts(9_995_000, true).value).toBe("10.0");
+    expect(formatGasFixed(9_995_000)).toBe("10.0 Mgas");
+    // The trimming formatter drops the band's trailing zero, as it always has.
+    expect(formatGas(9_995_000)).toBe("10 Mgas");
+    expect(formatGas(99_950_000)).toBe("100 Mgas");
+    expect(formatGasPerSecond(999_999.5)).toBe("1 Mgas/s");
+  });
   it("formats dollars at two decimals below a hundred and one above, so a band keeps its width", () => {
     expect(formatUsdFixed(0.0352)).toBe("0.04");
     expect(formatUsdFixed(0.2518)).toBe("0.25");

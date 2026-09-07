@@ -559,23 +559,78 @@ func TestBackfillErrors(t *testing.T) {
 	}
 }
 
-func TestFindBlockAt(t *testing.T) {
+// TestHistoryStart: the history window is measured back from the sampled
+// head's own timestamp, a chain younger than the window resolves to
+// genesis, and a depth beyond the supported maximum is capped rather than
+// wrapped round by the duration arithmetic.
+func TestHistoryStart(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
 	f := newTestFollower(t, rpc, dbtest.New())
-	n, err := f.findBlockAt(ctx, baseTime.Add(30*time.Second))
+	// The head is block 1000 at baseTime+100s: 70 seconds of history is
+	// block 300.
+	n, err := f.findHistoryStart(ctx, 70*time.Second)
 	if err != nil || n != 300 {
-		t.Fatalf("findBlockAt = %d %v", n, err)
+		t.Fatalf("historyStart = %d %v", n, err)
 	}
-	if n, _ := f.findBlockAt(ctx, baseTime.Add(-time.Hour)); n != 1 {
-		t.Fatalf("before genesis = %d", n)
+	// More history than the chain has resolves to genesis, and costs one
+	// header for each boundary rather than a whole search.
+	rpc.calls["HeaderByNumber"] = 0
+	if n, err := f.findHistoryStart(ctx, time.Hour); err != nil || n != 1 {
+		t.Fatalf("younger than the window = %d %v", n, err)
 	}
-	if n, _ := f.findBlockAt(ctx, baseTime.Add(time.Hour)); n != 1000 {
-		t.Fatalf("after head = %d", n)
+	if calls := rpc.calledTimes("HeaderByNumber"); calls != 2 {
+		t.Fatalf("both boundaries are checked, and nothing else: %d calls", calls)
+	}
+	// A depth beyond the supported maximum is capped where the cutoff is
+	// computed, so adding originMargin to it cannot overflow.
+	if got := f.historyDepth(maxHistoryDepth + time.Hour); got != maxHistoryDepth {
+		t.Fatalf("capped depth = %v", got)
+	}
+	if got := f.historyDepth(-time.Hour); got != 0 {
+		t.Fatalf("negative depth = %v", got)
+	}
+	if n, err := f.findHistoryStart(ctx, f.historyDepth(time.Duration(1<<62))+originMargin); err != nil || n != 1 {
+		t.Fatalf("an extreme depth must still resolve to genesis: %d %v", n, err)
 	}
 	rpc.errs["BlockNumber"] = errRPC
-	if _, err := f.findBlockAt(ctx, baseTime); !errors.Is(err, errRPC) {
+	if _, err := f.findHistoryStart(ctx, time.Second); !errors.Is(err, errRPC) {
 		t.Fatalf("head error: %v", err)
+	}
+	delete(rpc.errs, "BlockNumber")
+	rpc.errs["HeaderByNumber"] = errRPC
+	if _, err := f.findHistoryStart(ctx, time.Second); !errors.Is(err, errRPC) {
+		t.Fatalf("head header error: %v", err)
+	}
+}
+
+// TestBlockAtAfterTheHead: a target later than the head is a retryable
+// error, never the head itself, which the owner scan would persist as an
+// origin and mark all the history before it unavailable for good.
+func TestBlockAtAfterTheHead(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	f := newTestFollower(t, rpc, dbtest.New())
+	top := rpc.header(1000)
+	if _, err := f.blockAt(ctx, 1000, &top, baseTime.Add(time.Hour)); !errors.Is(err, errTargetAfterHead) {
+		t.Fatalf("a target after the head must be retryable, got %v", err)
+	}
+	// The clock is an hour ahead of a stalled chain: the owner scan
+	// derives its cutoff from the head, so it still starts at genesis
+	// instead of recording an origin at the head.
+	f.now = func() time.Time { return baseTime.Add(time.Hour) }
+	f.cfg.BackfillDepth = 70 * time.Second
+	if err := f.SlowTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	origin := f.scanOrigin
+	f.mu.Unlock()
+	if origin != nil {
+		t.Fatalf("no origin may be recorded from a clock ahead of the chain: %+v", origin)
+	}
+	if got, _ := f.findHistoryStart(ctx, 70*time.Second); got != 300 {
+		t.Fatalf("the window is measured from the head, not the clock: %d", got)
 	}
 }
 

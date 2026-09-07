@@ -1,9 +1,9 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { cloneElement, isValidElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { BlockPoint, LiveSnapshot, Network, OwnerAction, Series } from "@/types";
-import { createFrameStore, targetValues } from "@/lib/smoothing";
+import { createFrameStore, NO_PLACES, targetValues } from "@/lib/smoothing";
 import { applyReorg } from "@/hooks/useLive";
 import { BACKLOG_TITLE, backlogAxis, ConstraintCards, ConstraintCardsView, drainLabel, Sawtooth, sawtoothTooltipRows, secondsAgoLabel } from "./ConstraintCards";
 import { ChartTooltip } from "./ChartTooltip";
@@ -130,7 +130,7 @@ describe("LiveHero", () => {
     const frame = createFrameStore({ nowMs: Date.parse(snapshot.sampledAt) });
     render(<LiveHero network="robinhood" live={{ display: snapshot, frame, resyncing: false }} status="open" model="constraints" />);
     expect(screen.getByText("0.3997")).toBeInTheDocument();
-    act(() => frame.set({ blocks: [], values: { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.75 }, nowMs: Date.parse(snapshot.sampledAt) }));
+    act(() => frame.set({ blocks: [], places: NO_PLACES, values: { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.75 }, nowMs: Date.parse(snapshot.sampledAt) }));
     expect(screen.getByText("0.7500")).toBeInTheDocument();
     expect(screen.getByText(/last 0 blocks/)).toBeInTheDocument();
   });
@@ -199,6 +199,52 @@ describe("LiveHero", () => {
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByRole("figure", { name: /0.3997 to 0.8000 gwei/ })).toBeInTheDocument();
   });
+  it("reads every block out without a pointer, in an inspector and a data table", async () => {
+    render(
+      <LiveHeroView
+        network="robinhood"
+        snapshot={snapshot}
+        values={null}
+        blocks={sawtoothBlocks(5, snapshot.block.ts)}
+        nowMs={Date.parse(snapshot.sampledAt)}
+        status="open"
+        range="live"
+      />,
+    );
+    // A slider picks a block, which gives arrow keys, Home and End for free,
+    // and the values are read out in a live region.
+    const slider = screen.getByRole("slider", { name: "Select a block to read its values" });
+    expect(screen.getByText("Block inspector")).toBeInTheDocument();
+    expect(screen.getAllByText("base fee").length).toBeGreaterThan(0);
+    // And the same seconds are read out for the throughput chart under it.
+    expect(screen.getByRole("slider", { name: "Select a second to read its values" })).toBeInTheDocument();
+    // The whole series is available as a table for a reader who wants all of it.
+    const table = screen.getByText(/Base fee per block, as a table/);
+    await userEvent.click(table);
+    expect(screen.getByRole("table", { name: /Every block of the live base fee chart/ })).toBeInTheDocument();
+    fireEvent.change(slider, { target: { value: "0" } });
+    expect(slider).toHaveValue("0");
+  });
+
+  it("reads a bucketed range out without a pointer too, on the page and enlarged", async () => {
+    render(
+      <LiveHeroView
+        network="robinhood"
+        snapshot={snapshot}
+        values={null}
+        blocks={[]}
+        nowMs={Date.parse(snapshot.sampledAt)}
+        status="open"
+        range="24h"
+        series={history}
+        model="constraints"
+      />,
+    );
+    expect(screen.getAllByRole("slider", { name: "Select a bucket to read its values" }).length).toBeGreaterThan(1);
+    await userEvent.click(screen.getByText(/Base fee over 24h, as a table/));
+    expect(screen.getByRole("table", { name: /Every bucket of the base fee chart over 24h/ })).toBeInTheDocument();
+  });
+
   it("names what a hovered block carried", () => {
     const rows = heroTooltipRows();
     const row = { number: 55_812_345, fee: 0.3997, gasUsed: 4_021_130, ts: 1788679199 };
@@ -216,8 +262,8 @@ describe("LiveHero", () => {
   it("swaps the chart body for the chosen range and puts the live ring back, leaving the figures on the left alone", async () => {
     const onRangeChange = vi.fn();
     const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="live" onRangeChange={onRangeChange} />);
-    expect(screen.getByRole("tab", { name: "Live" })).toHaveAttribute("aria-selected", "true");
-    await userEvent.click(screen.getByRole("tab", { name: "24h" }));
+    expect(screen.getByRole("button", { name: "Live" })).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(screen.getByRole("button", { name: "24h" }));
     expect(onRangeChange).toHaveBeenCalledWith("24h");
 
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" onRangeChange={onRangeChange} series={history} model="constraints" />);
@@ -269,10 +315,10 @@ describe("LiveHero", () => {
     seriesMock.calls.length = 0;
     const frame = createFrameStore({ nowMs: Date.parse(snapshot.sampledAt) });
     render(<LiveHero network="robinhood" live={{ display: snapshot, frame, resyncing: false }} status="open" model="constraints" />);
-    expect(screen.getByRole("tab", { name: "24h" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: "24h" })).toHaveAttribute("aria-pressed", "true");
     expect(seriesMock.calls.at(-1)).toEqual(["robinhood", "24h"]);
     // Back to Live: nothing is asked of the api at all.
-    await userEvent.click(screen.getByRole("tab", { name: "Live" }));
+    await userEvent.click(screen.getByRole("button", { name: "Live" }));
     expect(window.localStorage.getItem(HERO_RANGE_KEY)).toBe("live");
     expect(seriesMock.calls.at(-1)).toEqual([null, null]);
   });
@@ -396,7 +442,7 @@ describe("ConstraintCards", () => {
     const frame = createFrameStore();
     render(<ConstraintCards network="robinhood" live={{ display: snapshot, frame, resyncing: false }} />);
     expect(screen.getByText("3.11")).toBeInTheDocument();
-    act(() => frame.set({ blocks: [], values: { ...targetValues(snapshot, [], 0), backlogs: [0, 0], bips: [0, 0], shares: [0, 0] }, nowMs: 0 }));
+    act(() => frame.set({ blocks: [], places: NO_PLACES, values: { ...targetValues(snapshot, [], 0), backlogs: [0, 0], bips: [0, 0], shares: [0, 0] }, nowMs: 0 }));
     expect(screen.getAllByText("no contribution")).toHaveLength(2);
     expect(screen.getAllByText("0.0000")).toHaveLength(2);
   });
@@ -475,10 +521,30 @@ describe("HistoryTabs", () => {
   it("marks the selected range and reports clicks", async () => {
     const onChange = vi.fn();
     render(<HistoryTabs range="24h" onChange={onChange} loading />);
-    expect(screen.getByRole("tab", { name: "24h" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: "24h" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("updating")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("tab", { name: "All" }));
+    await userEvent.click(screen.getByRole("button", { name: "All" }));
     expect(onChange).toHaveBeenCalledWith("all");
+  });
+
+  it("is a labelled button group, not a tablist it has no keyboard model for", () => {
+    const { container } = render(<HistoryTabs range="24h" onChange={vi.fn()} loading />);
+    // Nothing claims tab semantics, so no reader is promised arrow keys, Home
+    // and End and a panel per tab that the control does not implement.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+    const group = screen.getByRole("group", { name: "History range" });
+    // Every option is in the tab order and says whether it is on.
+    const options = within(group).getAllByRole("button");
+    expect(options.map((b) => b.getAttribute("aria-pressed"))).toEqual(["false", "true", "false", "false"]);
+    expect(options.every((b) => b.tabIndex === 0)).toBe(true);
+    // It wraps inside its container rather than overflowing a phone.
+    expect(group).toHaveClass("flex-wrap");
+    expect(group).toHaveClass("max-w-full");
+    // The status sits outside the group, so it cannot widen the control.
+    const status = screen.getByText("updating");
+    expect(group.contains(status)).toBe(false);
+    expect(container.firstElementChild).toHaveClass("min-w-0");
   });
 });
 

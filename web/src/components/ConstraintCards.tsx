@@ -3,7 +3,7 @@
 import { memo, useMemo } from "react";
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
-import { AVERAGE_WINDOW_S, isShortWindow, SAWTOOTH_WINDOW_S, sawtoothChart, sawtoothSamples, SHORT_WINDOW_S, targetValues, type LiveValues, type SawtoothSample } from "@/lib/smoothing";
+import { AVERAGE_WINDOW_S, isShortWindow, SAWTOOTH_WINDOW_S, sawtoothChart, sawtoothSamples, SHORT_WINDOW_S, targetValues, type BlockPlaces, type LiveValues, type SawtoothSample } from "@/lib/smoothing";
 import type { BlockPoint, Constraint, LegacyParams, LiveSnapshot } from "@/types";
 import { niceStep } from "@/lib/hero";
 import { constraintGauge, constraintGaugeSpanLabel, constraintGaugeTitle, contributionRampStep, legacyGauge, legacyGaugeSpanLabel, legacyGaugeTitle, seriesColor } from "@/utils/chart";
@@ -86,8 +86,9 @@ const SAWTOOTH_TICKS = [-SAWTOOTH_WINDOW_S, -10, -5, 0];
  * Memoised on the samples: they change when blocks arrive, the card
  * re-renders every frame.
  */
-export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, nowMs = 0, height = SAWTOOTH_HEIGHT }: { samples: SawtoothSample[]; color: string; target: number; index: number; nowMs?: number; height?: ChartHeight }) {
-  const data = useMemo(() => sawtoothChart(samples, nowMs), [samples, nowMs]);
+export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, places, nowMs = 0, height = SAWTOOTH_HEIGHT }: { samples: SawtoothSample[]; color: string; target: number; index: number; places?: BlockPlaces; nowMs?: number; height?: ChartHeight }) {
+  // Without the ring's placement (a caller that has none) the samples are placed on their own.
+  const data = useMemo(() => sawtoothChart(samples, nowMs, undefined, places), [samples, nowMs, places]);
   const sized = typeof height === "string";
   if (data.length < 2) return <div className={`w-full rounded-sm bg-chart ${sized ? height : ""}`} style={{ height: sized ? undefined : height }} aria-hidden="true" />;
   const peak = Math.max(...data.map((d) => d.backlog));
@@ -124,7 +125,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
   );
 });
 
-function ConstraintCard({ network, c, index, backlog, bips, share, samples, nowMs }: { network: string; c: Constraint; index: number; backlog: number; bips: number; share: number; samples: SawtoothSample[] | null; nowMs: number }) {
+function ConstraintCard({ network, c, index, backlog, bips, share, samples, places, nowMs }: { network: string; c: Constraint; index: number; backlog: number; bips: number; share: number; samples: SawtoothSample[] | null; places?: BlockPlaces; nowMs: number }) {
   // The gauge spans whole windows of target; marks are capped so a huge
   // backlog over a tiny window cannot ask for a billion elements.
   const gauge = constraintGauge(c, backlog);
@@ -180,7 +181,7 @@ function ConstraintCard({ network, c, index, backlog, bips, share, samples, nowM
       </dl>
       {samples ? (
         <div className="mt-4">
-          <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} nowMs={nowMs} />
+          <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} places={places} nowMs={nowMs} />
           <p className="mt-1 text-[11px] text-ink-3">{drainLabel(c.target)} boundary; bursts show as sawteeth. The thin line is the {AVERAGE_WINDOW_S} s average.</p>
         </div>
       ) : null}
@@ -262,11 +263,11 @@ const SAWTOOTH_NOTE = `Windows of ${formatDuration(SHORT_WINDOW_S)} or less are 
 /** One card per constraint, subscribed to the frame store: the figures move every frame, the page around them does not. */
 export function ConstraintCards({ network, live }: { network: string; live: SmoothedLive }) {
   const frame = useLiveFrame(live.frame);
-  return <ConstraintCardsView network={network} snapshot={live.display} values={frame.values} blocks={frame.blocks} nowMs={frame.nowMs} resyncing={live.resyncing} />;
+  return <ConstraintCardsView network={network} snapshot={live.display} values={frame.values} blocks={frame.blocks} places={frame.places} nowMs={frame.nowMs} resyncing={live.resyncing} />;
 }
 
 /** The cards with everything they show as plain props; until the first frame has eased values the sample stands in. */
-export function ConstraintCardsView({ network, snapshot, values, blocks, nowMs = 0, resyncing = false }: { network: string; snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[]; nowMs?: number; resyncing?: boolean }) {
+export function ConstraintCardsView({ network, snapshot, values, blocks, places, nowMs = 0, resyncing = false }: { network: string; snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[]; places?: BlockPlaces; nowMs?: number; resyncing?: boolean }) {
   const samples = useMemo(() => {
     if (!snapshot || snapshot.model === "legacy") return [];
     return snapshot.constraints.map((c, i) => (isShortWindow(c.window) ? sawtoothSamples(blocks, i, snapshot.block.ts) : null));
@@ -288,7 +289,7 @@ export function ConstraintCardsView({ network, snapshot, values, blocks, nowMs =
     <div>
       <div className={`grid gap-4 sm:grid-cols-2 ${cols}`}>
         {constraints.map((c, i) => (
-          <ConstraintCard key={`${c.target}-${c.window}-${i}`} network={network} c={c} index={i} backlog={v.backlogs[i] ?? c.backlog} bips={v.bips[i] ?? c.exponentBips} share={v.shares[i] ?? 0} samples={samples[i] ?? null} nowMs={nowMs} />
+          <ConstraintCard key={`${c.target}-${c.window}-${i}`} network={network} c={c} index={i} backlog={v.backlogs[i] ?? c.backlog} bips={v.bips[i] ?? c.exponentBips} share={v.shares[i] ?? 0} samples={samples[i] ?? null} places={places} nowMs={nowMs} />
         ))}
       </div>
       <p className="mt-2 text-xs text-ink-3">
@@ -314,6 +315,7 @@ export function SawtoothPanel({
   snapshot,
   values,
   blocks,
+  places,
   nowMs = 0,
   index,
   height = SAWTOOTH_HEIGHT,
@@ -321,6 +323,8 @@ export function SawtoothPanel({
   snapshot: LiveSnapshot;
   values: LiveValues | null;
   blocks: BlockPoint[];
+  /** The ring's own placement, so a block sits where the hero above put it. */
+  places?: BlockPlaces;
   nowMs?: number;
   index: number;
   height?: ChartHeight;
@@ -340,7 +344,7 @@ export function SawtoothPanel({
         <Stat label="Threshold" value={threshold.value} unit={threshold.unit} size="sm" hint={drainLabel(c.target)} />
         <Stat label={`Backlog (avg ${AVERAGE_WINDOW_S} s)`} value={<Figure ch={FIXED_WIDTH_CH.gas}>{average.value}</Figure>} unit={average.unit} size="sm" hint={formatDrainEquivalence(backlog, c.target)} />
       </div>
-      <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} nowMs={nowMs} height={height} />
+      <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} places={places} nowMs={nowMs} height={height} />
       <p className="mt-2 text-xs text-ink-3">
         {drainLabel(c.target)} boundary; bursts show as sawteeth. The thin line is the {AVERAGE_WINDOW_S} s average. {SAWTOOTH_NOTE}
       </p>

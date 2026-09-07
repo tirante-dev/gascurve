@@ -59,7 +59,7 @@ export type MockNetworkDef = {
   anchorBacklogs?: (number | null)[];
   /**
    * When the per-constraint split and the fee destinations started being
-   * recorded (migration 000006 on a real deployment). Series buckets before
+   * recorded (pricing version 0 on a real deployment). Series buckets before
    * this carry null `constraintBips`, `floorFeesWei` and `surplusFeesWei`,
    * as the api serves for history written before the migration.
    */

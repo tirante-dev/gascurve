@@ -98,8 +98,24 @@ export type LiveValues = {
   signature: string;
 };
 
-/** What the frame loop publishes each frame: the block ring, the eased values and the wall clock at the last cadence commit. */
-export type LiveFrame = { blocks: BlockPoint[]; values: LiveValues | null; nowMs: number };
+/**
+ * Where each block of the ring sits on the time axis, by block number. One
+ * map for the whole live section: a place is assigned once, when the block
+ * enters the ring, and is dropped when the ring evicts it, so every chart
+ * draws the same block at the same place and no block ever moves.
+ */
+export type BlockPlaces = ReadonlyMap<number, number>;
+
+/** The empty placement, for a frame with no ring yet. */
+export const NO_PLACES: BlockPlaces = new Map<number, number>();
+
+/** Where a block sits, or its bare timestamp for one the placement does not know. */
+export function placeOf(places: BlockPlaces, block: { number: number; ts: number }): number {
+  return places.get(block.number) ?? block.ts;
+}
+
+/** What the frame loop publishes each frame: the block ring with its placements, the eased values and the wall clock at the last cadence commit. */
+export type LiveFrame = { blocks: BlockPoint[]; places: BlockPlaces; values: LiveValues | null; nowMs: number };
 
 /** A tiny external store, so only the components that animate re-render per frame. */
 export type FrameStore = {
@@ -109,7 +125,7 @@ export type FrameStore = {
 };
 
 export function createFrameStore(initial: Partial<LiveFrame> = {}): FrameStore {
-  let frame: LiveFrame = { blocks: [], values: null, nowMs: 0, ...initial };
+  let frame: LiveFrame = { blocks: [], places: NO_PLACES, values: null, nowMs: 0, ...initial };
   const listeners = new Set<() => void>();
   return {
     get: () => frame,
@@ -201,22 +217,37 @@ function trailingMean(samples: readonly SawtoothSample[], i: number, seconds: nu
 }
 
 /**
- * Where each block sits on a time axis, in seconds of block timestamp with a
- * fraction for its place within its second, in the order given (oldest
- * first). Headers carry whole seconds and a Nitro chain makes several blocks a
- * second, so the k-th block of a second is placed at ts + k/N, spread across
- * the second it belongs to rather than stacked on one tick.
+ * Where each block of a standalone list sits on a time axis, in seconds of
+ * block timestamp with a fraction for its place within its second, in the
+ * order given (oldest first). Headers carry whole seconds and a Nitro chain
+ * makes several blocks a second, so the k-th block of a second is spread
+ * across the second it belongs to rather than stacked on one tick.
  *
- * N is the count of the block's own second for every second but the newest,
- * which is still filling: its count grows with each block that lands, and a
- * point that moved every time a sibling arrived is exactly the jitter the
- * charts must not show. The newest second is spread by the count of the
- * second before it (the rate the chain just ran at), widened to its own count
- * only when it has already overtaken that, so each placement stays inside its
- * second and is fixed from the moment the block arrives.
+ * This is the assignment rule, and `assignPlaces` is how the live ring uses
+ * it: on a ring that grows and is evicted from, only new blocks are placed,
+ * because recomputing every fraction from the current counts moves points
+ * that have already been drawn.
  */
 export function placeBlocks(blocks: readonly { ts: number }[]): number[] {
   if (blocks.length === 0) return [];
+  const shape = secondShape(blocks);
+  const placed = new Map<number, number>();
+  return blocks.map((b) => {
+    const k = placed.get(b.ts) ?? 0;
+    placed.set(b.ts, k + 1);
+    return b.ts + fraction(k, shape(b.ts));
+  });
+}
+
+/**
+ * How many blocks a second is spread over: its own count for every second but
+ * the newest, which is still filling. Its count grows with each block that
+ * lands, and a point that moved every time a sibling arrived is exactly the
+ * jitter the charts must not show, so it is spread by the count of the second
+ * before it (the rate the chain just ran at), widened to its own count only
+ * when it has already overtaken that.
+ */
+function secondShape(blocks: readonly { ts: number }[]): (ts: number) => number {
   const counts = new Map<number, number>();
   for (const b of blocks) counts.set(b.ts, (counts.get(b.ts) ?? 0) + 1);
   const newest = blocks[blocks.length - 1].ts;
@@ -225,13 +256,50 @@ export function placeBlocks(blocks: readonly { ts: number }[]): number[] {
     if (ts < newest && ts > previous) previous = ts;
   }
   const newestN = Math.max(counts.get(newest) ?? 1, previous > 0 ? (counts.get(previous) ?? 1) : 1);
+  return (ts) => (ts === newest ? newestN : (counts.get(ts) ?? 1));
+}
+
+/**
+ * Where the k-th block of a second sits inside it, as a fraction. `n` is what
+ * the second was expected to hold when the block arrived; a block past that
+ * estimate divides the remainder rather than spilling into the next second,
+ * so the fraction rises with k, always stays below one, and never depends on
+ * anything that arrives later. Where the estimate held (k < n) it is exactly
+ * the even spread k/n.
+ */
+function fraction(k: number, n: number): number {
+  return k / Math.max(n, k + 1);
+}
+
+/**
+ * The ring's placements after `blocks`: every block already placed keeps the
+ * place it was given, blocks that have left the ring lose theirs, and only
+ * blocks that are new get one, from the rule above. This is what makes a live
+ * point fixed. Recomputing the whole ring from the current per-second counts
+ * moved every existing point whenever a third block landed in the newest
+ * second, and moved the survivors of the oldest second whenever the ring
+ * evicted one of their siblings. `previous` is handed back unchanged when
+ * nothing entered or left, so a frame that only ticks the clock publishes the
+ * same map.
+ */
+export function assignPlaces(previous: BlockPlaces, blocks: readonly { number: number; ts: number }[]): BlockPlaces {
+  if (blocks.length === 0) return previous.size === 0 ? previous : NO_PLACES;
+  const shape = secondShape(blocks);
+  const next = new Map<number, number>();
   const placed = new Map<number, number>();
-  return blocks.map((b) => {
+  let added = false;
+  for (const b of blocks) {
     const k = placed.get(b.ts) ?? 0;
     placed.set(b.ts, k + 1);
-    const n = b.ts === newest ? newestN : (counts.get(b.ts) ?? 1);
-    return b.ts + k / n;
-  });
+    const kept = previous.get(b.number);
+    if (kept !== undefined) {
+      next.set(b.number, kept);
+      continue;
+    }
+    added = true;
+    next.set(b.number, b.ts + fraction(k, shape(b.ts)));
+  }
+  return !added && next.size === previous.size ? previous : next;
 }
 
 /**
@@ -247,13 +315,15 @@ export function liveNow(nowMs: number, newestPlace: number | undefined): number 
 
 /**
  * The short-window chart's series against a wall-clock axis ending at
- * `nowMs`. Each block keeps the place `placeBlocks` gives it, so the sawtooth
- * slides left as time passes and never rearranges itself.
+ * `nowMs`. Each block keeps its place, so the sawtooth slides left as time
+ * passes and never rearranges itself. `places` is the ring's own placement
+ * where the caller has one, so this chart puts a block exactly where the hero
+ * above it does; without one the samples are placed on their own.
  */
-export function sawtoothChart(samples: readonly SawtoothSample[], nowMs: number, averageSeconds = AVERAGE_WINDOW_S): SawtoothPoint[] {
-  const places = placeBlocks(samples);
-  const now = liveNow(nowMs, places[places.length - 1]);
-  return samples.map((s, i) => ({ x: places[i] - now, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog, average: trailingMean(samples, i, averageSeconds) }));
+export function sawtoothChart(samples: readonly SawtoothSample[], nowMs: number, averageSeconds = AVERAGE_WINDOW_S, places?: BlockPlaces): SawtoothPoint[] {
+  const own = places === undefined ? placeBlocks(samples) : samples.map((s) => placeOf(places, s));
+  const now = liveNow(nowMs, own[own.length - 1]);
+  return samples.map((s, i) => ({ x: own[i] - now, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog, average: trailingMean(samples, i, averageSeconds) }));
 }
 
 /** A backlog paid down at `rate` gas per second for `seconds`, floored at zero. */
