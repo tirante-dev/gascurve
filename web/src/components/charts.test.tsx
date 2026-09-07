@@ -367,8 +367,17 @@ describe("FeeFlows", () => {
     const { rerender } = render(<FeeFlows network="robinhood" range="24h" snapshot={priced} series={series} model="constraints" nowMs={now} />);
     // 5 ETH of fees, 2.2 to the infra account and 2.8 to the network account, at 4,200 dollars.
     expect(screen.getByText("$21,000.0")).toBeInTheDocument();
-    // Each dollar line hovers to the multiplication that produced it, quoting the ETH total drawn above it.
-    expect(screen.getByText("$21,000.0").closest("[title]")).toHaveAttribute("title", "5 ETH × $4,200.0/ETH = $21,000.0\ncoingecko, 5 min ago");
+    // Each dollar line opens a note with the multiplication that produced it,
+    // quoting the ETH total drawn above it, rather than a title the reader
+    // cannot see and has to wait on.
+    const usd = screen.getByText("$21,000.0");
+    expect(usd.closest("[title]")).toBeNull();
+    expect(screen.getByText("5 ETH × $4,200.0/ETH = $21,000.0")).toBeInTheDocument();
+    // All five totals name the quote they used, not just the one being read.
+    expect(screen.getAllByText("coingecko, 5 min ago")).toHaveLength(5);
+    // And the figure says it is inspectable rather than leaving the reader to guess.
+    const trigger = usd.closest(".cursor-help");
+    expect(trigger).toHaveAttribute("tabindex", "0");
     expect(screen.getByText("$9,240.0")).toBeInTheDocument();
     expect(screen.getByText("$11,760.0")).toBeInTheDocument();
     // Eleven minutes old: the same rule as the live tiles, so the totals go back to ETH alone.
@@ -378,6 +387,26 @@ describe("FeeFlows", () => {
     rerender(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={now} />);
     expect(screen.queryByText(/^\$/)).toBeNull();
     expect(screen.getByText("2.2")).toBeInTheDocument();
+  });
+  it("opens each note from the edge that keeps it inside the card at both column counts", () => {
+    const priced = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:15:00Z", source: "coingecko" } };
+    const { container } = render(<FeeFlows network="robinhood" range="24h" snapshot={priced} series={series} model="constraints" nowMs={NOW_MS} />);
+    // The stats grid is two columns narrow and five wide, so a stat's column
+    // changes with the breakpoint: the notes have to change edge with it, or a
+    // panel wider than one column leaves the card at one of the two widths.
+    const stats = container.querySelector(".sm\\:grid-cols-5") as HTMLElement;
+    const edges = [...stats.querySelectorAll(".cursor-help")].map((t) => {
+      const panel = t.nextElementSibling as HTMLElement;
+      return [panel.classList.contains("right-0") ? "end" : "start", panel.classList.contains("sm:right-0") ? "end" : "start"];
+    });
+    // Narrow, the odd stats are the right-hand column; wide, only the last two sit near the right edge.
+    expect(edges).toEqual([
+      ["start", "start"],
+      ["end", "start"],
+      ["start", "start"],
+      ["end", "end"],
+      ["start", "end"],
+    ]);
   });
   it("renders without a snapshot or history", () => {
     render(<FeeFlows network="robinhood" range="24h" snapshot={null} series={null} nowMs={NOW_MS} />);

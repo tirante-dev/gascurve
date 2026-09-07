@@ -443,7 +443,6 @@ describe("fixed-width formatters", () => {
     expect(math).not.toBeNull();
     expect(math?.line).toBe("0.00000840 ETH × $4,182.3/ETH = $0.04");
     expect(math?.provenance).toBe("coinbase, 34 s ago");
-    expect(math?.title).toBe("0.00000840 ETH × $4,182.3/ETH = $0.04\ncoinbase, 34 s ago");
     expect(math?.description).toBe("0.04 US dollars, 0.00000840 ETH at 4,182.3 dollars per ETH, quoted by coinbase 34 s ago");
     expect(math?.usd).toBe("0.04");
     // The working quotes the ETH figure the caller draws, so a total shown to four significant digits is not rounded twice.

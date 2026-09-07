@@ -54,6 +54,23 @@ export function Figure({ children, ch, className = "" }: { children: ReactNode; 
 export type NoteAlign = "start" | "end";
 
 /**
+ * The edge classes for each alignment, and the `sm` overrides that let a note
+ * change edge at the breakpoint. A grid that reflows moves a tile between
+ * columns (`grid-cols-2 sm:grid-cols-5` puts the third stat on the left narrow
+ * and in the middle wide), and a panel wider than one column has to open from
+ * whichever edge keeps it inside the card at that width, so one static edge
+ * cannot serve both. Tailwind scans for whole class names, hence the table.
+ */
+const NOTE_ALIGN: Record<NoteAlign, string> = {
+  start: "left-0",
+  end: "right-0",
+};
+const NOTE_ALIGN_SM: Record<NoteAlign, string> = {
+  start: "sm:left-0 sm:right-auto",
+  end: "sm:right-0 sm:left-auto",
+};
+
+/**
  * Whether the note anchors to a block of its own or sits inside a line of
  * running text. A tile is a fixed-width grid cell, so `block` places the panel
  * against the whole tile. A word mid-sentence cannot have a block wrapper
@@ -97,7 +114,7 @@ export type NoteFlow = "block" | "inline";
  * note permanently unopenable, which is worse than what it was fixing; a
  * missed arrival costs nothing, because the next one clears it.
  */
-export function HoverNote({ children, lines, description, align = "start", flow = "block" }: { children: ReactNode; lines: readonly string[]; description: string; align?: NoteAlign; flow?: NoteFlow }) {
+export function HoverNote({ children, lines, description, align = "start", alignSm = align, flow = "block" }: { children: ReactNode; lines: readonly string[]; description: string; align?: NoteAlign; /** The edge to line up with from the `sm` breakpoint up; defaults to `align`, which is one edge at every width. */ alignSm?: NoteAlign; flow?: NoteFlow }) {
   const [dismissed, setDismissed] = useState(false);
   const [under, setUnder] = useState(false);
   // Only while the pointer is on the note: a page of these should not each hold
@@ -132,7 +149,7 @@ export function HoverNote({ children, lines, description, align = "start", flow 
       </span>
       {/* The outer box carries the gap as padding rather than margin, so the
           pointer crosses live ground on its way from the figure to the panel. */}
-      <span aria-hidden="true" className={`absolute bottom-full z-20 hidden pb-2 ${dismissed ? "" : "group-focus-within:block group-hover:block"} ${align === "end" ? "right-0" : "left-0"}`}>
+      <span aria-hidden="true" className={`absolute bottom-full z-20 hidden pb-2 ${dismissed ? "" : "group-focus-within:block group-hover:block"} ${NOTE_ALIGN[align]} ${NOTE_ALIGN_SM[alignSm]}`}>
         {/* Never wider than the viewport leaves room for: at 320 px, or at 400%
             zoom, the equation wraps rather than running off the card. */}
         <span className="block w-max max-w-[min(42ch,calc(100vw_-_5rem))] rounded-md border border-hairline bg-surface px-3 py-2 text-left text-xs font-normal leading-snug shadow-lg">
