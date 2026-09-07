@@ -28,7 +28,7 @@ import {
   type ThroughputPoint,
 } from "@/lib/hero";
 import { assignPlaces, NO_PLACES, SWAP_GAS, targetValues, TRANSFER_GAS, type BlockPlaces, type LiveValues } from "@/lib/smoothing";
-import type { BlockPoint, LiveSnapshot, LiveStatus, PricerModel, Series } from "@/types";
+import type { BlockPoint, EthUsd, LiveSnapshot, LiveStatus, PricerModel, Series } from "@/types";
 import { FLOOR_COLOR, MARKER_COLOR, rampColor, rampInk, rampStep } from "@/utils/chart";
 import {
   FIXED_WIDTH_CH,
@@ -45,9 +45,8 @@ import {
   formatSignificant,
   formatTick,
   formatTime,
-  formatUsdFixed,
-  freshUsdPrice,
   gasPerSecondParts,
+  usdMath,
   weiToGweiNumber,
 } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
@@ -455,28 +454,28 @@ export function GasRateTile({ label, gasPerSecond }: { label: string; gasPerSeco
 /**
  * What a transaction of a given size costs, in dollars when the collector has
  * a fresh quote and in ETH when it does not. The dollar figure is the primary
- * one because it is the one people hold in their heads; the ETH amount stays
- * a hover away and is always in the accessible description, so nothing is
- * only available to a pointer.
+ * one because it is the one people hold in their heads; the multiplication
+ * behind it, the quote it used and that quote's age stay a hover away and are
+ * always in the accessible description, so nothing is only available to a
+ * pointer.
  */
-export function CostTile({ label, eth, usdPerEth }: { label: string; eth: number; usdPerEth: number | null }) {
-  if (usdPerEth === null) {
+export function CostTile({ label, eth, ethUsd, nowMs }: { label: string; eth: number; ethUsd: EthUsd | null; nowMs: number }) {
+  const math = usdMath(eth, ethUsd, nowMs);
+  if (math === null) {
     return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.eth}>{formatEthFixed(eth)}</Figure>} unit="ETH" size="sm" />;
   }
-  const ethText = `${formatEthFixed(eth)} ETH`;
-  const usd = formatUsdFixed(eth * usdPerEth);
   return (
     <Stat
       label={label}
       size="sm"
       value={
-        <span title={ethText}>
+        <span title={math.title}>
           {/* The dollar sign sits outside the reserved box, so a changing digit never shifts it. */}
           <span aria-hidden="true">
             <span className="text-ink-2">$</span>
-            <Figure ch={FIXED_WIDTH_CH.usd}>{usd}</Figure>
+            <Figure ch={FIXED_WIDTH_CH.usd}>{math.usd}</Figure>
           </span>
-          <span className="sr-only">{`${usd} US dollars, ${ethText}, at ${formatUsdFixed(usdPerEth)} dollars per ETH`}</span>
+          <span className="sr-only">{math.description}</span>
         </span>
       }
     />
@@ -678,8 +677,6 @@ export function LiveHeroView({
   const step = rampStep(multiplierBips);
   const sinceBlock = Math.max(0, nowMs / 1000 - snapshot.block.ts);
   const age = sampleAge(snapshot.sampledAt, nowMs);
-  // No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all.
-  const usdPerEth = freshUsdPrice(snapshot.ethUsd, nowMs);
   return (
     <div className="vw-card p-5">
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -712,8 +709,9 @@ export function LiveHeroView({
             <Freshness sinceBlock={sinceBlock} age={age} />
             <GasRateTile label="Gas/s (10 s)" gasPerSecond={v.gasPerSecond10} />
             <GasRateTile label="Gas/s (60 s)" gasPerSecond={v.gasPerSecond60} />
-            <CostTile label="21k transfer" eth={v.transferEth} usdPerEth={usdPerEth} />
-            <CostTile label="150k swap" eth={v.swapEth} usdPerEth={usdPerEth} />
+            {/* No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all. */}
+            <CostTile label="21k transfer" eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
+            <CostTile label="150k swap" eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
           </div>
 
           <FeeSplitBar snapshot={snapshot} />
