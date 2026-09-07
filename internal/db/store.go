@@ -157,14 +157,15 @@ type MissingRange struct {
 
 // OwnerAction is a row of the owner_actions table.
 type OwnerAction struct {
-	ChainID     uint64    `db:"chain_id"`
-	BlockNumber uint64    `db:"block_number"`
-	TxHash      string    `db:"tx_hash"`
-	LogIndex    int64     `db:"log_index"`
-	TS          time.Time `db:"ts"`
-	Method      string    `db:"method"`
-	Selector    string    `db:"selector"`
-	Args        JSONB     `db:"args"`
+	ChainID     uint64        `db:"chain_id"`
+	BlockNumber uint64        `db:"block_number"`
+	TxHash      string        `db:"tx_hash"`
+	TxIndex     sql.NullInt64 `db:"tx_index"`
+	LogIndex    int64         `db:"log_index"`
+	TS          time.Time     `db:"ts"`
+	Method      string        `db:"method"`
+	Selector    string        `db:"selector"`
+	Args        JSONB         `db:"args"`
 }
 
 // ConstraintSet is a row of the constraint_sets table.

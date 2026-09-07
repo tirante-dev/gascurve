@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -377,7 +378,8 @@ func (f *Follower) recordAction(ctx context.Context, s db.Store, a *nitro.OwnerA
 	}
 	at := time.Unix(int64(a.Timestamp), 0).UTC()
 	row := db.OwnerAction{
-		ChainID: f.chainID, BlockNumber: a.BlockNumber, TxHash: a.TxHash, LogIndex: int64(a.LogIndex),
+		ChainID: f.chainID, BlockNumber: a.BlockNumber, TxHash: a.TxHash,
+		TxIndex: sql.NullInt64{Int64: int64(a.TxIndex), Valid: true}, LogIndex: int64(a.LogIndex),
 		TS: at, Method: a.Method, Selector: a.Selector, Args: args,
 	}
 	n, err := s.InsertOwnerActions(ctx, []db.OwnerAction{row})

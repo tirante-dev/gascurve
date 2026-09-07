@@ -183,6 +183,16 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
 		t.Fatalf("after down: %d %v", v, err)
 	}
+	var txIndexes int
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'owner_actions' AND column_name = 'tx_index'`).Scan(&txIndexes); err != nil || txIndexes != 0 {
+		t.Fatalf("transaction index after down: %d %v", txIndexes, err)
+	}
+	if err := m.Down(1); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
+		t.Fatalf("after index down: %d %v", v, err)
+	}
 	var indexes int
 	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'state_samples_chain_block'`).Scan(&indexes); err != nil || indexes != 0 {
 		t.Fatalf("index after down: %d %v", indexes, err)
@@ -629,7 +639,7 @@ func TestIntegrationStore(t *testing.T) {
 
 	// Owner actions and constraint sets.
 	acts := []OwnerAction{
-		{ChainID: testChain, BlockNumber: 28, TxHash: "0xa", LogIndex: 0, TS: base.Add(-time.Hour), Method: "setGasPricingConstraints", Selector: "0xcc0d556a", Args: JSONB(`{"constraints":[]}`)},
+		{ChainID: testChain, BlockNumber: 28, TxHash: "0xa", TxIndex: sql.NullInt64{Int64: 2, Valid: true}, LogIndex: 0, TS: base.Add(-time.Hour), Method: "setGasPricingConstraints", Selector: "0xcc0d556a", Args: JSONB(`{"constraints":[]}`)},
 		{ChainID: testChain, BlockNumber: 174150, TxHash: "0xb", LogIndex: 1, TS: base, Method: "setMinimumL2BaseFee", Selector: "0xa0188cdb", Args: JSONB(`{"priceInWei":"20000000"}`)},
 	}
 	if n, err := p.InsertOwnerActions(ctx, acts); err != nil || n != 2 {
@@ -638,7 +648,7 @@ func TestIntegrationStore(t *testing.T) {
 	if n, err := p.InsertOwnerActions(ctx, acts); err != nil || n != 0 {
 		t.Fatalf("duplicate InsertOwnerActions: %d %v", n, err)
 	}
-	if as, err := p.OwnerActions(ctx, testChain, time.Time{}, time.Time{}, 0); err != nil || len(as) != 2 || as[0].BlockNumber != 174150 {
+	if as, err := p.OwnerActions(ctx, testChain, time.Time{}, time.Time{}, 0); err != nil || len(as) != 2 || as[0].BlockNumber != 174150 || !as[1].TxIndex.Valid || as[1].TxIndex.Int64 != 2 {
 		t.Fatalf("OwnerActions: %+v %v", as, err)
 	}
 	if as, err := p.OwnerActions(ctx, testChain, base.Add(-time.Minute), base.Add(time.Minute), 1); err != nil || len(as) != 1 || as[0].TxHash != "0xb" {

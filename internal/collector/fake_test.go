@@ -40,6 +40,7 @@ type fakeRPC struct {
 	arbos       uint64
 	logs        []nitro.Log
 	fullBlocks  map[uint64]nitro.Block
+	receipts    map[string]nitro.Receipt
 	available   int
 	stats       nitro.Stats
 	errs        map[string]error
@@ -88,6 +89,7 @@ func newFakeRPC(head uint64) *fakeRPC {
 		},
 		arbos:      61,
 		fullBlocks: map[uint64]nitro.Block{},
+		receipts:   map[string]nitro.Receipt{},
 		available:  1000,
 		errs:       map[string]error{},
 		hooks:      map[string]func(){},
@@ -273,6 +275,34 @@ func (f *fakeRPC) BlocksWithTxs(_ context.Context, numbers []uint64) ([]nitro.Bl
 	return out, nil
 }
 
+func (f *fakeRPC) TransactionReceipts(_ context.Context, hashes []string) ([]nitro.Receipt, error) {
+	if err := f.fail("TransactionReceipts"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]nitro.Receipt, 0, len(hashes))
+	for _, hash := range hashes {
+		if receipt, ok := f.receipts[hash]; ok {
+			out = append(out, receipt)
+			continue
+		}
+		var log *nitro.Log
+		for i := range f.logs {
+			if f.logs[i].TxHash == hash {
+				log = &f.logs[i]
+				break
+			}
+		}
+		if log == nil {
+			return nil, fmt.Errorf("receipt %s not found", hash)
+		}
+		gas := f.header(log.BlockNumber).GasUsed
+		out = append(out, nitro.Receipt{TxHash: hash, BlockNumber: log.BlockNumber, TxIndex: log.TxIndex, GasUsed: gas, CumulativeGasUsed: gas})
+	}
+	return out, nil
+}
+
 func (f *fakeRPC) OwnerActsLogs(_ context.Context, from, to uint64) ([]nitro.Log, error) {
 	if err := f.fail("OwnerActsLogs"); err != nil {
 		return nil, err
@@ -357,6 +387,7 @@ func fixtureLogs(t *testing.T) []nitro.Log {
 			Data        string   `json:"data"`
 			BlockNumber string   `json:"blockNumber"`
 			TxHash      string   `json:"transactionHash"`
+			TxIndex     string   `json:"transactionIndex"`
 			LogIndex    string   `json:"logIndex"`
 		} `json:"result"`
 	}
@@ -370,8 +401,9 @@ func fixtureLogs(t *testing.T) []nitro.Log {
 			t.Fatal(err)
 		}
 		bn, _ := nitro.HexUint64(r.BlockNumber)
+		ti, _ := nitro.HexUint64(r.TxIndex)
 		li, _ := nitro.HexUint64(r.LogIndex)
-		out = append(out, nitro.Log{Address: r.Address, Topics: r.Topics, Data: data, BlockNumber: bn, TxHash: r.TxHash, LogIndex: li})
+		out = append(out, nitro.Log{Address: r.Address, Topics: r.Topics, Data: data, BlockNumber: bn, TxHash: r.TxHash, TxIndex: ti, LogIndex: li})
 	}
 	return out
 }

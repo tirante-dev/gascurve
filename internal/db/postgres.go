@@ -595,7 +595,7 @@ func nullTime(t time.Time) sql.NullTime {
 	return sql.NullTime{Time: t, Valid: !t.IsZero()}
 }
 
-const ownerActionColumns = `chain_id, block_number, tx_hash, log_index, ts, method, selector, args`
+const ownerActionColumns = `chain_id, block_number, tx_hash, tx_index, log_index, ts, method, selector, args`
 
 // InsertOwnerActions inserts new actions and returns the number added.
 func (p *Postgres) InsertOwnerActions(ctx context.Context, actions []OwnerAction) (int, error) {
@@ -603,14 +603,20 @@ func (p *Postgres) InsertOwnerActions(ctx context.Context, actions []OwnerAction
 	for _, a := range actions {
 		res, err := p.exec(ctx, `
 			INSERT INTO owner_actions (`+ownerActionColumns+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (chain_id, tx_hash, log_index) DO NOTHING`,
-			a.ChainID, a.BlockNumber, a.TxHash, a.LogIndex, a.TS, a.Method, a.Selector, a.Args)
+			a.ChainID, a.BlockNumber, a.TxHash, a.TxIndex, a.LogIndex, a.TS, a.Method, a.Selector, a.Args)
 		if err != nil {
 			return inserted, fmt.Errorf("owner action %s/%d: %w", a.TxHash, a.LogIndex, err)
 		}
 		n, _ := res.RowsAffected()
 		inserted += int(n)
+		if n == 0 && a.TxIndex.Valid {
+			if _, err := p.exec(ctx, `UPDATE owner_actions SET tx_index = $4 WHERE chain_id = $1 AND tx_hash = $2 AND log_index = $3 AND tx_index IS NULL`,
+				a.ChainID, a.TxHash, a.LogIndex, a.TxIndex); err != nil {
+				return inserted, fmt.Errorf("owner action %s/%d transaction index: %w", a.TxHash, a.LogIndex, err)
+			}
+		}
 	}
 	return inserted, nil
 }

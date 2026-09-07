@@ -197,7 +197,7 @@ for block in order:
 Known error sources, all to be surfaced in the "Data & method" footer:
 
 1. Nitro grows backlogs by *compute* gas (gasUsed − gasUsedForL1), the replay uses header gasUsed. Today `gasUsedForL1 = 0`, so no error; earlier in the chain's life the L1 price was higher. Mitigation: the collector re-anchors to sampled backlogs every 5 s going forward; for backfilled history, report the replayed-vs-observed base fee error per bucket and, where it exceeds 2%, mark the decomposition as estimated.
-2. Owner actions inside a block: backlogs reset at that block; the replay applies the reset before processing the block.
+2. Owner actions inside a block: the replay uses the log's transaction index and the action transaction's receipt. Gas before the action transaction is added to the old backlogs, then the reset is applied, then the action transaction and later gas are added to the reset backlogs.
 3. Old headers without state: the decomposition before the collector's start is a pure replay validated only through base fee agreement. Because the two constraints have very different time constants, an alternative estimator exists: `x_24h ≈ rolling 60-s minimum of x` (the 15-s backlog drains to zero within seconds whenever demand < 60 M gas/s). Use it as a cross-check.
 4. Blocks with equal timestamps get `dt = 0`; that is how ArbOS behaves too (`startBlock.timePassed` is the timestamp delta), so no correction and no interpolation is needed as long as per-block headers are used.
 

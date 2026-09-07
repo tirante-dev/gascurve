@@ -173,7 +173,8 @@ Each alert can be switched off on its own, and its window, threshold and severit
 | `collectorDown` | `5m`, critical | no collector target is up, whether it failed or was removed |
 | `apiDown` | `5m`, critical | no api replica is up, whether they failed or were removed |
 | `apiErrorRate` | `> 5%` 5xx for `10m`, warning | the api is failing requests |
-| `databaseUnreachable` | `3m`, critical | `/ready` answers 503, which it does only when the database ping fails |
+| `apiListenerDown` | `3m`, warning | a replica has lost its PostgreSQL LISTEN feed, so its WebSocket clients go stale |
+| `databaseUnreachable` | `3m`, critical | `/ready` answers 503 while every listener is ready, which leaves the database ping |
 
 Lag is the one figure that needs two rules. A network with a dedicated endpoint normally sits at 0 to 2 seconds; one followed over a public RPC at its documented 4 calls per second normally sits at 20 to 60 seconds, because a tick costs about five calls and the catch-up gets what is left. A single threshold would either page constantly on the public networks or never fire on the dedicated one. `metrics.prometheusRule.dedicatedNetworks` is a regular expression on the `network` label that splits the fleet; it defaults to `robinhood` and must be widened when more networks move onto dedicated nodes.
 

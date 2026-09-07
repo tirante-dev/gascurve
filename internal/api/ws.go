@@ -183,15 +183,22 @@ func (h *Hub) setLimits(perIP, total int) {
 	}
 }
 
-// Run consumes notifications until ctx ends or the listener closes.
-func (h *Hub) Run(ctx context.Context, l db.Listener) {
+// Run consumes notifications until ctx ends. A listener closure without
+// cancellation is fatal because otherwise connected clients would keep getting
+// pings from a hub that can never deliver another chain update.
+func (h *Hub) Run(ctx context.Context, l db.Listener) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case n, ok := <-l.Notifications():
 			if !ok {
-				return
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					return errors.New("notification listener closed")
+				}
 			}
 			h.Handle(ctx, n)
 		}

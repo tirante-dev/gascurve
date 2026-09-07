@@ -899,10 +899,12 @@ func TestHubReconcile(t *testing.T) {
 }
 
 type fakeListener struct {
-	ch chan db.Notification
+	ch     chan db.Notification
+	status db.ListenerStatus
 }
 
 func (f *fakeListener) Notifications() <-chan db.Notification { return f.ch }
+func (f *fakeListener) Status() db.ListenerStatus             { return f.status }
 func (f *fakeListener) Close() error                          { return nil }
 
 func TestHubRun(t *testing.T) {
@@ -911,11 +913,10 @@ func TestHubRun(t *testing.T) {
 	hub.live = func(context.Context, uint64) (*model.LiveSnapshot, error) { return nil, errors.New("x") }
 	l := &fakeListener{ch: make(chan db.Notification, 2)}
 	l.ch <- liveNotification(robinhood)
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		hub.Run(ctx, l)
-		close(done)
+		done <- hub.Run(ctx, l)
 	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -933,11 +934,16 @@ func TestHubRun(t *testing.T) {
 	}
 	hub.mu.Unlock()
 	cancel()
-	<-done
-	// Closing the listener channel also ends Run.
+	if err := <-done; err != nil {
+		t.Fatalf("canceled run: %v", err)
+	}
+	// Closing the listener channel without cancellation is a fatal error, so
+	// the API process cannot remain ready while the feed is dead.
 	l2 := &fakeListener{ch: make(chan db.Notification)}
 	close(l2.ch)
-	hub.Run(context.Background(), l2)
+	if err := hub.Run(context.Background(), l2); err == nil || err.Error() != "notification listener closed" {
+		t.Fatalf("closed listener: %v", err)
+	}
 	// The ring is capped.
 	ctx2 := context.Background()
 	var blocks []db.Block

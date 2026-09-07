@@ -114,7 +114,7 @@ state_samples       (chain_id, sampled_at, block_number, base_fee, min_base_fee,
                      prices JSONB /* getPricesInWei tuple */, l1 JSONB /* pricer getters */,
                      accounts JSONB /* {infra:{address,balance}, network:{...}, l1Reward:{...}} or null */,
                      PK(chain_id, sampled_at))                   -- l1/accounts only on slow ticks; pruned after sample_retention
-owner_actions       (chain_id, block_number, tx_hash, log_index, ts, method, selector, args JSONB,
+owner_actions       (chain_id, block_number, tx_hash, tx_index INT NULL /* null for rows scanned before it was recorded */, log_index, ts, method, selector, args JSONB,
                      PK(chain_id, tx_hash, log_index))
 constraint_sets     (id SERIAL PK, chain_id, effective_block, effective_at, constraints JSONB, source TEXT /* 'genesis'|'owner_action'|'observed' */)
 batch_reports       (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero,
@@ -176,7 +176,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 
 | Method and path | Purpose |
 |---|---|
-| `GET /health`, `GET /ready` | liveness; readiness checks DB |
+| `GET /health`, `GET /ready` | liveness; readiness checks DB and the PostgreSQL notification listener |
 | `GET /networks` | `Network[]` |
 | `GET /networks/{network}` | `Network` |
 | `GET /networks/{network}/live` | `LiveSnapshot` (same as WS `tick`), `Cache-Control: no-store` |
@@ -186,7 +186,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 | `GET /networks/{network}/owner-actions` | `OwnerAction[]` newest first |
 | `GET /networks/{network}/batches?range=…` | `BatchSeries` (L1 cost per bucket, batch cadence) |
 | `GET /networks/{network}/l1?range=…` | `L1Series` (pricer getters over time, from state samples) |
-| `GET /status` | `{ version, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion, degraded, capacity: { configuredCallsPerSecond, requiredCallsPerSecond, observedCallsPerSecond, headroomCallsPerSecond, saturated, at, checkpointError }, holes: { pending, blocks, unfillable, retrying, oldestAgeSeconds, checkpointError }, activeEndpoint, failovers, endpoints: [{ index, ws, archive, disabled, error: string | null, wsCooling, wsError: string | null }] }] }` (`headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion`, `capacity.at` and unlimited capacity headroom are nullable; endpoint URLs are never exposed. `holes.pending` counts pending and retrying rows, `holes.unfillable` counts blocked rows, `holes.blocks` is the remaining block count, and `holes.oldestAgeSeconds` exposes the age of the oldest range. A checkpoint decode failure sets the related `checkpointError` instead of reporting no gaps.) |
+| `GET /status` | `{ version, listener: { ready, reconnects, lastError }, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion, degraded, capacity: { configuredCallsPerSecond, requiredCallsPerSecond, observedCallsPerSecond, headroomCallsPerSecond, saturated, at, checkpointError }, holes: { pending, blocks, unfillable, retrying, oldestAgeSeconds, checkpointError }, activeEndpoint, failovers, endpoints: [{ index, ws, archive, disabled, error: string | null, wsCooling, wsError: string | null }] }] }` (`listener.lastError` is null while its PostgreSQL LISTEN connection is ready. `listener.reconnects` counts successful recoveries after startup. `headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion`, `capacity.at` and unlimited capacity headroom are nullable; `endpoints` is `[]` when unknown; endpoint URLs are never exposed, in `error` and `wsError` either. `wsCooling` reports an endpoint whose WebSocket is cooled down after a dial, subscribe or repeated disconnect failure: its JSON-RPC keeps serving ordinary calls while the head subscription moves to another endpoint. `holes.pending` counts pending and retrying rows, `holes.unfillable` counts blocked rows, `holes.blocks` is the remaining block count, and `holes.oldestAgeSeconds` exposes the age of the oldest range. A checkpoint decode failure sets the related `checkpointError` instead of reporting no gaps.) |
 | `GET /ws?network=…` | WebSocket, see §7 |
 
 Points in `Series`, `BatchSeries` and `L1Series` are always ascending by `t`. Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applied server-side if more than 2000 points), `24h` → `1m` buckets, `30d` → `15m`, `all` → `1h`. `/live` returns 404 until the collector has produced a sample. Arrays are never `null` in responses. `L1Series` reaches back at most `collector.sample_retention`.
@@ -275,6 +275,12 @@ Server to client, one JSON object per message:
 
 Client to server: `{ type: 'pong' }` and `{ type: 'subscribe', network: string }` to switch networks on the same socket. The server closes idle sockets that miss two pings. The web client reconnects with exponential back-off (1 s to 30 s) and falls back to polling `/live` every 2 s while disconnected.
 
+lib/pq owns the notification connection and reconnects it on its own, re-issuing every LISTEN and marking the gap with a reconnect notification. The hub reconciles from that marker: it refreshes stored blocks, rebuilds a newer live snapshot and delivers missed owner actions before resuming normal fan-out. The API adds only the health lib/pq reports through its event callback, so a replica whose feed is down answers `/ready` with 503 and leaves the Service, even though its query pool is healthy and its REST answers would have been correct.
+
+Nothing replaces a failed lib/pq listener, because a failed one cannot be observed. lib/pq closes its notification channel in exactly one place, `listenerMain`, after `listenerConnLoop` returns, and both of that loop's returns are guarded by `l.closed()`, which only `Close` sets: a closed channel means this process closed it. If one ever closes anyway, `Hub.Run` returns an error and the API exits rather than serving WebSocket pings from a hub that can never deliver another update, which recovers through a restart instead of swapping a listener underneath live clients.
+
+`/ready` therefore answers 503 for two reasons, the database ping and the listener, which is why `gascurve_api_listener_ready` exists: `GascurveDatabaseUnreachable` subtracts the listener case so the two page separately.
+
 ## 8. Web (`web/`, Next.js App Router, TypeScript strict, Tailwind, Recharts, Vitest)
 
 ```
@@ -286,10 +292,12 @@ src/components/          PageHeader, LiveHero (live figures plus the base fee ch
 src/hooks/               useLive (WS + fallback), useSmoothedLive (250 ms render cadence, tweened values, one rAF loop), useSeries, useNetwork
 src/lib/api/             core.ts (fetch with timeout and retry), networks.ts, series.ts, live.ts, ws.ts
 src/lib/pricer.ts        approxExpBips and helpers in TS, unit-tested against the same vectors as Go
-src/types/               the shapes above
+src/types/               the shapes above, less the response fields no component reads
 src/utils/               formatting (gwei, gas, durations), bips math
 src/lib/seo.ts           site metadata: canonical origin, titles, the social card, the network list the sitemap uses
 ```
+
+`src/types/` narrows the response shapes to what the client renders rather than restating them. `/status` carries fields meant for an operator that no component reads: `holes`, `activeEndpoint`, `failovers`, `endpoints` and `listener` are all absent from `StatusResponse`. Add one when something on the page starts using it, so a type that grows records a real dependency instead of churning four test fixtures for a field nothing reads.
 
 Every chart card carries an enlarge control linking to `/{network}/charts/{chart}`, where `chart` is one of the registry ids in `src/lib/chartViews.ts`: `base-fee`, `backlog-sawtooth`, `contribution`, `gas-per-second`, `backlogs`, `fee-flows`, `l1`, `taylor`. The enlarged page draws the same component with the same hooks at a taller frame, keeps the range in `?range=` and the constraint slot in `?constraint=`, and offers tabs across every chart plus a link back to the section it came from.
 
@@ -353,6 +361,8 @@ The api's series carry no network label: it serves every network from one proces
 | `gascurve_api_ws_clients` | gauge | | WebSocket clients currently subscribed |
 | `gascurve_api_ws_frames_sent_total` | counter | | frames written to clients, pings included |
 | `gascurve_api_ws_clients_dropped_total` | counter | | clients closed for a full outbound queue |
+| `gascurve_api_listener_ready` | gauge | | 1 while the PostgreSQL notification listener is connected and subscribed |
+| `gascurve_api_listener_reconnects_total` | counter | | notification listener recoveries since the process started |
 
 `route` is the chi route pattern (`/api/v1/networks/{network}/series`), resolved after the handler returned, never the request path: a network name or a block number must not become a series of its own. A request no route claims is labeled with the wildcard chi matched (`/api/v1/*`), or `unmatched` when it never reached the router. `method` is bounded the same way: an HTTP method is an arbitrary token that net/http accepts and the router answers 405 to, so anything outside the nine real methods is labeled `other`. `/metrics` is not counted (it is the scrape itself) and neither is a WebSocket that upgraded, whose duration is the life of the socket rather than request latency; a handshake the server refused is counted like any other answer, so sustained WebSocket errors still reach the error rate. The scrape is also exempt from the per-IP rate limit: where a proxy makes ordinary traffic and Prometheus share one peer address, a throttled `/metrics` reads as a dead api.
 

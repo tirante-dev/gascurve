@@ -768,7 +768,11 @@ func (m *MemStore) InsertOwnerActions(_ context.Context, actions []db.OwnerActio
 	n := 0
 	for _, a := range actions {
 		key := fmt.Sprintf("%d/%s/%d", a.ChainID, a.TxHash, a.LogIndex)
-		if _, ok := m.ActionRows[key]; ok {
+		if existing, ok := m.ActionRows[key]; ok {
+			if !existing.TxIndex.Valid && a.TxIndex.Valid {
+				existing.TxIndex = a.TxIndex
+				m.ActionRows[key] = existing
+			}
 			continue
 		}
 		m.ActionRows[key] = a

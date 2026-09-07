@@ -46,13 +46,14 @@ const (
 
 // Server holds the handlers' dependencies.
 type Server struct {
-	store   db.Store
-	cfg     config.ServerConfig
-	log     *logger.Logger
-	hub     *Hub
-	version string
-	now     func() time.Time
-	router  chi.Router
+	store    db.Store
+	cfg      config.ServerConfig
+	log      *logger.Logger
+	hub      *Hub
+	listener db.ListenerStatusReporter
+	version  string
+	now      func() time.Time
+	router   chi.Router
 	// ethUsdMaxAge mirrors collector.eth_usd_max_age: a recorded spot older
 	// than this is served as null.
 	ethUsdMaxAge time.Duration
@@ -82,6 +83,10 @@ func WithMetrics(m *metrics.API, g prometheus.Gatherer) Option {
 		}
 	}
 }
+
+// WithListener exposes the notification listener through readiness and
+// status. It is optional for servers built without the live WebSocket feed.
+func WithListener(l db.ListenerStatusReporter) Option { return func(s *Server) { s.listener = l } }
 
 // WithEthUsdMaxAge sets how long a recorded ETH/USD spot is served before
 // /live reports null. It must match the collector's

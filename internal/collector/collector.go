@@ -39,6 +39,7 @@ type RPC interface {
 	HeadersByNumbers(ctx context.Context, numbers []uint64) ([]nitro.Header, error)
 	HeaderByNumber(ctx context.Context, number uint64) (*nitro.Header, error)
 	BlocksWithTxs(ctx context.Context, numbers []uint64) ([]nitro.Block, error)
+	TransactionReceipts(ctx context.Context, hashes []string) ([]nitro.Receipt, error)
 	OwnerActsLogs(ctx context.Context, from, to uint64) ([]nitro.Log, error)
 	L1Sample(ctx context.Context) (*nitro.L1Sample, error)
 	FeeAccounts(ctx context.Context) (*nitro.FeeAccounts, error)
@@ -213,6 +214,7 @@ type Follower struct {
 	lastSample    *nitro.Sample
 	lastResult    *pricer.Result
 	sets          []db.ConstraintSet
+	setChanges    []setChange
 	minFeeChanges []minFeeChange
 	legacyChanges []legacyChange
 	liveStart     *liveStart
@@ -239,9 +241,17 @@ type Follower struct {
 }
 
 // minFeeChange is a recorded setMinimumL2BaseFee.
+type actionPosition struct {
+	txHash       string
+	txIndex      uint64
+	txIndexKnown bool
+	logIndex     int64
+}
+
 type minFeeChange struct {
 	block uint64
 	fee   *big.Int
+	pos   actionPosition
 }
 
 // legacyChange is a recorded legacy pricer parameter change: the method
@@ -250,6 +260,7 @@ type legacyChange struct {
 	block  uint64
 	method string
 	value  uint64
+	pos    actionPosition
 }
 
 // setChange is a constraint set taking effect at a block; a set with the
@@ -258,6 +269,7 @@ type legacyChange struct {
 type setChange struct {
 	block   uint64
 	entries []model.ConstraintSetEntry
+	pos     actionPosition
 }
 
 // liveStart is the first block the live loop stored (collector_state
@@ -738,18 +750,48 @@ func (f *Follower) reloadSetsLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("owner actions: %w", err)
 	}
+	f.setChanges = f.setChanges[:0]
 	f.minFeeChanges = f.minFeeChanges[:0]
 	f.legacyChanges = f.legacyChanges[:0]
 	for i := len(actions) - 1; i >= 0; i-- { // ascending by block
 		a := actions[i]
+		pos := actionPositionOf(a)
+		if c, ok := setChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			c.pos = pos
+			f.setChanges = append(f.setChanges, c)
+		}
 		if c, ok := minFeeChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			c.pos = pos
 			f.minFeeChanges = append(f.minFeeChanges, c)
 		}
 		if c, ok := legacyChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			c.pos = pos
 			f.legacyChanges = append(f.legacyChanges, c)
 		}
 	}
 	return nil
+}
+
+func actionPositionOf(a db.OwnerAction) actionPosition {
+	return actionPosition{txHash: a.TxHash, txIndex: uint64(max(a.TxIndex.Int64, 0)), txIndexKnown: a.TxIndex.Valid, logIndex: a.LogIndex}
+}
+
+func pendingPositionOf(a *nitro.OwnerAction) actionPosition {
+	return actionPosition{txHash: a.TxHash, txIndex: a.TxIndex, txIndexKnown: true, logIndex: int64(a.LogIndex)}
+}
+
+// setChangeOf decodes a recorded setGasPricingConstraints action.
+func setChangeOf(block uint64, method string, args db.JSONB) (setChange, bool) {
+	if method != "setGasPricingConstraints" {
+		return setChange{}, false
+	}
+	var a struct {
+		Constraints []nitro.ConstraintParam `json:"constraints"`
+	}
+	if err := args.Unmarshal(&a); err != nil || a.Constraints == nil {
+		return setChange{}, false
+	}
+	return setChange{block: block, entries: entriesOf(a.Constraints)}, true
 }
 
 // minFeeChangeOf decodes a recorded setMinimumL2BaseFee.
@@ -811,6 +853,7 @@ type timeline struct {
 func (f *Follower) timelineLocked(pending []*nitro.OwnerAction) *timeline {
 	tl := &timeline{
 		origin: f.scanOrigin,
+		sets:   append([]setChange(nil), f.setChanges...),
 		fees:   append([]minFeeChange(nil), f.minFeeChanges...),
 		legacy: append([]legacyChange(nil), f.legacyChanges...),
 	}
@@ -819,31 +862,106 @@ func (f *Follower) timelineLocked(pending []*nitro.OwnerAction) *timeline {
 		if err != nil {
 			continue
 		}
-		tl.sets = append(tl.sets, setChange{block: cs.EffectiveBlock, entries: entries})
+		matched := false
+		for _, change := range tl.sets {
+			if change.block == cs.EffectiveBlock && sameSets(change.entries, entries) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			// An observed set has no action position. Keep the historical
+			// block-start fallback until an OwnerActs log explains it.
+			tl.sets = append(tl.sets, setChange{block: cs.EffectiveBlock, entries: entries})
+		}
 	}
 	for _, a := range pending {
+		pos := pendingPositionOf(a)
+		if tl.hasAction(pos) {
+			continue
+		}
 		if a.Constraints != nil {
-			tl.sets = append(tl.sets, setChange{block: a.BlockNumber, entries: entriesOf(a.Constraints)})
+			tl.sets = append(tl.sets, setChange{block: a.BlockNumber, entries: entriesOf(a.Constraints), pos: pos})
 		}
 		args, _ := db.MarshalJSONB(a.Args)
 		if c, ok := minFeeChangeOf(a.BlockNumber, a.Method, args); ok {
+			c.pos = pos
 			tl.fees = append(tl.fees, c)
 		}
 		if c, ok := legacyChangeOf(a.BlockNumber, a.Method, args); ok {
+			c.pos = pos
 			tl.legacy = append(tl.legacy, c)
 		}
 	}
-	sort.SliceStable(tl.sets, func(i, j int) bool { return tl.sets[i].block < tl.sets[j].block })
-	sort.SliceStable(tl.fees, func(i, j int) bool { return tl.fees[i].block < tl.fees[j].block })
-	sort.SliceStable(tl.legacy, func(i, j int) bool { return tl.legacy[i].block < tl.legacy[j].block })
+	sort.SliceStable(tl.sets, func(i, j int) bool {
+		return changeLess(tl.sets[i].block, tl.sets[i].pos, tl.sets[j].block, tl.sets[j].pos)
+	})
+	sort.SliceStable(tl.fees, func(i, j int) bool {
+		return changeLess(tl.fees[i].block, tl.fees[i].pos, tl.fees[j].block, tl.fees[j].pos)
+	})
+	sort.SliceStable(tl.legacy, func(i, j int) bool {
+		return changeLess(tl.legacy[i].block, tl.legacy[i].pos, tl.legacy[j].block, tl.legacy[j].pos)
+	})
 	return tl
+}
+
+func changeLess(aBlock uint64, a actionPosition, bBlock uint64, b actionPosition) bool {
+	if aBlock != bBlock {
+		return aBlock < bBlock
+	}
+	if (a.txHash == "") != (b.txHash == "") {
+		return a.txHash == ""
+	}
+	if a.txIndex != b.txIndex {
+		return a.txIndex < b.txIndex
+	}
+	return a.logIndex < b.logIndex
+}
+
+func sameAction(a, b actionPosition) bool {
+	return a.txHash != "" && a.txHash == b.txHash && a.logIndex == b.logIndex
+}
+
+func (tl *timeline) hasAction(pos actionPosition) bool {
+	for _, c := range tl.sets {
+		if sameAction(c.pos, pos) {
+			return true
+		}
+	}
+	for _, c := range tl.fees {
+		if sameAction(c.pos, pos) {
+			return true
+		}
+	}
+	for _, c := range tl.legacy {
+		if sameAction(c.pos, pos) {
+			return true
+		}
+	}
+	return false
 }
 
 // minFeeAt returns the minimum base fee in force at a block from the
 // recorded setMinimumL2BaseFee actions, with the scan origin's sampled fee
-// from the origin block on and nitro's genesis default before the first
-// recorded change. It never uses the live value.
+// and nitro's genesis default before the first recorded change. A
+// transaction action changes the state after its block has already been
+// priced. It never uses the live value.
 func (tl *timeline) minFeeAt(number uint64) *big.Int {
+	fee := big.NewInt(pricer.InitialMinimumBaseFeeWei)
+	if of := tl.origin.fee(); of != nil && number >= tl.origin.Block {
+		fee = of
+	}
+	for _, c := range tl.fees {
+		if c.block < number || c.block == number && c.pos.txHash == "" {
+			fee = c.fee
+		}
+	}
+	return new(big.Int).Set(fee)
+}
+
+// minFeeAfter returns the minimum base fee in the state at the end of a
+// block, after every transaction action in that block.
+func (tl *timeline) minFeeAfter(number uint64) *big.Int {
 	fee := big.NewInt(pricer.InitialMinimumBaseFeeWei)
 	if of := tl.origin.fee(); of != nil && number >= tl.origin.Block {
 		fee = of
@@ -856,7 +974,16 @@ func (tl *timeline) minFeeAt(number uint64) *big.Int {
 	return new(big.Int).Set(fee)
 }
 
-// minFeeChangeBlock returns the block of the last fee change at or before
+func (tl *timeline) feeChangesInBlock(number uint64) bool {
+	for _, c := range tl.fees {
+		if c.block == number && c.pos.txHash != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// minFeeChangeBlock returns the block of the last fee change that priced
 // number (the origin counts as one; 0 when none).
 func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
 	var block uint64
@@ -864,7 +991,7 @@ func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
 		block = tl.origin.Block
 	}
 	for _, c := range tl.fees {
-		if c.block <= number {
+		if c.block < number || c.block == number && c.pos.txHash == "" {
 			block = c.block
 		}
 	}
@@ -877,6 +1004,16 @@ func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
 // the caller's, so history is replayed from what was really in force
 // rather than from the current parameters.
 func (tl *timeline) legacyAt(number uint64, base *pricer.Legacy) *pricer.Legacy {
+	return tl.legacyThrough(number, base, true)
+}
+
+// legacyBefore returns the parameters that priced a block, excluding
+// transaction actions inside that block.
+func (tl *timeline) legacyBefore(number uint64, base *pricer.Legacy) *pricer.Legacy {
+	return tl.legacyThrough(number, base, false)
+}
+
+func (tl *timeline) legacyThrough(number uint64, base *pricer.Legacy, includeBlock bool) *pricer.Legacy {
 	if base == nil {
 		return nil
 	}
@@ -885,11 +1022,55 @@ func (tl *timeline) legacyAt(number uint64, base *pricer.Legacy) *pricer.Legacy 
 		out.SpeedLimit, out.Inertia, out.Tolerance = o.Legacy.SpeedLimit, o.Legacy.Inertia, o.Legacy.Tolerance
 	}
 	for _, c := range tl.legacy {
-		if c.block <= number {
+		if c.block < number || c.block == number && (includeBlock || c.pos.txHash == "") {
 			applyLegacy(&out, c)
 		}
 	}
 	return &out
+}
+
+type pricingChange struct {
+	pos    actionPosition
+	set    *setChange
+	fee    *minFeeChange
+	legacy *legacyChange
+}
+
+func (tl *timeline) changesAt(number uint64, transaction bool) []pricingChange {
+	var out []pricingChange
+	for i := range tl.sets {
+		c := &tl.sets[i]
+		if c.block == number && (c.pos.txHash != "") == transaction {
+			out = append(out, pricingChange{pos: c.pos, set: c})
+		}
+	}
+	for i := range tl.fees {
+		c := &tl.fees[i]
+		if c.block == number && (c.pos.txHash != "") == transaction {
+			out = append(out, pricingChange{pos: c.pos, fee: c})
+		}
+	}
+	for i := range tl.legacy {
+		c := &tl.legacy[i]
+		if c.block == number && (c.pos.txHash != "") == transaction {
+			out = append(out, pricingChange{pos: c.pos, legacy: c})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return changeLess(number, out[i].pos, number, out[j].pos)
+	})
+	return out
+}
+
+func applyPricingChange(st *pricer.State, change pricingChange) {
+	switch {
+	case change.set != nil && !st.IsLegacy():
+		st.Constraints = stateFromEntries(change.set.entries, st.MinBaseFee).Constraints
+	case change.fee != nil:
+		st.MinBaseFee = new(big.Int).Set(change.fee.fee)
+	case change.legacy != nil && st.Legacy != nil:
+		applyLegacy(st.Legacy, *change.legacy)
+	}
 }
 
 func applyLegacy(l *pricer.Legacy, c legacyChange) {
@@ -928,21 +1109,9 @@ func (tl *timeline) boundaryAt(number uint64) bool {
 // constraints model only), a fee change replaces the floor, a legacy change
 // replaces its parameter.
 func (tl *timeline) applyAt(st *pricer.State, number uint64) {
-	for _, s := range tl.sets {
-		if s.block == number && !st.IsLegacy() {
-			st.Constraints = stateFromEntries(s.entries, st.MinBaseFee).Constraints
-		}
-	}
-	for _, c := range tl.fees {
-		if c.block == number {
-			st.MinBaseFee = new(big.Int).Set(c.fee)
-		}
-	}
-	if st.Legacy != nil {
-		for _, c := range tl.legacy {
-			if c.block == number {
-				applyLegacy(st.Legacy, c)
-			}
+	for _, transaction := range []bool{false, true} {
+		for _, change := range tl.changesAt(number, transaction) {
+			applyPricingChange(st, change)
 		}
 	}
 }
