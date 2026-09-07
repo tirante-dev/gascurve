@@ -50,7 +50,10 @@ func (f *Follower) historyEpoch(ctx context.Context, s db.Store) (int, error) {
 // and writes the same rows, costing one pass rather than any history.
 //
 // Called with f.mu held, from ensureInit, so the loops see either the old
-// history or the reset one and never a half-cleared database.
+// history or the reset one and never a half-cleared database. It runs
+// before the owner-scan checkpoints are read, so a checkpoint too damaged
+// to parse cannot block the rebuild that would replace it; the live start
+// is the only state it needs loaded, for the bucket boundary.
 func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 	want := f.net.HistoryEpoch
 	if want <= 0 {
@@ -113,6 +116,9 @@ func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 	if !archive {
 		f.log.Warn("the history rebuild has no endpoint marked archive, the replay will be unanchored again")
 	}
+	// The scan-state load that follows in ensureInit reads the same
+	// cleared checkpoints; clearing them here keeps the rebuild correct on
+	// its own rather than through its position in that sequence.
 	f.scanOrigin = nil
 	f.ownerScanThrough = 0
 	return nil

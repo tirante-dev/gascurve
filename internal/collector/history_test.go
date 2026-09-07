@@ -395,3 +395,28 @@ func TestHistoryEpochRebuildsTheBackfill(t *testing.T) {
 		t.Fatalf("cursor after the rebuild: %+v %v", c, err)
 	}
 }
+
+// TestHistoryEpochRebuildsPastADamagedCheckpoint: a rebuild is how an
+// operator recovers a chain whose owner-scan checkpoint cannot be read, so
+// it has to run before that checkpoint is parsed. Otherwise the start
+// fails on the very state the rebuild would replace.
+func TestHistoryEpochRebuildsPastADamagedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := historyStore(t)
+	if err := store.SetState(ctx, 4663, db.StateOwnerScanOrigin, "{not json"); err != nil {
+		t.Fatal(err)
+	}
+	// Without a rebuild the follower cannot start at all.
+	if err := epochFollower(t, store, 0).ensureInit(ctx); err == nil {
+		t.Fatal("an unreadable owner scan origin must fail the start")
+	}
+	if err := epochFollower(t, store, 1).ensureInit(ctx); err != nil {
+		t.Fatalf("the rebuild must clear the damaged checkpoint: %v", err)
+	}
+	if _, ok := stateOf(t, store, db.StateOwnerScanOrigin); ok {
+		t.Fatal("the damaged checkpoint is gone")
+	}
+	if v, _ := stateOf(t, store, db.StateHistoryEpoch); v != "1" {
+		t.Fatalf("epoch: %q", v)
+	}
+}
