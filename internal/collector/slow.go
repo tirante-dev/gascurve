@@ -864,7 +864,17 @@ func (f *Follower) prune(ctx context.Context) error {
 			return err
 		}
 		// In the same transaction as the delete it describes, so the record
-		// can never claim rows are gone that are still there.
+		// can never claim rows are gone that are still there. Never without
+		// a live start: a frontier is only meaningful relative to one, and
+		// with none the cutoff is the wall clock, which on a stalled or
+		// development chain sits past every block. The loops start together,
+		// so the first prune can run before the first tick sets the live
+		// start, and a forward-only record made then could never be lowered
+		// once it was. The delete is a no-op in that state, since there are
+		// no rows yet, and the seed at startup declines for the same reason.
+		if !hasBoundary {
+			return nil
+		}
 		return f.recordPruneFrontier(ctx, s, before)
 	})
 	if err != nil {

@@ -643,6 +643,36 @@ func TestRepairStepWillNotRebuildBelowThePruneFrontier(t *testing.T) {
 	}
 }
 
+// The loops start together, so a fresh database's first prune can run before
+// the first tick has set the live start. With no boundary the cutoff is the
+// wall clock, which on a stalled or development chain sits past every block;
+// a forward-only frontier recorded then could never be lowered once the live
+// start appeared, and every rebuild would be refused for good. Prune, like
+// the seed, records nothing without a live start.
+func TestPruneRecordsNoFrontierBeforeALiveStart(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	f := newTestFollower(t, newFakeRPC(1000), store)
+	f.cfg.BlockRetention = time.Hour
+	// ensureInit on an empty store leaves no live start, and the slow loop
+	// does not reload it on later ticks: the fast loop sets it in memory.
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	_, has := f.boundaryLocked()
+	f.mu.Unlock()
+	if has {
+		t.Fatal("a live start exists on an empty store, so the test proves nothing")
+	}
+	if err := f.prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.pruneFrontier(ctx); err != nil || !got.IsZero() {
+		t.Fatalf("prune recorded a frontier with no live start: %v %v", got, err)
+	}
+}
+
 func TestPruneRecordsAFrontierThatOnlyMovesForward(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
