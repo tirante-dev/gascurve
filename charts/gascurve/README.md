@@ -27,6 +27,7 @@ helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
 | `config.server.trusted_proxies` | Addresses or CIDRs of reverse proxies allowed to supply the client forwarding chain. Required when ingress and api are enabled | `[]` |
 | `api.networkPolicy.enabled` | With chart-managed ingress, restrict API pod ingress to the configured controller peers | `true` |
 | `api.networkPolicy.allowedPeers` | Kubernetes NetworkPolicy peers allowed to reach the API. Defaults to the standard ingress-nginx controller labels | ingress-nginx controller |
+| `api.networkPolicy.monitoringPeers` | Extra peers admitted for `/metrics`, which shares the API's HTTP port. Required when `metrics.serviceMonitor.enabled` is true and the policy renders | `[]` |
 | `collector.resources` | Portable defaults, not a production profile. See Sizing the collector | `100m` / `128Mi` requested |
 | `database.url` | Rendered into a chart-managed Secret. Exactly one of `database.url` and `database.existingSecret` is required when the collector or api is enabled | `""` |
 | `database.existingSecret`, `database.existingSecretKey` | Use an existing Secret instead of `database.url` | `""`, `DB_URL` |
@@ -73,7 +74,21 @@ api:
 
 Change the namespace and pod selectors for another ingress installation. `ipBlock` peers are also accepted when a controller cannot be selected by labels. The policy only restricts ingress to the API pods; database and RPC egress are unchanged. Your cluster must use a networking implementation that enforces Kubernetes NetworkPolicy. Set `api.networkPolicy.enabled=false` only when an equivalent policy outside the chart already prevents direct access to the API Service or pods.
 
-The API serves `/metrics` on the same port as REST and WebSocket, so this layer 4 policy also blocks direct API ServiceMonitor scrapes. To scrape it directly, append the Prometheus pods to `api.networkPolicy.allowedPeers`; that exception can reach every API route, not only `/metrics`. Keep those pod addresses outside `config.server.trusted_proxies` so their forwarding headers remain untrusted. If the address ranges overlap, use an equivalent path-aware policy or a trusted metrics proxy instead. Collector scraping is unaffected because it has a separate metrics port and is not selected by this policy.
+The API serves `/metrics` on the same port as REST and WebSocket, so this layer 4 policy also blocks direct API ServiceMonitor scrapes. A blocked scrape is not quiet: `up` goes to 0 and this chart's own `apiDown` alert pages against a healthy API. The chart therefore refuses to render `metrics.serviceMonitor.enabled: true` alongside this policy until `api.networkPolicy.monitoringPeers` names the Prometheus pods:
+
+```yaml
+api:
+  networkPolicy:
+    monitoringPeers:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: mon
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+```
+
+Those peers are appended to the policy's `from` list and can reach every API route, not only `/metrics`. Keep their addresses outside `config.server.trusted_proxies` so their forwarding headers stay untrusted. If the ranges overlap, or a peer selector cannot single Prometheus out, leave `metrics.serviceMonitor.enabled` off and use an equivalent path-aware policy or a trusted metrics proxy instead. Collector scraping is unaffected because it has a separate metrics port and is not selected by this policy.
 
 Upgrades of an existing release with both ingress and API enabled must add `config.server.trusted_proxies` before this chart version will render. Confirm the controller peer range and labels first, then apply the Helm upgrade. A wrong CIDR leaves forwarded headers ignored, and wrong NetworkPolicy selectors block ingress traffic. No database migration or data recomputation is involved.
 

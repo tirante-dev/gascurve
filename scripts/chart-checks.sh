@@ -271,6 +271,18 @@ reject "empty ingress controller NetworkPolicy peers" "allowedPeers" \
   --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
   --set-json 'api.networkPolicy.allowedPeers=[]'
 
+reject "API ServiceMonitor blocked by the chart's own NetworkPolicy" "monitoringPeers" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set metrics.serviceMonitor.enabled=true
+reject "API ServiceMonitor blocked by the chart's own NetworkPolicy, schema validation skipped" "apiDown" \
+  --skip-schema-validation \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set metrics.serviceMonitor.enabled=true
+
 echo "== database.url renders the chart-managed Secret"
 if render "database-url" "${work}/url.yaml" --values "${ci}/database-url-values.yaml"; then
   has "${work}/url.yaml" 'kind: Secret' "database-url: no chart-managed Secret rendered"
@@ -298,6 +310,14 @@ if render "ingress" "${work}/ingress.yaml" --values "${ci}/ingress-values.yaml";
   has "${work}/ingress.yaml" 'port: http' "ingress: NetworkPolicy does not limit access to the API HTTP port"
   lacks "${work}/ingress.yaml" 'kind: Secret' "ingress: rendered a Secret, but database.existingSecret was set"
   ok "Ingress, trusted proxies and API NetworkPolicy rendered"
+fi
+
+if render "ingress-scraped" "${work}/ingress-scraped.yaml" \
+  --values "${ci}/ingress-values.yaml" --set metrics.serviceMonitor.enabled=true \
+  --set-json 'api.networkPolicy.monitoringPeers=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"mon"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"prometheus"}}}]'; then
+  has "${work}/ingress-scraped.yaml" 'kind: ServiceMonitor' "ingress-scraped: no ServiceMonitor rendered"
+  has "${work}/ingress-scraped.yaml" 'kubernetes.io/metadata.name: mon' "ingress-scraped: NetworkPolicy does not admit the monitoring peer"
+  ok "a declared monitoring peer reaches the API through its NetworkPolicy"
 fi
 
 if render "ingress-policy-disabled" "${work}/ingress-policy-disabled.yaml" \

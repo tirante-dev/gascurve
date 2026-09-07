@@ -13,9 +13,6 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- if and .Values.api.enabled .Values.api.networkPolicy.enabled (empty .Values.api.networkPolicy.allowedPeers) -}}
-{{- fail "api.networkPolicy.enabled is true for an ingress deployment but api.networkPolicy.allowedPeers is empty. Configure the ingress controller NetworkPolicy peers, or disable the chart policy only after applying an equivalent policy outside this chart." -}}
-{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

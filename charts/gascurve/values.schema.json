@@ -58,9 +58,14 @@
               "type": "array",
               "minItems": 1,
               "items": { "$ref": "#/definitions/networkPolicyPeer" }
+            },
+            "monitoringPeers": {
+              "description": "Extra peers admitted for /metrics, which the api serves on its REST and WebSocket port. Required when metrics.serviceMonitor.enabled is true and this policy is rendered.",
+              "type": "array",
+              "items": { "$ref": "#/definitions/networkPolicyPeer" }
             }
           },
-          "required": ["enabled", "allowedPeers"],
+          "required": ["enabled", "allowedPeers", "monitoringPeers"],
           "additionalProperties": false
         },
         "resources": { "$ref": "#/definitions/resources" },
@@ -334,6 +339,41 @@
             "required": ["server"]
           }
         }
+      }
+    },
+    {
+      "title": "an API NetworkPolicy that Prometheus must cross needs an explicit monitoring peer",
+      "if": {
+        "properties": {
+          "ingress": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "api": {
+            "properties": {
+              "enabled": { "const": true },
+              "networkPolicy": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] }
+            },
+            "required": ["enabled", "networkPolicy"]
+          },
+          "metrics": {
+            "properties": { "serviceMonitor": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } },
+            "required": ["serviceMonitor"]
+          }
+        },
+        "required": ["ingress", "api", "metrics"]
+      },
+      "then": {
+        "properties": {
+          "api": {
+            "properties": {
+              "networkPolicy": {
+                "title": "api.networkPolicy.monitoringPeers must name the Prometheus pods, or the scrape this chart configures cannot cross its own policy",
+                "properties": { "monitoringPeers": { "minItems": 1 } },
+                "required": ["monitoringPeers"]
+              }
+            },
+            "required": ["networkPolicy"]
+          }
+        },
+        "required": ["api"]
       }
     }
   ],

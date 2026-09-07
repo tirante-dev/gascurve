@@ -93,6 +93,13 @@ api:
           matchLabels:
             app.kubernetes.io/name: ingress-nginx
             app.kubernetes.io/component: controller
+    # Peers allowed in for /metrics, which the api serves on the same port
+    # as REST and the WebSocket. Required whenever
+    # metrics.serviceMonitor.enabled is true and this policy is rendered,
+    # because a layer 4 policy cannot single out a path: without it the
+    # scrape fails and this chart's own apiDown alert fires. Keep these
+    # addresses out of config.server.trusted_proxies.
+    monitoringPeers: []
   resources:
     requests:
       cpu: 100m
