@@ -10,10 +10,8 @@ import { gasScale, weiToGweiNumber } from "@/utils/format";
 /** The span the hero reaches back over, in seconds of block timestamp. */
 export const HERO_WINDOW_S = 120;
 
-/** Tick spacings the relative-time axis may use, smallest first. */
 export const HERO_TICK_STEPS = [10, 15, 30, 60];
 
-/** Most ticks the axis carries, the newest one included. */
 const HERO_MAX_TICKS = 5;
 
 /**
@@ -57,7 +55,6 @@ export function heroTickStep(span: number): number {
   return HERO_TICK_STEPS[HERO_TICK_STEPS.length - 1];
 }
 
-/** Ticks from minus the span up to now, evenly spaced, oldest first. */
 export function heroTicks(span: number): number[] {
   const step = heroTickStep(span);
   const out: number[] = [];
@@ -66,7 +63,6 @@ export function heroTicks(span: number): number[] {
   return out;
 }
 
-/** A point on the relative-time axis: "-2:00", "-0:30", and "now" at the right edge. */
 export function heroTimeLabel(x: number): string {
   if (x >= 0) return "now";
   const total = Math.round(Math.abs(x));
@@ -75,7 +71,6 @@ export function heroTimeLabel(x: number): string {
   return `-${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
-/** What the tooltip's heading says for a hovered point: where it sits on the axis, in words. */
 export function heroPointTitle(x: number): string {
   if (x >= -1) return "now";
   return `${Math.round(Math.abs(x))} s ago`;
@@ -218,7 +213,6 @@ export function throughputAxis(max: number): ThroughputAxis {
   return { top, ticks: [0, top / 2, top], divisor, decimals, unit: `${prefix}gas/s` };
 }
 
-/** One label on that axis: the figure alone, in the axis's own unit and at the axis's own decimal count. */
 export function throughputTick(value: number, axis: ThroughputAxis): string {
   const scaled = value / axis.divisor;
   return axis.decimals === 0 ? Math.round(scaled).toLocaleString("en-US") : scaled.toFixed(axis.decimals);
@@ -228,10 +222,8 @@ export function throughputTick(value: number, axis: ThroughputAxis): string {
  * for. Live is the default and the fallback. */
 export type HeroRange = "live" | SeriesRange;
 
-/** The hero's range control, in order: the live view first, then the api's ranges. */
 export const HERO_RANGES: readonly HeroRange[] = ["live", ...SERIES_RANGES];
 
-/** The word on each range tab. */
 export const HERO_RANGE_LABELS: Record<HeroRange, string> = { live: "Live", "1h": "1h", "24h": "24h", "30d": "30d", all: "All" };
 
 /** Where the chosen range is kept, so a reload comes back to the same view. */
@@ -252,7 +244,6 @@ export function readHeroRange(): HeroRange {
   }
 }
 
-/** Remembers the chosen range. A browser that refuses storage simply does not remember it. */
 export function storeHeroRange(range: HeroRange): void {
   try {
     window.localStorage.setItem(HERO_RANGE_KEY, range);
@@ -272,20 +263,17 @@ export function heroRange(): HeroRange {
   return current;
 }
 
-/** Live, always: what the server renders, and what hydration starts from. */
 export function heroRangeOnServer(): HeroRange {
   return "live";
 }
 
-/** Sets the range for this tab and remembers it for the next visit. */
 export function setHeroRange(range: HeroRange): void {
   current = range;
   storeHeroRange(range);
   for (const listener of listeners) listener();
 }
 
-/** Subscribes to the range, this tab's changes and another tab's alike: a choice made next door reaches
- * this page as a storage event, so the two windows agree. */
+/** Subscribes to the range: a choice made in another tab arrives as a storage event, so the two agree. */
 export function subscribeHeroRange(onChange: () => void): () => void {
   listeners.add(onChange);
   const onStorage = (event: StorageEvent) => {

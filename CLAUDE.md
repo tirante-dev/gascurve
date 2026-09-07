@@ -54,7 +54,7 @@ Comment only what the code cannot say: a constraint, a hazard, a decision whose 
 
 Do not write a comment that restates the name (`// Close closes the client`), narrates the next line, or recaps what a function plainly does. Prefer a better name to a comment explaining a bad one. Explanations longer than a few lines belong in `docs/`, not above a function.
 
-Two or three lines is a normal comment. `make comment-check` enforces the budget over Go and web sources alike, in CI: no run of consecutive comment lines may exceed 8 (a `//` paragraph separator does not break the run), and no file over 40 lines may be more than 30% comments. Raising a threshold to pass is the same as lowering any other CI gate: fix the comment instead.
+Two or three lines is a normal comment. `make comment-check` enforces the budget over Go and web sources alike, in CI: no run of consecutive comment lines may exceed 8 (a `//` paragraph separator does not break the run), and no file over 40 lines may be more than 30% comments. It counts `//`, `/* */` and JSX `{/* */}` alike, and exempts a leading copyright header, generated files, build directives and lint pragmas. Raising a threshold to pass is the same as lowering any other CI gate: fix the comment instead.
 
 ## Writing style
 
