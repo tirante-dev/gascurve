@@ -526,6 +526,11 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// The fast loop keeps appending blocks while this runs, so the
+		// candidates can reach past the anchor the parameters were pinned
+		// to. Those are left for the next tick, which pins a newer one,
+		// rather than priced against a snapshot that predates them.
+		nums = capBlocks(nums, resolver.anchor.block)
 		if len(nums) == 0 {
 			return nil
 		}
@@ -659,6 +664,17 @@ func defaultPerBatchGasCharge(arbosVersion uint64) int64 {
 	default:
 		return 0
 	}
+}
+
+// capBlocks truncates an ascending block list at the last entry that is
+// not above through.
+func capBlocks(nums []uint64, through uint64) []uint64 {
+	for i, n := range nums {
+		if n > through {
+			return nums[:i]
+		}
+	}
+	return nums
 }
 
 // batchCandidates lists the next blocks to inspect after the cursor: every

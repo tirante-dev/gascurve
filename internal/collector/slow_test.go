@@ -869,3 +869,52 @@ func TestBatchScanReEvaluatesAfterFailover(t *testing.T) {
 		t.Fatalf("cursor after catching up = %q", v)
 	}
 }
+
+// TestBatchScanStopsAtParameterAnchor: the fast loop keeps appending blocks
+// while a slow tick runs, so the scan can see blocks newer than the
+// parameter snapshot the tick pinned. They are left for the next tick, which
+// pins a newer anchor, instead of failing the scan.
+func TestBatchScanStopsAtParameterAnchor(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	pool := &fakePool{fakeRPC: rpc, pol: nitro.Policy{Unlimited: true}}
+	store := dbtest.New()
+	f := NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, CallsPerSecond: 4, Enabled: true},
+		Collector: testConfig(), RPC: pool, Store: store, Log: logger.Nop(),
+		Now:   func() time.Time { return baseTime.Add(140 * time.Second) },
+		Sleep: func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
+	})
+	f.batchCostAnchor = &batchCostAnchor{block: ^uint64(0), params: nitro.BatchPostingCostParams{
+		ArbOSVersion: 61, PerBatchGasCharge: 210_000, ParentGasFloorPerToken: 10,
+	}}
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.setHead(1400)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.batchCostAnchor.block = 1050
+	if err := f.scanBatchReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); v != "1050" {
+		t.Fatalf("the scan must stop at the pinned anchor, cursor = %q", v)
+	}
+	// A tick whose anchor has not moved has nothing left to price.
+	if err := f.scanBatchReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); v != "1050" {
+		t.Fatalf("cursor after an unmoved anchor = %q", v)
+	}
+	// The next slow tick's anchor releases the rest.
+	f.batchCostAnchor.block = 1400
+	if err := f.scanBatchReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); v != "1400" {
+		t.Fatalf("cursor after the anchor advanced = %q", v)
+	}
+}

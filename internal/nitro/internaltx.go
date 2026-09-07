@@ -61,12 +61,19 @@ type BatchPostingCost struct {
 	WeiSpent *big.Int
 }
 
+// MaxAttributedGasSpent is the largest gas figure Cost reports. Attributed
+// gas is persisted in a signed 64-bit column, so a malformed report whose
+// saturating arithmetic runs past it clamps here rather than failing the
+// write and stalling the scan. No report Nitro can produce comes near it.
+const MaxAttributedGasSpent uint64 = math.MaxInt64
+
 // Cost reproduces Nitro's ApplyInternalTxUpdate batch-report accounting. V1
 // uses its signed saturating calculation. V2 uses LegacyCostForStats, adds
 // extra gas and a nonnegative per-batch charge, then applies the ArbOS 50+
 // parent calldata floor. Saturating arithmetic preserves Nitro's behavior at
 // its explicit saturation points and prevents malformed uint64 inputs from
-// wrapping in the remaining multiplications.
+// wrapping in the remaining multiplications; the result is then clamped to
+// MaxAttributedGasSpent.
 func (r *BatchPostingReport) Cost(p BatchPostingCostParams) (BatchPostingCost, error) {
 	var gas uint64
 	switch r.Version {
@@ -92,6 +99,8 @@ func (r *BatchPostingReport) Cost(p BatchPostingCostParams) (BatchPostingCost, e
 	default:
 		return BatchPostingCost{}, fmt.Errorf("unsupported batch posting report version %d", r.Version)
 	}
+
+	gas = min(gas, MaxAttributedGasSpent)
 
 	wei := new(big.Int)
 	if r.L1BaseFee != nil {

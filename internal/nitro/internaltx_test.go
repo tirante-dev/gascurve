@@ -107,8 +107,11 @@ func TestBatchPostingReportCostNitroVectors(t *testing.T) {
 func TestBatchPostingReportCostOverflowSafety(t *testing.T) {
 	v2 := BatchPostingReport{Version: 2, CalldataLen: math.MaxUint64, CalldataNonZeros: math.MaxUint64, ExtraGas: math.MaxUint64, L1BaseFee: big.NewInt(1)}
 	cost, err := v2.Cost(BatchPostingCostParams{ArbOSVersion: 50, PerBatchGasCharge: math.MaxInt64, ParentGasFloorPerToken: math.MaxUint64})
-	if err != nil || cost.GasSpent != math.MaxUint64 || cost.WeiSpent.String() != "18446744073709551615" {
+	if err != nil || cost.GasSpent != MaxAttributedGasSpent || cost.WeiSpent.String() != "9223372036854775807" {
 		t.Fatalf("v2 saturation: %+v %v", cost, err)
+	}
+	if MaxAttributedGasSpent > math.MaxInt64 {
+		t.Fatalf("attributed gas must fit a BIGINT column: %d", MaxAttributedGasSpent)
 	}
 	v1 := BatchPostingReport{Version: 1, ExtraGas: math.MaxUint64}
 	cost, err = v1.Cost(BatchPostingCostParams{PerBatchGasCharge: math.MaxInt64})
