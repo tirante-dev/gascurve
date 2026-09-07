@@ -7,7 +7,7 @@ import { chartView } from "@/lib/chartViews";
 import { bucketNote, describeAction, feeChartData, feeTooltipRows, formatFloor, type DrawnRow } from "@/lib/feeChart";
 import { emptyRangeNote, type GapModel, type GapWindow } from "@/lib/gaps";
 import { throughputAxis, throughputTick, type ThroughputAxis } from "@/lib/hero";
-import { missingRuns, withMissingNote, type MissingRun, type Present } from "@/lib/missing";
+import { missingRuns, withMissingNote, withMissingNotes, type MissingRun, type MissingSeries, type Present } from "@/lib/missing";
 import {
   hasUnknownSets,
   hasUnrecordedSplit,
@@ -109,6 +109,8 @@ export type SeriesModel = {
    */
   gasMissing: MissingRun[];
   gasNote: (row: Record<string, unknown>) => string | null;
+  /** `note` plus the cause for every series with nothing in the bucket: what the bucket inspector reads out. */
+  inspectorNote: (row: Record<string, unknown>) => string | null;
   /** The same for one backlog slot: the buckets that recorded no backlog for it, and its note. */
   backlogMissingFor: (index: number) => MissingRun[];
   backlogNoteFor: (index: number) => (row: Record<string, unknown>) => string | null;
@@ -155,11 +157,20 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
     if (row.setKnown === true && own.length === 0) return true;
     return own.some((s) => typeof row[s.backlogKey] === "number") || typeof row[unknownBacklogKey(i)] === "number";
   };
+  // An api older than the rate sends no compute gas at all, which the chart
+  // rows cannot tell from a rate the api reports as null. That is the client
+  // meeting an older api rather than a chain whose receipts are missing, so
+  // it earns no band: the chart simply has nothing to draw.
+  const ratesReported = series.points.some((p) => p.computeGasPerSecond !== undefined);
   // Read from the buckets rather than from `drawn`: the duplicate a set
   // boundary inserts would otherwise count its bucket twice.
-  const gasMissing = missingRuns(points, gasPresent, bucketSeconds, "receipts");
+  const gasMissing = ratesReported ? missingRuns(points, gasPresent, bucketSeconds, "receipts") : [];
   const backlogMissing = indices.map((i) => missingRuns(points, backlogPresent(i), bucketSeconds, "backlog"));
   const backlogNotes = indices.map((i) => withMissingNote(note, backlogPresent(i), "backlog"));
+  // The inspector stands in for every chart at once, and it is how a reader
+  // without a pointer reads a bucket, so it carries the cause for each series
+  // that has nothing in one.
+  const inspected: MissingSeries[] = [...(ratesReported ? [{ present: gasPresent, kind: "receipts" as const }] : []), ...indices.map((i) => ({ present: backlogPresent(i), kind: "backlog" as const }))];
   // The contribution chart needs none of this: a null in one constraint's
   // series means another set is in force, which the neighbouring series
   // draws, and every bucket's x lands either under its own set or under the
@@ -227,7 +238,8 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
     hasTargets,
     note,
     gasMissing,
-    gasNote: withMissingNote(note, gasPresent, "receipts"),
+    gasNote: ratesReported ? withMissingNote(note, gasPresent, "receipts") : note,
+    inspectorNote: withMissingNotes(note, inspected),
     backlogMissingFor: (i) => backlogMissing[i] ?? [],
     backlogNoteFor: (i) => backlogNotes[i] ?? note,
     feeRows: feeTooltipRows(),
@@ -312,7 +324,7 @@ export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth =
             {missingBandAreas(m.gasMissing, m.gaps.window)}
             {timeAxis(m.span, m.gaps.window)}
             <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
-            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.gasNote} />} />
+            <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.gasNote} />} />
             <Area type="monotone" dataKey="gps" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
             {m.hasTargets ? m.indices.map((i) => <Line key={i} type="stepAfter" dataKey={targetKey(i)} connectNulls={false} stroke={seriesColor(i)} strokeDasharray="4 3" dot={false} isAnimationActive={false} />) : null}
           </ComposedChart>
@@ -341,7 +353,7 @@ export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }:
             {missingBandAreas(m.backlogMissingFor(index), m.gaps.window)}
             {timeAxis(m.span, m.gaps.window)}
             <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
-            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.backlogNoteFor(index)} />} />
+            <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.backlogNoteFor(index)} />} />
             {m.segments
               .filter((s) => s.index === index)
               .map((s) => (
@@ -454,7 +466,7 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
           { title: "gas", rows: m.gasRows },
           { title: "backlog", rows: m.backlogRows },
         ]}
-        note={m.note}
+        note={m.inspectorNote}
       />
 
       <details className="text-xs text-ink-2" onToggle={(e) => setTableOpen((e.currentTarget as HTMLDetailsElement).open)}>

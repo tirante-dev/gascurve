@@ -5,6 +5,7 @@ import {
   missingNote,
   missingRuns,
   withMissingNote,
+  withMissingNotes,
   NO_BACKLOG_DATA_LABEL,
   NO_RECEIPT_DATA_LABEL,
   type MissingRow,
@@ -72,7 +73,7 @@ describe("the words", () => {
     expect(missingBandLabel("receipts")).toBe(NO_RECEIPT_DATA_LABEL);
     expect(missingBandLabel("backlog")).toBe(NO_BACKLOG_DATA_LABEL);
     expect(missingNote("receipts")).toContain("no receipt data");
-    expect(missingNote("backlog")).toContain("no backlog recorded");
+    expect(missingNote("backlog")).toBe("no backlog recorded for this bucket");
   });
   it("counts the buckets and the stretches under the chart", () => {
     expect(missingCaption([{ from: 0, to: 60, kind: "receipts", buckets: 1 }])).toBe("Dotted: no receipt data for 1 bucket");
@@ -110,5 +111,13 @@ describe("the tooltip footnote", () => {
   it("leaves a gap row and a partial bucket to their own explanations", () => {
     expect(note({ t: 0, gps: null, gapRow: true })).toBeNull();
     expect(note({ t: 0, gps: null, partial: "in-progress", coverage: 0.5 })).toBeNull();
+  });
+  it("names each cause once however many series share it", () => {
+    // Three backlog slots with nothing in the bucket say so once, not thrice.
+    const slots = [0, 1, 2].map((i) => ({ present: (row: Record<string, unknown>) => typeof row[`b${i}`] === "number", kind: "backlog" as const }));
+    const many = withMissingNotes(() => null, [{ present, kind: "receipts" }, ...slots]);
+    expect(many({ t: 0, gps: null, b0: null, b1: null, b2: null })).toBe(`${missingNote("receipts")} · ${missingNote("backlog")}`);
+    expect(many({ t: 0, gps: 5, b0: 1, b1: null, b2: 2 })).toBe(missingNote("backlog"));
+    expect(many({ t: 0, gps: 5, b0: 1, b1: 1, b2: 2 })).toBeNull();
   });
 });

@@ -80,6 +80,9 @@ export function missingRuns(rows: readonly MissingRow[], present: Present, step:
   return out;
 }
 
+/** The kinds a caption or a note names, in the order it names them. */
+const KINDS: readonly MissingKind[] = ["receipts", "backlog"];
+
 /** What the band over buckets with no receipts behind them says. */
 export const NO_RECEIPT_DATA_LABEL = "no receipt data";
 
@@ -99,11 +102,8 @@ export function missingBandLabel(kind: MissingKind): string {
 export function missingNote(kind: MissingKind): string {
   return kind === "receipts"
     ? "no receipt data for this bucket, so compute gas per second is not drawn"
-    : "no backlog recorded for this constraint in this bucket";
+    : "no backlog recorded for this bucket";
 }
-
-/** The kinds a caption names, in the order it names them. */
-const KINDS: readonly MissingKind[] = ["receipts", "backlog"];
 
 function describe(kind: MissingKind, runs: readonly MissingRun[]): string {
   const buckets = runs.reduce((n, run) => n + run.buckets, 0);
@@ -121,15 +121,31 @@ export function missingCaption(runs: readonly MissingRun[]): string | null {
   return `Dotted: ${parts.join(" · ")}`;
 }
 
+/** One series a note speaks for: how to tell it has a value, and what it is missing when it has none. */
+export type MissingSeries = { present: Present; kind: MissingKind };
+
 /**
- * `note` with the missing-series footnote added, joined the way `bucketNote`
- * joins its own parts. A row another mark already explains keeps that
- * explanation and gains nothing here, exactly as the bands do.
+ * `note` with a footnote for every one of `series` the row has no value for,
+ * joined the way `bucketNote` joins its own parts. Each cause is named once
+ * however many series share it, so a bucket that recorded no backlog for
+ * three slots does not say so three times. A row another mark already
+ * explains keeps that explanation and gains nothing here, exactly as the
+ * bands do.
  */
-export function withMissingNote(note: (row: Record<string, unknown>) => string | null, present: Present, kind: MissingKind): (row: Record<string, unknown>) => string | null {
+export function withMissingNotes(note: (row: Record<string, unknown>) => string | null, series: readonly MissingSeries[]): (row: Record<string, unknown>) => string | null {
   return (row) => {
-    const missing = !explained(row) && !present(row);
-    const parts = [note(row), missing ? missingNote(kind) : null].filter((part): part is string => part !== null);
+    const missing = new Set<MissingKind>();
+    if (!explained(row)) {
+      for (const one of series) {
+        if (!one.present(row)) missing.add(one.kind);
+      }
+    }
+    const parts = [note(row), ...KINDS.filter((kind) => missing.has(kind)).map(missingNote)].filter((part): part is string => part !== null);
     return parts.length > 0 ? parts.join(" · ") : null;
   };
+}
+
+/** The same for a chart that draws one series. */
+export function withMissingNote(note: (row: Record<string, unknown>) => string | null, present: Present, kind: MissingKind): (row: Record<string, unknown>) => string | null {
+  return withMissingNotes(note, [{ present, kind }]);
 }

@@ -136,6 +136,23 @@ describe("SeriesCharts", () => {
     expect(m.gasNote(m.points[0])).toBeNull();
   });
 
+  it("claims nothing about receipts when the api never reports a compute rate at all", () => {
+    // An api older than the field sends no rate anywhere. The chart has
+    // nothing to draw, but that is the client meeting an older api and not a
+    // chain whose receipts are missing, so it must not say it is.
+    const omitRate = (p: SeriesPoint): SeriesPoint => {
+      const copy = { ...p };
+      delete copy.computeGasPerSecond;
+      return copy;
+    };
+    const legacy = { ...series, points: series.points.map(omitRate) };
+    const m = buildSeriesModel(legacy, "constraints");
+    expect(m.gasMissing).toEqual([]);
+    expect(m.gasNote(m.points[0])).toBeNull();
+    render(<GasPerSecondChart m={m} />);
+    expect(screen.queryByText(/^Dotted:/)).toBeNull();
+  });
+
   it("says nothing about a slot a constraint set never defined, which is not a hole in the record", () => {
     // One set with a single constraint, drawn beside a set with two: the
     // second panel is empty over the first set's buckets because that
