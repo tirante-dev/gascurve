@@ -7,6 +7,9 @@ export type SeriesRange = "1h" | "24h" | "30d" | "all";
 
 export type SeriesResolution = "block" | "5s" | "1m" | "15m" | "1h";
 
+/** Whether a series bucket's aggregates include every block in its span. */
+export type SeriesCompleteness = "complete" | "partial" | "unknown";
+
 export type ConstraintSetSource = "genesis" | "owner_action" | "observed";
 
 export type Network = {
@@ -120,13 +123,12 @@ export type SeriesPoint = {
   gasUsed: number;
   gasPerSecond: number;
   /**
-   * The share of the bucket the collector indexed: 1 for a whole one, less for
-   * the bucket in progress at the right edge and for the first bucket after
-   * the collector started. `gasPerSecond` is the rate over that covered span,
-   * so rates and averages read normally; the sums below are sums over the
-   * covered span alone.
+   * The share of the bucket the collector indexed when it can be measured.
+   * Bounded missing intervals reduce it. Insufficient time bounds make it null.
    */
-  coverage: number;
+  coverage: number | null;
+  /** Complete when all blocks are present, partial when an omission is known, and unknown when the available time bounds cannot locate a missing range. */
+  completeness: SeriesCompleteness;
   feesWei: string;
   baseFeeMin: string;
   baseFeeAvg: string;

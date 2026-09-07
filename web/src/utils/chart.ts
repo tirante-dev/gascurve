@@ -1,9 +1,9 @@
 // Pure helpers that turn api shapes into what the charts draw.
 
 import { bucketSeconds as bucketWidth } from "@/lib/gaps";
-import { coverageOf, partialKinds, type PartialKind } from "@/lib/partial";
+import { completenessOf, coverageOf, partialKinds, type PartialKind } from "@/lib/partial";
 import { saturatingCastToBips, saturatingUMul, toUint64 } from "@/lib/pricer";
-import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesPoint } from "@/types";
+import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesCompleteness, SeriesPoint } from "@/types";
 import { formatDuration, formatGas, formatGasPerSecond, formatInteger, weiToEthNumber, weiToGweiNumber } from "./format";
 
 export const MAX_SERIES = 6;
@@ -250,7 +250,8 @@ export type ChartPoint = {
   /** Floor in force at the bucket's last block, gwei; drawn as a stepped line. Null when the bucket holds a block with pricing version 0, which recorded no floor. */
   floor: number | null;
   x: number;
-  gps: number;
+  /** Null when a missing block interval makes the rate's time divisor unknown. */
+  gps: number | null;
   feesEth: number;
   /** The floor and congestion parts of `feesEth`; null for buckets that predate the fee split, when `unsplitFeesEth` carries the whole. */
   floorFeesEth: number | null;
@@ -258,8 +259,10 @@ export type ChartPoint = {
   /** `feesEth` for buckets whose destination split is unknown, null otherwise. */
   unsplitFeesEth: number | null;
   blocks: number;
-  /** The share of the bucket the collector indexed; 1 for a whole one. */
-  coverage: number;
+  /** The share of the bucket the collector indexed, null when it cannot be measured. */
+  coverage: number | null;
+  /** Whether the API knows the bucket aggregates are whole. */
+  completeness: SeriesCompleteness;
   /**
    * Which kind of partial bucket this is, null for a whole one. Rates and
    * averages are drawn on a partial bucket as they are; the sums are not.
@@ -311,6 +314,7 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
     const floorWei = p.floorFeesWei;
     const surplusWei = p.surplusFeesWei;
     const feeSplitKnown = floorWei !== null && surplusWei !== null;
+    const pointCoverage = coverageOf(p);
     const row: ChartPoint = {
       t: p.t,
       feeAvg: weiToGweiNumber(p.baseFeeAvg),
@@ -318,13 +322,14 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
       feeMax: weiToGweiNumber(p.baseFeeMax),
       floor: p.minBaseFee === null ? null : weiToGweiNumber(p.minBaseFee),
       x: bipsToXValue(p.exponentBips),
-      gps: p.gasPerSecond,
+      gps: pointCoverage === null || pointCoverage <= 0 ? null : p.gasPerSecond,
       feesEth,
       floorFeesEth: feeSplitKnown ? weiToEthNumber(floorWei) : null,
       surplusFeesEth: feeSplitKnown ? weiToEthNumber(surplusWei) : null,
       unsplitFeesEth: feeSplitKnown ? null : feesEth,
       blocks: p.blocks,
-      coverage: coverageOf(p),
+      coverage: pointCoverage,
+      completeness: completenessOf(p),
       partial: kinds[i],
       replayErrorBips: p.replayErrorBips,
       constraintSetId: p.constraintSetId,

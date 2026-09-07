@@ -13,6 +13,13 @@ const (
 	ModelUnknown     = "unknown"
 )
 
+// Series bucket completeness states.
+const (
+	SeriesComplete = "complete"
+	SeriesPartial  = "partial"
+	SeriesUnknown  = "unknown"
+)
+
 // Constraint set sources.
 const (
 	SourceGenesis     = "genesis"
@@ -180,12 +187,14 @@ type SeriesPoint struct {
 	T       int64  `json:"t"`
 	Blocks  int64  `json:"blocks"`
 	GasUsed uint64 `json:"gasUsed"`
-	// GasPerSecond is the rate over the covered span of the bucket, and
-	// Coverage the share of the bucket that span is (1 for a whole bucket,
-	// less for the bucket in progress or the first one after the collector
-	// started), so a chart never reads a partial bucket as a low rate.
+	// GasPerSecond is the rate over the covered span of the bucket. Coverage
+	// is the share of the bucket that span is after subtracting bounded missing
+	// intervals, or null when the missing-range time bounds cannot measure it.
+	// Completeness distinguishes a whole aggregate, a known partial aggregate
+	// and an aggregate whose completeness cannot be located in time.
 	GasPerSecond    uint64   `json:"gasPerSecond"`
-	Coverage        float64  `json:"coverage"`
+	Coverage        *float64 `json:"coverage"`
+	Completeness    string   `json:"completeness"`
 	FeesWei         string   `json:"feesWei"`
 	BaseFeeMin      string   `json:"baseFeeMin"`
 	BaseFeeAvg      string   `json:"baseFeeAvg"`

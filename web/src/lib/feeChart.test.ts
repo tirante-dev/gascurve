@@ -23,6 +23,7 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     gasUsed: 0,
     gasPerSecond: 0,
     coverage: 1,
+    completeness: "complete",
     feesWei: "0",
     baseFeeMin: "1",
     baseFeeAvg: "1",

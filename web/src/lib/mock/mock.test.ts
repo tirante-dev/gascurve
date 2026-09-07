@@ -207,7 +207,7 @@ describe("mock world", () => {
     // in progress at the right edge and the one the range's start cuts into
     // carry the share that was indexed, and every sum in them is a sum over
     // that share alone.
-    expect(hour.points.every((p) => p.coverage > 0 && p.coverage <= 1)).toBe(true);
+    expect(hour.points.every((p) => p.coverage !== null && p.coverage > 0 && p.coverage <= 1)).toBe(true);
     expect(month.points[0].coverage).toBeCloseTo(2 / 3, 6);
     expect(month.points[month.points.length - 1].coverage).toBeCloseTo(1 / 3, 6);
     expect(month.points.slice(1, -1).every((p) => p.coverage === 1)).toBe(true);

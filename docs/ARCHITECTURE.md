@@ -91,7 +91,7 @@ Replay comparison: ArbOS computes the fee in block N's `startBlock` and it appli
 All tables are keyed by `chain_id` first. Wei values are `NUMERIC(40,0)`. Gas values are `BIGINT`. Backlogs are `NUMERIC(20,0)[]`: a backlog is a `uint64` in the pricer and saturates at 2^64-1, which does not fit in a `BIGINT`. A nullable column means unknown, never zero, and `pricing_version` says which rows carry the full pricing breakdown (1) and which are history recorded without it (0).
 
 Production release `v1.0.1` established schema version 1 from `000001_init`. Released migrations are immutable, and every correction uses a new forward migration. CI verifies both empty-schema installation and upgrades from the last production schema. See [MIGRATIONS.md](MIGRATIONS.md) for authoring, release, rollback, and concurrent pull request rules.
-Forward migration `000002_state_samples_chain_block` adds the state-sample lookup index. Forward migration `000003_missing_ranges` adds durable recovery records for skipped history and therefore follows `000002`.
+Forward migration `000002_state_samples_chain_block` adds the state-sample lookup index, `000003_owner_action_tx_index` adds the owner-action transaction index column, and `000004_missing_ranges` adds durable recovery records for skipped history.
 
 ```sql
 networks            (chain_id PK, name, display_name, explorer_url, enabled, head_block, head_at, last_sample_at, last_error, updated_at)
@@ -241,7 +241,8 @@ type SeriesPoint = {
   t: number;                               // unix seconds, bucket start
   blocks: number; gasUsed: number; gasPerSecond: number; feesWei: string;
   // minBaseFee, floorFeesWei and surplusFeesWei are null together, under one condition: any block in the bucket was written at pricing version 0.
-  coverage: number;                        // share of the bucket the collector indexed (1 = whole); gasPerSecond is the rate over that covered span, so the bucket in progress and the bucket the collector started inside read as rates, not as fractions of a bucket. Sums (gasUsed, feesWei, blocks) are over the covered span only. The live start trims only the one bucket it falls inside: a bucket that ends before it was written by the backfiller or the gap filler and is whole. Coverage does not look inside a bucket, so a hole in the middle of one is not represented (the gap filler closes those and the bucket is rebuilt whole). A bucket lying entirely at or after the serving clock is not returned at all, so coverage is always above zero
+  coverage: number | null;                 // share of the bucket the collector indexed when the time span is measurable. Bounded missing intervals reduce it; it is null when missing-range time bounds are insufficient. gasPerSecond is a usable rate only when coverage is positive and non-null. Sums (gasUsed, feesWei, blocks) always include indexed blocks only
+  completeness: 'complete' | 'partial' | 'unknown'; // complete means every block in the covered bucket is indexed; partial means the API can place a missing range in this bucket or the bucket is still in progress, even when equal block timestamps leave coverage at 1; unknown means a missing range lacks enough time bounds to decide whether it overlaps this bucket
   baseFeeMin: string; baseFeeAvg: string; baseFeeMax: string;
   exponentBips: number; constraintBips: number[] | null;   // start-of-block values of the bucket's last block; null for pricing version 0 history
   backlogs: number[]; backlogsMax: number[];
