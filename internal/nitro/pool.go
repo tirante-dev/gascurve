@@ -13,7 +13,6 @@ import (
 	"github.com/tirante-dev/gascurve/internal/logger"
 )
 
-// defaultFailoverCooldown is used when PoolConfig.Cooldown is not set.
 const defaultFailoverCooldown = time.Minute
 
 // ErrNoEndpoint is returned when a pool has no usable endpoint left.
@@ -25,11 +24,9 @@ type PoolConfig struct {
 	ChainID uint64
 	// Endpoints lists the primary first, then the fallbacks.
 	Endpoints []config.EndpointConfig
-	// BatchSize is every endpoint's starting batch cap
-	// (collector.header_batch_size).
+	// BatchSize is every endpoint's starting batch cap (collector.header_batch_size).
 	BatchSize int
-	// Cooldown is how long the pool stays on a fallback before probing the
-	// primary again (collector.failover_cooldown).
+	// Cooldown is how long the pool stays on a fallback before probing the primary again.
 	Cooldown time.Duration
 }
 
@@ -44,31 +41,25 @@ func WithPoolClientOptions(opts ...Option) PoolOption {
 	return func(p *Pool) { p.clientOpts = append(p.clientOpts, opts...) }
 }
 
-// withPoolClock replaces the clock and sleeper of the pool, its endpoints
-// and their pacers, for tests.
+// withPoolClock replaces the clock and sleeper throughout the pool, for tests.
 func withPoolClock(now func() time.Time, sleep func(context.Context, time.Duration) error) PoolOption {
 	return func(p *Pool) { p.now, p.sleep = now, sleep }
 }
 
-// EndpointStatus describes one endpoint for /status. URLs are never
-// included: they can carry keys. Error is why the endpoint was disabled,
-// empty while it is usable; it is built from the chain ids alone, so it
-// carries no URL or credential either.
+// EndpointStatus describes one endpoint for /status. URLs are never included: they can carry
+// keys, and Error is built from the chain ids alone for the same reason.
 type EndpointStatus struct {
 	Index    int
 	WS       bool
 	Archive  bool
 	Disabled bool
 	Error    string
-	// WSCooling is set while the endpoint's WebSocket is cooled down after
-	// a dial, subscribe or repeated disconnect failure; WSError says why,
-	// sanitized the same way (never a URL or a credential). WebSocket
-	// health is separate from HTTP verification: an endpoint whose
-	// JSON-RPC answers can still have a socket that does not work.
+	// WSCooling is set while the endpoint's WebSocket is cooled down after a dial, subscribe
+	// or repeated disconnect failure. WebSocket health is tracked apart from HTTP
+	// verification: an endpoint whose JSON-RPC answers can still have a dead socket.
 	WSCooling bool
 	WSError   string
-	// RateLimitEvents is how often this endpoint has reported throttling.
-	// It only ever grows, so an observer can report it as a counter.
+	// RateLimitEvents only ever grows, so an observer can report it as a counter.
 	RateLimitEvents uint64
 }
 
@@ -79,15 +70,10 @@ type PoolStatus struct {
 	Endpoints []EndpointStatus
 }
 
-// Pool routes one network's JSON-RPC calls across its endpoints. Ordinary
-// calls go to the active endpoint, the primary unless it failed: after a
-// failed request (an EndpointError: transport error, HTTP 5xx, throttling
-// past its back-off, or a chain id mismatch) the pool moves to the next
-// usable endpoint for the cooldown, then probes the primary with one
-// eth_chainId before returning to it. Capabilities are routed by WS and
-// Archive independently of the active endpoint. Every endpoint is
-// verified against the chain id before its first use; a mismatch disables
-// it for good.
+// Pool routes one network's JSON-RPC calls across its endpoints. After an EndpointError the
+// pool moves to the next usable endpoint for the cooldown, then probes the primary with one
+// eth_chainId before returning to it. Capabilities (WS, Archive) are routed independently of
+// the active endpoint. A chain id mismatch disables an endpoint for good.
 type Pool struct {
 	chainID    uint64
 	endpoints  []*Endpoint
@@ -96,9 +82,7 @@ type Pool struct {
 	now        func() time.Time
 	sleep      func(context.Context, time.Duration) error
 	clientOpts []Option
-	// archive is the managed historical-state path, built once so callers
-	// (and their failover state) share one binding; nil when no endpoint
-	// serves historical state.
+	// archive is the shared historical-state path; nil when no endpoint serves it.
 	archive *ArchivePool
 
 	mu            sync.Mutex
@@ -108,12 +92,9 @@ type Pool struct {
 	failovers     uint64
 }
 
-// NewPool builds the endpoints of cfg. Nothing is contacted until Verify
-// or the first call.
+// NewPool builds the endpoints of cfg. Nothing is contacted until Verify or the first call.
 func NewPool(cfg PoolConfig, opts ...PoolOption) *Pool {
-	// The clock is set before the options so that production construction,
-	// which passes none, still has one: failover and primary probing call
-	// it on the first endpoint failure.
+	// Set before the options so production construction, which passes none, still has a clock.
 	p := &Pool{chainID: cfg.ChainID, cooldown: cfg.Cooldown, log: logger.Nop(), now: time.Now, sleep: sleepContext}
 	for _, o := range opts {
 		o(p)
@@ -139,10 +120,9 @@ func (p *Pool) newEndpoint(i int, ec config.EndpointConfig, batchSize int) *Endp
 	return newEndpoint(i, ec, batchSize, p.log, p.now, opts...)
 }
 
-// stillActive builds the check the endpoint makes under its send lock: an
-// ordinary call that selected this endpoint before another caller failed
-// over must not reach the wire. Capability calls (the archive path) select
-// their endpoint themselves and are exempt.
+// stillActive builds the check the endpoint makes under its send lock: an ordinary call that
+// selected this endpoint before another caller failed over must not reach the wire.
+// Capability calls pick their own endpoint and are exempt.
 func (p *Pool) stillActive(e *Endpoint) func(context.Context) error {
 	return func(ctx context.Context) error {
 		if capabilityCall(ctx) {
@@ -158,12 +138,10 @@ func (p *Pool) stillActive(e *Endpoint) func(context.Context) error {
 	}
 }
 
-// capabilityKey marks a context whose calls are routed by capability
-// rather than by the active endpoint.
+// capabilityKey marks a context routed by capability rather than by the active endpoint.
 type capabilityKey struct{}
 
-// withCapability marks ctx as a capability call (historical state), which
-// picks its own endpoint and is not bound to the active one.
+// withCapability marks ctx as a capability call, which picks its own endpoint.
 func withCapability(ctx context.Context) context.Context {
 	return context.WithValue(ctx, capabilityKey{}, true)
 }
@@ -176,8 +154,7 @@ func capabilityCall(ctx context.Context) bool {
 // Endpoints returns every endpoint, primary first.
 func (p *Pool) Endpoints() []*Endpoint { return p.endpoints }
 
-// ActiveEndpoint returns the index of the endpoint ordinary calls go to
-// (0 is the primary).
+// ActiveEndpoint returns the index of the endpoint ordinary calls go to (0 is the primary).
 func (p *Pool) ActiveEndpoint() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -206,11 +183,9 @@ func (p *Pool) Status() PoolStatus {
 	return st
 }
 
-// WS returns the first verified endpoint with a WebSocket URL, or nil. An
-// endpoint that could not be reached during Verify is not verified and is
-// never bound: it would otherwise be followed for ever, and, if it later
-// answered on another chain, its heads would be written under this chain
-// id.
+// WS returns the first verified endpoint with a WebSocket URL, or nil. An endpoint that could
+// not be reached during Verify is never bound: it might later answer on another chain, and its
+// heads would be written under this chain id.
 func (p *Pool) WS() *Endpoint { return p.capable(func(e *Endpoint) bool { return e.wsURL != "" }) }
 
 // capable returns the first verified, usable endpoint matching want.
@@ -223,9 +198,8 @@ func (p *Pool) capable(want func(*Endpoint) bool) *Endpoint {
 	return nil
 }
 
-// HasWS reports whether any endpoint is configured with a ws_url, whatever
-// its verification state: the follower builds its subscriber from that and
-// lets WSURL choose an endpoint at every connection attempt.
+// HasWS reports whether any endpoint is configured with a ws_url, whatever its verification
+// state: WSURL chooses the endpoint again at every connection attempt.
 func (p *Pool) HasWS() bool {
 	for _, e := range p.endpoints {
 		if e.wsURL != "" {
@@ -235,16 +209,12 @@ func (p *Pool) HasWS() bool {
 	return false
 }
 
-// WSLease binds a HeadSubscriber to one endpoint's WebSocket for one
-// connection attempt: what to dial, and where to report what happened. A
-// subscriber that reports back lets the pool track WebSocket health per
-// endpoint, apart from the HTTP verification that only proves the
-// endpoint's JSON-RPC answers, and rebind to another endpoint when a
-// socket cannot be dialed, cannot be subscribed to, or will not stay up.
+// WSLease binds a HeadSubscriber to one endpoint's WebSocket for one connection attempt.
+// Reporting back lets the pool track WebSocket health per endpoint and rebind elsewhere when
+// a socket cannot be dialed, cannot be subscribed to, or will not stay up.
 type WSLease struct {
 	// URL is the endpoint to dial. It is a credential: never log it.
-	URL string
-	// Index names the endpoint in logs and errors.
+	URL   string
 	Index int
 
 	pool  *Pool
@@ -252,8 +222,7 @@ type WSLease struct {
 	scrub *scrubber
 }
 
-// Connected reports a live subscription on the leased endpoint. A lease
-// that names no endpoint (one a test built by hand) is inert.
+// Connected reports a live subscription. A lease naming no endpoint is inert.
 func (l *WSLease) Connected() {
 	if l == nil || l.e == nil {
 		return
@@ -261,9 +230,8 @@ func (l *WSLease) Connected() {
 	l.e.noteWSConnected()
 }
 
-// Failed reports that the leased endpoint's WebSocket could not be
-// dialed, could not be subscribed to, or did not stay up. subscribed says
-// whether the subscription had been acknowledged before it broke.
+// Failed reports that the leased endpoint's WebSocket failed. subscribed says whether the
+// subscription had been acknowledged before it broke.
 func (l *WSLease) Failed(subscribed bool, err error) {
 	if l == nil || l.e == nil || err == nil {
 		return
@@ -275,16 +243,11 @@ func (l *WSLease) Failed(subscribed bool, err error) {
 	}
 }
 
-// WSEndpoint resolves the WebSocket endpoint to dial next and leases it:
-// the first usable one with a ws_url whose socket is not cooling down,
-// verified now when it has not been verified yet. A HeadSubscriber calls
-// it before every connection attempt, so a subscriber rebinds to the next
-// endpoint as soon as the one it followed is disabled, fails verification
-// or has a socket that does not work, and comes back to the primary once
-// it recovers. When every WebSocket endpoint is cooling down the one that
-// recovers first is leased anyway: a network with a single WebSocket
-// endpoint must keep trying on the subscriber's own back-off rather than
-// lose heads for a whole cooldown.
+// WSEndpoint leases the WebSocket endpoint to dial next: the first usable one with a ws_url
+// whose socket is not cooling down, verified now if it has not been. Subscribers call it before
+// every attempt, so they rebind as endpoints fail and come back to the primary once it
+// recovers. When every one is cooling down the first to recover is leased anyway, so a network
+// with a single WebSocket endpoint keeps trying instead of losing heads for a whole cooldown.
 func (p *Pool) WSEndpoint(ctx context.Context) (*WSLease, error) {
 	var errs []error
 	var cooling *Endpoint
@@ -322,9 +285,7 @@ func (p *Pool) lease(e *Endpoint) *WSLease {
 	return &WSLease{URL: e.wsURL, Index: e.index, pool: p, e: e, scrub: e.scrub}
 }
 
-// WSURL resolves the WebSocket endpoint to dial next and returns its URL
-// alone. WSEndpoint is the fuller form: it leases the endpoint, so the
-// subscriber can report whether its socket worked.
+// WSURL is WSEndpoint without the lease, for callers that cannot report back.
 func (p *Pool) WSURL(ctx context.Context) (string, error) {
 	l, err := p.WSEndpoint(ctx)
 	if err != nil {
@@ -333,21 +294,16 @@ func (p *Pool) WSURL(ctx context.Context) (string, error) {
 	return l.URL, nil
 }
 
-// ArchivePool routes historical state calls across the endpoints that
-// serve them. It is independent of the active endpoint (a capability is
-// routed by capability, not by order): it verifies the endpoint it picks,
-// fails over to the next archive endpoint on an endpoint error, and stays
-// there, so a dead archive endpoint is left behind instead of retried for
-// ever.
+// ArchivePool routes historical state calls across the endpoints that serve them, independently
+// of the active endpoint. It fails over to the next archive endpoint on an endpoint error and
+// stays there, so a dead one is left behind instead of retried for ever.
 type ArchivePool struct {
 	pool *Pool
 	mu   sync.Mutex
 	at   int
 }
 
-// Archive returns the managed archive path, or nil when no endpoint is
-// configured to serve historical state. The same path is returned every
-// time, so its binding and failover state are shared by every caller.
+// Archive returns the shared archive path, or nil when no endpoint serves historical state.
 func (p *Pool) Archive() *ArchivePool { return p.archive }
 
 // Endpoint returns the archive endpoint calls currently go to, or nil when
@@ -358,8 +314,7 @@ func (a *ArchivePool) Endpoint() *Endpoint {
 	return a.nextLocked()
 }
 
-// nextLocked returns the first usable archive endpoint at or after the
-// current one.
+// nextLocked returns the first usable archive endpoint at or after the current one.
 func (a *ArchivePool) nextLocked() *Endpoint {
 	for i := a.at; i < len(a.pool.endpoints); i++ {
 		if e := a.pool.endpoints[i]; e.archive && !e.Disabled() {
@@ -469,10 +424,9 @@ func (a *ArchivePool) PricingSampleAt(ctx context.Context, number uint64) (*Samp
 	return nil, fmt.Errorf("%w: %w", ErrNoEndpoint, errors.Join(errs...))
 }
 
-// Verify checks every endpoint's eth_chainId against the configured chain
-// id. A mismatching endpoint is disabled for good and reported; one that
-// cannot be reached stays unverified and is checked again before its first
-// use. Verify fails when no endpoint could be verified.
+// Verify checks every endpoint's eth_chainId against the configured chain id. A mismatch
+// disables the endpoint for good; an unreachable one stays unverified and is checked again
+// before its first use. Verify fails when no endpoint could be verified.
 func (p *Pool) Verify(ctx context.Context) error {
 	var errs []error
 	usable := 0
@@ -503,8 +457,7 @@ func (p *Pool) Verify(ctx context.Context) error {
 // check asks the endpoint for its chain id: a match marks it verified, a
 // mismatch disables it. Both failures are EndpointErrors.
 func (p *Pool) check(ctx context.Context, e *Endpoint) error {
-	// Verification addresses one endpoint by name, so it is exempt from the
-	// active-endpoint check the ordinary path makes under the send lock.
+	// Verification addresses one endpoint by name, so it is exempt from the active-endpoint check.
 	id, err := e.ChainID(withCapability(ctx))
 	if err != nil {
 		p.log.Warn("endpoint unverified, eth_chainId failed", "endpoint", e.index, "err", err.Error())
@@ -572,9 +525,8 @@ func (p *Pool) failOverLocked(from *Endpoint, cause error) bool {
 	return true
 }
 
-// failOver is failOverLocked for a request that failed on from. When
-// another caller already moved on it simply reports that a retry is worth
-// it.
+// failOver is failOverLocked for a request that failed on from. When another caller already
+// moved on it simply reports that a retry is worth it.
 func (p *Pool) failOver(from *Endpoint, cause error) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -584,9 +536,8 @@ func (p *Pool) failOver(from *Endpoint, cause error) bool {
 	return p.failOverLocked(from, cause)
 }
 
-// pick returns the endpoint the next ordinary call goes to. Once the
-// cooldown on a fallback has passed the primary is probed first (by one
-// caller at a time) and taken back when it answers with the right chain.
+// pick returns the endpoint the next ordinary call goes to. Once the cooldown on a fallback has
+// passed the primary is probed first, by one caller at a time, and taken back when it answers.
 func (p *Pool) pick(ctx context.Context) (*Endpoint, error) {
 	p.mu.Lock()
 	e := p.currentLocked()
@@ -638,9 +589,8 @@ func (p *Pool) do(ctx context.Context, fn func(*Endpoint) error) error {
 			return err
 		}
 		if errors.Is(err, ErrStaleEndpoint) {
-			// Another caller failed over while this one queued for the send
-			// lock: nothing was sent, so pick again rather than fail over.
-			// The bound keeps a pathological hand-off from looping.
+			// Another caller failed over while this one queued for the send lock: nothing was sent,
+			// so pick again rather than fail over. The bound stops a pathological hand-off looping.
 			stale++
 			if stale > len(p.endpoints) {
 				return err
@@ -654,7 +604,6 @@ func (p *Pool) do(ctx context.Context, fn func(*Endpoint) error) error {
 	}
 }
 
-// call runs a typed request through do.
 func call[T any](ctx context.Context, p *Pool, fn func(*Endpoint) (T, error)) (T, error) {
 	var out T
 	err := p.do(ctx, func(e *Endpoint) error {
@@ -665,88 +614,71 @@ func call[T any](ctx context.Context, p *Pool, fn func(*Endpoint) (T, error)) (T
 	return out, err
 }
 
-// Call performs a single JSON-RPC call on the active endpoint.
 func (p *Pool) Call(ctx context.Context, method string, params ...any) (json.RawMessage, error) {
 	return call(ctx, p, func(e *Endpoint) (json.RawMessage, error) { return e.Call(ctx, method, params...) })
 }
 
-// BlockNumber returns the latest block number.
 func (p *Pool) BlockNumber(ctx context.Context) (uint64, error) {
 	return call(ctx, p, func(e *Endpoint) (uint64, error) { return e.BlockNumber(ctx) })
 }
 
-// ChainID returns the chain id the active endpoint reports.
 func (p *Pool) ChainID(ctx context.Context) (uint64, error) {
 	return call(ctx, p, func(e *Endpoint) (uint64, error) { return e.ChainID(ctx) })
 }
 
-// HeaderByNumber fetches one header.
 func (p *Pool) HeaderByNumber(ctx context.Context, number uint64) (*Header, error) {
 	return call(ctx, p, func(e *Endpoint) (*Header, error) { return e.HeaderByNumber(ctx, number) })
 }
 
-// HeadersByNumbers fetches headers in batches of the endpoint's cap.
 func (p *Pool) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
 	return call(ctx, p, func(e *Endpoint) ([]Header, error) { return e.HeadersByNumbers(ctx, numbers) })
 }
 
-// BlocksWithTxs fetches full blocks in batches of the endpoint's cap.
 func (p *Pool) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, error) {
 	return call(ctx, p, func(e *Endpoint) ([]Block, error) { return e.BlocksWithTxs(ctx, numbers) })
 }
 
-// TransactionReceipts fetches receipts in batches of the endpoint's cap.
 func (p *Pool) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
 	return call(ctx, p, func(e *Endpoint) ([]Receipt, error) { return e.TransactionReceipts(ctx, hashes) })
 }
 
-// OwnerActsLogs fetches OwnerActs events over [from, to].
 func (p *Pool) OwnerActsLogs(ctx context.Context, from, to uint64) ([]Log, error) {
 	return call(ctx, p, func(e *Endpoint) ([]Log, error) { return e.OwnerActsLogs(ctx, from, to) })
 }
 
-// Balance returns an account balance at the latest block.
 func (p *Pool) Balance(ctx context.Context, address string) (*big.Int, error) {
 	return call(ctx, p, func(e *Endpoint) (*big.Int, error) { return e.Balance(ctx, address) })
 }
 
-// FastSample performs the fast tick at the latest block.
 func (p *Pool) FastSample(ctx context.Context) (*Sample, error) {
 	return call(ctx, p, func(e *Endpoint) (*Sample, error) { return e.FastSample(ctx) })
 }
 
-// FastSampleAt performs the fast tick pinned to one block.
 func (p *Pool) FastSampleAt(ctx context.Context, number uint64) (*Sample, error) {
 	return call(ctx, p, func(e *Endpoint) (*Sample, error) { return e.FastSampleAt(ctx, number) })
 }
 
-// PricingSampleAt reads only the block and pricing state at one height.
 func (p *Pool) PricingSampleAt(ctx context.Context, number uint64) (*Sample, error) {
 	return call(ctx, p, func(e *Endpoint) (*Sample, error) { return e.PricingSampleAt(ctx, number) })
 }
 
-// L1Sample reads the L1 pricer getters.
 func (p *Pool) L1Sample(ctx context.Context) (*L1Sample, error) {
 	return call(ctx, p, func(e *Endpoint) (*L1Sample, error) { return e.L1Sample(ctx) })
 }
 
-// L1SampleAt reads the L1 pricer getters at one block.
 func (p *Pool) L1SampleAt(ctx context.Context, number uint64) (*L1Sample, error) {
 	return call(ctx, p, func(e *Endpoint) (*L1Sample, error) { return e.L1SampleAt(ctx, number) })
 }
 
-// FeeAccounts reads the fee accounts and their balances.
 func (p *Pool) FeeAccounts(ctx context.Context) (*FeeAccounts, error) {
 	return call(ctx, p, func(e *Endpoint) (*FeeAccounts, error) { return e.FeeAccounts(ctx) })
 }
 
-// ArbOSVersion returns the ArbOS version.
 func (p *Pool) ArbOSVersion(ctx context.Context) (uint64, error) {
 	return call(ctx, p, func(e *Endpoint) (uint64, error) { return e.ArbOSVersion(ctx) })
 }
 
-// Stats aggregates request accounting over every endpoint; the back-off is
-// the active endpoint's.
+// Stats aggregates request accounting over every endpoint; the back-off is the active one's.
 func (p *Pool) Stats() Stats {
 	active := p.ActiveEndpoint()
 	var out Stats
@@ -770,11 +702,9 @@ func (p *Pool) Stats() Stats {
 	return out
 }
 
-// Policy is the call policy of the endpoint ordinary calls go to right
-// now: its budget in calls per second and whether it has none. Gap
-// skipping and the batch-report prefilter follow the active endpoint, not
-// the primary's configuration, so a paced primary with an unlimited
-// fallback stops skipping gaps while the fallback serves the network.
+// Policy is the call policy of the endpoint ordinary calls go to right now. Gap skipping and the
+// batch-report prefilter follow the active endpoint, not the primary, so a paced primary with an
+// unlimited fallback stops skipping gaps while the fallback serves the network.
 type Policy struct {
 	Unlimited bool
 	Rate      float64

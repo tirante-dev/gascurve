@@ -1,22 +1,10 @@
-// The presentation layer of the live section, kept pure so the frame loop in
-// useSmoothedLive is only a scheduler: the render cadence, the tween that
-// eases the sampled figures, the drain projection for long windows and the
-// moving average for short ones.
-//
-// What is eased and what is derived: the backlogs are the state, so they are
-// what the tween moves. Each frame's per-constraint contributions and shares
-// are then computed from that frame's backlogs through the integer pricer, so
-// a card can never show a backlog beside a contribution that is not its own.
-// The constraint definition (the targets and windows) travels with the values
-// as a signature: when an owner replaces a set, even with one of the same
-// size, there is nothing to ease from and everything snaps.
-//
-// Why the short windows are averaged: nitro drains a backlog only when the
-// block timestamp advances. Within one wall-clock second every block adds its
-// gas and nothing is paid down; at the next second the whole second's worth
-// of target (60M gas on Robinhood) comes off at once. A 15 s constraint's
-// backlog is therefore a 1 Hz sawtooth, and the number that is true of it is
-// its average, not its instantaneous value.
+// The presentation layer of the live section, kept pure so the frame loop in useSmoothedLive is only a
+// scheduler. The backlogs are the state, so they are what the tween moves; each frame's contributions and
+// shares are derived from that frame's backlogs through the integer pricer, so a card can never show a
+// backlog beside a contribution that is not its own. The constraint definition travels with the values as
+// a signature: when an owner replaces a set, even with one of the same size, everything snaps. Short
+// windows are averaged because nitro drains a backlog only when the block timestamp advances, which makes
+// a 15 s constraint's backlog a 1 Hz sawtooth whose average is the number that is true.
 
 import { contributionsBips, legacyExponentBips, toLegacyState } from "@/lib/pricer";
 import type { BlockPoint, LiveSnapshot } from "@/types";
@@ -37,11 +25,8 @@ export const SAWTOOTH_WINDOW_S = 15;
 export const TRANSFER_GAS = 21_000;
 export const SWAP_GAS = 150_000;
 
-/**
- * What prices a snapshot: the constraint targets and windows, or the legacy
- * parameters. Backlogs are the state that moves; this is the definition that
- * turns them into an exponent, and it only changes when the owner changes it.
- */
+/** What prices a snapshot: the constraint targets and windows, or the legacy parameters. Backlogs are the
+ * state that moves; this is the definition that turns them into an exponent. */
 export type PricingDefinition =
   | { model: "constraints"; constraints: { target: number; window: number }[] }
   | { model: "legacy"; legacy: { speedLimit: number; inertia: number; tolerance: number } };
@@ -56,10 +41,8 @@ export function definitionOf(snapshot: Pick<LiveSnapshot, "model" | "constraints
 }
 
 /**
- * A stable string for a definition. Two snapshots with the same signature
- * price the same way, so their backlogs may be eased into one another; any
- * other change (an owner replacing a set with one of the same size included)
- * makes the old figures meaningless and has to snap.
+ * A stable string for a definition. Two snapshots with the same signature price the same way, so their
+ * backlogs may be eased into one another; any other change makes the old figures meaningless and snaps.
  */
 export function signatureOf(definition: PricingDefinition): string {
   if (definition.model === "legacy") {
@@ -87,9 +70,9 @@ export type LiveValues = {
   swapEth: number;
   /** The exponent that priced the sampled block, as x. */
   exponent: number;
-  /** Per constraint: the drained projection for long windows, the 2 s average for short ones; the legacy backlog for the legacy model. */
+  /** Per constraint: the drained projection for long windows, the 2 s average for short ones. */
   backlogs: number[];
-  /** Per constraint exponent contribution in bips, derived from `backlogs` through the integer pricer every frame, never eased on its own. */
+  /** Per constraint exponent contribution in bips, derived from `backlogs` every frame, never eased. */
   bips: number[];
   /** Each constraint's share of the total, from those same bips. */
   shares: number[];
@@ -99,10 +82,8 @@ export type LiveValues = {
 };
 
 /**
- * Where each block of the ring sits on the time axis, by block number. One
- * map for the whole live section: a place is assigned once, when the block
- * enters the ring, and is dropped when the ring evicts it, so every chart
- * draws the same block at the same place and no block ever moves.
+ * Where each block of the ring sits on the time axis, by block number. A place is assigned once, when the
+ * block enters the ring, so every chart draws the same block at the same place and no block ever moves.
  */
 export type BlockPlaces = ReadonlyMap<number, number>;
 
@@ -148,14 +129,10 @@ export function isShortWindow(windowSeconds: number): boolean {
 }
 
 /**
- * Mean of a constraint's end-of-block backlog over the blocks of the last
- * `seconds` timestamp seconds ending at `lastTs`, or null when the ring has
- * no block in that span (a polled feed carries no blocks). Blocks within one
- * second share a timestamp, so the window is whole seconds and the mean is
- * per block: every sample the collector took counts once. Blocks below
- * `sinceBlock` are left out: they were priced under another constraint
- * definition, and averaging across a definition change would mix two meanings
- * of the same slot.
+ * Mean of a constraint's end-of-block backlog over the blocks of the last `seconds` timestamp seconds
+ * ending at `lastTs`, or null when the ring has no block in that span. The window is whole seconds and the
+ * mean is per block, so every sample counts once. Blocks below `sinceBlock` are left out: they were priced
+ * under another definition, and averaging across a change would mix two meanings of the same slot.
  */
 export function averageBacklog(
   blocks: readonly BlockPoint[],
@@ -195,23 +172,16 @@ export function sawtoothSamples(blocks: readonly BlockPoint[], index: number, la
   return out;
 }
 
-/**
- * A sample placed on a time axis, in seconds before now: 0 is the right edge
- * and the span reaches back to minus the window.
- */
+/** A sample placed on a time axis, in seconds before now: 0 is the right edge. */
 export type SawtoothPoint = { x: number; number: number; ts: number; gasUsed: number; backlog: number };
 
 /**
- * Where each block of a standalone list sits on a time axis, in seconds of
- * block timestamp with a fraction for its place within its second, in the
- * order given (oldest first). Headers carry whole seconds and a Nitro chain
- * makes several blocks a second, so the k-th block of a second is spread
- * across the second it belongs to rather than stacked on one tick.
+ * Where each block of a standalone list sits on a time axis, in seconds of block timestamp with a fraction
+ * for its place within its second. Headers carry whole seconds and a Nitro chain makes several blocks a
+ * second, so the k-th block of a second is spread across it rather than stacked on one tick.
  *
- * This is the assignment rule, and `assignPlaces` is how the live ring uses
- * it: on a ring that grows and is evicted from, only new blocks are placed,
- * because recomputing every fraction from the current counts moves points
- * that have already been drawn.
+ * This is the assignment rule; `assignPlaces` is how the live ring uses it, placing only new blocks,
+ * because recomputing every fraction moves points that have already been drawn.
  */
 export function placeBlocks(blocks: readonly { ts: number }[]): number[] {
   if (blocks.length === 0) return [];
@@ -225,12 +195,9 @@ export function placeBlocks(blocks: readonly { ts: number }[]): number[] {
 }
 
 /**
- * How many blocks a second is spread over: its own count for every second but
- * the newest, which is still filling. Its count grows with each block that
- * lands, and a point that moved every time a sibling arrived is exactly the
- * jitter the charts must not show, so it is spread by the count of the second
- * before it (the rate the chain just ran at), widened to its own count only
- * when it has already overtaken that.
+ * How many blocks a second is spread over: its own count for every second but the newest, which is still
+ * filling. A point that moved every time a sibling arrived is exactly the jitter the charts must not show,
+ * so the newest is spread by the count of the second before it, widened only once it has overtaken that.
  */
 function secondShape(blocks: readonly { ts: number }[]): (ts: number) => number {
   const counts = new Map<number, number>();
@@ -245,27 +212,19 @@ function secondShape(blocks: readonly { ts: number }[]): (ts: number) => number 
 }
 
 /**
- * Where the k-th block of a second sits inside it, as a fraction. `n` is what
- * the second was expected to hold when the block arrived; a block past that
- * estimate divides the remainder rather than spilling into the next second,
- * so the fraction rises with k, always stays below one, and never depends on
- * anything that arrives later. Where the estimate held (k < n) it is exactly
- * the even spread k/n.
+ * Where the k-th block of a second sits inside it, as a fraction. `n` is what the second was expected to
+ * hold when the block arrived; a block past that estimate divides the remainder rather than spilling into
+ * the next second, so the fraction rises with k, stays below one, and never depends on later arrivals.
  */
 function fraction(k: number, n: number): number {
   return k / Math.max(n, k + 1);
 }
 
 /**
- * The ring's placements after `blocks`: every block already placed keeps the
- * place it was given, blocks that have left the ring lose theirs, and only
- * blocks that are new get one, from the rule above. This is what makes a live
- * point fixed. Recomputing the whole ring from the current per-second counts
- * moved every existing point whenever a third block landed in the newest
- * second, and moved the survivors of the oldest second whenever the ring
- * evicted one of their siblings. `previous` is handed back unchanged when
- * nothing entered or left, so a frame that only ticks the clock publishes the
- * same map.
+ * The ring's placements after `blocks`: every block already placed keeps its place, evicted blocks lose
+ * theirs, and only new blocks get one. Recomputing the whole ring from the current per-second counts moved
+ * every existing point whenever a third block landed in the newest second. `previous` is handed back
+ * unchanged when nothing entered or left, so a frame that only ticks the clock publishes the same map.
  */
 export function assignPlaces(previous: BlockPlaces, blocks: readonly { number: number; ts: number }[]): BlockPlaces {
   if (blocks.length === 0) return previous.size === 0 ? previous : NO_PLACES;
@@ -288,10 +247,9 @@ export function assignPlaces(previous: BlockPlaces, blocks: readonly { number: n
 }
 
 /**
- * The right edge of a live time axis, in seconds: the wall clock, or the
- * newest block's place when a slow browser clock would put that block in the
- * future. Blocks then sit left of the edge by their real age, and the axis
- * slides with the clock instead of stepping once a second.
+ * The right edge of a live time axis, in seconds: the wall clock, or the newest block's place when a slow
+ * browser clock would put that block in the future. The axis then slides with the clock rather than
+ * stepping once a second.
  */
 export function liveNow(nowMs: number, newestPlace: number | undefined): number {
   const wall = nowMs / 1000;
@@ -299,11 +257,9 @@ export function liveNow(nowMs: number, newestPlace: number | undefined): number 
 }
 
 /**
- * The short-window chart's series against a wall-clock axis ending at
- * `nowMs`. Each block keeps its place, so the sawtooth slides left as time
- * passes and never rearranges itself. `places` is the ring's own placement
- * where the caller has one, so this chart puts a block exactly where the hero
- * above it does; without one the samples are placed on their own.
+ * The short-window chart's series against a wall-clock axis ending at `nowMs`. Each block keeps its place,
+ * so the sawtooth slides left and never rearranges itself. `places` is the ring's own placement where the
+ * caller has one, so this chart puts a block exactly where the hero above it does.
  */
 export function sawtoothChart(samples: readonly SawtoothSample[], nowMs: number, places?: BlockPlaces): SawtoothPoint[] {
   const own = places === undefined ? placeBlocks(samples) : samples.map((s) => placeOf(places, s));
@@ -317,12 +273,9 @@ export function drained(backlog: number, rate: number, seconds: number): number 
 }
 
 /**
- * The values a snapshot asks the screen to show `elapsedS` seconds after it
- * was sampled: long windows keep draining at their target, short windows show
- * the 2 s average from the block ring (falling back to the sample when the
- * ring has nothing recent, and never reaching back past `sinceBlock`, the
- * first block priced under the snapshot's definition), bips and shares follow
- * from those backlogs through the integer pricer.
+ * The values a snapshot asks the screen to show `elapsedS` seconds after it was sampled: long windows keep
+ * draining at their target, short windows show the 2 s average from the block ring (falling back to the
+ * sample, and never reaching past `sinceBlock`). Bips and shares follow from those backlogs.
  */
 export function targetValues(snapshot: LiveSnapshot, blocks: readonly BlockPoint[], elapsedS: number, sinceBlock = Number.NEGATIVE_INFINITY): LiveValues {
   const fee = snapshot.baseFee;
@@ -359,10 +312,8 @@ function settleTolerance(target: number): number {
   return Math.max(1e-12, Math.abs(target) * 1e-6);
 }
 
-/**
- * One step of an exponential approach: the gap to the target shrinks by
- * e^(-dt/tau). A non-finite side snaps to the target.
- */
+/** One step of an exponential approach: the gap to the target shrinks by e^(-dt/tau). A non-finite side
+ * snaps to the target. */
 export function approach(current: number, target: number, dtMs: number, tauMs = TWEEN_TAU_MS): number {
   if (!Number.isFinite(current) || !Number.isFinite(target) || tauMs <= 0) return target;
   const gap = target - current;
@@ -372,14 +323,10 @@ export function approach(current: number, target: number, dtMs: number, tauMs = 
 }
 
 /**
- * Eases every figure of `current` toward `target` by `dtMs`. Only primitives
- * are eased: the backlogs are the state, and the bips and shares are computed
- * from the eased backlogs through the integer pricer, so what a card shows as
- * its contribution is always the contribution of the backlog beside it.
- * Returns `current` itself when nothing moved, so callers can skip a publish;
- * snaps to the target when there is nothing to ease from or the constraint
- * definition changed (a signature change, which includes a replacement set of
- * the same size).
+ * Eases every figure of `current` toward `target` by `dtMs`. Only the backlogs are eased; bips and shares
+ * are computed from them, so a card's contribution is always the contribution of the backlog beside it.
+ * Returns `current` itself when nothing moved, and snaps when there is nothing to ease from or the
+ * constraint signature changed.
  */
 export function tweenValues(current: LiveValues | null, target: LiveValues, dtMs: number, tauMs = TWEEN_TAU_MS): LiveValues {
   if (!current || current.signature !== target.signature || current.backlogs.length !== target.backlogs.length) return target;

@@ -19,23 +19,18 @@ import (
 // BackfillStatus is the outcome of one backfill step.
 type BackfillStatus int
 
-// Backfill step outcomes.
 const (
 	BackfillProgressed BackfillStatus = iota
 	BackfillIdle
 	BackfillDone
 )
 
-// backfillCursor is the resumable checkpoint stored in collector_state.
-// Segments are bounded by constraint sets and replayed forward from the
-// set's starting backlogs; the job walks segments backwards in time until
-// the segment end is older than backfill_depth. Top is the first live
-// block when the backfill started, the bound of everything it folds: a
-// reorg whose ancestor lies below Top-1 restarts the backfill. On archive
-// networks LastAnchor, LastAnchorErrorBips and AnchorMinFee record the
-// most recent state anchor, the replay error observed just before it and
-// the minimum base fee sampled there. Verified marks a segment chosen
-// after the initial owner-action scan completed; an unverified live-model
+// backfillCursor is the resumable checkpoint stored in collector_state. Segments are bounded by
+// constraint sets and replayed forward from the set's starting backlogs; the job walks segments
+// backwards until the segment end is older than backfill_depth. Top is the first live block when the
+// backfill started, the bound of everything it folds: a reorg whose ancestor lies below Top-1
+// restarts the backfill. LastAnchor and friends record the most recent archive state anchor.
+// Verified marks a segment chosen after the owner-action scan completed; an unverified live-model
 // segment left by an older collector is discarded at start.
 type backfillCursor struct {
 	Done                bool     `json:"done"`
@@ -55,11 +50,9 @@ type backfillCursor struct {
 	AnchorMinFee        string   `json:"anchorMinFee,omitempty"`
 }
 
-// backfillState renders the cursor for the instruments: where the active
-// segment has replayed to, the oldest block the configured depth reaches,
-// and how many blocks are still to be replayed, counting the segments
-// below the active one. A cursor that has not chosen a segment yet reports
-// the whole range below its end.
+// backfillState renders the cursor for the instruments: where the active segment has replayed to,
+// the oldest block the configured depth reaches, and how many blocks are still to be replayed,
+// counting the segments below the active one.
 func backfillState(c *backfillCursor) metrics.BackfillState {
 	out := metrics.BackfillState{Cursor: c.Next, Floor: c.DepthStart, Done: c.Done}
 	if c.Done {
@@ -96,22 +89,16 @@ func (f *Follower) saveCursor(ctx context.Context, s db.Store, c *backfillCursor
 	return s.SetState(ctx, f.chainID, db.StateBackfillCursor, string(b))
 }
 
-// BackfillStep advances the backfill by at most one header batch, sized
-// to the RPC budget the other loops leave spare (at least
-// minBackfillBatch, queued for its turn). On archive networks the
-// replay is pinned to the real state every backfill_anchor_interval
-// blocks; otherwise it is a pure replay from the segment's starting
-// backlogs. Buckets in the hour of the first live block are rebuilt from
-// block rows (the live loop shares them); older buckets are folded
-// additively, committed together with the cursor under the chain lock so
-// every block counts exactly once and no live rebuild sees a half-written
-// fold.
+// BackfillStep advances the backfill by at most one header batch, sized to the RPC budget the other
+// loops leave spare. On archive networks the replay is pinned to the real state every
+// backfill_anchor_interval blocks; otherwise it is a pure replay from the segment's starting
+// backlogs. Buckets in the hour of the first live block are rebuilt from block rows (the live loop
+// shares them); older buckets fold additively, committed with the cursor under the chain lock so
+// every block counts exactly once and no live rebuild sees a half-written fold.
 func (f *Follower) BackfillStep(ctx context.Context) (BackfillStatus, error) {
 	status, err := f.backfillStep(ctx)
 	if errors.Is(err, errStaleGeneration) {
-		// The fast loop rewound while this step was fetching: its headers
-		// and anchors describe the old fork, so nothing is written and the
-		// next step starts again from the committed cursor.
+		// The headers and anchors describe the old fork, so nothing is written.
 		f.log.Warn("backfill step discarded after a rewind", "err", err.Error())
 		return BackfillIdle, nil
 	}
@@ -122,8 +109,7 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err := f.ensureInit(ctx); err != nil {
 		return BackfillIdle, err
 	}
-	// The generation is captured before any network call and compared
-	// inside the transaction that commits this step.
+	// Captured before any network call and compared inside the commit transaction.
 	gen, err := f.generation(ctx, f.store)
 	if err != nil {
 		return BackfillIdle, err
@@ -132,8 +118,8 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err != nil {
 		return BackfillIdle, err
 	}
-	// The committed cursor is what the instruments report, so the gauges
-	// never claim progress a failed commit did not make.
+	// The committed cursor is what the instruments report, so the gauges never claim progress a
+	// failed commit did not make.
 	f.metrics.ObserveBackfill(backfillState(c))
 	if c.Done {
 		return BackfillDone, nil
@@ -151,11 +137,9 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 		return BackfillIdle, nil
 	}
 	remaining := c.End - c.Next
-	// The batch is sized to what the bucket holds spare, so the backfill
-	// never holds the pacer's turnstile through a long sleep and the
-	// other loops' turns come soon, but never below the smallest batch:
-	// for that it queues first come, first served with the other bulk
-	// work. The fast tick keeps its reserve either way.
+	// Sized to what the bucket holds spare, so the backfill never holds the pacer's turnstile through
+	// a long sleep, but never below the smallest batch: for that it queues with the other bulk work.
+	// The fast tick keeps its reserve either way.
 	n := min(uint64(f.cfg.HeaderBatchSize), remaining)
 	if avail := uint64(max(f.rpc.Available(), 0)) / 2; avail < n {
 		n = max(avail, min(minBackfillBatch, remaining))
@@ -244,12 +228,10 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	return BackfillProgressed, nil
 }
 
-// checkCursor runs once per process: an active live-model segment (SetID
-// 0) that was not verified against a completed owner-action scan came from
-// an older collector and may carry the wrong constraints. Its buckets
-// (every backfill-only bucket) are deleted and the backfill starts over.
-// The check counts as done only once that cleanup has committed, so a
-// failed cleanup is retried rather than skipped.
+// checkCursor runs once per process: an active live-model segment (SetID 0) that was not verified
+// against a completed owner-action scan came from an older collector and may carry the wrong
+// constraints, so every backfill-only bucket is deleted and the backfill starts over. The check
+// counts as done only once that cleanup has committed.
 func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor, gen uint64) (*backfillCursor, error) {
 	f.mu.Lock()
 	checked := f.cursorChecked
@@ -283,13 +265,10 @@ func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor, gen uint6
 	return fresh, nil
 }
 
-// backfillAnchors reads the real pricer state at every anchor block among
-// numbers from the archive endpoint and returns the Anchor for the replay
-// plus the minimum base fee sampled at each anchor. The anchor is nil
-// without an archive endpoint (pure replay) and when no anchor block is
-// in range. An anchor whose model differs from the segment's constraint
-// set is skipped with a warning: the replay state cannot change shape mid
-// segment.
+// backfillAnchors reads the real pricer state at every anchor block among numbers and returns the
+// Anchor for the replay plus the minimum base fee sampled at each. Nil without an archive endpoint
+// or when no anchor block is in range. An anchor whose model differs from the segment's constraint
+// set is skipped: the replay state cannot change shape mid segment.
 func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, headers []nitro.Header) (pricer.Anchor, map[uint64]*big.Int, error) {
 	if f.archive == nil {
 		return nil, nil, nil
@@ -327,11 +306,9 @@ func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, header
 	}, fees, nil
 }
 
-// backfillFees returns the minimum base fee in force at every header: the
-// recorded owner actions (genesis default before the first), overridden
-// after an archive anchor by the fee sampled there until the next recorded
-// change. anchorFees are the anchors inside this batch; the cursor carries
-// the last one from earlier batches.
+// backfillFees returns the minimum base fee in force at every header: the recorded owner actions
+// (genesis default before the first), overridden after an archive anchor by the fee sampled there
+// until the next recorded change. The cursor carries the last anchor from earlier batches.
 func (f *Follower) backfillFees(tl *timeline, c *backfillCursor, headers []nitro.Header, anchorFees map[uint64]*big.Int) []*big.Int {
 	lastAnchor := c.LastAnchor
 	var anchorFee *big.Int
@@ -352,10 +329,8 @@ func (f *Follower) backfillFees(tl *timeline, c *backfillCursor, headers []nitro
 	return out
 }
 
-// replaySegment replays headers, splitting at every recorded boundary the
-// segment crosses (minimum base fee changes and, on a legacy chain, speed
-// limit, inertia and tolerance changes) and pinning backlogs wherever
-// anchor says so. Segmenting on fees alone would price historical legacy
+// replaySegment replays headers, splitting at every recorded boundary the segment crosses and
+// pinning backlogs wherever anchor says so. Segmenting on fees alone would price historical legacy
 // blocks with today's parameters.
 func (f *Follower) replaySegment(ctx context.Context, st *pricer.State, c *backfillCursor, headers []nitro.Header, anchor pricer.Anchor, anchorFees map[uint64]*big.Int) ([]db.Block, error) {
 	f.mu.Lock()
@@ -392,8 +367,7 @@ func (f *Follower) replaySegment(ctx context.Context, st *pricer.State, c *backf
 	return rows, nil
 }
 
-// applyLegacyParams copies the parameters in force into the replay state,
-// keeping the backlog the replay has built up.
+// applyLegacyParams copies the parameters in force into the replay state, keeping the backlog.
 func applyLegacyParams(st *pricer.State, l *pricer.Legacy) {
 	if st.Legacy == nil || l == nil {
 		return
@@ -401,8 +375,7 @@ func applyLegacyParams(st *pricer.State, l *pricer.Legacy) {
 	st.Legacy.SpeedLimit, st.Legacy.Inertia, st.Legacy.Tolerance = l.SpeedLimit, l.Inertia, l.Tolerance
 }
 
-// sameLegacyParams compares two sets of legacy parameters, ignoring the
-// backlog, which the replay carries.
+// sameLegacyParams compares two sets of legacy parameters, ignoring the backlog.
 func sameLegacyParams(a, b *pricer.Legacy) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -410,15 +383,11 @@ func sameLegacyParams(a, b *pricer.Legacy) bool {
 	return a.SpeedLimit == b.SpeedLimit && a.Inertia == b.Inertia && a.Tolerance == b.Tolerance
 }
 
-// startSegment picks the next segment to replay, walking backwards through
-// constraint sets. Nothing starts before the owner-action timeline is
-// complete through the block preceding the first live block (the
-// owner_scan_through checkpoint): only then are the historical sets and
-// fees known for everything the backfill touches. A truncated scan's
-// origin bounds the depth: the origin sample is end-of-block state, so
-// the replay may only start at the block after it. Returns BackfillDone
-// when the depth is reached and BackfillIdle when nothing can be decided
-// yet.
+// startSegment picks the next segment to replay, walking backwards through constraint sets. Nothing
+// starts before the owner-action timeline is complete through the block preceding the first live one
+// (owner_scan_through): only then are the historical sets and fees known. A truncated scan's origin
+// bounds the depth, and since that sample is end-of-block state the replay may only start at the
+// block after it. Returns BackfillDone at the depth and BackfillIdle when nothing can be decided yet.
 func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint64) (BackfillStatus, error) {
 	f.mu.Lock()
 	ready := f.ownerScanThrough > 0 && f.liveStart != nil && f.ownerScanThrough+1 >= f.liveStart.Block
@@ -476,18 +445,14 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 			c.Backlogs[i] = e.StartingBacklog
 		}
 	case origin.fullState() && origin.Legacy != nil && c.End > origin.replayFrom():
-		// A legacy chain whose whole state was sampled at the scan origin:
-		// replay forward from those parameters and that backlog, which is
-		// the end-of-block state of the origin block.
+		// A legacy chain whose whole state was sampled at the scan origin: replay forward from the
+		// end-of-block parameters and backlog of the origin block.
 		c.SegStart = origin.replayFrom()
 		c.SetID = 0
 		c.Backlogs = []uint64{origin.Legacy.Backlog}
 	default:
-		// Nothing independently known describes the pricer state before
-		// this point: no constraint set covers it and no archive sample
-		// established one. Replaying the current model with empty backlogs
-		// would invent history, so the range becomes a hole instead and
-		// the backfill stops here.
+		// Nothing independently known describes the pricer state before this point. Replaying the
+		// current model with empty backlogs would invent history, so the range becomes a hole instead.
 		return f.holeToDepth(ctx, c, gen)
 	}
 	c.Active = true
@@ -500,10 +465,9 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 	return BackfillProgressed, f.withGeneration(ctx, gen, func(s db.Store) error { return f.saveCursor(ctx, s, c) })
 }
 
-// holeToDepth records everything still unfilled as a hole and finishes the
-// backfill: the state before it is not known from any independent source,
-// so the range is reported as missing rather than reconstructed from the
-// live model.
+// holeToDepth records everything still unfilled as a hole and finishes the backfill: the state
+// before it is not known from any independent source, so it is reported missing rather than
+// reconstructed from the live model.
 func (f *Follower) holeToDepth(ctx context.Context, c *backfillCursor, gen uint64) (BackfillStatus, error) {
 	h := hole{From: c.DepthStart, To: c.End - 1, Reason: reasonNoState}
 	f.log.Warn("no independently known pricer state below the backfill range, recording it as a hole",
@@ -558,8 +522,7 @@ func (f *Follower) segmentState(ctx context.Context, c *backfillCursor) (*pricer
 		st.SetBacklogs(c.Backlogs)
 		return st, sql.NullInt64{Int64: c.SetID, Valid: true}, nil
 	}
-	// The only segment without a constraint set is a legacy chain replayed
-	// from the state sampled at the scan origin.
+	// The only segment without a constraint set is a legacy chain replayed from the scan origin.
 	o := f.scanOrigin
 	if o == nil || o.Legacy == nil {
 		return nil, sql.NullInt64{}, fmt.Errorf("backfill: no sampled legacy state to replay from")
@@ -569,22 +532,16 @@ func (f *Follower) segmentState(ctx context.Context, c *backfillCursor) (*pricer
 	return st, sql.NullInt64{}, nil
 }
 
-// maxHistoryDepth bounds a configured history depth where the cutoff is
-// computed. A time.Duration is int64 nanoseconds, so a depth near that
-// limit plus the originMargin the owner scan adds would wrap round to a
-// positive offset and place the cutoff after the head, marking the whole
-// configured depth permanently unavailable. A century is more history than
-// any Nitro chain has and leaves the arithmetic far from the boundary.
+// maxHistoryDepth bounds a configured history depth. A time.Duration is int64 nanoseconds, so a
+// depth near that limit plus the owner scan's originMargin would wrap to a positive offset and place
+// the cutoff after the head, marking the whole depth permanently unavailable.
 const maxHistoryDepth = 100 * 365 * 24 * time.Hour
 
-// errTargetAfterHead marks a history cutoff later than the chain's head:
-// the chain is stalled, or the sampled head is behind. It is retryable and
-// nothing is written for it, so the next pass decides again instead of
-// recording an origin at the head.
+// errTargetAfterHead marks a history cutoff later than the chain's head. It is retryable and nothing
+// is written, so the next pass decides again instead of recording an origin at the head.
 var errTargetAfterHead = errors.New("the history cutoff is later than the chain head, retrying")
 
-// historyDepth bounds a configured depth, so the caller may add
-// originMargin to the result without the duration arithmetic overflowing.
+// historyDepth bounds a configured depth, so the caller may add originMargin without overflowing.
 func (f *Follower) historyDepth(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -605,11 +562,9 @@ func (f *Follower) findHistoryStart(ctx context.Context, depth time.Duration) (u
 	return f.historyStart(ctx, head, depth)
 }
 
-// historyStart is the first block of a history window depth wide: the
-// first block at or after depth before the head's own timestamp. The
-// window is measured from the chain, not from the host clock, so a clock
-// running ahead of a stalled chain cannot place the cutoff past the head
-// and mark the configured depth unavailable.
+// historyStart is the first block at or after depth before the head's own timestamp. The window is
+// measured from the chain, not the host clock, so a clock running ahead of a stalled chain cannot
+// place the cutoff past the head and mark the configured depth unavailable.
 func (f *Follower) historyStart(ctx context.Context, head uint64, depth time.Duration) (uint64, error) {
 	top, err := f.rpc.HeaderByNumber(ctx, head)
 	if err != nil {
@@ -618,13 +573,10 @@ func (f *Follower) historyStart(ctx context.Context, head uint64, depth time.Dur
 	return f.blockAt(ctx, head, top, time.Unix(int64(top.Timestamp), 0).UTC().Add(-depth))
 }
 
-// blockAt binary-searches for the first block at or after t below head,
-// with top the header at head the caller already read. Both boundaries are
-// checked against real headers: a target at or before the first block is
-// genesis without a search, and a target after the head is a retryable
-// error rather than the head itself, which the caller would otherwise
-// persist as a scan origin, marking everything before it unavailable for
-// good.
+// blockAt binary-searches for the first block at or after t below head, with top the header the
+// caller already read. Both boundaries are checked against real headers: a target at or before the
+// first block is genesis, and one after the head is a retryable error rather than the head itself,
+// which the caller would otherwise persist as a scan origin.
 func (f *Follower) blockAt(ctx context.Context, head uint64, top *nitro.Header, t time.Time) (uint64, error) {
 	target := uint64(max(t.Unix(), 0))
 	if top.Timestamp < target {
@@ -657,8 +609,7 @@ func (f *Follower) blockAt(ctx context.Context, head uint64, top *nitro.Header, 
 	return lo, nil
 }
 
-// entriesFromSample renders live constraints as set entries (used by tests
-// and the observed-set logic).
+// entriesFromSample renders live constraints as set entries.
 func entriesFromSample(s *nitro.Sample) []model.ConstraintSetEntry {
 	out := make([]model.ConstraintSetEntry, len(s.Constraints))
 	for i, c := range s.Constraints {

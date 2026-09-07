@@ -39,16 +39,13 @@ const (
 	wsDBTimeout = 5 * time.Second
 	// networkCacheTTL is how long a network lookup (found or not) is reused.
 	networkCacheTTL = 5 * time.Second
-	// seenActions is how many delivered owner actions are remembered per
-	// network for de-duplication after a LISTEN reconnect.
+	// seenActions is how many delivered owner actions are remembered per network for de-duplication.
 	seenActions = 256
 )
 
-// Hub fans NOTIFY payloads out to WebSocket clients. It keeps, per network,
-// the latest snapshot and a ring of recent blocks read from the blocks
-// table (with their hashes, so a reorg that replaces blocks at or below
-// the ring's tip is noticed), so clients get `blocks` messages without
-// querying per client.
+// Hub fans NOTIFY payloads out to WebSocket clients. It keeps, per network, the latest snapshot and a
+// ring of recent blocks read from the blocks table (with their hashes, so a reorg at or below the
+// ring's tip is noticed), so clients get blocks messages without querying per client.
 type Hub struct {
 	store        db.Store
 	log          *logger.Logger
@@ -59,16 +56,13 @@ type Hub struct {
 	now          func() time.Time
 	maxPerIP     int
 	maxTotal     int
-	// ethUsdMaxAge mirrors the server's: the cached snapshot a hello
-	// serves is re-aged against it, so a quote that aged out since the
-	// tick was published is not handed to a new client as live.
+	// ethUsdMaxAge mirrors the server's: the cached snapshot a hello serves is re-aged against it, so a
+	// quote that aged out since the tick was published is not handed to a new client as live.
 	ethUsdMaxAge time.Duration
 	// queueSize is the per-client outbound queue depth.
 	queueSize int
-	// metrics counts subscribed clients, the frames written to them and
-	// the ones dropped for a full queue. api.New replaces it with the
-	// server's; a hub built on its own still has one, so no call site has
-	// to guard it.
+	// metrics counts subscribed clients and the frames written to or dropped for them. A hub built on
+	// its own still has one, so no call site has to guard it.
 	metrics *metrics.API
 
 	mu       sync.Mutex
@@ -92,8 +86,7 @@ type netState struct {
 	clients    map[*client]struct{}
 	// refreshMu serializes block refreshes for the network.
 	refreshMu sync.Mutex
-	// ownerSince and seen track delivered owner actions so a reconnect can
-	// reconcile from the table without repeating any.
+	// ownerSince and seen track delivered owner actions so a reconnect can reconcile without repeating.
 	ownerInit  bool
 	ownerSince uint64
 	seen       map[actionKey]struct{}
@@ -106,16 +99,15 @@ type actionKey struct {
 	logIndex uint64
 }
 
-// ringBlock is a ring entry: the point clients get and the stored hash the
-// hub compares against the table to notice a reorg.
+// ringBlock is a ring entry: the point clients get and the stored hash the hub compares against the
+// table to notice a reorg.
 type ringBlock struct {
 	point model.BlockPoint
 	hash  string
 }
 
-// delta is what one refresh found: a reorg (the canonical replacements
-// above the ancestor, which clients apply before anything else) or new
-// blocks appended to the ring.
+// delta is what one refresh found: a reorg (the canonical replacements above the ancestor, applied
+// before anything else) or new blocks appended to the ring.
 type delta struct {
 	reorg  *model.Reorg
 	blocks []model.BlockPoint
@@ -132,11 +124,9 @@ func points(ring []ringBlock) []model.BlockPoint {
 // HubOption customizes a Hub.
 type HubOption func(*Hub)
 
-// WithPingInterval sets the ping cadence (tests use a short one).
 func WithPingInterval(d time.Duration) HubOption { return func(h *Hub) { h.pingInterval = d } }
 
-// withClientQueue sets the per-client outbound queue depth (tests use a
-// short one to reach the overflow path).
+// withClientQueue sets the per-client outbound queue depth.
 func withClientQueue(n int) HubOption {
 	return func(h *Hub) {
 		if n > 0 {
@@ -150,13 +140,11 @@ func WithOrigins(origins []string) HubOption {
 	return func(h *Hub) { h.origins = originPatterns(origins) }
 }
 
-// WithConnectionLimits caps concurrent sockets per client address and in
-// total.
+// WithConnectionLimits caps concurrent sockets per client address and in total.
 func WithConnectionLimits(perIP, total int) HubOption {
 	return func(h *Hub) { h.setLimits(perIP, total) }
 }
 
-// NewHub creates a hub.
 func NewHub(store db.Store, log *logger.Logger, opts ...HubOption) *Hub {
 	if log == nil {
 		log = logger.Nop()
@@ -183,9 +171,8 @@ func (h *Hub) setLimits(perIP, total int) {
 	}
 }
 
-// Run consumes notifications until ctx ends. A listener closure without
-// cancellation is fatal because otherwise connected clients would keep getting
-// pings from a hub that can never deliver another chain update.
+// Run consumes notifications until ctx ends. A listener closure without cancellation is fatal:
+// connected clients would otherwise keep getting pings from a hub that can never deliver an update.
 func (h *Hub) Run(ctx context.Context, l db.Listener) error {
 	for {
 		select {
@@ -205,7 +192,6 @@ func (h *Hub) Run(ctx context.Context, l db.Listener) error {
 	}
 }
 
-// Handle dispatches one notification.
 func (h *Hub) Handle(ctx context.Context, n db.Notification) {
 	switch {
 	case n.Reconnected:
@@ -226,9 +212,8 @@ func (h *Hub) state(chainID uint64) *netState {
 	return st
 }
 
-// lookupNetwork resolves a reference through a short-lived cache so a
-// client cannot turn subscribe messages into database queries. Unknown
-// references are cached too.
+// lookupNetwork resolves a reference through a short-lived cache so a client cannot turn subscribe
+// messages into database queries. Unknown references are cached too.
 func (h *Hub) lookupNetwork(ctx context.Context, ref string) (*db.Network, error) {
 	now := h.now()
 	h.mu.Lock()
@@ -268,9 +253,8 @@ func (h *Hub) handleLive(ctx context.Context, payload string) {
 	h.mu.Unlock()
 }
 
-// fanOut delivers a refresh's outcome and, when given, a tick to every
-// client of a network, in the order clients must apply them: the reorg
-// first, then the tick, then the new blocks. The caller holds h.mu.
+// fanOut delivers a refresh's outcome and, when given, a tick to every client of a network, in the
+// order clients must apply them: reorg, tick, new blocks. The caller holds h.mu.
 func (h *Hub) fanOut(st *netState, d delta, tick json.RawMessage) {
 	var reorg, tickMsg []byte
 	if d.reorg != nil {
@@ -281,8 +265,7 @@ func (h *Hub) fanOut(st *netState, d delta, tick json.RawMessage) {
 	}
 	for c := range st.clients {
 		if reorg != nil {
-			// The client's hello may have carried orphaned blocks: the
-			// watermark drops to the ancestor so their replacements pass.
+			// The client's hello may have carried orphaned blocks: the watermark drops to the ancestor.
 			c.watermark = min(c.watermark, d.reorg.Ancestor)
 			c.deliver(outbound{raw: reorg})
 		}
@@ -295,11 +278,9 @@ func (h *Hub) fanOut(st *netState, d delta, tick json.RawMessage) {
 	}
 }
 
-// refreshAndBroadcast is the one path that mutates the ring: whatever a
-// refresh finds is delivered to the network's clients before the lock is
-// released, so no committed delta is ever consumed without being sent.
-// A caller that discarded one would leave every client that was waiting
-// for those blocks without them until the next notification.
+// refreshAndBroadcast is the one path that mutates the ring: whatever a refresh finds is delivered to
+// the network's clients before the lock is released, so no committed delta is consumed without being
+// sent. A caller that discarded one would leave clients waiting for those blocks.
 func (h *Hub) refreshAndBroadcast(ctx context.Context, chainID uint64) error {
 	d, err := h.refreshBlocks(ctx, chainID)
 	if err != nil {
@@ -318,14 +299,11 @@ func reverse(rows []db.Block) {
 	}
 }
 
-// refreshBlocks reconciles the ring with the blocks table and returns what
-// changed: the blocks newer than the ring's tip, oldest first, or, when
-// the table no longer holds the tip the ring knows (its hash changed or
-// its row is gone), a reorg: the ring is truncated to the highest entry
-// the table still agrees with and the canonical blocks above it are
-// appended and reported as replacements. Refreshes are serialized per
-// network and their results filtered against the ring, so concurrent
-// callers never append the same block twice or move the tip backwards.
+// refreshBlocks reconciles the ring with the blocks table and returns what changed: the blocks newer
+// than the ring's tip, oldest first, or, when the table no longer holds the tip the ring knows, a
+// reorg with the ring truncated to the highest agreeing entry and the canonical blocks above it.
+// Refreshes are serialized per network and filtered against the ring, so concurrent callers never
+// append the same block twice or move the tip backwards.
 func (h *Hub) refreshBlocks(ctx context.Context, chainID uint64) (delta, error) {
 	h.mu.Lock()
 	st := h.state(chainID)
@@ -347,10 +325,8 @@ func (h *Hub) refreshBlocks(ctx context.Context, chainID uint64) (delta, error) 
 		rows, err = h.store.RecentBlocks(ctx, chainID, helloBlocks)
 		reverse(rows)
 	} else {
-		// From the tip itself, so its row proves the ring is still
-		// on-chain, and on until the table's tip: one tick can advance the
-		// chain by more than a single page, and a ring left behind would
-		// only catch up at the next notification.
+		// From the tip itself, so its row proves the ring is still on-chain, and on until the table's
+		// tip: one tick can advance the chain by more than a single page.
 		for from := last - 1; ; {
 			var page []db.Block
 			if page, err = h.store.BlocksAfter(ctx, chainID, from, ringSize); err != nil {
@@ -383,11 +359,9 @@ func (h *Hub) refreshBlocks(ctx context.Context, chainID uint64) (delta, error) 
 	return delta{blocks: added}, nil
 }
 
-// reorgRing rebuilds the ring after the table diverged from it: the
-// ancestor is the highest ring entry whose row still exists with the same
-// hash (rows written before hashes were stored count as matching only
-// against an equally hashless ring entry), everything above it is dropped
-// and replaced by the canonical rows.
+// reorgRing rebuilds the ring after the table diverged from it: the ancestor is the highest ring entry
+// whose row still exists with the same hash (rows written before hashes were stored match only a
+// hashless ring entry), everything above it is dropped and replaced by the canonical rows.
 func (h *Hub) reorgRing(ctx context.Context, st *netState, chainID uint64) (delta, error) {
 	rows, err := h.store.RecentBlocks(ctx, chainID, ringSize)
 	if err != nil {
@@ -421,18 +395,15 @@ func (h *Hub) reorgRing(ctx context.Context, st *netState, chainID uint64) (delt
 		st.blocks = append(st.blocks, ringBlock{point: blockPoint(r), hash: r.Hash})
 	}
 	st.trim()
-	// The owner-action cursor follows the chain down too: the actions above
-	// the ancestor were delivered from a fork that no longer exists, so
-	// their replacements must be able to arrive again, and reconciliation
-	// after a LISTEN outage has to look at that range once more.
+	// The owner-action cursor follows the chain down too: the actions above the ancestor came from a
+	// fork that no longer exists, so their replacements must be able to arrive again.
 	st.forgetActionsAbove(ancestor)
 	h.log.Warn("blocks replaced below the ring tip, resending the canonical chain", "chainId", chainID, "ancestor", ancestor, "blocks", len(replaced))
 	return delta{reorg: &model.Reorg{ChainID: chainID, Ancestor: ancestor, Blocks: replaced}}, nil
 }
 
-// forgetActionsAbove drops the delivered owner actions above a reorg
-// ancestor and lowers the reconciliation cursor to it. The caller holds
-// h.mu.
+// forgetActionsAbove drops the delivered owner actions above a reorg ancestor and lowers the
+// reconciliation cursor to it. The caller holds h.mu.
 func (st *netState) forgetActionsAbove(ancestor uint64) {
 	kept := st.seenOrder[:0]
 	for _, k := range st.seenOrder {
@@ -490,8 +461,8 @@ func (st *netState) markSeen(k actionKey) bool {
 	return true
 }
 
-// initOwnerCursor starts a network's owner-action cursor at the newest
-// stored action, so a later reconcile only looks at what came after.
+// initOwnerCursor starts a network's owner-action cursor at the newest stored action, so a later
+// reconcile only looks at what came after.
 func (h *Hub) initOwnerCursor(ctx context.Context, chainID uint64) {
 	h.mu.Lock()
 	st := h.state(chainID)
@@ -516,11 +487,9 @@ func (h *Hub) initOwnerCursor(ctx context.Context, chainID uint64) {
 	}
 }
 
-// reconcile runs after the LISTEN connection was re-established: every
-// notification sent meanwhile was lost, so for every network with clients
-// the blocks are refreshed from the table, the live snapshot is rebuilt
-// from the latest sample and sent as a tick when it is newer than the
-// cached one, and owner actions since the cursor are delivered once.
+// reconcile runs after the LISTEN connection was re-established: every notification sent meanwhile was
+// lost, so for each network with clients the blocks are refreshed from the table, the snapshot is
+// rebuilt and sent when newer than the cached one, and owner actions since the cursor are delivered.
 func (h *Hub) reconcile(ctx context.Context) {
 	h.mu.Lock()
 	ids := make([]uint64, 0, len(h.networks))
@@ -578,9 +547,8 @@ func (u *snapshotUpdate) payload() json.RawMessage {
 	return u.raw
 }
 
-// newerSnapshot rebuilds a network's live snapshot from the latest sample
-// and returns it when it is newer than the cached one (or nothing is
-// cached), so a tick lost during a LISTEN outage is made up.
+// newerSnapshot rebuilds a network's live snapshot from the latest sample and returns it when it is
+// newer than the cached one, so a tick lost during a LISTEN outage is made up.
 func (h *Hub) newerSnapshot(ctx context.Context, chainID uint64) *snapshotUpdate {
 	snap, err := h.live(ctx, chainID)
 	if err != nil {
@@ -603,20 +571,17 @@ func (h *Hub) newerSnapshot(ctx context.Context, chainID uint64) *snapshotUpdate
 	return &snapshotUpdate{raw: mustJSON(snap), at: at}
 }
 
-// prepared is everything a hello needs that comes from the database,
-// gathered before the client is registered so registration itself cannot
-// fail.
+// prepared is everything a hello needs from the database, gathered before the client is registered so
+// registration itself cannot fail.
 type prepared struct {
 	net      model.Network
 	fallback *model.LiveSnapshot
 }
 
-// prepare does the database work for a hello: the network model, the ring
-// (filled from the table when the hub has not seen a tick yet), the owner
-// cursor and a snapshot fallback. Filling the ring goes through the one
-// path that broadcasts what a refresh found, so a hello racing the first
-// notification can never swallow a block another client was waiting for.
-// Short deadlines keep a subscribe storm from holding connections.
+// prepare does the database work for a hello: the network model, the ring (filled from the table when
+// the hub has not seen a tick yet), the owner cursor and a snapshot fallback. Filling the ring goes
+// through the one broadcasting path, so a hello racing the first notification can never swallow a block
+// another client was waiting for. Short deadlines keep a subscribe storm from holding connections.
 func (h *Hub) prepare(ctx context.Context, n db.Network) (*prepared, error) {
 	ctx, cancel := context.WithTimeout(ctx, wsDBTimeout)
 	defer cancel()
@@ -646,11 +611,9 @@ func (h *Hub) prepare(ctx context.Context, n db.Network) (*prepared, error) {
 	return p, nil
 }
 
-// subscribe moves the client to a network and queues its hello, all under
-// the hub lock: the hello is built from the ring exactly as it is at
-// registration, and fan-out that arrives from then on is buffered behind
-// it. The client's watermark is the hello's last block: a blocks message
-// never repeats a block the hello carried, whatever refresh produced it.
+// subscribe moves the client to a network and queues its hello, all under the hub lock: the hello is
+// built from the ring as it is at registration, and later fan-out is buffered behind it. The client's
+// watermark is the hello's last block, so a blocks message never repeats what the hello carried.
 func (h *Hub) subscribe(c *client, chainID uint64, p *prepared) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -682,13 +645,10 @@ func (h *Hub) subscribe(c *client, chainID uint64, p *prepared) {
 	c.enqueue(hello)
 }
 
-// freshenEthUsd re-applies the ETH/USD staleness rule to a snapshot the
-// hub cached. The cache holds the last tick a network published, which a
-// hello can serve much later: by then its quote may have aged past
-// collector.eth_usd_max_age, and a snapshot must never present an aged
-// out quote as live. A quote stamped materially later than the serving
-// clock is unusable for the same reason /live rejects it. Anything that
-// cannot be read is left exactly as it is.
+// freshenEthUsd re-applies the ETH/USD staleness rule to a snapshot the hub cached, which a hello can
+// serve much later: by then its quote may have aged past collector.eth_usd_max_age, and a snapshot must
+// never present an aged out quote as live. A quote stamped materially later than the serving clock is
+// unusable for the same reason /live rejects it. Anything unreadable is left as it is.
 func freshenEthUsd(raw json.RawMessage, now time.Time, maxAge time.Duration) json.RawMessage {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
@@ -722,15 +682,13 @@ func (h *Hub) unsubscribe(c *client) {
 	}
 }
 
-// ClientCount returns the number of clients subscribed to a network.
 func (h *Hub) ClientCount(chainID uint64) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.state(chainID).clients)
 }
 
-// admit reserves a connection slot for an address, or reports which cap
-// refused it.
+// admit reserves a connection slot for an address, or reports which cap refused it.
 func (h *Hub) admit(ip string) (ok bool, reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -756,7 +714,6 @@ func (h *Hub) release(ip string) {
 	}
 }
 
-// Connections returns the open socket count.
 func (h *Hub) Connections() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -797,8 +754,8 @@ func errorMessage(code, msg string) []byte {
 	return mustJSON(wsError{Type: msgError, Error: model.ErrorDetail{Code: code, Message: msg}})
 }
 
-// outbound is one fan-out item: a raw message, or blocks that are encoded
-// when delivered (so a hello's block range can filter them).
+// outbound is one fan-out item: a raw message, or blocks encoded when delivered, so a hello's block
+// range can filter them.
 type outbound struct {
 	raw    []byte
 	blocks []model.BlockPoint
@@ -810,18 +767,16 @@ type client struct {
 	send    chan []byte
 	limiter *rate.Limiter
 	chainID uint64
-	// watermark is the last block the client's hello carried (guarded by
-	// the hub lock): blocks at or below it are never sent again.
+	// watermark is the last block the client's hello carried, guarded by the hub lock: blocks at or
+	// below it are never sent again.
 	watermark uint64
 	once      sync.Once
 	closed    chan struct{}
-	// dropped marks a client the hub gave up on (an overflowed queue):
-	// nothing more is written, not even what is still queued.
+	// dropped marks a client the hub gave up on: nothing more is written, not even what is queued.
 	dropped atomic.Bool
 }
 
-// deliver queues a fan-out item for the client, dropping blocks its hello
-// already carried. The caller holds the hub lock.
+// deliver queues a fan-out item, dropping blocks the client's hello already carried. Caller holds h.mu.
 func (c *client) deliver(o outbound) {
 	if o.raw != nil {
 		c.enqueue(o.raw)
@@ -839,12 +794,10 @@ func (c *client) deliver(o outbound) {
 	c.enqueue(msg)
 }
 
-// enqueue queues one message. A client that is already closing accepts
-// nothing more, so the flush that follows a protocol error is bounded by
-// what is queued at that moment and a steady live feed cannot keep the
-// socket alive indefinitely. A full queue means the peer is not reading
-// fast enough: the client is dropped rather than allowed to hold a
-// connection slot while it falls further behind.
+// enqueue queues one message. A client already closing accepts nothing more, so the flush after a
+// protocol error is bounded by what is queued at that moment and a steady live feed cannot keep the
+// socket alive indefinitely. A full queue means the peer is not reading fast enough: the client is
+// dropped rather than allowed to hold a connection slot while it falls further behind.
 func (c *client) enqueue(msg []byte) {
 	select {
 	case <-c.closed:
@@ -858,19 +811,17 @@ func (c *client) enqueue(msg []byte) {
 	}
 }
 
-// close ends the client once the write loop has flushed what is queued.
-// It is the path for the few protocol errors that merit a final frame.
+// close ends the client once the write loop has flushed what is queued, for the few protocol errors
+// that merit a final frame.
 func (c *client) close() {
 	c.once.Do(func() { close(c.closed) })
 }
 
-// drop ends the client at once, writing nothing further. The socket is
-// closed here rather than by the write loop, which is very likely blocked
-// writing to the peer that caused the overflow; CloseNow does not wait for
-// a close handshake, so it never blocks the hub lock the caller holds.
+// drop ends the client at once, writing nothing further. The socket is closed here rather than by the
+// write loop, which is very likely blocked writing to the peer that caused the overflow; CloseNow does
+// not wait for a close handshake, so it never blocks the hub lock the caller holds.
 func (c *client) drop() {
-	// Two goroutines can find the queue full at once, so the counter moves
-	// on the transition alone; everything after it is idempotent already.
+	// Two goroutines can find the queue full at once, so the counter moves on the transition alone.
 	if c.dropped.CompareAndSwap(false, true) {
 		c.hub.metrics.WSClientDropped()
 	}
@@ -880,9 +831,8 @@ func (c *client) drop() {
 	}
 }
 
-// ServeWS upgrades the connection and runs the client until it goes away.
-// Every refusal before the upgrade, including a malformed handshake, is
-// the JSON error envelope.
+// ServeWS upgrades the connection and runs the client until it goes away. Every refusal before the
+// upgrade, including a malformed handshake, is the JSON error envelope.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	ref := r.URL.Query().Get(networkParam)
 	if ref == "" {
@@ -950,10 +900,8 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	_ = conn.Close(websocket.StatusNormalClosure, "bye")
 }
 
-// handshakeError validates the WebSocket handshake headers the upgrade
-// library would otherwise refuse with a plaintext response: the Connection
-// token, the protocol version and the client key. It returns the reason,
-// or "" when the handshake is well formed.
+// handshakeError validates the WebSocket handshake headers the upgrade library would otherwise refuse
+// with a plaintext response. It returns the reason, or "" when the handshake is well formed.
 func handshakeError(r *http.Request) string {
 	if !r.ProtoAtLeast(1, 1) {
 		return "websocket handshake requires HTTP/1.1"
@@ -987,10 +935,9 @@ func headerHasToken(h http.Header, name, token string) bool {
 	return false
 }
 
-// originAllowed checks the Origin header against the configured patterns
-// before the upgrade, so a refusal is a JSON error rather than the
-// library's plain text. Browsers always send Origin; non-browser clients
-// without one are allowed, as the library does.
+// originAllowed checks the Origin header against the configured patterns before the upgrade, so a
+// refusal is a JSON error rather than the library's plain text. Browsers always send Origin;
+// non-browser clients without one are allowed, as the library does.
 func (h *Hub) originAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" || len(h.origins) == 0 {
@@ -1009,8 +956,8 @@ func (h *Hub) originAllowed(r *http.Request) bool {
 	return false
 }
 
-// readLoop handles pong and subscribe messages. Messages beyond the
-// per-connection budget are answered with one error and the socket closes.
+// readLoop handles pong and subscribe messages. Messages beyond the per-connection budget are answered
+// with one error and the socket closes.
 func (c *client) readLoop(ctx context.Context, pongs chan<- struct{}) {
 	defer c.close()
 	for {
@@ -1038,8 +985,7 @@ func (c *client) readLoop(ctx context.Context, pongs chan<- struct{}) {
 	}
 }
 
-// handleSubscribe switches the client to another network. Subscribing to
-// the network it already follows is a no-op.
+// handleSubscribe switches the client to another network; the one it already follows is a no-op.
 func (c *client) handleSubscribe(ctx context.Context, ref string) {
 	n, err := c.hub.lookupNetwork(ctx, ref)
 	if err != nil {
@@ -1062,8 +1008,7 @@ func (c *client) handleSubscribe(ctx context.Context, ref string) {
 	c.hub.subscribe(c, n.ChainID, p)
 }
 
-// writeLoop sends queued messages and pings, closing after two missed
-// pongs.
+// writeLoop sends queued messages and pings, closing after two missed pongs.
 func (c *client) writeLoop(ctx context.Context, pongs <-chan struct{}) {
 	ticker := time.NewTicker(c.hub.pingInterval)
 	defer ticker.Stop()
@@ -1075,13 +1020,11 @@ func (c *client) writeLoop(ctx context.Context, pongs <-chan struct{}) {
 			return
 		case <-c.closed:
 			if c.dropped.Load() {
-				// The queue overflowed: the peer is not reading, so there is
-				// nothing to flush to it and the socket is already closed.
+				// The queue overflowed: the peer is not reading, so there is nothing to flush to it.
 				return
 			}
-			// Flush what was queued (an error message, say) before closing.
-			// Nothing more is accepted once the client is closing, so this
-			// drains what is there and returns.
+			// Flush what was queued (an error message, say) before closing. Nothing more is accepted once
+			// the client is closing, so this drains what is there and returns.
 			for {
 				select {
 				case msg := <-c.send:

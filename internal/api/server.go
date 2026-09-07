@@ -36,12 +36,10 @@ const (
 	rateEntryTTL = 10 * time.Minute
 	// rateSweepEvery bounds how often idle entries are expired.
 	rateSweepEvery = time.Minute
-	// unmatchedRoute is the route label for a request no route claimed. The
-	// path of a 404 is whatever the caller sent, so it must never become a
-	// label value.
+	// unmatchedRoute labels a request no route claimed: the path of a 404 is whatever the caller sent,
+	// so it must never become a label value.
 	unmatchedRoute = "unmatched"
-	// wsPath is the WebSocket route.
-	wsPath = "/api/v1/ws"
+	wsPath         = "/api/v1/ws"
 )
 
 // Server holds the handlers' dependencies.
@@ -57,9 +55,8 @@ type Server struct {
 	// ethUsdMaxAge mirrors collector.eth_usd_max_age: a recorded spot older
 	// than this is served as null.
 	ethUsdMaxAge time.Duration
-	// metrics is where requests and WebSocket activity are recorded, and
-	// gatherer is what /metrics serves. Both are always set: New builds a
-	// registry of its own when the caller passes none.
+	// metrics records requests and WebSocket activity; gatherer is what /metrics serves. Both are
+	// always set: New builds a registry of its own when the caller passes none.
 	metrics  *metrics.API
 	gatherer prometheus.Gatherer
 }
@@ -70,12 +67,10 @@ type Option func(*Server)
 // WithClock overrides the clock (tests).
 func WithClock(now func() time.Time) Option { return func(s *Server) { s.now = now } }
 
-// WithVersion sets the version reported by /status.
 func WithVersion(v string) Option { return func(s *Server) { s.version = v } }
 
-// WithMetrics records requests and WebSocket activity on m and serves g at
-// /metrics. Production passes the process registry; without it the server
-// builds one of its own, so /metrics always answers.
+// WithMetrics records requests and WebSocket activity on m and serves g at /metrics. Without it the
+// server builds a registry of its own, so /metrics always answers.
 func WithMetrics(m *metrics.API, g prometheus.Gatherer) Option {
 	return func(s *Server) {
 		if m != nil && g != nil {
@@ -88,9 +83,8 @@ func WithMetrics(m *metrics.API, g prometheus.Gatherer) Option {
 // status. It is optional for servers built without the live WebSocket feed.
 func WithListener(l db.ListenerStatusReporter) Option { return func(s *Server) { s.listener = l } }
 
-// WithEthUsdMaxAge sets how long a recorded ETH/USD spot is served before
-// /live reports null. It must match the collector's
-// collector.eth_usd_max_age; a non-positive value keeps the default.
+// WithEthUsdMaxAge sets how long a recorded ETH/USD spot is served before /live reports null. It must
+// match collector.eth_usd_max_age; a non-positive value keeps the default.
 func WithEthUsdMaxAge(d time.Duration) Option {
 	return func(s *Server) {
 		if d > 0 {
@@ -99,8 +93,7 @@ func WithEthUsdMaxAge(d time.Duration) Option {
 	}
 }
 
-// New builds the server and its router. hub may be nil when the WebSocket
-// is not wanted.
+// New builds the server and its router. hub may be nil when the WebSocket is not wanted.
 func New(store db.Store, cfg config.ServerConfig, hub *Hub, log *logger.Logger, opts ...Option) *Server {
 	if log == nil {
 		log = logger.Nop()
@@ -117,8 +110,7 @@ func New(store db.Store, cfg config.ServerConfig, hub *Hub, log *logger.Logger, 
 		s.hub.live = s.buildLive
 		s.hub.network = s.networkModel
 		s.hub.setLimits(cfg.WSMaxPerIP, cfg.WSMaxTotal)
-		// The hello re-ages a cached snapshot's quote against the same
-		// cutoff /live applies, so both endpoints agree on what is live.
+		// The hello re-ages a cached snapshot's quote against the same cutoff /live applies.
 		s.hub.ethUsdMaxAge = s.ethUsdMaxAge
 		s.hub.now = s.now
 		s.hub.metrics = s.metrics
@@ -127,7 +119,6 @@ func New(store db.Store, cfg config.ServerConfig, hub *Hub, log *logger.Logger, 
 	return s
 }
 
-// Handler returns the HTTP handler.
 func (s *Server) Handler() http.Handler { return s.router }
 
 func (s *Server) routes() chi.Router {
@@ -189,20 +180,16 @@ func (s *Server) routes() chi.Router {
 	if s.hub != nil {
 		r.Get(wsPath, s.hub.ServeWS)
 	}
-	// Scraped, not browsed: no request timeout, no cache header and no
-	// JSON envelope, and the exposition format is the whole response.
+	// Scraped, not browsed: no request timeout, no cache header and no JSON envelope.
 	r.Get(metrics.Path, metrics.Handler(s.gatherer).ServeHTTP)
 	return r
 }
 
-// requestMetrics records one served request. The route label is the
-// router's pattern, resolved only once the handler has returned, so a
-// block number or a network name in the path never becomes a series of its
-// own. The scrape does not count itself, and a WebSocket that upgraded is
-// not a request: its duration is the life of the socket, which says
-// nothing about request latency. A handshake the server refused is an
-// ordinary answer and is counted like one, so sustained WebSocket errors
-// reach the error rate instead of disappearing.
+// requestMetrics records one served request. The route label is the router's pattern, resolved only
+// once the handler returned, so a block number or network name never becomes a series of its own. The
+// scrape does not count itself, and a WebSocket that upgraded is not a request: its duration is the
+// life of the socket. A handshake the server refused is counted like any other answer, so sustained
+// WebSocket errors reach the error rate instead of disappearing.
 func requestMetrics(m *metrics.API) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +226,6 @@ func routePattern(r *http.Request) string {
 	return unmatchedRoute
 }
 
-// writeJSON writes v with the given status and Cache-Control.
 func writeJSON(w http.ResponseWriter, status int, cacheControl string, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if cacheControl != "" {
@@ -249,17 +235,14 @@ func writeJSON(w http.ResponseWriter, status int, cacheControl string, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeError writes the error envelope.
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, "no-store", model.ErrorBody{Error: model.ErrorDetail{Code: code, Message: msg}})
 }
 
-// realIP replaces RemoteAddr with the client address the configured
-// reverse proxies forwarded. Forwarding headers are believed only when the
-// direct peer is a trusted proxy; the X-Forwarded-For chain is then walked
-// from the right, past every trusted hop, to the first address a trusted
-// proxy did not vouch for. A private peer address proves nothing by
-// itself, and with no trusted proxies configured the peer is the client.
+// realIP replaces RemoteAddr with the client address the configured reverse proxies forwarded.
+// Forwarding headers are believed only when the direct peer is a trusted proxy; the X-Forwarded-For
+// chain is then walked from the right, past every trusted hop, to the first address no trusted proxy
+// vouched for. A private peer address proves nothing by itself.
 func realIP(trusted []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -286,9 +269,8 @@ func inNets(ip net.IP, nets []*net.IPNet) bool {
 	return false
 }
 
-// forwardedClient walks X-Forwarded-For right to left and returns the first
-// hop that is not a trusted proxy (or the leftmost hop when every hop is
-// trusted), falling back to X-Real-IP. Empty when nothing usable is there.
+// forwardedClient walks X-Forwarded-For right to left and returns the first hop that is not a trusted
+// proxy (or the leftmost when all are), falling back to X-Real-IP. Empty when nothing usable is there.
 func forwardedClient(r *http.Request, trusted []*net.IPNet) string {
 	var hops []net.IP
 	for _, xff := range r.Header.Values("X-Forwarded-For") {
@@ -309,7 +291,6 @@ func forwardedClient(r *http.Request, trusted []*net.IPNet) string {
 	return ""
 }
 
-// requestLogger logs one line per request.
 func requestLogger(log *logger.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -326,11 +307,9 @@ func requestLogger(log *logger.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// rateLimiter keeps a token bucket per client IP in a bounded LRU: idle
-// entries expire after rateEntryTTL (swept at most every rateSweepEvery,
-// on any request, not only when a new address shows up) and the least
-// recently seen address is evicted when the hard cap is reached, so
-// memory and per-request work stay bounded whatever the addresses do.
+// rateLimiter keeps a token bucket per client IP in a bounded LRU: idle entries expire after
+// rateEntryTTL (swept at most every rateSweepEvery, on any request) and the least recently seen
+// address is evicted at the hard cap, so memory and per-request work stay bounded.
 type rateLimiter struct {
 	mu        sync.Mutex
 	limit     rate.Limit
@@ -381,8 +360,8 @@ func entryOf(el *list.Element) *rateEntry {
 	return e
 }
 
-// sweepLocked drops entries idle for longer than the TTL, walking from the
-// least recently seen end and stopping at the first live one.
+// sweepLocked drops entries idle for longer than the TTL, walking from the least recently seen end
+// and stopping at the first live one.
 func (rl *rateLimiter) sweepLocked(now time.Time) {
 	for el := rl.order.Back(); el != nil; {
 		e := entryOf(el)
@@ -400,14 +379,12 @@ func (rl *rateLimiter) removeLocked(el *list.Element) {
 	rl.order.Remove(el)
 }
 
-// size returns the number of tracked addresses.
 func (rl *rateLimiter) size() int {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	return rl.order.Len()
 }
 
-// clientIP strips the port from a remote address.
 func clientIP(addr string) string {
 	if host, _, ok := strings.Cut(addr, ":"); ok && !strings.Contains(addr, "]") {
 		return host
@@ -419,11 +396,9 @@ func clientIP(addr string) string {
 
 func (rl *rateLimiter) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The scrape is exempt: where a proxy or a mesh makes ordinary
-		// traffic and Prometheus share one peer address, a throttled
-		// /metrics reads as a dead api and pages for it. The endpoint is
-		// not routed by the chart's Ingress, so it is reachable from
-		// inside the cluster only.
+		// The scrape is exempt: where a proxy or mesh makes ordinary traffic and Prometheus share one
+		// peer address, a throttled /metrics reads as a dead api and pages for it. The endpoint is not
+		// routed by the chart's Ingress, so it is reachable from inside the cluster only.
 		if r.URL.Path == metrics.Path {
 			next.ServeHTTP(w, r)
 			return

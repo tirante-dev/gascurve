@@ -19,11 +19,9 @@ func WithMetrics(m *metrics.Collector) func(*Options) {
 	return func(o *Options) { o.Metrics = m }
 }
 
-// Run drives the fast loop, the slow loop and the history loop (gap
-// filling and the backfill) until ctx ends.
-// It returns early when the follower cannot initialize or when the RPC
-// reports a different chain id than the one configured: nothing from the
-// wrong chain may be written under this network's identity.
+// Run drives the fast loop, the slow loop and the history loop until ctx ends. It returns early when
+// the follower cannot initialize or when the RPC reports a different chain id than the one configured:
+// nothing from the wrong chain may be written under this network's identity.
 func (f *Follower) Run(ctx context.Context) error {
 	start := f.now()
 	if err := f.ensureInit(ctx); err != nil {
@@ -49,20 +47,15 @@ func (f *Follower) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// verifyChainID refuses to run against an RPC whose eth_chainId differs
-// from the configured chain id, recording the mismatch on the network row.
-// With a pool every endpoint is verified (a mismatching one is disabled
-// and shown in /status) and the follower runs as long as one is usable;
-// capabilities are then routed among the usable endpoints.
+// verifyChainID refuses to run against an RPC whose eth_chainId differs from the configured chain id,
+// recording the mismatch on the network row. With a pool every endpoint is verified (a mismatching one
+// is disabled and shown in /status) and the follower runs as long as one is usable.
 func (f *Follower) verifyChainID(ctx context.Context) error {
 	if f.pool != nil {
 		err := f.pool.Verify(ctx)
-		// Observed either way, and before the error is returned: a pool
-		// with no usable endpoint stops the follower before the slow loop
-		// ever runs, so this is the only place the endpoint gauges can
-		// come from when every endpoint fails at startup. Without it the
-		// worst case, a network that never had a working endpoint, is the
-		// one case the exhausted-endpoints alert cannot see.
+		// Observed either way, and before the error is returned: a pool with no usable endpoint stops the
+		// follower before the slow loop ever runs, so this is the only place the endpoint gauges can come
+		// from when every endpoint fails at startup.
 		status := f.pool.Status()
 		f.metrics.ObservePool(poolMetrics(f.rpc.Stats(), &status))
 		if err != nil {
@@ -90,10 +83,8 @@ func (f *Follower) refuse(ctx context.Context, err error) error {
 	return err
 }
 
-// runFast drives the fast loop: on the timer when polling, on newHeads
-// events when a head source is configured. The timer runs at the
-// network's effective tick interval (its own tick_interval, else
-// collector.tick_interval).
+// runFast drives the fast loop: on the timer when polling, on newHeads events when a head source is
+// configured. The timer runs at the network's effective tick interval.
 func (f *Follower) runFast(ctx context.Context) {
 	if f.heads == nil {
 		f.runPolling(ctx)
@@ -120,17 +111,12 @@ func (f *Follower) runPolling(ctx context.Context) {
 	}
 }
 
-// runOnHeads ticks at every head the subscription delivers, sampling state
-// at that block number. Heads that arrive while a tick is running collapse
-// into one tick at the newest of them (the catch-up fetches the rest). The
-// timer keeps firing at the effective tick interval but only ticks while
-// the subscription is down, so the follower degrades to polling and picks the
-// subscription back up on its own; the first timer beat after the
-// subscription comes up runs one explicit tick, so a quiet chain is
-// sampled as soon as the subscription is acknowledged rather than at its
-// next head. After a failed head tick (say the HTTP node has not seen that
-// block yet) the timer polls once so a quiet chain cannot leave the
-// follower stuck on a stale head.
+// runOnHeads ticks at every head the subscription delivers, sampling state at that block number. Heads
+// that arrive while a tick is running collapse into one tick at the newest of them. The timer keeps
+// firing but only ticks while the subscription is down, so the follower degrades to polling and picks
+// the subscription back up on its own. The first timer beat after it comes up runs one explicit tick,
+// so a quiet chain is sampled as soon as the subscription is acknowledged. After a failed head tick the
+// timer polls once, so a quiet chain cannot leave the follower stuck on a stale head.
 func (f *Follower) runOnHeads(ctx context.Context) {
 	var mu sync.Mutex
 	var latest uint64
@@ -205,14 +191,11 @@ func (f *Follower) runSlow(ctx context.Context) {
 	}
 }
 
-// runHistory is the loop that rebuilds history: every iteration fills one
-// batch of the newest fillable hole, and only when nothing is fillable
-// does it spend the iteration on the backfill. Gap filling outlives the
-// backfill, because a paced network keeps skipping ranges as it follows
-// the head. Completion is never cached here: BackfillStep answers Done
-// from the durable cursor without a call, so a rewind that resets that
-// cursor is picked up by the next iteration instead of leaving the
-// deleted history unrebuilt for the life of the process.
+// runHistory rebuilds history: every iteration fills one batch of the newest fillable hole, and only
+// when nothing is fillable does it spend the iteration on the backfill. Gap filling outlives the
+// backfill, because a paced network keeps skipping ranges as it follows the head. Completion is never
+// cached here: BackfillStep answers Done from the durable cursor, so a rewind that resets that cursor
+// is picked up by the next iteration.
 func (f *Follower) runHistory(ctx context.Context) {
 	for ctx.Err() == nil {
 		start := f.now()
@@ -255,9 +238,8 @@ func (f *Follower) runHistory(ctx context.Context) {
 		f.observeLoop(loopHistory, start, err)
 		switch back {
 		case BackfillDone, BackfillIdle:
-			// A finished backfill is polled at the idle cadence: the
-			// cursor answers Done without a call, and a rewind that
-			// resets it puts the job back to work on its own.
+			// A finished backfill is polled at the idle cadence: the cursor answers Done without a call,
+			// and a rewind that resets it puts the job back to work on its own.
 			if err := f.sleep(ctx, backfillIdle); err != nil {
 				return
 			}
@@ -276,8 +258,8 @@ func (f *Follower) observeLoop(loop string, start time.Time, err error) {
 	}
 }
 
-// Run starts one follower per enabled network and blocks until ctx ends.
-// A follower that fails to initialize is restarted after restartDelay.
+// Run starts one follower per enabled network and blocks until ctx ends. A follower that fails to
+// initialize is restarted after restartDelay.
 func Run(ctx context.Context, cfg *config.Config, store db.Store, newRPC func(config.NetworkConfig) RPC, log *logger.Logger, opts ...func(*Options)) {
 	enabled := cfg.EnabledNetworks()
 	followers := make([]*Follower, 0, len(enabled))
@@ -293,9 +275,8 @@ func Run(ctx context.Context, cfg *config.Config, store db.Store, newRPC func(co
 			monitors[f.monitor] = true
 		}
 	}
-	// A collector configured with no enabled networks still has a live
-	// health server. Discover its monitor from the process option so startup
-	// can complete instead of entering a probe restart loop.
+	// A collector with no enabled networks still has a live health server: discover its monitor from the
+	// process option so startup can complete instead of entering a probe restart loop.
 	if len(followers) == 0 {
 		o := Options{}
 		for _, apply := range opts {

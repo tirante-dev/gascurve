@@ -13,14 +13,13 @@ import (
 // ResolutionOrder fixes the fold order so output is deterministic.
 var ResolutionOrder = []string{Resolution1m, Resolution15m, Resolution1h}
 
-// BucketBuilder aggregates block rows into one bucket. It is the single
-// definition of the bucket arithmetic, shared by the collector's folds, the
-// in-memory store and the tests that pin the SQL rebuild to it.
+// BucketBuilder aggregates block rows into one bucket. It is the single definition of the bucket
+// arithmetic, shared by the collector's folds, the in-memory store and the tests that pin the SQL
+// rebuild to it.
 type BucketBuilder struct {
 	b Bucket
 }
 
-// NewBucketBuilder starts an empty bucket.
 func NewBucketBuilder(chainID uint64, resolution string, start time.Time) *BucketBuilder {
 	return &BucketBuilder{b: Bucket{
 		ChainID: chainID, Resolution: resolution, BucketStart: start,
@@ -32,11 +31,9 @@ func NewBucketBuilder(chainID uint64, resolution string, start time.Time) *Bucke
 	}}
 }
 
-// Add folds one block in. setID is the constraint set in force at the
-// block. A block without the pricing breakdown (PricingUnknown, or no
-// recorded floor) makes the bucket's floor, surplus and minimum fee
-// unknown: one block of guessed history must not be presented as an exact
-// split for the whole window.
+// Add folds one block in. setID is the constraint set in force at the block. A block without the
+// pricing breakdown makes the bucket's floor, surplus and minimum fee unknown: one block of guessed
+// history must not be presented as an exact split for the whole window.
 func (a *BucketBuilder) Add(blk Block, setID sql.NullInt64) {
 	fee := blk.BaseFee.BigInt()
 	if !blk.Known() {
@@ -100,9 +97,8 @@ func (a *BucketBuilder) Add(blk Block, setID sql.NullInt64) {
 	}
 }
 
-// Bucket returns the aggregate; the average is derived from the exact sum.
-// A window holding any block without the pricing breakdown reports no fee
-// split and no floor at all.
+// Bucket returns the aggregate; the average is derived from the exact sum. A window holding any block
+// without the pricing breakdown reports no fee split and no floor at all.
 func (a *BucketBuilder) Bucket() Bucket {
 	if a.b.Blocks > 0 {
 		a.b.BaseFeeAvg = NewWei(new(big.Int).Div(a.b.BaseFeeSum.Wei.BigInt(), big.NewInt(a.b.Blocks)))
@@ -114,9 +110,8 @@ func (a *BucketBuilder) Bucket() Bucket {
 	return a.b
 }
 
-// baseFeeSumOf is the sum behind a bucket's average: the exact one when
-// known, otherwise the rounded average times the block count (the best a
-// row written before the sum existed can offer).
+// baseFeeSumOf is the sum behind a bucket's average: the exact one when known, otherwise the rounded
+// average times the block count.
 func baseFeeSumOf(b Bucket) *big.Int {
 	if b.BaseFeeSum.Valid {
 		return b.BaseFeeSum.Wei.BigInt()
@@ -140,8 +135,7 @@ func ReplayErrorBips(blk Block) int64 {
 	return pricer.ErrorBips(blk.PredictedBaseFee.BigInt(), blk.BaseFee.BigInt())
 }
 
-// BucketStarts returns the distinct window starts of rows at a resolution,
-// ascending.
+// BucketStarts returns the distinct window starts of rows at a resolution, ascending.
 func BucketStarts(rows []Block, resolution string) []time.Time {
 	width := Resolutions[resolution]
 	var out []time.Time
@@ -156,8 +150,7 @@ func BucketStarts(rows []Block, resolution string) []time.Time {
 	return out
 }
 
-// FoldBlocks groups consecutive blocks (ascending by number) into partial
-// buckets for every resolution, in ResolutionOrder.
+// FoldBlocks groups consecutive blocks into partial buckets for every resolution, in ResolutionOrder.
 func FoldBlocks(rows []Block, setID func(uint64) sql.NullInt64) []Bucket {
 	var out []Bucket
 	for _, res := range ResolutionOrder {
@@ -180,13 +173,10 @@ func FoldBlocks(rows []Block, setID func(uint64) sql.NullInt64) []Bucket {
 	return out
 }
 
-// MergeBuckets adds partial bucket b into stored bucket old exactly like the
-// SQL fold: counters and sums add, min/max combine, *_end fields follow the
-// higher last block, array maxima are element-wise, and the pricing version
-// is the lower of the two. A sum or fee split that is unknown on either
-// side stays unknown, and a merged bucket holding any block without the
-// pricing breakdown reports no split and no floor; the average then falls
-// back to the rounded reconstruction for the unknown side.
+// MergeBuckets adds partial bucket b into stored bucket old exactly like the SQL fold: counters and
+// sums add, min/max combine, *_end fields follow the higher last block, array maxima are element-wise,
+// and the pricing version is the lower of the two. A sum or split unknown on either side stays unknown,
+// and a merged bucket holding any block without the breakdown reports no split and no floor.
 func MergeBuckets(old, b Bucket) Bucket {
 	merged := old
 	merged.Blocks = old.Blocks + b.Blocks

@@ -15,9 +15,8 @@ type OwnerAction struct {
 	Owner       string
 	Selector    string
 	Method      string
-	// Args is the decoded argument map (JSON friendly values: uint64 and
-	// int64 as numbers, uint256 as decimal strings, addresses as strings).
-	// Unknown selectors get {"raw": "0x..."} with the full calldata.
+	// Args is the decoded argument map (uint64 and int64 as numbers, uint256 as decimal strings,
+	// addresses as strings). Unknown selectors get {"raw": "0x..."} with the full calldata.
 	Args map[string]any
 	// Constraints is set for setGasPricingConstraints.
 	Constraints []ConstraintParam
@@ -54,8 +53,7 @@ type ownerMethod struct {
 	kinds  []argKind
 }
 
-// ownerMethods lists the ArbOwner functions decoded by name. Keys are the
-// canonical signatures; selectors are computed once at init.
+// ownerMethods lists the ArbOwner functions decoded by name. Keys are the canonical signatures.
 var ownerMethods = map[string]ownerMethod{
 	"setMinimumL2BaseFee(uint256)":            {methodSetMinimumL2BaseFee, []string{"priceInWei"}, []argKind{kindUint256}},
 	"setSpeedLimit(uint64)":                   {"setSpeedLimit", []string{paramLimit}, []argKind{kindUint64}},
@@ -90,9 +88,8 @@ func init() {
 	}
 }
 
-// DecodeOwnerActs decodes an OwnerActs(bytes4 indexed method, address
-// indexed owner, bytes data) log. The data payload is the full calldata of
-// the owner call (selector plus ABI-encoded arguments).
+// DecodeOwnerActs decodes an OwnerActs(bytes4 indexed method, address indexed owner, bytes data) log.
+// The data payload is the full calldata of the owner call.
 func DecodeOwnerActs(l Log) (*OwnerAction, error) {
 	if len(l.Topics) != 3 || l.Topics[0] != OwnerActsTopic {
 		return nil, fmt.Errorf("log %s/%d: not an OwnerActs event", l.TxHash, l.LogIndex)
@@ -136,10 +133,9 @@ func mustDecode(s string) []byte {
 	return padWord(b)
 }
 
-// DecodeOwnerCalldata decodes an ArbOwner call. Unknown selectors yield an
-// empty method name and {"raw": calldata}. A known selector whose
-// arguments do not decode is an error: such an event may change the
-// pricer and must not be stored as an opaque raw action.
+// DecodeOwnerCalldata decodes an ArbOwner call. Unknown selectors yield an empty method name and
+// {"raw": calldata}. A known selector whose arguments do not decode is an error: such an event may
+// change the pricer and must not be stored as an opaque raw action.
 func DecodeOwnerCalldata(calldata []byte) (method string, args map[string]any, constraints []ConstraintParam, minBaseFee *big.Int, err error) {
 	raw := map[string]any{"raw": EncodeHex(calldata)}
 	if len(calldata) < 4 {
@@ -196,8 +192,7 @@ func DecodeOwnerCalldata(calldata []byte) (method string, args map[string]any, c
 	return m.name, args, nil, minBaseFee, nil
 }
 
-// EncodeSetGasPricingConstraints builds the calldata for
-// setGasPricingConstraints(uint64[3][]), used by tests and tooling.
+// EncodeSetGasPricingConstraints builds the calldata for setGasPricingConstraints(uint64[3][]).
 func EncodeSetGasPricingConstraints(constraints []ConstraintParam) []byte {
 	out := make([]byte, 0, 4+wordSize*(2+3*len(constraints)))
 	out = append(out, selSetGasPricingConstr[:]...)

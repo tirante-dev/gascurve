@@ -485,15 +485,10 @@ export function GasRateTile({ label, gasPerSecond }: { label: ReactNode; gasPerS
 }
 
 /**
- * What a transaction of a given size costs, in dollars when the collector has
- * a fresh quote and in ETH when it does not. The dollar figure is the primary
- * one because it is the one people hold in their heads; the multiplication
- * behind it, the quote it used and that quote's age stay a hover away and are
- * always in the accessible description, so nothing is only available to a
- * pointer.
- *
- * `align` is which way the note opens: the tiles sit two to a row, and the
- * right-hand one has to open leftwards to stay inside the card.
+ * What a transaction of a given size costs, in dollars when the collector has a fresh quote and in ETH
+ * when it does not. The multiplication behind it, the quote and its age stay a hover away and are always
+ * in the accessible description. `align` is which way the note opens: the right-hand tile of a row has to
+ * open leftwards to stay inside the card.
  */
 export function CostTile({ label, eth, ethUsd, nowMs, align }: { label: ReactNode; eth: number; ethUsd: EthUsd | null; nowMs: number; align?: NoteAlign }) {
   const math = usdMath(eth, ethUsd, nowMs);
@@ -656,13 +651,9 @@ export function LiveHero({ network, live, status, model }: { network: string; li
 }
 
 /**
- * The hero with everything it shows as plain props: the figures on the left,
- * the chosen range of base fee on the right. `snapshot` is the display
- * snapshot (the render cadence), so block number, gas in the block and the
- * freshness follow it; `values` are the eased figures, with the sample
- * standing in until the first frame has produced them. With no snapshot the
- * hero says which kind of nothing it is: a reorg that took the last canonical
- * state away, or a feed that has not delivered one yet.
+ * The hero with everything it shows as plain props. `snapshot` is the display snapshot, so block number,
+ * gas and freshness follow it; `values` are the eased figures, with the sample standing in until the
+ * first frame. With no snapshot the hero says which kind of nothing it is.
  */
 export function LiveHeroView({
   network,

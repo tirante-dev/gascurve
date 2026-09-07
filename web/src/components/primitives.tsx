@@ -22,7 +22,6 @@ export function Label({ children }: { children: ReactNode }) {
   return <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-label">{children}</div>;
 }
 
-/** A label/value pair. Values are set in the mono face with tabular figures. */
 export function Stat({ label, value, unit, hint, size = "md" }: { label: ReactNode; value: ReactNode; unit?: ReactNode; hint?: ReactNode; size?: "sm" | "md" | "lg" }) {
   const valueClass = size === "lg" ? "text-3xl sm:text-4xl" : size === "sm" ? "text-base" : "text-xl";
   return (
@@ -37,11 +36,8 @@ export function Stat({ label, value, unit, hint, size = "md" }: { label: ReactNo
   );
 }
 
-/**
- * A live figure in a box of reserved width, so a changing digit or decimal
- * count never moves its neighbours: tabular figures in the mono face, and
- * `ch` (the width of a digit) reserved. The unit belongs outside, after it.
- */
+/** A live figure in a box of reserved width, so a changing digit never moves its neighbours. `ch` is the
+ * width of a digit; the unit belongs outside, after it. */
 export function Figure({ children, ch, className = "" }: { children: ReactNode; ch: number; className?: string }) {
   return (
     <span className={`num inline-block text-left tabular-nums ${className}`} style={{ minWidth: `${ch}ch` }}>
@@ -54,12 +50,9 @@ export function Figure({ children, ch, className = "" }: { children: ReactNode; 
 export type NoteAlign = "start" | "end";
 
 /**
- * The edge classes for each alignment, and the `sm` overrides that let a note
- * change edge at the breakpoint. A grid that reflows moves a tile between
- * columns (`grid-cols-2 sm:grid-cols-5` puts the third stat on the left narrow
- * and in the middle wide), and a panel wider than one column has to open from
- * whichever edge keeps it inside the card at that width, so one static edge
- * cannot serve both. Tailwind scans for whole class names, hence the table.
+ * The edge classes for each alignment, and the `sm` overrides that let a note change edge at the
+ * breakpoint: a reflowing grid moves a tile between columns, so one static edge cannot keep a panel
+ * inside the card at both widths. Tailwind scans for whole class names, hence the table.
  */
 const NOTE_ALIGN: Record<NoteAlign, string> = {
   start: "left-0",
@@ -71,48 +64,17 @@ const NOTE_ALIGN_SM: Record<NoteAlign, string> = {
 };
 
 /**
- * Whether the note anchors to a block of its own or sits inside a line of
- * running text. A tile is a fixed-width grid cell, so `block` places the panel
- * against the whole tile. A word mid-sentence cannot have a block wrapper
- * without breaking the line around it, so `inline` leaves the wrapper
- * unpositioned and the panel anchors to the nearest positioned ancestor
- * instead: **the line element must be `relative`**. Anchoring to the word
- * itself is what does not work. A panel is far wider than the word it explains,
- * so at a phone's width it runs off whichever edge the word sits nearer, and
- * neither `align` saves it.
+ * Whether the note anchors to a block of its own or sits inside running text. A tile is a fixed-width
+ * grid cell, so `block` places the panel against the whole tile. `inline` leaves the wrapper unpositioned
+ * and the panel anchors to the nearest positioned ancestor: **the line element must be `relative`**.
+ * Anchoring to the word itself does not work, since a panel is far wider than the word it explains.
  */
 export type NoteFlow = "block" | "inline";
 
 /**
- * A figure whose working is a hover away. The browser's own `title` tooltip
- * was the obvious way to carry it and the wrong one: it gives the reader
- * nothing to notice, waits about a second, and draws in the platform's chrome
- * rather than the panel the charts already read out in. So the trigger says it
- * is inspectable (a dotted rule and a help cursor) and the panel is the one
- * from ChartTooltip.
- *
- * Focus opens it as hover does, so the working is not behind a pointer, and
- * `description` states the same facts in the accessible name for a reader that
- * gets neither. The panel is `aria-hidden` because that description already
- * carries it: announcing both would say everything twice.
- *
- * WCAG 1.4.13 asks that content shown on hover or focus be hoverable and
- * dismissable, so the panel takes the pointer (with the gap above the figure
- * bridged, or crossing it would close the panel on the way in) and Escape
- * closes it.
- *
- * Escape has to be caught twice over, because the two ways in leave the key
- * somewhere different. A reader who focused the figure sends it to the figure;
- * a reader who only hovered has never moved focus, so it goes to whatever holds
- * it, usually the body. Hence a handler on the trigger and, while the pointer
- * is over the note, one on the document. Dismissing has to work without moving
- * the pointer, which is the whole point of the requirement.
- *
- * Escape is undone on the way in, by the pointer or the focus arriving, rather
- * than on the way out. Both edges would do in the ordinary case; arriving is
- * the one to hang it on because of how the two fail. A missed leave leaves the
- * note permanently unopenable, which is worse than what it was fixing; a
- * missed arrival costs nothing, because the next one clears it.
+ * Whether the note anchors to a block of its own or sits inside running text. A tile is a fixed-width grid
+ * cell, so `block` places the panel against the whole tile. `inline` leaves the wrapper unpositioned and
+ * the panel anchors to the nearest positioned ancestor: **the line element must be `relative`**.
  */
 export function HoverNote({
   children,
@@ -135,8 +97,8 @@ export function HoverNote({
 }) {
   const [dismissed, setDismissed] = useState(false);
   const [under, setUnder] = useState(false);
-  // Only while the pointer is on the note: a page of these should not each hold
-  // a document listener for a key that is not being pressed at them.
+  // Escape is caught here as well as on the trigger, because a reader who only hovered never moved focus.
+  // Only while the pointer is on the note: a page of these should not each hold a document listener.
   useEffect(() => {
     if (!under) return;
     const close = (e: KeyboardEvent) => e.key === "Escape" && setDismissed(true);
@@ -144,11 +106,9 @@ export function HoverNote({
     return () => document.removeEventListener("keydown", close);
   }, [under]);
   return (
-    /* The panel is placed against the tile, not against the figure: a note wider
-       than the digits it explains has the whole tile to open into, which is what
-       keeps the right-hand one of a pair on screen at a phone's width. An inline
-       note anchors to the line it sits in for the same reason, which is the
-       call site's `relative` and not this wrapper's. */
+    /* The panel is placed against the tile, not the figure: a note wider than the digits it explains has
+       the whole tile to open into. An inline note anchors to the line it sits in, which is the call
+       site's `relative` and not this wrapper's. */
     <span
       className={flow === "inline" ? "group" : "group relative block"}
       onMouseEnter={() => {
@@ -202,11 +162,9 @@ export function Term({ children, lines, align, alignSm, flow }: { children: stri
 const BIPS_NOTE = "basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.";
 
 /**
- * A figure quoted in basis points, with the unit's definition and its own
- * value in ordinary decimal a hover away. The pricer works in integer bips and
- * the api hands them over unchanged, so the raw unit reaches the page; rather
- * than translate it away (the integer is the thing the pricer actually holds)
- * the word carries what it means.
+ * A figure quoted in basis points, with the unit's definition and its decimal value a hover away. The
+ * pricer works in integer bips and the api hands them over unchanged, so rather than translate the unit
+ * away the word carries what it means.
  */
 export function Bips({ value, align = "end" }: { value: number; align?: NoteAlign }) {
   const bips = Math.round(value);
@@ -252,10 +210,9 @@ export const HATCH_STROKE = 2;
 export type SwatchKind = "rect" | "line" | "hatch";
 
 /**
- * The hatch a chart fills an unknown series with. Drawn at full strength: a
- * translucent hatch composites to about 2.2:1 on the light chart surface,
- * under the 3:1 a non-text mark needs. Its legend swatch repeats the same
- * geometry, so the association does not rest on colour alone.
+ * The hatch a chart fills an unknown series with, drawn at full strength: a translucent hatch composites
+ * to about 2.2:1 on the light chart surface, under the 3:1 a non-text mark needs. Its legend swatch
+ * repeats the geometry, so the association does not rest on colour alone.
  */
 export function HatchPattern({ id, color }: { id: string; color: string }) {
   return (
@@ -270,8 +227,8 @@ export function Swatch({ color, kind = "rect" }: { color: string; kind?: SwatchK
     return <span className="inline-block h-0.5 w-4 rounded-full align-middle" style={{ background: color }} aria-hidden="true" />;
   }
   if (kind === "hatch") {
-    // The same 45 degree hatch the chart fills with, at the same spacing, so
-    // the legend carries the pattern and not only the colour.
+    // The same 45 degree hatch the chart fills with, so the legend carries the pattern and not only the
+    // colour.
     return (
       <span
         className="inline-block h-2.5 w-2.5 rounded-[2px] align-middle"
@@ -299,25 +256,16 @@ export function Legend({ items }: { items: { label: string; color: string; kind?
   );
 }
 
-/**
- * Room at the right of a time axis for half of its last tick label. The axis
- * spans the window a range asked for, so its last tick sits exactly at the
- * right edge and would otherwise be cut in half by the frame.
- */
+/** Room at the right of a time axis for half of its last tick label: the axis spans the window a range
+ * asked for, so its last tick sits exactly at the edge. */
 export const TIME_AXIS_RIGHT = 22;
 
-/**
- * How tall a chart frame stands: a number of pixels, or the utility classes
- * that size it. An enlarged chart is sized against the viewport, which is a
- * class and not a number.
- */
+/** How tall a chart frame stands: pixels, or the utility classes that size it. An enlarged chart is sized
+ * against the viewport, which is a class and not a number. */
 export type ChartHeight = number | string;
 
-/**
- * Charts scroll inside this frame on narrow screens; the page never scrolls
- * sideways. The frame paints the chart surface, the colour every series
- * palette was validated against, so marks never sit on the card colour.
- */
+/** Charts scroll inside this frame on narrow screens; the page never scrolls sideways. The frame paints
+ * the chart surface, the colour every series palette was validated against. */
 export function ChartFrame({ height, minWidth = 560, children, label }: { height: ChartHeight; minWidth?: number; children: ReactNode; label: string }) {
   const sized = typeof height === "string";
   return (

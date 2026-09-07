@@ -27,16 +27,14 @@ type Header struct {
 	// PosterGas is the sum of gasUsedForL1 from the block's receipts. It is
 	// nil only for header-only lookups that do not need fee accounting.
 	PosterGas *uint64
-	// computeGasBefore holds the cumulative compute gas before each
-	// transaction. It comes from the same validated receipt set as PosterGas
-	// and lets replay place owner actions at the correct compute-gas boundary.
+	// computeGasBefore holds the cumulative compute gas before each transaction, from the same validated
+	// receipt set as PosterGas, so replay can place owner actions at the right compute-gas boundary.
 	computeGasBefore []uint64
 }
 
-// ComputeGas is the gas Nitro applies to the L2 pricer and splits between
-// the infrastructure and network fee accounts. A header-only lookup has no
-// receipt input and falls back to total gas because callers such as ancestry
-// checks do not use the value for fee accounting.
+// ComputeGas is the gas Nitro applies to the L2 pricer and splits between the infrastructure and network
+// fee accounts. A header-only lookup has no receipt input and falls back to total gas, which its callers
+// do not use for fee accounting.
 func (h Header) ComputeGas() uint64 {
 	if h.PosterGas == nil {
 		return h.GasUsed
@@ -47,8 +45,8 @@ func (h Header) ComputeGas() uint64 {
 	return h.GasUsed - *h.PosterGas
 }
 
-// ComputeGasBeforeTx returns the cumulative compute gas before transaction
-// index when the header was joined with its authoritative receipt set.
+// ComputeGasBeforeTx returns the cumulative compute gas before transaction index, when the header was
+// joined with its authoritative receipt set.
 func (h Header) ComputeGasBeforeTx(index uint64) (uint64, bool) {
 	if index >= uint64(len(h.computeGasBefore)) {
 		return 0, false
@@ -83,8 +81,7 @@ type Log struct {
 	LogIndex       uint64
 }
 
-// Receipt is the transaction-ordering and gas-accounting subset of an
-// eth_getTransactionReceipt response.
+// Receipt is the transaction-ordering and gas-accounting subset of an eth_getTransactionReceipt response.
 type Receipt struct {
 	TxHash            string
 	BlockNumber       uint64
@@ -174,8 +171,7 @@ func parseHeader(raw json.RawMessage) (*Block, error) {
 		if err != nil || len(mixHash) != 32 {
 			return nil, fmt.Errorf("block %d mixHash: expected 32 bytes", b.Number)
 		}
-		// Nitro HeaderInfo stores ArbOSFormatVersion in bytes 16 through 23
-		// of the mix digest. This is the version used to process the block.
+		// Nitro HeaderInfo stores ArbOSFormatVersion in bytes 16 through 23 of the mix digest.
 		b.ArbOSVersion = binary.BigEndian.Uint64(mixHash[16:24])
 	}
 	b.TxCount = len(rb.Transactions)
@@ -272,18 +268,16 @@ func parseReceipt(raw json.RawMessage) (*Receipt, error) {
 	return r, nil
 }
 
-// parsePosterGas validates a block receipt set and returns the sum of its
-// authoritative gasUsedForL1 fields. Matching the receipt count, block number
-// and hash keeps a reorg during a batched header/receipt read from joining two
-// different blocks.
+// parsePosterGas validates a block receipt set and returns the sum of its authoritative gasUsedForL1
+// fields. Matching the receipt count, block number and hash keeps a reorg during a batched
+// header/receipt read from joining two different blocks.
 func parsePosterGas(raw json.RawMessage, h Header) (uint64, error) {
 	posterGas, _, err := parseReceiptGas(raw, h)
 	return posterGas, err
 }
 
-// parseReceiptGas also records the cumulative compute gas before each
-// transaction. Owner-action replay uses these boundaries so poster gas from
-// transactions before an action is not added to the compute pricer.
+// parseReceiptGas also records the cumulative compute gas before each transaction, so owner-action
+// replay does not add poster gas from earlier transactions to the compute pricer.
 func parseReceiptGas(raw json.RawMessage, h Header) (posterGas uint64, computeGasBefore []uint64, err error) {
 	if len(raw) == 0 || string(raw) == nullJSON {
 		return 0, nil, fmt.Errorf("block %d receipts not found", h.Number)

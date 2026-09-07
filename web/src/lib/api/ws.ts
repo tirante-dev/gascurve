@@ -1,20 +1,10 @@
-// WebSocket client for docs/ARCHITECTURE.md section 7. It handles hello, reorg,
-// tick, blocks, owner_action and ping (replying pong), switches network with a
-// subscribe message on the same socket, and reconnects with exponential
-// backoff from 1 s to 30 s. The hook layer polls /live while the status is
-// anything other than open.
-//
-// Identity: the client tracks what it asked for (`requested`, a name or a
-// decimal chain id) and what the server last confirmed (`confirmed`: the
-// canonical name, the chain id and the subscription generation the hello
-// answered). Nothing is delivered until a hello matching the current request
-// arrives; ticks and reorgs must carry the confirmed chain id; frames without
-// a chain id (blocks, owner_action) are accepted only while the confirmed
-// generation is the current one. A subscribe whose target is an alias of the
-// confirmed network (its name or its chain id) is a no-op: the server would
-// not answer it with a hello. The status is `open` only once the current
-// generation has been confirmed, and an acknowledgement watchdog that pings
-// cannot satisfy closes a socket whose hello never comes.
+// WebSocket client for docs/ARCHITECTURE.md section 7: hello, reorg, tick, blocks, owner_action and ping
+// (replying pong), switching network with a subscribe on the same socket, reconnecting with exponential
+// backoff. The hook layer polls /live while the status is anything but open. The client tracks what it
+// asked for and what the server last confirmed (name, chain id and subscription generation): nothing is
+// delivered until a hello matching the current request arrives, and frames without a chain id are
+// accepted only while the confirmed generation is current. A subscribe for an alias of the confirmed
+// network is a no-op, since the server would answer it with no hello.
 
 import type { BlockPoint, ClientMessage, HelloData, LiveSnapshot, LiveStatus, OwnerAction, ReorgData, ServerMessage } from "@/types";
 import { API_BASE_URL, isRelativeBase } from "./core";
@@ -41,10 +31,8 @@ export const WATCHDOG_MS = 75_000;
 export const ACK_WATCHDOG_MS = 10_000;
 
 /**
- * WebSocket endpoint: NEXT_PUBLIC_WS_URL, or the api URL with http swapped
- * for ws and /ws appended. A relative api base (the published image bakes
- * /api/v1, served from the same hostname as the app) is resolved against
- * the page's own origin first, since WebSocket has no relative form.
+ * WebSocket endpoint: NEXT_PUBLIC_WS_URL, or the api URL with http swapped for ws and /ws appended. A
+ * relative api base is resolved against the page's own origin first, since WebSocket has no relative form.
  */
 export function resolveWsUrl(
   apiBaseUrl: string = API_BASE_URL,
@@ -206,8 +194,8 @@ export class LiveClient {
     this.generation += 1;
     socket.onopen = () => {
       if (this.socket !== socket) return;
-      // Neither the status nor the backoff counter change here: only the
-      // hello for the current generation makes the feed live.
+      // Neither the status nor the backoff counter change here: only the hello for the current
+      // generation makes the feed live.
       this.armWatchdog(socket);
       if (this.subscribedNetwork !== this.requested) this.sendSubscribe(socket);
       else this.armAckWatchdog(socket);
@@ -236,10 +224,8 @@ export class LiveClient {
     switch (message.type) {
       case "hello": {
         if (!helloMatches(message.data, this.requested)) {
-          // A hello for something else means the server is not on our
-          // subscription: whatever was confirmed before no longer keys the
-          // feed, the status is pending again, and the hello we do want has
-          // the acknowledgement window to arrive.
+          // A hello for something else means the server is not on our subscription: whatever was
+          // confirmed no longer keys the feed, and the hello we want has the acknowledgement window.
           this.confirmed = undefined;
           this.setStatus(this.pendingStatus());
           this.armAckWatchdog(socket);
@@ -279,9 +265,8 @@ export class LiveClient {
       }
       case "error":
         this.options.onError?.(message.error.message);
-        // While confirmed the socket stays open (the server keeps it open too).
-        // An error answering the current subscription means no hello is coming:
-        // drop the socket so the backoff, and then polling, take over.
+        // While confirmed the socket stays open. An error answering the current subscription means no
+        // hello is coming: drop the socket so the backoff, and then polling, take over.
         if (!this.isConfirmed()) this.abandon(socket, 4001, "subscription rejected");
         break;
       case "ping":
@@ -377,10 +362,8 @@ export class LiveClient {
   }
 
   /**
-   * Switches network on the open socket, or on the next connection. Messages
-   * are dropped until the new hello. A target that is an alias of the confirmed
-   * network (its name for a chain-id route, or the reverse) keeps the
-   * subscription as it is: the server would treat the subscribe as a no-op and
+   * Switches network on the open socket, or on the next connection. Messages are dropped until the new
+   * hello. A target that is an alias of the confirmed network keeps the subscription: the server would
    * send no hello, so the feed stays live under the new reference.
    */
   subscribe(network: string): void {
