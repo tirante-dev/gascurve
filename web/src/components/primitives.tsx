@@ -137,7 +137,7 @@ export function HoverNote({ children, lines, description, align = "start", flow 
             zoom, the equation wraps rather than running off the card. */}
         <span className="block w-max max-w-[min(42ch,calc(100vw_-_5rem))] rounded-md border border-hairline bg-surface px-3 py-2 text-left text-xs font-normal leading-snug shadow-lg">
           {lines.map((line, i) => (
-            <span key={line} className={i === 0 ? "num block text-ink" : "block text-ink-2"}>
+            <span key={i} className={i === 0 ? "num block text-ink" : "block text-ink-2"}>
               {line}
             </span>
           ))}
@@ -165,7 +165,7 @@ export function Bips({ value, align = "end" }: { value: number; align?: NoteAlig
   const figure = bips.toLocaleString("en-US");
   return (
     <HoverNote flow="inline" align={align} lines={[`${figure} bips = ${decimal}`, BIPS_NOTE]} description={`${figure} bips is ${decimal}. ${BIPS_NOTE}`}>
-      {figure} <abbr>bips</abbr>
+      {figure} bips
     </HoverNote>
   );
 }

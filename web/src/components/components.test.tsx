@@ -535,6 +535,7 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("244 bips is 0.0244. basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.")).toBeInTheDocument();
     // Focus opens the note as hover does, and nothing is left on a `title` the reader cannot see.
     const bips = screen.getByText("244 bips = 0.0244").closest(".group")?.querySelector(".cursor-help");
+    expect(bips).not.toBeNull();
     expect(bips).toHaveAttribute("tabindex", "0");
     expect(screen.getByText("0.0244").closest("[title]")).toBeNull();
     // The x cell is the right-hand column, so its note opens leftwards to stay
