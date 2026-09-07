@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "gascurve values",
-  "description": "Validated by helm install, upgrade, template and lint. A database is mandatory whenever the collector or the api is enabled: set exactly one of database.url (rendered into a Secret) and database.existingSecret. Ingress needs at least one backend, so it cannot be enabled with both api.enabled and web.enabled false. The config object is the application's own configuration and is modelled here field by field, because a value the chart accepts and the binary then rejects only shows up as a crash-looping pod: durations are Go durations, budgets are 0 (unlimited) or 0.1 to 10000 calls per second, ws_url values are ws:// or wss://, and chart-owned objects reject unknown keys so a misplaced field cannot be silently ignored. What cannot be expressed here is the cross-reference between a network without an rpc_url and a NETWORK_<NAME>_RPC_URL entry in the collector's environment; the templates check that.",
+  "description": "Validated by helm install, upgrade, template and lint. A database is mandatory whenever the collector or the api is enabled: set exactly one of database.url (rendered into a Secret) and database.existingSecret. Ingress needs at least one backend, and ingress with the api needs at least one explicit trusted proxy address or CIDR so client rate limits do not collapse onto the ingress address. The config object is the application's own configuration and is modelled here field by field, because a value the chart accepts and the binary then rejects only shows up as a crash-looping pod: durations are Go durations, budgets are 0 (unlimited) or 0.1 to 10000 calls per second, ws_url values are ws:// or wss://, and chart-owned objects reject unknown keys so a misplaced field cannot be silently ignored. What cannot be expressed here is the cross-reference between a network without an rpc_url and a NETWORK_<NAME>_RPC_URL entry in the collector's environment; the templates check that.",
   "type": "object",
   "properties": {
     "global": {
@@ -49,10 +49,29 @@
         "image": { "$ref": "#/definitions/componentImage" },
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
         "service": { "$ref": "#/definitions/service" },
+        "networkPolicy": {
+          "type": "object",
+          "description": "Ingress isolation for API pods. It is rendered only when both the api and chart-managed ingress are enabled.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "allowedPeers": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/definitions/networkPolicyPeer" }
+            },
+            "monitoringPeers": {
+              "description": "Extra peers admitted for /metrics, which the api serves on its REST and WebSocket port. Required when metrics.serviceMonitor.enabled is true and this policy is rendered.",
+              "type": "array",
+              "items": { "$ref": "#/definitions/networkPolicyPeer" }
+            }
+          },
+          "required": ["enabled", "allowedPeers", "monitoringPeers"],
+          "additionalProperties": false
+        },
         "resources": { "$ref": "#/definitions/resources" },
         "extraEnv": { "$ref": "#/definitions/envVarList" }
       },
-      "required": ["enabled", "image", "service"],
+      "required": ["enabled", "image", "service", "networkPolicy"],
       "additionalProperties": false
     },
     "web": {
@@ -117,9 +136,9 @@
             "rate_limit_per_second": { "type": "number", "exclusiveMinimum": 0 },
             "rate_limit_burst": { "type": "integer", "minimum": 1 },
             "trusted_proxies": {
-              "description": "Addresses or CIDRs of reverse proxies whose X-Forwarded-For is believed.",
+              "description": "Addresses or CIDRs of reverse proxies whose X-Forwarded-For is believed. Required when both ingress and api are enabled.",
               "type": "array",
-              "items": { "type": "string", "minLength": 1 }
+              "items": { "$ref": "#/definitions/trustedProxyAddress" }
             },
             "ws_max_per_ip": { "type": "integer", "minimum": 1 },
             "ws_max_total": { "type": "integer", "minimum": 1 }
@@ -297,9 +316,167 @@
           }
         }
       }
+    },
+    {
+      "title": "ingress with the api needs an explicit trusted proxy address or CIDR",
+      "if": {
+        "properties": {
+          "ingress": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "api": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] }
+        },
+        "required": ["ingress", "api"]
+      },
+      "then": {
+        "properties": {
+          "config": {
+            "properties": {
+              "server": {
+                "title": "config.server.trusted_proxies must name every trusted reverse proxy hop when ingress and api are enabled",
+                "properties": { "trusted_proxies": { "minItems": 1 } },
+                "required": ["trusted_proxies"]
+              }
+            },
+            "required": ["server"]
+          }
+        }
+      }
+    },
+    {
+      "title": "an API NetworkPolicy that Prometheus must cross needs an explicit monitoring peer",
+      "if": {
+        "properties": {
+          "ingress": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "api": {
+            "properties": {
+              "enabled": { "const": true },
+              "networkPolicy": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] }
+            },
+            "required": ["enabled", "networkPolicy"]
+          },
+          "metrics": {
+            "properties": { "serviceMonitor": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] } },
+            "required": ["serviceMonitor"]
+          }
+        },
+        "required": ["ingress", "api", "metrics"]
+      },
+      "then": {
+        "properties": {
+          "api": {
+            "properties": {
+              "networkPolicy": {
+                "title": "api.networkPolicy.monitoringPeers must name the Prometheus pods, or the scrape this chart configures cannot cross its own policy",
+                "properties": { "monitoringPeers": { "minItems": 1 } },
+                "required": ["monitoringPeers"]
+              }
+            },
+            "required": ["networkPolicy"]
+          }
+        },
+        "required": ["api"]
+      }
     }
   ],
   "definitions": {
+    "ipAddressOrCIDR": {
+      "title": "IP address or CIDR",
+      "description": "An IPv4 or IPv6 address, optionally followed by its prefix length. These two patterns accept exactly what net.ParseIP and net.ParseCIDR accept, so a value cannot pass validation here and then be discarded at runtime; a leading zero is rejected in an IPv4 octet, as Go rejects it, and in a prefix length, where Go allows it but it is a typo rather than a value.",
+      "type": "string",
+      "anyOf": [
+        { "title": "IPv4 address or CIDR", "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(/(3[0-2]|[12][0-9]|[0-9]))?$" },
+        { "title": "IPv6 address or CIDR", "pattern": "^(([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|([0-9A-Fa-f]{1,4}:){1,7}:|([0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|([0-9A-Fa-f]{1,4}:){1,5}(:[0-9A-Fa-f]{1,4}){1,2}|([0-9A-Fa-f]{1,4}:){1,4}(:[0-9A-Fa-f]{1,4}){1,3}|([0-9A-Fa-f]{1,4}:){1,3}(:[0-9A-Fa-f]{1,4}){1,4}|([0-9A-Fa-f]{1,4}:){1,2}(:[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:(:[0-9A-Fa-f]{1,4}){1,6}|:((:[0-9A-Fa-f]{1,4}){1,7}|:)|([0-9A-Fa-f]{1,4}:){6}(((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))|::([fF]{4}(:0{1,4})?:)?(((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))|([0-9A-Fa-f]{1,4}:){1,5}:(((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])))(/(12[0-8]|1[01][0-9]|[1-9]?[0-9]))?$" }
+      ]
+    },
+    "trustedProxyAddress": {
+      "title": "trusted reverse proxy address or CIDR",
+      "description": "One reverse proxy hop the API believes forwarding headers from. A /0 prefix or the unspecified address would trust every reachable peer, which is the opposite of what this list is for, so both are rejected.",
+      "allOf": [
+        { "$ref": "#/definitions/ipAddressOrCIDR" },
+        { "title": "a prefix of /0 trusts every peer", "not": { "pattern": "/0$" } },
+        { "title": "the unspecified address trusts every peer", "not": { "pattern": "^(0\\.0\\.0\\.0|::)$" } }
+      ]
+    },
+    "cidr": {
+      "title": "IP CIDR",
+      "allOf": [
+        { "$ref": "#/definitions/ipAddressOrCIDR" },
+        { "pattern": "/[0-9]+$" }
+      ]
+    },
+    "labelSelector": {
+      "title": "Kubernetes label selector",
+      "type": "object",
+      "properties": {
+        "matchLabels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "matchExpressions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string", "minLength": 1 },
+              "operator": { "type": "string", "enum": ["In", "NotIn", "Exists", "DoesNotExist"] },
+              "values": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["key", "operator"],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "title": "In and NotIn need at least one value",
+                "if": { "properties": { "operator": { "enum": ["In", "NotIn"] } }, "required": ["operator"] },
+                "then": { "properties": { "values": { "minItems": 1 } }, "required": ["values"] }
+              },
+              {
+                "title": "Exists and DoesNotExist take no values",
+                "if": { "properties": { "operator": { "enum": ["Exists", "DoesNotExist"] } }, "required": ["operator"] },
+                "then": { "properties": { "values": { "maxItems": 0 } } }
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "networkPolicyPeer": {
+      "title": "Kubernetes NetworkPolicyPeer",
+      "type": "object",
+      "properties": {
+        "podSelector": { "$ref": "#/definitions/labelSelector" },
+        "namespaceSelector": { "$ref": "#/definitions/labelSelector" },
+        "ipBlock": {
+          "type": "object",
+          "properties": {
+            "cidr": { "$ref": "#/definitions/cidr" },
+            "except": { "type": "array", "items": { "$ref": "#/definitions/cidr" } }
+          },
+          "required": ["cidr"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "title": "pod and/or namespace selector",
+          "anyOf": [
+            { "required": ["podSelector"] },
+            { "required": ["namespaceSelector"] }
+          ],
+          "not": { "required": ["ipBlock"] }
+        },
+        {
+          "title": "IP block",
+          "required": ["ipBlock"],
+          "not": {
+            "anyOf": [
+              { "required": ["podSelector"] },
+              { "required": ["namespaceSelector"] }
+            ]
+          }
+        }
+      ]
+    },
     "duration": {
       "title": "Go duration",
       "description": "A positive Go duration: a magnitude and a unit (ns, us, ms, s, m, h), optionally repeated, for example 500ms, 3s, 60s, 720h or 1h30m. Zero is rejected: every interval the collector uses must be positive.",

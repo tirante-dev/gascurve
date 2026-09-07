@@ -76,6 +76,30 @@ api:
   service:
     type: ClusterIP
     port: 8080
+  # When this chart also creates an Ingress, isolate the API pods so only
+  # the ingress controller can reach their HTTP port. The default peer
+  # selects the standard ingress-nginx controller. Change it when your
+  # controller uses another namespace or labels. Any extra peer listed here
+  # can reach every API route at the network layer, including a Prometheus
+  # scraper because /metrics shares the HTTP port. Disable only when an
+  # equivalent policy is managed outside this chart.
+  networkPolicy:
+    enabled: true
+    allowedPeers:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: ingress-nginx
+            app.kubernetes.io/component: controller
+    # Peers allowed in for /metrics, which the api serves on the same port
+    # as REST and the WebSocket. Required whenever
+    # metrics.serviceMonitor.enabled is true and this policy is rendered,
+    # because a layer 4 policy cannot single out a path: without it the
+    # scrape fails and this chart's own apiDown alert fires. Keep these
+    # addresses out of config.server.trusted_proxies.
+    monitoringPeers: []
   resources:
     requests:
       cpu: 100m
@@ -106,7 +130,9 @@ web:
 
 # One host serves both: / goes to web, /api goes to the API. The web image is
 # built with NEXT_PUBLIC_API_URL=/api/v1 so it talks to the same origin and
-# derives the WebSocket URL from it.
+# derives the WebSocket URL from it. When the API is enabled, ingress also
+# requires config.server.trusted_proxies so per-client REST and WebSocket
+# limits can safely use the forwarding chain.
 ingress:
   enabled: false
   className: nginx
@@ -160,6 +186,13 @@ config:
     cors_origins:
       - https://gascurve.com
     dev_mode: false
+    # Addresses or CIDRs the API sees as its reverse-proxy peers. Forwarded
+    # client headers are ignored unless the direct peer is in this list.
+    # Keep this empty without a reverse proxy. An ingress deployment with the
+    # API enabled must set at least one entry, for example the ingress
+    # controller pod CIDR. The API NetworkPolicy above prevents other pods in
+    # that CIDR from bypassing the controller and spoofing a client address.
+    trusted_proxies: []
   database:
     max_open: 25
     max_idle: 10

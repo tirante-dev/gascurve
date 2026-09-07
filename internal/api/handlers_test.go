@@ -977,6 +977,23 @@ func TestRealIPTrustedProxies(t *testing.T) {
 			t.Fatalf("request %d: %d want %d", i, resp.StatusCode, want)
 		}
 	}
+	// The same forwarded addresses are not identities when the direct peer
+	// is untrusted. This is the secure default for a direct deployment.
+	direct := New(seed(t), config.ServerConfig{RateLimitPerSecond: 1, RateLimitBurst: 1}, nil, nil)
+	directTS := httptest.NewServer(direct.Handler())
+	defer directTS.Close()
+	for i, want := range []int{200, 429} {
+		req, _ := http.NewRequest(http.MethodGet, directTS.URL+"/health", http.NoBody)
+		req.Header.Set("X-Forwarded-For", []string{"198.51.100.10", "198.51.100.11"}[i])
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("untrusted request %d: %d want %d", i, resp.StatusCode, want)
+		}
+	}
 }
 
 func TestHelpers(t *testing.T) {
