@@ -57,11 +57,11 @@ func (h *wsHarness) dial(t *testing.T, network string) *websocket.Conn {
 	return conn
 }
 
-func readMsg(t *testing.T, conn *websocket.Conn) (string, json.RawMessage) {
+func readMsg(t *testing.T, conn *websocket.Conn) (typ string, data json.RawMessage) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, data, err := conn.Read(ctx)
+	_, raw, err := conn.Read(ctx)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -69,8 +69,8 @@ func readMsg(t *testing.T, conn *websocket.Conn) (string, json.RawMessage) {
 		Type string          `json:"type"`
 		Data json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("decode %s: %v", data, err)
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
 	}
 	return m.Type, m.Data
 }
