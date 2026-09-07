@@ -73,6 +73,7 @@ function BaseFeeBody({ live, range, series, model }: { live: SmoothedLive; range
   if (!snapshot) return <ChartNote>{live.resyncing ? RESYNC_COPY : WAITING_COPY}</ChartNote>;
   return (
     <HeroChartPanel
+      readout
       snapshot={snapshot}
       blocks={frame.blocks}
       places={frame.places}
@@ -95,6 +96,7 @@ function ThroughputBody({ live, range, series, model }: { live: SmoothedLive; ra
   const frame = useLiveFrame(live.frame);
   return (
     <HeroThroughputPanel
+      readout
       blocks={frame.blocks}
       places={frame.places}
       nowMs={frame.nowMs}
