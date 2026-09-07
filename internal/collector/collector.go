@@ -561,10 +561,8 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	}
 	// Before the checkpoints it clears are read, so an unreadable owner-scan checkpoint cannot block
 	// the rebuild that would replace it. It needs only the live start above it for the boundary.
-	// Before the history rebuild, which resets the backfill cursor: the seed reads that cursor to
-	// tell whether the old collector's cutoff was pinned, and a raised history_epoch in the same
-	// rollout would otherwise make a finished backfill look unfinished and pin the seed to the
-	// boundary on a database whose real cutoff was long past it.
+	// The seed reads no cursor, so a malformed backfill cursor cannot fail it, and a raised
+	// history_epoch below still reaches and overwrites that cursor as it always could.
 	if err := f.seedPruneFrontierLocked(ctx); err != nil {
 		return err
 	}

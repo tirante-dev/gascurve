@@ -755,8 +755,8 @@ func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 	if err := f.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Retention is measured from the latest stored block, not the clock two hours on.
-	want := time.Unix(int64(tsFor(905)), 0).UTC().Add(-time.Hour)
+	// The seed is the wall clock at this start, less retention: an upper bound on the old cutoff.
+	want := later.Add(-time.Hour)
 	if got, err := f.pruneFrontier(ctx); err != nil || !got.Equal(want) {
 		t.Fatalf("seeded frontier %v %v, want the cutoff %v", got, err, want)
 	}
@@ -803,9 +803,9 @@ func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 		t.Fatalf("seeded a frontier on an empty store: %v %v", got, err)
 	}
 
-	// Backfill unfinished: the cutoff is pinned to the boundary, and so is the seed, which is what
-	// keeps it below every row a gap fill can write. The pin only engages once the stored rows span
-	// more than retention, so this fixture has rows an hour apart.
+	// Backfill unfinished: the seed does not pin. The old collector's cutoff was pinned then, so
+	// the seed sits above it, which is the direction chosen: it can only refuse a rebuild, never
+	// permit one across deleted rows. The live prune that follows honors the pin.
 	pinned := dbtest.New()
 	wide := newFakeRPC(70_000)
 	seedBlocksWithoutPosterGas(t, wide, pinned, 28_500, 28_502)
@@ -815,18 +815,15 @@ func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 	if err := g.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	g.mu.Lock()
-	boundary, _ := g.boundaryLocked()
-	g.mu.Unlock()
-	if got, _ := g.pruneFrontier(ctx); !got.Equal(boundary) {
-		t.Fatalf("seed with the backfill unfinished %v, want the boundary %v", got, boundary)
+	if got, _ := g.pruneFrontier(ctx); !got.Equal(later.Add(-time.Hour)) {
+		t.Fatalf("seed with the backfill unfinished %v, want the clock less retention %v", got, later.Add(-time.Hour))
 	}
 }
 
-// An upgraded database with no record, the repair running before any prune. The seed reproduces the
-// old collector's cutoff, an hour before the latest row, so the first surviving row's windows sit
-// below it and are refused (their earlier rows are gone) while the later row's are rebuilt; and the
-// repair is not outrun, because prune is pinned while it runs.
+// An upgraded database with no record, the repair running before any prune. The seed is the clock
+// at this start less retention, an upper bound on the old cutoff, so the first surviving row's
+// windows sit below it and are refused (their earlier rows may be gone) while the later row's are
+// rebuilt; and the repair is not outrun, because prune is pinned while it runs.
 func TestRepairOnAnUpgradedDatabaseIsFlooredByTheSeed(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(70_000)
@@ -835,7 +832,9 @@ func TestRepairOnAnUpgradedDatabaseIsFlooredByTheSeed(t *testing.T) {
 	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
 	first := time.Unix(int64(tsFor(28_500)), 0).UTC()
 	second := time.Unix(int64(tsFor(64_500)), 0).UTC()
-	f := newTestFollower(t, rpc, store)
+	// The clock a little past the second row: less an hour, it lands between the two.
+	now := second.Add(90 * time.Second)
+	f := newTestFollower(t, rpc, store, func(o *Options) { o.Now = func() time.Time { return now } })
 	f.cfg.BlockRetention = time.Hour
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
 		t.Fatal(err)
@@ -846,9 +845,9 @@ func TestRepairOnAnUpgradedDatabaseIsFlooredByTheSeed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seed := second.Add(-time.Hour)
+	seed := now.Add(-time.Hour)
 	if got, _ := f.pruneFrontier(ctx); !got.Equal(seed) {
-		t.Fatalf("frontier %v, want the old cutoff %v", got, seed)
+		t.Fatalf("frontier %v, want the clock less retention %v", got, seed)
 	}
 	for _, res := range db.ResolutionOrder {
 		buckets, err := store.Buckets(ctx, 4663, res, first.Add(-time.Hour), second.Add(time.Hour))
@@ -1034,10 +1033,9 @@ func TestPruneMeasuresRetentionInChainTime(t *testing.T) {
 	}
 }
 
-// The seed reproduces what the old collector deleted and so ignores the repair pin: on an upgraded
-// database whose cutoff was long past the live boundary, seeding with the pin would record that
-// boundary and let the first surviving windows be rebuilt short. prune itself honors the pin, so
-// while the repair runs no row above the boundary is dropped and the recorded frontier does not move.
+// The seed reads no pin at all; the live prune honors the repair pin. With the repair unfinished,
+// prune is pinned to the boundary: nothing above it is dropped, and the frontier moves only to the
+// boundary, which the forward-only record accepts because rows below it are the backfill's.
 func TestSeedIgnoresTheRepairPinButPruneHonorsIt(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
@@ -1055,18 +1053,16 @@ func TestSeedIgnoresTheRepairPinButPruneHonorsIt(t *testing.T) {
 	if err := f.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
-	want := latest.Add(-time.Hour)
-	if got, _ := f.pruneFrontier(ctx); !got.Equal(want) {
-		t.Fatalf("seed %v with the repair unfinished, want the old cutoff %v, not the boundary", got, want)
+	seed := f.now().UTC().Add(-time.Hour)
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(seed) {
+		t.Fatalf("seed %v, want the clock less retention %v", got, seed)
 	}
-	// prune while the repair runs: pinned to the boundary, so nothing above it goes and the
-	// frontier, forward-only, stays where the seed put it.
 	if err := f.prune(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := f.pruneFrontier(ctx); !got.Equal(want) {
-		t.Fatalf("frontier moved to %v under the repair pin", got)
+	boundary := time.Unix(int64(tsFor(28_500)), 0).UTC().Truncate(time.Hour)
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(boundary) {
+		t.Fatalf("frontier %v after a pinned prune, want the boundary %v", got, boundary)
 	}
 	for _, n := range []uint64{28_500, 64_500} {
 		if b, err := store.BlockByNumber(ctx, 4663, n); err != nil || b == nil {
@@ -1224,10 +1220,10 @@ func TestSeedLeavesARecordedFrontierAlone(t *testing.T) {
 	}
 }
 
-// A raised history_epoch in the rollout that introduces the checkpoint resets a finished backfill
-// cursor. The seed runs first, so it still sees the backfill as finished and records the old cutoff
-// rather than pinning to the boundary on a database whose real cutoff was long past it.
-func TestSeedRunsBeforeAHistoryRebuildResetsTheBackfill(t *testing.T) {
+// The seed reads no cursor, so a malformed backfill cursor cannot fail it, and a raised
+// history_epoch in the same start still reaches and overwrites that cursor as it always could: the
+// recovery path for damaged state is not blocked by the migration that runs ahead of it.
+func TestSeedDoesNotBlockHistoryRebuildOverAMalformedCursor(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
 	rpc := newFakeRPC(70_000)
@@ -1237,55 +1233,46 @@ func TestSeedRunsBeforeAHistoryRebuildResetsTheBackfill(t *testing.T) {
 	f := newTestFollower(t, rpc, store)
 	f.cfg.BlockRetention = time.Hour
 	f.net.HistoryEpoch = 1
-	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.saveCursor2(ctx, store); err != nil {
+	if err := store.SetState(ctx, 4663, db.StateBackfillCursor, "not json"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.ensureInit(ctx); err != nil {
-		t.Fatal(err)
+		t.Fatalf("init failed over a malformed cursor the rebuild was meant to overwrite: %v", err)
 	}
-	if c, _ := f.loadCursor(ctx); c.Done {
-		t.Fatal("the history rebuild did not reset the backfill, so the test proves nothing")
+	if c, err := f.loadCursor(ctx); err != nil || c.Done {
+		t.Fatalf("the rebuild did not overwrite the cursor: %+v %v", c, err)
 	}
-	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
-	if got, _ := f.pruneFrontier(ctx); !got.Equal(latest.Add(-time.Hour)) {
-		t.Fatalf("seed %v, want the old cutoff %v: the rebuild's reset was read as an unfinished backfill", got, latest.Add(-time.Hour))
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(f.now().UTC().Add(-time.Hour)) {
+		t.Fatalf("seed %v, want the clock less retention", got)
 	}
 }
 
-// The old collector pruned by the wall clock. On a chain that had stalled at the upgrade the last
-// sample's time is later than the latest block's, and it is what the old rule actually pruned by;
-// on a live chain the two agree and the later one errs toward refusing a rebuild.
-func TestSeedReproducesTheOldWallClockRule(t *testing.T) {
+// The seed is an upper bound on the old cutoff: the clock now, less retention, whatever the chain's
+// latest block or the last sample said. Both are ignored, since neither was the old prune time.
+func TestSeedIsTheClockLessRetention(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
 	rpc := newFakeRPC(70_000)
 	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_502)
 	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
-	f := newTestFollower(t, rpc, store)
+	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
+	now := latest.Add(5 * time.Hour)
+	f := newTestFollower(t, rpc, store, func(o *Options) { o.Now = func() time.Time { return now } })
 	f.cfg.BlockRetention = time.Hour
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.saveCursor2(ctx, store); err != nil {
-		t.Fatal(err)
-	}
-	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
-	// The chain stalled: the old collector kept sampling, and pruning, for two more hours.
-	sampled := latest.Add(2 * time.Hour)
 	if err := store.UpsertNetwork(ctx, db.Network{ChainID: 4663, Name: "robinhood", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpdateNetworkHead(ctx, 4663, 64_502, latest, sampled); err != nil {
+	if err := store.UpdateNetworkHead(ctx, 4663, 64_502, latest, latest.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := f.pruneFrontier(ctx); !got.Equal(sampled.Add(-time.Hour)) {
-		t.Fatalf("seed %v, want the old wall-clock cutoff %v", got, sampled.Add(-time.Hour))
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("seed %v, want the clock less retention %v", got, now.Add(-time.Hour))
 	}
 }
 

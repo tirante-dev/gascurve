@@ -766,10 +766,11 @@ func (f *Follower) liveStartFrom(ctx context.Context, s db.Store) (*liveStart, e
 // seedPruneFrontierLocked is a one-time migration for a database pruned before the checkpoint
 // existed: the store guards only below a frontier it can read. It runs only when none is recorded,
 // since re-seeding would advance an existing one on every restart past rows a still-running repair
-// had not reached. The value reproduces what the old collector deleted: retention back from the
-// later of the latest block and the last sample time, the old rule having been the wall clock, and
-// pinned only while the backfill runs, as the old rule was. Not the oldest surviving row, which was
-// tried and refused to bucket rows a gap fill writes below it.
+// had not reached. The value is the wall clock now, less retention: a true upper bound on whatever
+// the old collector last pruned by, which was never recorded and which no stored fact reconstructs.
+// The oldest surviving row, chain time and the last sample time were each tried and each fell short
+// of it somewhere. Erring high can only refuse a rebuild, which loses at most the rows between the
+// old collector's last prune and this start; erring low would rebuild across deleted rows.
 func (f *Follower) seedPruneFrontierLocked(ctx context.Context) error {
 	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		raw, recorded, err := s.GetState(ctx, f.chainID, db.StatePruneFrontier)
@@ -788,38 +789,10 @@ func (f *Follower) seedPruneFrontierLocked(ctx context.Context) error {
 			// stalled or development chain could never get out from under.
 			return err
 		}
-		cutoff, err := f.migrationCutoff(ctx, s, boundaryOf(ls))
-		if err != nil || cutoff.IsZero() {
-			return err
-		}
+		cutoff := f.now().UTC().Add(-f.cfg.BlockRetention)
 		f.log.Info("seeding the prune frontier for a database pruned before it was recorded", "at", cutoff)
 		return f.recordPruneFrontier(ctx, s, cutoff)
 	})
-}
-
-// migrationCutoff is the old collector's cutoff as far as it can be reconstructed: retention back
-// from the later of the latest block's time and the last sample's wall-clock time. On a live chain
-// the two agree to within a slow interval, and taking the later errs toward refusing a rebuild, which
-// loses at most a bucket of repair; on a chain that had stalled at the upgrade, the sample time is
-// what the old wall-clock rule actually pruned by.
-func (f *Follower) migrationCutoff(ctx context.Context, s db.Store, boundary time.Time) (time.Time, error) {
-	cutoff, err := f.pruneCutoff(ctx, s, boundary, false)
-	if err != nil || cutoff.IsZero() {
-		return cutoff, err
-	}
-	nets, err := s.Networks(ctx)
-	if err != nil {
-		return time.Time{}, err
-	}
-	for _, n := range nets {
-		if n.ChainID != f.chainID || !n.LastSampleAt.Valid {
-			continue
-		}
-		if byClock := n.LastSampleAt.Time.UTC().Add(-f.cfg.BlockRetention); byClock.After(cutoff) && !cutoff.Equal(boundary) {
-			cutoff = byClock
-		}
-	}
-	return cutoff, nil
 }
 
 // boundaryOf is the start of the hour holding the first live block: buckets from it on are rebuilt
