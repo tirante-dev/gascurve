@@ -545,8 +545,19 @@ describe("ConstraintCards", () => {
     expect(meter).toHaveAttribute("aria-valuenow", "100");
     // The far end says what it is, not what to multiply out.
     expect(screen.getByText("1,000,000,000 windows of target (1 Ggas)")).toBeInTheDocument();
-    expect(meter).toHaveAttribute("title", "one window = target × window = 1 gas; each full window adds 1.0 to x");
     expect(screen.getByRole("meter", { name: /1,000,000,000 windows/ })).toBeInTheDocument();
+    // And it opens as a note rather than a title the reader has to find on a
+    // 10 px bar and then wait on: the pricer's own divisor, multiplied out.
+    expect(meter).not.toHaveAttribute("title");
+    expect(screen.getByText("1 window of target = 1 gas/s × 1 s = 1 gas")).toBeInTheDocument();
+    // Twice over, in the panel and in the description that stands in for it:
+    // the panel is aria-hidden, so a reader without it still gets the working.
+    expect(screen.getAllByText(/A backlog of one window adds exactly 1.0 to x/)).toHaveLength(2);
+    // The scale is not a fixed ceiling, which is the part the count alone hides.
+    expect(screen.getAllByText(/the far end moves out as the backlog crosses one/)).toHaveLength(2);
+    // The figure says it is inspectable, and the panel is not announced twice.
+    const trigger = screen.getByText("1,000,000,000 windows of target (1 Ggas)").closest(".cursor-help");
+    expect(trigger).toHaveAttribute("tabindex", "0");
   });
 
   it("defines the legacy gauge for zero tolerance and for a zero denominator", () => {
@@ -554,6 +565,7 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("no free gas: every unit prices")).toBeInTheDocument();
     expect(screen.getByText("x = 1 at 714 Mgas")).toBeInTheDocument();
     expect(screen.getByText("2 units of x (1.43 Ggas)")).toBeInTheDocument();
+    expect(screen.getByText("1 unit of x = inertia × speed limit = 714 Mgas")).toBeInTheDocument();
     const meter = screen.getByRole("meter", { name: /units of inertia/ });
     expect(meter).toHaveAttribute("aria-valuenow", "70");
     expect(meter.querySelectorAll("span")).toHaveLength(1);
@@ -562,6 +574,8 @@ describe("ConstraintCards", () => {
     rerender(<ConstraintCardsView network="robinhood" snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 0, tolerance: 0, backlog: 5 } }} values={null} blocks={[]} />);
     expect(screen.getByText("no scale")).toBeInTheDocument();
     expect(screen.getByText("no scale (zero inertia or speed limit)")).toBeInTheDocument();
+    // The legacy far end opens the same way, and says why there is no scale.
+    expect(screen.getByText("no scale: the inertia or the speed limit is zero")).toBeInTheDocument();
     expect(screen.getByRole("meter")).toHaveAttribute("aria-valuenow", "0");
     expect(screen.getByText(/x = 0.0000/)).toBeInTheDocument();
   });
