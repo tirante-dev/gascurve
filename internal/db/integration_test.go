@@ -152,13 +152,36 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if _, err := p.DB().ExecContext(ctx, `INSERT INTO state_samples (chain_id, sampled_at, block_number, base_fee, min_base_fee) VALUES (1, now(), 1, 1, 1)`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := p.DB().ExecContext(ctx, `INSERT INTO missing_ranges (chain_id, from_block, to_block, detected_at, lifecycle, reason) VALUES (1, 10, 20, now(), 'pending', 'catch up limit')`); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.Down(0); err == nil {
 		t.Fatal("Down(0) should fail")
 	}
+	// Rolling back the missing-ranges migration preserves the basic range in
+	// the legacy JSON checkpoint before the table is removed.
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
 	if v, _, err := m.Version(); err != nil || v != headVersion-1 {
+		t.Fatalf("after migration down: %d %v", v, err)
+	}
+	if raw, ok, err := p.GetState(ctx, 1, StateHoles); err != nil || !ok || !strings.Contains(raw, `"from": 10`) {
+		t.Fatalf("rollback checkpoint: %q %v %v", raw, ok, err)
+	}
+	if err := m.Up(); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != headVersion {
+		t.Fatalf("after migration up: %d %v", v, err)
+	}
+	// Stepping back past the owner-action transaction index removes the
+	// column, and the step below that removes the state-sample index. Both
+	// keep the original schema and the sample rows.
+	if err := m.Down(2); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
 		t.Fatalf("after down: %d %v", v, err)
 	}
 	var txIndexes int
@@ -168,7 +191,7 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-3 {
 		t.Fatalf("after index down: %d %v", v, err)
 	}
 	var indexes int
@@ -300,6 +323,20 @@ func TestIntegrationStore(t *testing.T) {
 	}
 	if err := p.UpsertNetwork(ctx, Network{ChainID: otherChain, Name: "900004663", Enabled: true}); err != nil {
 		t.Fatal(err)
+	}
+	rangeRow := MissingRange{
+		ChainID: testChain, From: 10, To: 20, DetectedAt: base, Lifecycle: "retrying", Reason: "catch up limit",
+		Cursor: 15, ReplayState: JSONB(`{"block":14}`), Folded: 15, RetryCount: 2,
+		LastAttemptAt: sql.NullTime{Time: base.Add(time.Minute), Valid: true}, NextRetryAt: sql.NullTime{Time: base.Add(2 * time.Minute), Valid: true},
+		LastError: sql.NullString{String: "rpc busy", Valid: true}, PredecessorAt: sql.NullTime{Time: base.Add(-time.Second), Valid: true},
+		SuccessorAt: sql.NullTime{Time: base.Add(20 * time.Second), Valid: true}, CursorAt: sql.NullTime{Time: base.Add(14 * time.Second), Valid: true},
+	}
+	if err := p.WithChainTx(ctx, testChain, func(s Store) error { return s.ReplaceMissingRanges(ctx, testChain, []MissingRange{rangeRow}) }); err != nil {
+		t.Fatal(err)
+	}
+	ranges, err := p.MissingRanges(ctx, testChain)
+	if err != nil || len(ranges) != 1 || ranges[0].Cursor != 15 || ranges[0].RetryCount != 2 || ranges[0].LastError.String != "rpc busy" || !ranges[0].CursorAt.Valid {
+		t.Fatalf("missing ranges: %+v %v", ranges, err)
 	}
 	if n, err := p.NetworkByRef(ctx, "900004663"); err != nil || n == nil || n.ChainID != testChain {
 		t.Fatalf("NetworkByRef prefers the chain id: %+v %v", n, err)

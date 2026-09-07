@@ -437,14 +437,19 @@ func TestRunHistoryFillsGaps(t *testing.T) {
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
 	seedSets(t, store)
+	var logicalNanos atomic.Int64
+	logicalNanos.Store(baseTime.Add(100 * time.Second).UnixNano())
 	f := NewFollower(Options{
 		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, CallsPerSecond: 4, Enabled: true},
 		Collector: fastConfig(),
 		RPC:       rpc,
 		Store:     store,
 		Log:       logger.Nop(),
-		Now:       func() time.Time { return baseTime.Add(100 * time.Second) },
-		Sleep:     quickSleep,
+		Now:       func() time.Time { return time.Unix(0, logicalNanos.Load()).UTC() },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			logicalNanos.Add(int64(d))
+			return quickSleep(ctx, d)
+		},
 	})
 	// Every header fetch fails at first, so both error paths of the loop
 	// run: the gap fill's and the backfill's.

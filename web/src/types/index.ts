@@ -199,10 +199,23 @@ export type L1Series = { range: string; from: number; to: number; points: L1Poin
 
 export type HealthStatus = "healthy" | "degraded" | "disabled";
 
-export type HoleStatus = {
+export type RPCCapacity = {
+  configuredCallsPerSecond: number;
+  requiredCallsPerSecond: number;
+  observedCallsPerSecond: number;
+  headroomCallsPerSecond: number | null;
+  saturated: boolean;
+  at: string | null;
+  checkpointError: boolean;
+};
+
+export type MissingRangesStatus = {
   pending: number;
   blocks: number;
   unfillable: number;
+  retrying: number;
+  oldestAgeSeconds: number;
+  checkpointError: boolean;
   pendingBlocks: number;
   oldestPendingAt: string | null;
   oldestPendingAgeSeconds: number | null;
@@ -253,7 +266,9 @@ export type NetworkStatus = {
   last429At: string | null;
   backfillCursor: string | null;
   arbosVersion: string | null;
-  holes: HoleStatus;
+  degraded: boolean;
+  capacity: RPCCapacity;
+  holes: MissingRangesStatus;
   status: HealthStatus;
   degradedReasons: string[];
   collector: CollectorTelemetry | null;

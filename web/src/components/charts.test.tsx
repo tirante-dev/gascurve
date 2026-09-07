@@ -492,7 +492,53 @@ describe("DataFooter", () => {
         series={series}
         networkInfo={{ name: "robinhood", displayName: "Robinhood Chain", chainId: 4663, explorerUrl: "", model: "constraints", headBlock: 0, headAt: null, lagSeconds: null, enabled: true }}
         status="open"
-        apiStatus={{ version: "1", status: "degraded", networks: [{ name: "robinhood", chainId: 4663, enabled: true, headBlock: 0, headAt: null, lagSeconds: null, lastSampleAt: null, lastError: null, rateLimitEvents: 0, last429At: null, backfillCursor: null, arbosVersion: null, holes: { pending: 0, blocks: 0, unfillable: 0, pendingBlocks: 0, oldestPendingAt: null, oldestPendingAgeSeconds: null }, status: "degraded", degradedReasons: ["collector heartbeat missing"], collector: null, activeEndpoint: 0, failovers: 0, endpoints: [] }] }}
+        apiStatus={{
+          version: "1",
+          status: "degraded",
+          networks: [
+            {
+              name: "robinhood",
+              chainId: 4663,
+              enabled: true,
+              headBlock: 0,
+              headAt: null,
+              lagSeconds: null,
+              lastSampleAt: null,
+              lastError: null,
+              rateLimitEvents: 0,
+              last429At: null,
+              backfillCursor: null,
+              arbosVersion: null,
+              degraded: false,
+              capacity: {
+                configuredCallsPerSecond: 0,
+                requiredCallsPerSecond: 0,
+                observedCallsPerSecond: 0,
+                headroomCallsPerSecond: null,
+                saturated: false,
+                at: null,
+                checkpointError: false,
+              },
+              holes: {
+                pending: 0,
+                blocks: 0,
+                unfillable: 0,
+                retrying: 0,
+                oldestAgeSeconds: 0,
+                checkpointError: false,
+                pendingBlocks: 0,
+                oldestPendingAt: null,
+                oldestPendingAgeSeconds: null,
+              },
+              status: "degraded",
+              degradedReasons: ["collector heartbeat missing"],
+              collector: null,
+              activeEndpoint: 0,
+              failovers: 0,
+              endpoints: [],
+            },
+          ],
+        }}
         now={Date.parse("2026-09-06T07:20:03Z")}
       />,
     );

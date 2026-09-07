@@ -196,13 +196,29 @@ func (m *Monitor) persist(ctx context.Context) {
 }
 
 func (m *Monitor) refreshHoles(ctx context.Context, chainID uint64, now time.Time) {
+	rows, err := m.store.MissingRanges(ctx, chainID)
+	if err != nil {
+		return
+	}
+	holes := make([]model.Hole, 0, len(rows))
+	for _, row := range rows {
+		holes = append(holes, model.Hole{
+			From: row.From, To: row.To, At: row.DetectedAt.UTC().Format(time.RFC3339),
+			Lifecycle: row.Lifecycle, Next: row.Cursor, Reason: row.Reason,
+		})
+	}
+	// The legacy checkpoint still holds every range until the fill loop
+	// imports it, so freshness stays reported across a rolling upgrade.
 	raw, ok, err := m.store.GetState(ctx, chainID, db.StateHoles)
 	if err != nil {
 		return
 	}
-	var holes []model.Hole
-	if ok && json.Unmarshal([]byte(raw), &holes) != nil {
-		return
+	if ok {
+		var legacy []model.Hole
+		if json.Unmarshal([]byte(raw), &legacy) != nil {
+			return
+		}
+		holes = append(holes, legacy...)
 	}
 	m.mu.Lock()
 	n := m.networks[chainID]

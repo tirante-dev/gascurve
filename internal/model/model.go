@@ -311,19 +311,29 @@ type EndpointsStatus struct {
 	Endpoints      []EndpointStatus `json:"endpoints"`
 }
 
-// Reasons a hole is not queued work. A hole with any reason is counted as
-// unfillable by /status; only HoleReasonNoState is re-examined and taken
-// up again when a state appears before the range.
+// Missing-range lifecycle states. Pending work is ready now, retrying work is
+// delayed until its durable retry time, and blocked work has no replay state
+// to continue from. Blocked ranges are re-examined because later backfill or a
+// newly configured archive endpoint can make them recoverable.
 const (
+	MissingRangePending  = "pending"
+	MissingRangeRetrying = "retrying"
+	MissingRangeBlocked  = "blocked"
+
+	// HoleReasonCatchUpLimit marks a range skipped because the endpoint's
+	// configured ingress capacity could not keep the live follower current.
+	HoleReasonCatchUpLimit = "catch up limit"
+	// HoleReasonReplayDiscontinuity marks a range skipped because the model
+	// changed without enough recorded state to replay through it safely.
+	HoleReasonReplayDiscontinuity = "replay discontinuity"
 	// HoleReasonNoState marks a hole no replay can fill right now: no
 	// block before it is stored with a pricing state and the hole carries
 	// no replay state of its own, so nothing can be replayed forward into
 	// it. The gap filler skips these and only looks at them again once
 	// something before the range appears.
 	HoleReasonNoState = "no state"
-	// HoleReasonExpired marks a hole dropped from the work queue because
-	// the queue was full. Its blocks stay counted as not indexed, but no
-	// filler will ever fetch them again.
+	// HoleReasonExpired is accepted only while importing the old bounded JSON
+	// checkpoint. Those ranges become pending again in durable storage.
 	HoleReasonExpired = "expired"
 )
 
@@ -347,24 +357,28 @@ type HoleState struct {
 	SetID       int64         `json:"setId,omitempty"`
 }
 
-// Hole is one block range the collector did not index, recorded in
-// collector_state under the holes key. Next is the gap filler's progress
-// cursor: blocks below it are filled, 0 means nothing yet. State is the
-// replay state at Next-1, written with every batch so the next one
-// continues from it. Folded is the first block of the range whose additive
-// bucket contribution has not been committed yet: it is not reset when a
-// rewind resets Next, so a refilled batch below it is replayed for its
-// state but folded only once. Reason is set only when the range is not
-// queued work (HoleReasonNoState, HoleReasonExpired); an empty Reason
-// means the range is queued for filling.
+// Hole is the collector's domain shape for one durable missing_ranges row and
+// the decoder for the legacy JSON checkpoint. Next is the first block still
+// missing, State describes Next-1, and Folded prevents additive bucket work
+// from being counted twice after a rewind. Lifecycle, reason and retry fields
+// describe recovery. The three time bounds let the API map the remaining
+// interval without decoding State.
 type Hole struct {
-	From   uint64     `json:"from"`
-	To     uint64     `json:"to"`
-	At     string     `json:"at"`
-	Next   uint64     `json:"next,omitempty"`
-	State  *HoleState `json:"state,omitempty"`
-	Folded uint64     `json:"folded,omitempty"`
-	Reason string     `json:"reason,omitempty"`
+	From          uint64     `json:"from"`
+	To            uint64     `json:"to"`
+	At            string     `json:"at"`
+	Lifecycle     string     `json:"lifecycle,omitempty"`
+	Next          uint64     `json:"next,omitempty"`
+	State         *HoleState `json:"state,omitempty"`
+	Folded        uint64     `json:"folded,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
+	RetryCount    uint64     `json:"retryCount,omitempty"`
+	LastAttemptAt string     `json:"lastAttemptAt,omitempty"`
+	NextRetryAt   string     `json:"nextRetryAt,omitempty"`
+	LastError     string     `json:"lastError,omitempty"`
+	PredecessorAt string     `json:"predecessorAt,omitempty"`
+	SuccessorAt   string     `json:"successorAt,omitempty"`
+	CursorAt      string     `json:"cursorAt,omitempty"`
 }
 
 // Start is the first block still to fill: the cursor when it has moved
@@ -384,17 +398,31 @@ func (h Hole) Blocks() uint64 {
 	return h.To - h.Start() + 1
 }
 
-// HolesStatus summarizes a network's holes for /status: how many ranges
-// wait for the gap filler, how many blocks they still cover in total
-// (unfillable ones included, since those blocks are missing too) and how
-// many ranges can never be filled.
+// HolesStatus summarizes a network's missing ranges for /status.
 type HolesStatus struct {
 	Pending                 int     `json:"pending"`
 	Blocks                  uint64  `json:"blocks"`
 	Unfillable              int     `json:"unfillable"`
+	Retrying                int     `json:"retrying"`
+	OldestAgeSeconds        uint64  `json:"oldestAgeSeconds"`
+	CheckpointError         bool    `json:"checkpointError"`
 	PendingBlocks           uint64  `json:"pendingBlocks"`
 	OldestPendingAt         *string `json:"oldestPendingAt"`
 	OldestPendingAgeSeconds *int64  `json:"oldestPendingAgeSeconds"`
+}
+
+// RPCCapacity is the latest estimate of the calls per second required to
+// sample the head and fetch intervening headers compared with the active
+// endpoint's configured budget. A configured value of zero is unlimited.
+// Saturated means observed ingress demand exceeded that finite budget.
+type RPCCapacity struct {
+	ConfiguredCallsPerSecond float64  `json:"configuredCallsPerSecond"`
+	RequiredCallsPerSecond   float64  `json:"requiredCallsPerSecond"`
+	ObservedCallsPerSecond   float64  `json:"observedCallsPerSecond"`
+	HeadroomCallsPerSecond   *float64 `json:"headroomCallsPerSecond"`
+	Saturated                bool     `json:"saturated"`
+	At                       *string  `json:"at"`
+	CheckpointError          bool     `json:"checkpointError"`
 }
 
 // SummarizeHoles counts the recorded holes for /status.
@@ -409,14 +437,32 @@ func SummarizeHolesAt(holes []Hole, now time.Time) HolesStatus {
 	out := HolesStatus{}
 	var oldest time.Time
 	for _, h := range holes {
-		if h.Reason == "" {
+		pending := false
+		switch h.Lifecycle {
+		case MissingRangeRetrying:
 			out.Pending++
+			out.Retrying++
+			pending = true
+		case MissingRangeBlocked:
+			out.Unfillable++
+		case MissingRangePending:
+			out.Pending++
+			pending = true
+		default:
+			// Compatibility with the legacy checkpoint, where an empty reason
+			// was pending and any reason meant unfillable.
+			if h.Reason == "" || h.Reason == HoleReasonExpired {
+				out.Pending++
+				pending = true
+			} else {
+				out.Unfillable++
+			}
+		}
+		if pending {
 			out.PendingBlocks += h.Blocks()
 			if at, err := time.Parse(time.RFC3339, h.At); err == nil && (oldest.IsZero() || at.Before(oldest)) {
 				oldest = at
 			}
-		} else {
-			out.Unfillable++
 		}
 		out.Blocks += h.Blocks()
 	}
@@ -501,6 +547,8 @@ type NetworkStatus struct {
 	Last429At       *string             `json:"last429At"`
 	BackfillCursor  *string             `json:"backfillCursor"`
 	ArbOSVersion    *string             `json:"arbosVersion"`
+	Degraded        bool                `json:"degraded"`
+	Capacity        RPCCapacity         `json:"capacity"`
 	Holes           HolesStatus         `json:"holes"`
 	Status          string              `json:"status"`
 	DegradedReasons []string            `json:"degradedReasons"`

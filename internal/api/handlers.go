@@ -500,7 +500,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ns.Last429At = optString(st, db.StateLast429At)
 		ns.BackfillCursor = optString(st, db.StateBackfillCursor)
 		ns.ArbOSVersion = optString(st, db.StateArbOSVersion)
-		ns.Holes = holesStatus(st, s.now())
+		ns.Holes, err = s.holesStatus(r.Context(), n.ChainID, st)
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		ns.Capacity = capacityStatus(st)
+		ns.Degraded = ns.Capacity.Saturated || ns.Capacity.CheckpointError || ns.Holes.Blocks > 0 || ns.Holes.CheckpointError
 		ns.EndpointsStatus = endpointsStatus(st)
 		ns.Collector = collectorTelemetry(st, s.now())
 		if ns.Collector != nil {
@@ -516,21 +522,69 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cacheNone, out)
 }
 
-// holesStatus summarizes the ranges the collector has not indexed: how
-// many are queued for the gap filler, how many blocks they still cover
-// and how many can never be filled (nothing before them is stored with a
-// pricing state). A network without a checkpoint, or with an unreadable
-// one, reports zeros.
-func holesStatus(st map[string]string, now time.Time) model.HolesStatus {
-	raw, ok := st[db.StateHoles]
+// holesStatus summarizes durable missing ranges. During a rolling upgrade it
+// also reads the legacy checkpoint until the collector imports it. A malformed
+// checkpoint sets an explicit degradation signal instead of looking empty.
+func (s *Server) holesStatus(ctx context.Context, chainID uint64, st map[string]string) (model.HolesStatus, error) {
+	rows, err := s.store.MissingRanges(ctx, chainID)
+	if err != nil {
+		return model.HolesStatus{}, err
+	}
+	holes := make([]model.Hole, 0, len(rows))
+	checkpointError := false
+	for _, row := range rows {
+		// The decode only detects corruption. Once one row is malformed the
+		// remaining ones add nothing, and /status is polled often.
+		if !checkpointError && row.ReplayState != nil {
+			var state model.HoleState
+			if err := row.ReplayState.Unmarshal(&state); err != nil {
+				checkpointError = true
+			}
+		}
+		holes = append(holes, model.Hole{
+			From: row.From, To: row.To, At: row.DetectedAt.UTC().Format(time.RFC3339), Lifecycle: row.Lifecycle,
+			Next: row.Cursor, Reason: row.Reason, RetryCount: row.RetryCount,
+		})
+	}
+	if raw, ok := st[db.StateHoles]; ok {
+		var legacy []model.Hole
+		if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
+			checkpointError = true
+		} else {
+			holes = append(holes, legacy...)
+		}
+	}
+	now := s.now()
+	out := model.SummarizeHolesAt(holes, now)
+	out.CheckpointError = checkpointError
+	oldest := now
+	known := false
+	for _, h := range holes {
+		at, err := time.Parse(time.RFC3339, h.At)
+		if err != nil {
+			out.CheckpointError = true
+			continue
+		}
+		if !known || at.Before(oldest) {
+			oldest, known = at, true
+		}
+	}
+	if known && oldest.Before(now) {
+		out.OldestAgeSeconds = uint64(now.Sub(oldest) / time.Second)
+	}
+	return out, nil
+}
+
+func capacityStatus(st map[string]string) model.RPCCapacity {
+	raw, ok := st[db.StateRPCCapacity]
 	if !ok {
-		return model.HolesStatus{}
+		return model.RPCCapacity{}
 	}
-	var holes []model.Hole
-	if err := json.Unmarshal([]byte(raw), &holes); err != nil {
-		return model.HolesStatus{}
+	var out model.RPCCapacity
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		out.CheckpointError = true
 	}
-	return model.SummarizeHolesAt(holes, now)
+	return out
 }
 
 func collectorTelemetry(st map[string]string, now time.Time) *model.CollectorTelemetry {
@@ -598,6 +652,18 @@ func networkHealth(n model.NetworkStatus, now time.Time) (status string, reasons
 	if n.Holes.OldestPendingAgeSeconds != nil && telemetry != nil && telemetry.Loops.History.StaleAfterSecs > 0 &&
 		*n.Holes.OldestPendingAgeSeconds > telemetry.Loops.History.StaleAfterSecs {
 		reasons = append(reasons, "pending gaps are stale")
+	}
+	if n.Holes.Blocks > 0 {
+		reasons = append(reasons, "blocks missing from history")
+	}
+	if n.Holes.CheckpointError {
+		reasons = append(reasons, "missing range checkpoint unreadable")
+	}
+	if n.Capacity.Saturated {
+		reasons = append(reasons, "RPC capacity saturated")
+	}
+	if n.Capacity.CheckpointError {
+		reasons = append(reasons, "RPC capacity checkpoint unreadable")
 	}
 	if len(reasons) > 0 {
 		return model.StatusDegraded, reasons

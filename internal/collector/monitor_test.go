@@ -159,3 +159,39 @@ func TestMonitorHealthPersistenceAndMetrics(t *testing.T) {
 		t.Fatalf("an upstream outage must not fail liveness: %d", status)
 	}
 }
+
+func TestMonitorHoleFreshnessFromDurableRanges(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	clock := newMonitorClock(now)
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: 4663, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The fill loop deletes the legacy checkpoint once it has imported it,
+	// so freshness has to come from the durable rows after an upgrade.
+	if err := store.ReplaceMissingRanges(ctx, 4663, []db.MissingRange{{
+		ChainID: 4663, From: 100, To: 109, Cursor: 105,
+		DetectedAt: now.Add(-20 * time.Minute), Lifecycle: model.MissingRangePending,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	reg := metrics.NewRegistry()
+	collectorMetrics := metrics.NewCollector(reg)
+	monitor := NewMonitor(store, nil, collectorMetrics, nil, WithMonitorClock(clock.Now), WithHeartbeatInterval(time.Second))
+	NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, Enabled: true},
+		Collector: config.CollectorConfig{TickInterval: time.Second, SlowInterval: time.Minute},
+		RPC:       newFakeRPC(110), Store: store, Metrics: collectorMetrics, Monitor: monitor,
+	})
+	monitor.persist(ctx)
+	metricsBody := scrapeRegistry(t, reg)
+	for _, want := range []string{
+		`gascurve_collector_holes_pending_blocks{chain_id="4663",network="robinhood"} 5`,
+		`gascurve_collector_holes_oldest_age_seconds{chain_id="4663",network="robinhood"} 1200`,
+	} {
+		if !strings.Contains(metricsBody, want) {
+			t.Errorf("metrics missing %q:\n%s", want, metricsBody)
+		}
+	}
+}

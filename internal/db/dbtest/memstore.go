@@ -31,6 +31,7 @@ type MemStore struct {
 	BlockRows     map[uint64]map[uint64]db.Block
 	BucketRows    map[string]db.Bucket
 	SampleRows    []db.StateSample
+	MissingRows   map[uint64][]db.MissingRange
 	ActionRows    map[string]db.OwnerAction
 	SetRows       []db.ConstraintSet
 	ReportRows    map[string]db.BatchReport
@@ -55,6 +56,7 @@ func New() *MemStore {
 	return &MemStore{
 		NetworkRows: map[uint64]db.Network{},
 		BlockRows:   map[uint64]map[uint64]db.Block{},
+		MissingRows: map[uint64][]db.MissingRange{},
 		BucketRows:  map[string]db.Bucket{},
 		ActionRows:  map[string]db.OwnerAction{},
 		ReportRows:  map[string]db.BatchReport{},
@@ -63,6 +65,40 @@ func New() *MemStore {
 		Hooks:       map[string]func(){},
 		chainMu:     map[uint64]*sync.Mutex{},
 	}
+}
+
+// MissingRanges lists a copy of one chain's durable missing intervals.
+func (m *MemStore) MissingRanges(_ context.Context, chainID uint64) ([]db.MissingRange, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("MissingRanges"); err != nil {
+		return nil, err
+	}
+	out := append([]db.MissingRange(nil), m.MissingRows[chainID]...)
+	sort.Slice(out, func(i, j int) bool { return out[i].From < out[j].From })
+	return out, nil
+}
+
+// ReplaceMissingRanges replaces one chain's intervals after copying their
+// byte slices, matching the value semantics of committed database rows.
+func (m *MemStore) ReplaceMissingRanges(_ context.Context, chainID uint64, ranges []db.MissingRange) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("ReplaceMissingRanges"); err != nil {
+		return err
+	}
+	out := make([]db.MissingRange, len(ranges))
+	copy(out, ranges)
+	for i := range out {
+		out[i].ChainID = chainID
+		out[i].ReplayState = append(db.JSONB(nil), out[i].ReplayState...)
+	}
+	if len(out) == 0 {
+		delete(m.MissingRows, chainID)
+		return nil
+	}
+	m.MissingRows[chainID] = out
+	return nil
 }
 
 // hook runs the test hook of a method, outside the store lock so it may

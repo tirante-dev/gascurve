@@ -124,15 +124,13 @@ func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 	return nil
 }
 
-// resetHistoryHoles puts the recorded holes back in step with a history
-// that is being rebuilt. A range recorded as unfillable is dropped so it
-// is examined again against the origin the rebuild re-establishes, which
-// is the whole point of rebuilding after an archive endpoint appears: what
-// had nothing to replay from may now have a sampled state before it. A
-// range that had folded into the deleted additive buckets restarts, since
-// its contribution to them went with them and only a refill can put it
-// back. A range whose blocks are row-backed keeps its progress: those
-// buckets are rebuilt from rows and were never deleted.
+// resetHistoryHoles puts the recorded ranges back in step with history that is
+// being rebuilt. A range blocked for lack of state becomes pending so it is
+// examined again against the origin the rebuild re-establishes, which is the
+// point of rebuilding after an archive endpoint appears. The durable record
+// stays visible until it is actually filled. A range that had folded into the
+// deleted additive buckets restarts, since its contribution went with them.
+// A row-backed range keeps its progress because those buckets were not deleted.
 func (f *Follower) resetHistoryHoles(ctx context.Context, s db.Store, bucketsDeleted bool) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil || len(holes) == 0 {
@@ -142,13 +140,13 @@ func (f *Follower) resetHistoryHoles(ctx context.Context, s db.Store, bucketsDel
 	changed := false
 	for _, h := range holes {
 		if h.Reason == reasonNoState {
-			f.log.Info("dropping an unfillable range so the rebuild can examine it again", "from", h.From, "to", h.To)
+			f.log.Info("requeueing a blocked range so the rebuild can examine it again", "from", h.From, "to", h.To)
+			h.Lifecycle, h.Reason, h.NextRetryAt, h.LastError = rangePending, "", "", ""
 			changed = true
-			continue
 		}
 		if bucketsDeleted && h.Folded > 0 {
 			f.log.Info("restarting a range whose folded buckets the rebuild deleted", "from", h.From, "to", h.To)
-			h.Next, h.State, h.Folded = 0, nil, 0
+			h.Next, h.State, h.Folded, h.CursorAt = 0, nil, 0, ""
 			changed = true
 		}
 		out = append(out, h)
