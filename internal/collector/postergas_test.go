@@ -823,11 +823,11 @@ func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 	}
 }
 
-// An upgraded database with no record, the repair running before any prune. While the repair is
-// unfinished the seed and the cutoff are pinned to the boundary, so no window above it can be refused
-// under the pass: rows an hour apart are both repaired, and the seed is the boundary, not the latest
-// row less retention. That floor only takes over once the repair is done.
-func TestRepairOnAnUpgradedDatabaseIsNotOutrunByPrune(t *testing.T) {
+// An upgraded database with no record, the repair running before any prune. The seed reproduces the
+// old collector's cutoff, an hour before the latest row, so the first surviving row's windows sit
+// below it and are refused (their earlier rows are gone) while the later row's are rebuilt; and the
+// repair is not outrun, because prune is pinned while it runs.
+func TestRepairOnAnUpgradedDatabaseIsFlooredByTheSeed(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(70_000)
 	store := dbtest.New()
@@ -846,23 +846,26 @@ func TestRepairOnAnUpgradedDatabaseIsNotOutrunByPrune(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	boundary := first.Truncate(time.Hour)
-	if got, _ := f.pruneFrontier(ctx); !got.Equal(boundary) {
-		t.Fatalf("frontier %v while the repair ran, want the boundary %v", got, boundary)
-	}
-	for _, n := range []uint64{28_500, 64_500} {
-		if got := posterGasOf(t, store, n); !got.Valid {
-			t.Fatalf("block %d was not repaired: prune outran the pass", n)
-		}
+	seed := second.Add(-time.Hour)
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(seed) {
+		t.Fatalf("frontier %v, want the old cutoff %v", got, seed)
 	}
 	for _, res := range db.ResolutionOrder {
 		buckets, err := store.Buckets(ctx, 4663, res, first.Add(-time.Hour), second.Add(time.Hour))
-		if err != nil || len(buckets) == 0 {
-			t.Fatalf("%s buckets: %d %v", res, len(buckets), err)
+		if err != nil {
+			t.Fatal(err)
 		}
 		for _, b := range buckets {
-			if !b.PosterGas.Valid {
-				t.Fatalf("%s bucket %s was refused while the repair was pinned", res, b.BucketStart)
+			above := !b.BucketStart.Before(seed)
+			if b.PosterGas.Valid != above {
+				t.Fatalf("%s bucket %s: poster gas %v, want %v (above the seed: %v)", res, b.BucketStart, b.PosterGas.Valid, above, above)
+			}
+		}
+	}
+	for _, batch := range rpc.posterGasCalls {
+		for _, n := range batch {
+			if n < 64_500 {
+				t.Fatalf("read receipts for block %d, whose windows are all below the seed", n)
 			}
 		}
 	}
@@ -975,15 +978,9 @@ func TestPruneRechecksTheDurableLiveStartUnderTheLock(t *testing.T) {
 	if err := f.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	f.mu.Lock()
-	_, has := f.boundaryLocked()
-	f.mu.Unlock()
-	if !has {
-		t.Fatal("no live start loaded, so the test proves nothing")
-	}
-	// Clear the record the startup seed just made, so anything recorded
-	// from here on is prune's own doing. Then the rewind's clear of the
-	// live start lands after prune's snapshot and before its lock.
+	// Clear the record the startup seed just made, so anything recorded from here on is prune's own
+	// doing. Then the rewind's clear of the live start: prune reads the durable checkpoint under the
+	// lock and finds none, whatever the follower still holds in memory.
 	if err := store.DeleteState(ctx, 4663, db.StatePruneFrontier); err != nil {
 		t.Fatal(err)
 	}
@@ -1037,10 +1034,11 @@ func TestPruneMeasuresRetentionInChainTime(t *testing.T) {
 	}
 }
 
-// While the poster-gas repair is unfinished prune is pinned to the boundary, as it is for the
-// backfill: rows the repair has not reached have to outlive it, or the frontier advances under the
-// pass and refuses the buckets it was about to rebuild.
-func TestPruneFrontierPinsToTheBoundaryWhileTheRepairRuns(t *testing.T) {
+// The seed reproduces what the old collector deleted and so ignores the repair pin: on an upgraded
+// database whose cutoff was long past the live boundary, seeding with the pin would record that
+// boundary and let the first surviving windows be rebuilt short. prune itself honors the pin, so
+// while the repair runs no row above the boundary is dropped and the recorded frontier does not move.
+func TestSeedIgnoresTheRepairPinButPruneHonorsIt(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
 	rpc := newFakeRPC(70_000)
@@ -1057,25 +1055,23 @@ func TestPruneFrontierPinsToTheBoundaryWhileTheRepairRuns(t *testing.T) {
 	if err := f.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	f.mu.Lock()
-	boundary, has := f.boundaryLocked()
-	f.mu.Unlock()
-	if !has {
-		t.Fatal("no boundary loaded, so the test proves nothing")
+	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
+	want := latest.Add(-time.Hour)
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(want) {
+		t.Fatalf("seed %v with the repair unfinished, want the old cutoff %v, not the boundary", got, want)
 	}
-	if got, _ := f.pruneFrontier(ctx); !got.Equal(boundary) {
-		t.Fatalf("frontier %v with the repair unfinished, want the boundary %v", got, boundary)
-	}
-	// Once the repair is done the pin lifts and retention is what prune goes by.
-	if err := f.saveCursor2(ctx, store); err != nil {
-		t.Fatal(err)
-	}
+	// prune while the repair runs: pinned to the boundary, so nothing above it goes and the
+	// frontier, forward-only, stays where the seed put it.
 	if err := f.prune(ctx); err != nil {
 		t.Fatal(err)
 	}
-	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
-	if got, _ := f.pruneFrontier(ctx); !got.Equal(latest.Add(-time.Hour)) {
-		t.Fatalf("frontier %v after the repair finished, want %v", got, latest.Add(-time.Hour))
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(want) {
+		t.Fatalf("frontier moved to %v under the repair pin", got)
+	}
+	for _, n := range []uint64{28_500, 64_500} {
+		if b, err := store.BlockByNumber(ctx, 4663, n); err != nil || b == nil {
+			t.Fatalf("block %d pruned while the repair was unfinished", n)
+		}
 	}
 }
 
@@ -1120,5 +1116,79 @@ func TestHistoryLoopGivesTheRepairItsTurnWhileTheFillerYields(t *testing.T) {
 	f.runHistory(ctx)
 	if len(rpc.posterGasCalls) == 0 {
 		t.Fatalf("the repair got no turn in %d iterations while the filler yielded", sleeps)
+	}
+}
+
+// A fill that fails persistently must not skip the repair. It once did, and with prune pinned while
+// the repair is unfinished that would have held every row above the boundary indefinitely.
+func TestHistoryLoopRunsTheRepairAfterAFillError(t *testing.T) {
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	sleeps := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newTestFollower(t, rpc, store, func(o *Options) {
+		o.Sleep = func(context.Context, time.Duration) error {
+			sleeps++
+			if sleeps >= 4 {
+				cancel()
+			}
+			return nil
+		}
+	})
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	if err := f.saveLiveStart(ctx, store, &liveStart{Block: 900, TS: int64(tsFor(900))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, baseTime.Add(-24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	// Every fill step fails before it can do anything.
+	store.FailOn["MissingRanges"] = true
+
+	f.runHistory(ctx)
+	if len(rpc.posterGasCalls) == 0 {
+		t.Fatalf("the repair got no turn in %d iterations while the fill kept failing", sleeps)
+	}
+}
+
+// prune goes by the durable live start under the chain lock, not the follower's copy: a rewind that
+// re-established it after the snapshot is what the durable value reflects.
+func TestPruneGoesByTheDurableLiveStart(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(70_000)
+	store := dbtest.New()
+	// Three rows: one well before the cutoff, one exactly at it, one an hour on.
+	seedBlocksWithoutPosterGas(t, rpc, store, 20_000, 20_002)
+	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_502)
+	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BlockRetention = time.Hour
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.saveCursor2(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	// The follower has no live start in memory at all; only the durable checkpoint says there is one.
+	if err := f.saveLiveStart(ctx, store, &liveStart{Block: 28_500, TS: int64(tsFor(28_500))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteState(ctx, 4663, db.StatePruneFrontier); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(latest.Add(-time.Hour)) {
+		t.Fatalf("frontier %v, want prune to have gone by the durable live start and recorded %v", got, latest.Add(-time.Hour))
+	}
+	// Rows are dropped strictly before the cutoff: the one at it survives, the older one does not.
+	if b, _ := store.BlockByNumber(ctx, 4663, 20_000); b != nil {
+		t.Fatal("a row older than the cutoff survived a one-hour retention")
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 28_500); b == nil {
+		t.Fatal("the row exactly at the cutoff was pruned")
 	}
 }

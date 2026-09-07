@@ -50,7 +50,12 @@ type posterGasCursor struct {
 // loadPosterGasCursor reads the checkpoint. An unreadable one starts the pass over: every write is
 // guarded on the row still lacking the value, so repeating work is harmless.
 func (f *Follower) loadPosterGasCursor(ctx context.Context) (*posterGasCursor, error) {
-	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StatePosterGasRepair)
+	return f.loadPosterGasCursorFrom(ctx, f.store)
+}
+
+// loadPosterGasCursorFrom reads the cursor through s, for a caller inside a chain transaction.
+func (f *Follower) loadPosterGasCursorFrom(ctx context.Context, s db.Store) (*posterGasCursor, error) {
+	raw, ok, err := s.GetState(ctx, f.chainID, db.StatePosterGasRepair)
 	if err != nil {
 		return nil, err
 	}

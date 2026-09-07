@@ -199,17 +199,17 @@ func (f *Follower) runSlow(ctx context.Context) {
 func (f *Follower) runHistory(ctx context.Context) {
 	for ctx.Err() == nil {
 		start := f.now()
-		status, err := f.FillStep(ctx)
-		if err != nil {
+		status, fillErr := f.FillStep(ctx)
+		if fillErr != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			f.observeLoop(loopHistory, start, err)
-			f.log.Warn("gap fill error", "err", err.Error())
-			if err := f.sleep(ctx, restartDelay); err != nil {
-				return
-			}
-			continue
+			// Logged and observed, but not the end of the turn: a hole that fails persistently
+			// (a malformed replay state, say) must not hold the repair off for good, all the more
+			// now that an unfinished repair pins retention and would then hold every row above the
+			// boundary indefinitely. The repair runs, and the restart delay follows it.
+			f.log.Warn("gap fill error", "err", fillErr.Error())
+			status = FillIdle
 		}
 		// The repair runs every iteration, whatever the fill did. A progressed fill must not take the
 		// turn, or a long gap would hold the repair off for hours; an idle fill must not either, or
@@ -228,7 +228,14 @@ func (f *Follower) runHistory(ctx context.Context) {
 			continue
 		}
 		if status == FillProgressed || repair == RepairProgressed {
-			f.observeLoop(loopHistory, start, nil)
+			f.observeLoop(loopHistory, start, fillErr)
+			continue
+		}
+		if fillErr != nil {
+			f.observeLoop(loopHistory, start, fillErr)
+			if err := f.sleep(ctx, restartDelay); err != nil {
+				return
+			}
 			continue
 		}
 		if status == FillIdle || repair == RepairIdle {
