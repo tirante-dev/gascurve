@@ -26,6 +26,13 @@ const (
 	minimumFastFreshness     = 30 * time.Second
 	minimumHistoryFreshness  = 2 * time.Minute
 	monitorStatusKey         = "status"
+	// readinessErrorStreak is how many consecutive fast-loop failures
+	// remove readiness. A public RPC answers the occasional call with 429
+	// and the loop recovers on its next tick, so a single failure says
+	// nothing about whether the collector is keeping up. A sustained
+	// outage still removes readiness here, and would anyway once the loop
+	// passes its freshness window.
+	readinessErrorStreak = 3
 )
 
 type databaseStats interface {
@@ -36,6 +43,7 @@ type loopRuntime struct {
 	lastSuccess time.Time
 	lastError   time.Time
 	err         string
+	errorStreak int64
 	duration    time.Duration
 	staleAfter  time.Duration
 }
@@ -125,8 +133,9 @@ func (m *Monitor) observeLoop(chainID uint64, loop string, start time.Time, err 
 	l.duration = max(at.Sub(start), 0)
 	if err != nil {
 		l.lastError, l.err = at, err.Error()
+		l.errorStreak++
 	} else {
-		l.lastSuccess = at
+		l.lastSuccess, l.errorStreak = at, 0
 	}
 	instruments, duration := n.metrics, l.duration
 	m.mu.Unlock()
@@ -282,7 +291,11 @@ func loopModel(l *loopRuntime) model.LoopStatus {
 	if l == nil {
 		return model.LoopStatus{}
 	}
-	out := model.LoopStatus{LastDurationMS: l.duration.Milliseconds(), StaleAfterSecs: int64(l.staleAfter / time.Second)}
+	out := model.LoopStatus{
+		LastDurationMS: l.duration.Milliseconds(),
+		StaleAfterSecs: int64(l.staleAfter / time.Second),
+		ErrorStreak:    l.errorStreak,
+	}
 	if !l.lastSuccess.IsZero() {
 		at := l.lastSuccess.UTC().Format(time.RFC3339Nano)
 		out.LastSuccessAt = &at
@@ -367,7 +380,7 @@ func (m *Monitor) notReadyReason() string {
 		if fast.lastSuccess.IsZero() {
 			return "waiting for first successful fast loop for " + n.name
 		}
-		if fast.lastError.After(fast.lastSuccess) {
+		if fast.errorStreak >= readinessErrorStreak {
 			return "fast loop failing for " + n.name
 		}
 		if now.Sub(fast.lastSuccess) > fast.staleAfter {

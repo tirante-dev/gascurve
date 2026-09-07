@@ -503,11 +503,15 @@ func SummarizeHolesAt(holes []Hole, now time.Time) HolesStatus {
 
 // LoopStatus is the latest outcome of one collector loop. Both success and
 // error timestamps are retained so a recovered error remains diagnosable
-// without continuing to mark the network degraded.
+// without continuing to mark the network degraded. ErrorStreak counts the
+// consecutive failures since the last success and is what says a loop is
+// failing: one error on a metered public RPC is routine, and the loop
+// recovers on its next tick.
 type LoopStatus struct {
 	LastSuccessAt  *string `json:"lastSuccessAt"`
 	LastErrorAt    *string `json:"lastErrorAt"`
 	LastError      *string `json:"lastError"`
+	ErrorStreak    int64   `json:"errorStreak"`
 	LastDurationMS int64   `json:"lastDurationMs"`
 	StaleAfterSecs int64   `json:"staleAfterSeconds"`
 }

@@ -145,10 +145,33 @@ func TestMonitorHealthPersistenceAndMetrics(t *testing.T) {
 		t.Fatalf("metric declaration must occur once:\n%s", metricsBody)
 	}
 
+	// A metered public RPC answers the occasional call with 429, and the
+	// loop recovers on its next tick. Readiness follows the streak, so a
+	// blip like that cannot take the collector out of the Service.
 	clock.Add(time.Second)
+	for range readinessErrorStreak - 1 {
+		monitor.observeLoop(4663, loopFast, clock.Now(), context.DeadlineExceeded)
+		if status, _ := monitorRequest(t, handler, "/ready"); status != http.StatusOK {
+			t.Fatalf("a transient fast-loop error must not fail readiness: %d", status)
+		}
+	}
+	// One success clears the streak, so the count is consecutive failures
+	// and not failures since the last time anyone looked.
+	monitor.observeLoop(4663, loopFast, clock.Now(), nil)
+	for range readinessErrorStreak - 1 {
+		monitor.observeLoop(4663, loopFast, clock.Now(), context.DeadlineExceeded)
+	}
+	if status, _ := monitorRequest(t, handler, "/ready"); status != http.StatusOK {
+		t.Fatalf("a success must clear the error streak: %d", status)
+	}
 	monitor.observeLoop(4663, loopFast, clock.Now(), context.DeadlineExceeded)
-	if status, _ := monitorRequest(t, handler, "/ready"); status != http.StatusServiceUnavailable {
-		t.Fatalf("a current fast-loop error must make readiness fail: %d", status)
+	if status, body := monitorRequest(t, handler, "/ready"); status != http.StatusServiceUnavailable || !strings.Contains(body, "fast loop failing") {
+		t.Fatalf("a failing fast loop must fail readiness: %d %s", status, body)
+	}
+	// The streak is published, so the API applies the same rule to /status
+	// as the collector applies to its own readiness.
+	if streak := monitor.telemetry(4663).Loops.Fast.ErrorStreak; streak != readinessErrorStreak {
+		t.Fatalf("published error streak = %d, want %d", streak, readinessErrorStreak)
 	}
 	monitor.observeLoop(4663, loopFast, clock.Now(), nil)
 	clock.Add(time.Minute)
