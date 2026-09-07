@@ -96,7 +96,7 @@ Upgrades of an existing release with both ingress and API enabled must add `conf
 
 ## Health and collector metrics
 
-The collector listens on `config.collector.metrics_port` (9090 by default) inside its pod. Kubernetes uses `/startup` until the database setup is complete and the follower loops launch, `/health` for shallow process liveness, and `/ready` for database connectivity plus a fresh successful fast loop for every enabled network. RPC or database outages therefore remove readiness but do not cause the singleton collector to restart forever. Setting the port to `0` explicitly disables the server and the chart-managed probes.
+The collector listens on `config.collector.metrics_port` (9090 by default) inside its pod. Kubernetes uses `/startup` until the database setup is complete and the follower loops launch, `/health` for shallow process liveness, and `/ready` for database connectivity plus a fresh fast loop for every enabled network. A loop counts as failing only after three consecutive errors with no success in between, so a single 429 from a metered public RPC cannot flap the pod out of readiness. RPC or database outages therefore remove readiness but do not cause the singleton collector to restart forever. Setting the port to `0` explicitly disables the server and the chart-managed probes.
 
 `/metrics` exposes Prometheus text for the heartbeat, per-loop success, error and duration, observed and indexed heads, block lag, queued gap count, age and blocks, RPC calls, errors, rate limits and latency, and database latency and errors. The chart's headless collector Service supports Prometheus discovery without exposing the endpoint publicly. It can also be inspected directly:
 
