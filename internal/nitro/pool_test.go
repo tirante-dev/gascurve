@@ -618,6 +618,9 @@ func TestPoolTypedCalls(t *testing.T) {
 	if logs, err := p.OwnerActsLogs(ctx, 0, 100); err != nil || len(logs) != 1 {
 		t.Fatalf("OwnerActsLogs: %v %v", logs, err)
 	}
+	if receipts, err := p.TransactionReceipts(ctx, []string{"0x01"}); err != nil || len(receipts) != 1 || receipts[0].GasUsed != 3 {
+		t.Fatalf("TransactionReceipts: %v %v", receipts, err)
+	}
 	if bal, err := p.Balance(ctx, "0x1"); err != nil || bal.Int64() != 100 {
 		t.Fatalf("Balance: %s %v", bal, err)
 	}

@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -182,6 +183,11 @@ func TestMemStore(t *testing.T) {
 	}
 	if n, _ := m.InsertOwnerActions(ctx, acts); n != 0 {
 		t.Fatal("duplicate actions")
+	}
+	enriched := acts[0]
+	enriched.TxIndex = sql.NullInt64{Int64: 7, Valid: true}
+	if n, _ := m.InsertOwnerActions(ctx, []db.OwnerAction{enriched}); n != 0 || !m.ActionRows["1/a/0"].TxIndex.Valid || m.ActionRows["1/a/0"].TxIndex.Int64 != 7 {
+		t.Fatal("duplicate action transaction index enrichment")
 	}
 	if as, _ := m.OwnerActions(ctx, 1, time.Time{}, time.Time{}, 0); len(as) != 2 || as[0].LogIndex != 1 {
 		t.Fatal("actions order")

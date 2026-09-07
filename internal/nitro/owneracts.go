@@ -10,6 +10,7 @@ type OwnerAction struct {
 	BlockNumber uint64
 	Timestamp   uint64
 	TxHash      string
+	TxIndex     uint64
 	LogIndex    uint64
 	Owner       string
 	Selector    string
@@ -111,6 +112,7 @@ func DecodeOwnerActs(l Log) (*OwnerAction, error) {
 		BlockNumber: l.BlockNumber,
 		Timestamp:   l.BlockTimestamp,
 		TxHash:      l.TxHash,
+		TxIndex:     l.TxIndex,
 		LogIndex:    l.LogIndex,
 		Owner:       owner,
 		Selector:    EncodeHex(methodTopic[:4]),

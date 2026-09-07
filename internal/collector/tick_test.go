@@ -247,9 +247,10 @@ func TestTickGapSkipAndParameterChange(t *testing.T) {
 	}
 }
 
-// TestTickSplitsAtOwnerAction: a constraint set change inside a catch-up
-// range is located through the owner log and the replay switches sets at
-// its block, so the blocks before it keep the old model.
+// TestTickSplitsAtOwnerAction: a constraint set change late in a block is
+// located through the owner log and its receipt. Gas from earlier
+// transactions stays on the old state, while the action transaction and
+// the gas after it are added to the reset state.
 func TestTickSplitsAtOwnerAction(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
@@ -258,13 +259,24 @@ func TestTickSplitsAtOwnerAction(t *testing.T) {
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if rpc.calledTimes("TransactionReceipts") != 0 {
+		t.Fatal("a block range without owner pricing actions must not fetch receipts")
+	}
 	// setGasPricingConstraints at block 1005 switches to one constraint
-	// with a starting backlog of 5; the node's live state follows.
+	// with a starting backlog of 5. The action is the last of three
+	// transactions, with 800,000 gas consumed before it.
 	newSet := []nitro.ConstraintParam{{GasTargetPerSecond: 60_000_000, AdjustmentWindowSeconds: 15, StartingBacklog: 5}}
 	calldata := nitro.EncodeSetGasPricingConstraints(newSet)
-	rpc.logs = []nitro.Log{ownerLog(1005, calldata)}
+	action := ownerLog(1005, calldata)
+	action.TxIndex = 2
+	rpc.logs = []nitro.Log{action}
+	rpc.receipts[action.TxHash] = nitro.Receipt{
+		TxHash: action.TxHash, BlockNumber: action.BlockNumber, TxIndex: action.TxIndex,
+		GasUsed: 100_000, CumulativeGasUsed: 900_000,
+	}
+	afterReset := gasFor(1005) - 800_000
 	rpc.mu.Lock()
-	rpc.constraints = []nitro.Constraint{{Target: 60_000_000, Window: 15, Backlog: 5 + gasFor(1005) + gasFor(1006) + gasFor(1007) + gasFor(1008)}}
+	rpc.constraints = []nitro.Constraint{{Target: 60_000_000, Window: 15, Backlog: 5 + afterReset + gasFor(1006) + gasFor(1007) + gasFor(1008)}}
 	rpc.mu.Unlock()
 	rpc.setHead(1008)
 	if err := f.Tick(ctx); err != nil {
@@ -272,6 +284,9 @@ func TestTickSplitsAtOwnerAction(t *testing.T) {
 	}
 	if rpc.calledTimes("OwnerActsLogs") != 1 || rpc.logRanges[0] != [2]uint64{1001, 1008} {
 		t.Fatalf("owner log scan: %d calls %v", rpc.calledTimes("OwnerActsLogs"), rpc.logRanges)
+	}
+	if rpc.calledTimes("TransactionReceipts") != 1 {
+		t.Fatalf("only the action block should need receipts: %d calls", rpc.calledTimes("TransactionReceipts"))
 	}
 	blocks, _ := store.BlocksAfter(ctx, 4663, 1000, 100)
 	if len(blocks) != 8 {
@@ -285,10 +300,10 @@ func TestTickSplitsAtOwnerAction(t *testing.T) {
 			t.Fatalf("block %d should use the new set: %+v", b.Number, b)
 		}
 	}
-	// Block 1005 starts from the set's starting backlog plus its own gas;
-	// the head anchors to the sample without a jump, so the replay was
-	// exact in between.
-	if blocks[4].Backlogs[0] != 5+gasFor(1005) || db.ReplayErrorBips(blocks[7]) != 0 && !blocks[7].Anchored {
+	// The 800,000 gas before the late reset is discarded with the old
+	// backlog. Only the action transaction and the remainder of its block
+	// survive on top of the starting backlog.
+	if blocks[4].Backlogs[0] != 5+afterReset || db.ReplayErrorBips(blocks[7]) != 0 && !blocks[7].Anchored {
 		t.Fatalf("block 1005: %+v", blocks[4])
 	}
 	// The seed recorded the live shape as an observed set at 1000 (no set
@@ -296,6 +311,10 @@ func TestTickSplitsAtOwnerAction(t *testing.T) {
 	sets, _ := store.ConstraintSets(ctx, 4663)
 	if len(sets) != 2 || sets[0].EffectiveBlock != 1000 || sets[0].Source != model.SourceObserved || sets[1].EffectiveBlock != 1005 || sets[1].Source != model.SourceOwnerAction {
 		t.Fatalf("constraint set recorded by the fast loop: %+v", sets)
+	}
+	acts, _ := store.OwnerActions(ctx, 4663, time.Time{}, time.Time{}, 0)
+	if len(acts) != 1 || !acts[0].TxIndex.Valid || acts[0].TxIndex.Int64 != 2 {
+		t.Fatalf("owner action transaction index: %+v", acts)
 	}
 	if holes := holesOf(t, store); len(holes) != 0 {
 		t.Fatalf("no hole expected: %+v", holes)
@@ -311,11 +330,12 @@ func TestTickSplitsAtOwnerAction(t *testing.T) {
 	}
 	b1011, _ := store.BlockByNumber(ctx, 4663, 1011)
 	b1012, _ := store.BlockByNumber(ctx, 4663, 1012)
-	if b1011.MinBaseFee.Wei.Int64() != 20_000_000 || b1012.MinBaseFee.Wei.Int64() != 30_000_000 {
-		t.Fatalf("min fee split: %s then %s", b1011.MinBaseFee.Wei, b1012.MinBaseFee.Wei)
+	b1013, _ := store.BlockByNumber(ctx, 4663, 1013)
+	if b1011.MinBaseFee.Wei.Int64() != 20_000_000 || b1012.MinBaseFee.Wei.Int64() != 20_000_000 || b1013.MinBaseFee.Wei.Int64() != 30_000_000 {
+		t.Fatalf("min fee split: %s then %s then %s", b1011.MinBaseFee.Wei, b1012.MinBaseFee.Wei, b1013.MinBaseFee.Wei)
 	}
-	if f.minFeeAt(1011).Int64() != pricer.InitialMinimumBaseFeeWei || f.minFeeAt(1012).Int64() != 30_000_000 {
-		t.Fatalf("minFeeAt: %s %s", f.minFeeAt(1011), f.minFeeAt(1012))
+	if f.minFeeAt(1011).Int64() != pricer.InitialMinimumBaseFeeWei || f.minFeeAt(1012).Int64() != pricer.InitialMinimumBaseFeeWei || f.minFeeAt(1013).Int64() != 30_000_000 {
+		t.Fatalf("minFeeAt: %s %s %s", f.minFeeAt(1011), f.minFeeAt(1012), f.minFeeAt(1013))
 	}
 	// A failing owner log fetch fails the tick without moving the head.
 	rpc.mu.Lock()
@@ -372,7 +392,7 @@ func TestTickCatchUpBoundaries(t *testing.T) {
 	if len(b(1004).Backlogs) != 2 || len(b(1005).Backlogs) != 1 || len(b(1006).Backlogs) != 1 || len(b(1007).Backlogs) != 2 || b(1007).Backlogs[0] != 11+gasFor(1007) {
 		t.Fatalf("change and change back: %v %v %v %v", b(1004).Backlogs, b(1005).Backlogs, b(1006).Backlogs, b(1007).Backlogs)
 	}
-	if b(1007).MinBaseFee.Wei.Int64() != 20_000_000 || b(1008).MinBaseFee.Wei.Int64() != 30_000_000 || b(1009).MinBaseFee.Wei.Int64() != 20_000_000 || b(1010).MinBaseFee.Wei.Int64() != 20_000_000 {
+	if b(1007).MinBaseFee.Wei.Int64() != 20_000_000 || b(1008).MinBaseFee.Wei.Int64() != 20_000_000 || b(1009).MinBaseFee.Wei.Int64() != 30_000_000 || b(1010).MinBaseFee.Wei.Int64() != 20_000_000 {
 		t.Fatalf("fee change and change back: %s %s %s", b(1007).MinBaseFee.Wei, b(1008).MinBaseFee.Wei, b(1009).MinBaseFee.Wei)
 	}
 	sets, _ := store.ConstraintSets(ctx, 4663)
@@ -403,11 +423,11 @@ func TestTickCatchUpBoundaries(t *testing.T) {
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if acts, _ := store.OwnerActions(ctx, 4663, time.Time{}, time.Time{}, 0); len(acts) != 6 || f.minFeeAt(1012).Int64() != 25_000_000 {
-		t.Fatalf("retry records the action: %d actions, fee %s", len(acts), f.minFeeAt(1012))
+	if acts, _ := store.OwnerActions(ctx, 4663, time.Time{}, time.Time{}, 0); len(acts) != 6 || f.minFeeAt(1012).Int64() != 20_000_000 || f.minFeeAt(1013).Int64() != 25_000_000 {
+		t.Fatalf("retry records the action: %d actions, fees %s then %s", len(acts), f.minFeeAt(1012), f.minFeeAt(1013))
 	}
 	b1012, _ := store.BlockByNumber(ctx, 4663, 1012)
-	if b1012.MinBaseFee.Wei.Int64() != 25_000_000 {
+	if b1012.MinBaseFee.Wei.Int64() != 20_000_000 {
 		t.Fatalf("fee split on the retry: %+v", b1012)
 	}
 	// A fee change nothing explains (no action in the interval) is a hole,
@@ -1139,8 +1159,8 @@ func TestHelpers(t *testing.T) {
 	}
 	// The minimum fee before the first recorded change is nitro's genesis
 	// default, never the live value.
-	f.minFeeChanges = []minFeeChange{{block: 100, fee: big.NewInt(5)}}
-	if f.minFeeAt(50).Int64() != pricer.InitialMinimumBaseFeeWei || f.minFeeAt(150).Int64() != 5 || f.minFeeChangeBlock(50) != 0 || f.minFeeChangeBlock(150) != 100 {
+	f.minFeeChanges = []minFeeChange{{block: 100, fee: big.NewInt(5), pos: actionPosition{txHash: "0xfee"}}}
+	if f.minFeeAt(50).Int64() != pricer.InitialMinimumBaseFeeWei || f.minFeeAt(100).Int64() != pricer.InitialMinimumBaseFeeWei || f.minFeeAt(150).Int64() != 5 || f.minFeeChangeBlock(50) != 0 || f.minFeeChangeBlock(150) != 100 {
 		t.Fatal("minFeeAt")
 	}
 	if !f.boundaryAt(100) || f.boundaryAt(101) || !f.boundaryAt(20) {

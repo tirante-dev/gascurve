@@ -66,8 +66,18 @@ func setupChain(f *fakeRPC) {
 				"0xa0188cdb00000000000000000000000000000000000000000000000000000000",
 				"0x0000000000000000000000002a153c6a1b66dbc930a8d7017230ab0253005c09",
 			},
-			"data": "0x00", "blockNumber": "0x10", "transactionHash": "0xtx", "logIndex": "0x1", "blockTimestamp": "0x5",
+			"data": "0x00", "blockNumber": "0x10", "transactionHash": "0xtx", "transactionIndex": "0x2", "logIndex": "0x1", "blockTimestamp": "0x5",
 		}}
+	}
+	f.handlers["eth_getTransactionReceipt"] = func(params []json.RawMessage) any {
+		hash := paramString(params[0])
+		if hash == "0xmissing" {
+			return nil
+		}
+		return map[string]any{
+			"transactionHash": hash, "blockNumber": "0x140", "transactionIndex": "0x1",
+			"gasUsed": "0x3", "cumulativeGasUsed": "0x5",
+		}
 	}
 	f.handlers["eth_getBalance"] = func(params []json.RawMessage) any {
 		switch paramString(params[0]) {
@@ -144,8 +154,15 @@ func TestTypedCalls(t *testing.T) {
 	if _, err := c.BlocksWithTxs(ctx, []uint64{5}); err == nil {
 		t.Fatal("missing full block should error")
 	}
+	receipts, err := c.TransactionReceipts(ctx, []string{"0x01", "0x02"})
+	if err != nil || len(receipts) != 2 || receipts[1].TxHash != "0x02" || receipts[1].BlockNumber != 320 || receipts[1].TxIndex != 1 || receipts[1].GasUsed != 3 || receipts[1].CumulativeGasUsed != 5 {
+		t.Fatalf("TransactionReceipts: %+v %v", receipts, err)
+	}
+	if _, err := c.TransactionReceipts(ctx, []string{"0xmissing"}); err == nil {
+		t.Fatal("missing receipt should error")
+	}
 	logs, err := c.OwnerActsLogs(ctx, 0, 100)
-	if err != nil || len(logs) != 1 || logs[0].BlockNumber != 16 || logs[0].LogIndex != 1 || logs[0].BlockTimestamp != 5 {
+	if err != nil || len(logs) != 1 || logs[0].BlockNumber != 16 || logs[0].TxIndex != 2 || logs[0].LogIndex != 1 || logs[0].BlockTimestamp != 5 {
 		t.Fatalf("Logs: %+v %v", logs, err)
 	}
 	if logs, err := c.Logs(ctx, 0, 1, "0x1", nil); err != nil || len(logs) != 0 {
@@ -408,6 +425,9 @@ func TestL1SampleAndFeeAccounts(t *testing.T) {
 	if _, err := c.BlocksWithTxs(ctx, []uint64{1}); err == nil {
 		t.Fatal("transport")
 	}
+	if _, err := c.TransactionReceipts(ctx, []string{"0x1"}); err == nil {
+		t.Fatal("transport")
+	}
 	if _, err := c.ArbOSVersion(ctx); err == nil {
 		t.Fatal("transport")
 	}
@@ -466,10 +486,23 @@ func TestParseHeaderErrors(t *testing.T) {
 		`[{"data":"0xzz"}]`,
 		`[{"data":"0x","blockNumber":"zz"}]`,
 		`[{"data":"0x","blockNumber":"0x1","logIndex":"zz"}]`,
-		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1","blockTimestamp":"zz"}]`,
+		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1","transactionIndex":"zz"}]`,
+		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1"}]`,
+		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1","transactionIndex":"0x1","blockTimestamp":"zz"}]`,
 	} {
 		if _, err := parseLogs(json.RawMessage(c)); err == nil {
 			t.Errorf("expected log error for %s", c)
+		}
+	}
+	for _, c := range []string{
+		`null`, `"str"`,
+		`{"blockNumber":"zz"}`,
+		`{"blockNumber":"0x1","transactionIndex":"zz"}`,
+		`{"blockNumber":"0x1","transactionIndex":"0x1","gasUsed":"zz"}`,
+		`{"blockNumber":"0x1","transactionIndex":"0x1","gasUsed":"0x1","cumulativeGasUsed":"zz"}`,
+	} {
+		if _, err := parseReceipt(json.RawMessage(c)); err == nil {
+			t.Errorf("expected receipt error for %s", c)
 		}
 	}
 }

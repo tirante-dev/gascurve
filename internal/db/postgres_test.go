@@ -198,19 +198,20 @@ func TestPostgresQueries(t *testing.T) {
 
 	mock.ExpectExec("INSERT INTO owner_actions").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO owner_actions").WillReturnResult(sqlmock.NewResult(0, 0))
-	if n, err := p.InsertOwnerActions(ctx, []OwnerAction{{TxHash: "a", Args: JSONB(`{}`)}, {TxHash: "b", Args: JSONB(`{}`)}}); err != nil || n != 1 {
+	mock.ExpectExec("UPDATE owner_actions SET tx_index").WillReturnResult(sqlmock.NewResult(0, 1))
+	if n, err := p.InsertOwnerActions(ctx, []OwnerAction{{TxHash: "a", Args: JSONB(`{}`)}, {TxHash: "b", TxIndex: sql.NullInt64{Int64: 2, Valid: true}, Args: JSONB(`{}`)}}); err != nil || n != 1 {
 		t.Fatalf("InsertOwnerActions: %d %v", n, err)
 	}
-	oaCols := []string{"chain_id", "block_number", "tx_hash", "log_index", "ts", "method", "selector", "args"}
-	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 AND ts >= \\$2 AND ts < \\$3 ORDER BY .* LIMIT \\$4").WillReturnRows(sqlmock.NewRows(oaCols).AddRow(4663, 1, "0x", 0, now, "m", "0x1", []byte(`{}`)))
-	if as, err := p.OwnerActions(ctx, 4663, now, now, 5); err != nil || len(as) != 1 {
+	oaCols := []string{"chain_id", "block_number", "tx_hash", "tx_index", "log_index", "ts", "method", "selector", "args"}
+	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 AND ts >= \\$2 AND ts < \\$3 ORDER BY .* LIMIT \\$4").WillReturnRows(sqlmock.NewRows(oaCols).AddRow(4663, 1, "0x", 2, 0, now, "m", "0x1", []byte(`{}`)))
+	if as, err := p.OwnerActions(ctx, 4663, now, now, 5); err != nil || len(as) != 1 || as[0].TxIndex.Int64 != 2 {
 		t.Fatalf("OwnerActions: %+v %v", as, err)
 	}
 	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 ORDER BY").WillReturnRows(sqlmock.NewRows(oaCols))
 	if as, err := p.OwnerActions(ctx, 4663, time.Time{}, time.Time{}, 0); err != nil || len(as) != 0 {
 		t.Fatalf("OwnerActions unbounded: %+v %v", as, err)
 	}
-	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 AND block_number >= \\$2 ORDER BY block_number ASC").WithArgs(4663, 5).WillReturnRows(sqlmock.NewRows(oaCols).AddRow(4663, 6, "0x", 0, now, "m", "0x1", []byte(`{}`)))
+	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 AND block_number >= \\$2 ORDER BY block_number ASC").WithArgs(4663, 5).WillReturnRows(sqlmock.NewRows(oaCols).AddRow(4663, 6, "0x", nil, 0, now, "m", "0x1", []byte(`{}`)))
 	if as, err := p.OwnerActionsSince(ctx, 4663, 5); err != nil || len(as) != 1 || as[0].BlockNumber != 6 {
 		t.Fatalf("OwnerActionsSince: %+v %v", as, err)
 	}

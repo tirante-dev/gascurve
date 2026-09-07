@@ -31,7 +31,7 @@ func rangeLimitedLogs(f *fakeRPC, limit uint64, refusal *RPCError, at ...uint64)
 		for _, n := range at {
 			if n >= from && n <= to {
 				out = append(out, json.RawMessage(fmt.Sprintf(
-					`{"address":%q,"topics":[%q],"data":"0x00","blockNumber":"0x%x","transactionHash":"0xtx","logIndex":"0x0","blockTimestamp":"0x5"}`,
+					`{"address":%q,"topics":[%q],"data":"0x00","blockNumber":"0x%x","transactionHash":"0xtx","transactionIndex":"0x0","logIndex":"0x0","blockTimestamp":"0x5"}`,
 					ArbOwnerAddress, OwnerActsTopic, n)))
 			}
 		}
