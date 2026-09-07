@@ -492,7 +492,7 @@ describe("DataFooter", () => {
         series={series}
         networkInfo={{ name: "robinhood", displayName: "Robinhood Chain", chainId: 4663, explorerUrl: "", model: "constraints", headBlock: 0, headAt: null, lagSeconds: null, enabled: true }}
         status="open"
-        apiStatus={{ version: "1", listener: { ready: true, reconnects: 0, lastError: null }, networks: [{ name: "robinhood", chainId: 4663, headBlock: 0, headAt: null, lagSeconds: null, lastSampleAt: null, lastError: null, rateLimitEvents: 0 }] }}
+        apiStatus={{ version: "1", networks: [{ name: "robinhood", chainId: 4663, headBlock: 0, headAt: null, lagSeconds: null, lastSampleAt: null, lastError: null, rateLimitEvents: 0 }] }}
         now={Date.parse("2026-09-06T07:20:03Z")}
       />,
     );

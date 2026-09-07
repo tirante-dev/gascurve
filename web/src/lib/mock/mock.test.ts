@@ -505,7 +505,6 @@ describe("mockRequest", () => {
     const status = await mockRequest<StatusResponse>("/status");
     expect(status.networks).toHaveLength(3);
     expect(status.version).toBe("0.0.0-mock");
-    expect(status.listener).toEqual({ ready: true, reconnects: 0, lastError: null });
     expect(await mockRequest("/health")).toEqual({ ok: true });
   });
 

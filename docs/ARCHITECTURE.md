@@ -284,10 +284,12 @@ src/components/          PageHeader, LiveHero (live figures plus the base fee ch
 src/hooks/               useLive (WS + fallback), useSmoothedLive (250 ms render cadence, tweened values, one rAF loop), useSeries, useNetwork
 src/lib/api/             core.ts (fetch with timeout and retry), networks.ts, series.ts, live.ts, ws.ts
 src/lib/pricer.ts        approxExpBips and helpers in TS, unit-tested against the same vectors as Go
-src/types/               the shapes above
+src/types/               the shapes above, less the response fields no component reads
 src/utils/               formatting (gwei, gas, durations), bips math
 src/lib/seo.ts           site metadata: canonical origin, titles, the social card, the network list the sitemap uses
 ```
+
+`src/types/` narrows the response shapes to what the client renders rather than restating them. `/status` carries fields meant for an operator that no component reads: `holes`, `activeEndpoint`, `failovers`, `endpoints` and `listener` are all absent from `StatusResponse`. Add one when something on the page starts using it, so a type that grows records a real dependency instead of churning four test fixtures for a field nothing reads.
 
 Every chart card carries an enlarge control linking to `/{network}/charts/{chart}`, where `chart` is one of the registry ids in `src/lib/chartViews.ts`: `base-fee`, `backlog-sawtooth`, `contribution`, `gas-per-second`, `backlogs`, `fee-flows`, `l1`, `taylor`. The enlarged page draws the same component with the same hooks at a taller frame, keeps the range in `?range=` and the constraint slot in `?constraint=`, and offers tabs across every chart plus a link back to the section it came from.
 
