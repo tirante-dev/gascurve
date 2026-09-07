@@ -414,16 +414,17 @@ fi
 # dry-run renders it, but Helm 3 still probes the cluster for its version
 # first, so these two checks are skipped where no cluster is reachable (CI).
 # The env-var behaviour they accompany is asserted above through the manifests.
+# notes_check <label> <values file> <has|lacks> <pattern> <what the pattern warns about>
 notes_check() {
-  local label="$1" values="$2" mode="$3"
+  local label="$1" values="$2" mode="$3" pattern="$4" what="$5"
   local out="${work}/${label}-notes.txt"
   if helm install gascurve "${chart}" --dry-run=client --values "${values}" > "${out}" 2>&1; then
     if [ "${mode}" = has ]; then
-      has "${out}" 'extraEnv is deprecated' "${label}: NOTES.txt does not warn about the deprecated alias"
-      ok "NOTES warns about the deprecated alias"
+      has "${out}" "${pattern}" "${label}: NOTES.txt does not warn about ${what}"
+      ok "NOTES warns about ${what}"
     else
-      lacks "${out}" 'extraEnv is deprecated' "${label}: NOTES.txt warns about the deprecated alias although only the component lists are used"
-      ok "NOTES stays quiet for the component lists"
+      lacks "${out}" "${pattern}" "${label}: NOTES.txt warns about ${what} when it should not"
+      ok "NOTES stays quiet about ${what}"
     fi
   elif grep -q 'cluster unreachable' "${out}"; then
     echo "  skip: ${label} NOTES check (no cluster reachable for helm install --dry-run=client)"
@@ -431,8 +432,16 @@ notes_check() {
     fail "${label}: helm install --dry-run=client failed: $(tr '\n' ' ' < "${out}")"
   fi
 }
-notes_check "deprecated-extra-env" "${ci}/deprecated-extra-env-values.yaml" has
-notes_check "secret-rpc" "${ci}/secret-rpc-values.yaml" lacks
+notes_check "deprecated-extra-env" "${ci}/deprecated-extra-env-values.yaml" has \
+  'extraEnv is deprecated' "the deprecated alias"
+notes_check "secret-rpc" "${ci}/secret-rpc-values.yaml" lacks \
+  'extraEnv is deprecated' "the deprecated alias"
+# An api with no chart-managed Ingress may still sit behind a tunnel or an
+# Ingress this chart does not own, which the render checks cannot see.
+notes_check "no-ingress-proxy-trust" "${ci}/secret-rpc-values.yaml" has \
+  'config.server.trusted_proxies is empty' "an api that may be fronted by a proxy the chart cannot see"
+notes_check "ingress-proxy-trust" "${ci}/ingress-values.yaml" lacks \
+  'config.server.trusted_proxies is empty' "an api that may be fronted by a proxy the chart cannot see"
 
 if [ "${failures}" -ne 0 ]; then
   echo "chart-checks: ${failures} check(s) failed" >&2

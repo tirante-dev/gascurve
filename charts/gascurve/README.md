@@ -90,6 +90,8 @@ api:
 
 Those peers are appended to the policy's `from` list and can reach every API route, not only `/metrics`. Keep their addresses outside `config.server.trusted_proxies` so their forwarding headers stay untrusted. If the ranges overlap, or a peer selector cannot single Prometheus out, leave `metrics.serviceMonitor.enabled` off and use an equivalent path-aware policy or a trusted metrics proxy instead. Collector scraping is unaffected because it has a separate metrics port and is not selected by this policy.
 
+`config.server.trusted_proxies` is enforced only for chart-managed ingress, because that is the only proxy this chart can see. An API reached through a Cloudflare Tunnel, a Gateway, or an Ingress owned by something else has exactly the same problem and none of the checks: the tunnel or gateway pod is the API's direct peer, so every visitor shares one bucket and one WebSocket cap. Set the value there too, to the addresses the API pods see for that proxy, and pair it with a policy that stops other pods in the same range from reaching the API. The install notes warn when the API is enabled, the chart renders no Ingress, and the list is empty.
+
 Upgrades of an existing release with both ingress and API enabled must add `config.server.trusted_proxies` before this chart version will render. Confirm the controller peer range and labels first, then apply the Helm upgrade. A wrong CIDR leaves forwarded headers ignored, and wrong NetworkPolicy selectors block ingress traffic. No database migration or data recomputation is involved.
 
 ## RPC URLs and Secrets
