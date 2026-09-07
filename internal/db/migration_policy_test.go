@@ -14,8 +14,10 @@ const (
 )
 
 var immutableMigrationSHA256 = map[string]string{
-	"000001_init.down.sql": "3a02068ff4a96c8c34405ffb1941751130a089573fef24717a70273fa15fd963",
-	"000001_init.up.sql":   "12ecf190ff9c1359f4d470c03cdcf030e257981257e9ebc9f4f2eea57a0bc26d",
+	"000001_init.down.sql":                      "3a02068ff4a96c8c34405ffb1941751130a089573fef24717a70273fa15fd963",
+	"000001_init.up.sql":                        "12ecf190ff9c1359f4d470c03cdcf030e257981257e9ebc9f4f2eea57a0bc26d",
+	"000002_state_samples_chain_block.down.sql": "031e18eb914da642209b67fc00cc443a496a72243f4aa3d59e985c49e501d4f4",
+	"000002_state_samples_chain_block.up.sql":   "5f3d4651c07fdadb5503e3fb1097652e3ef6b1e9d9441f5f15f4f8c7c1399694",
 }
 
 func TestReleasedMigrationsImmutable(t *testing.T) {

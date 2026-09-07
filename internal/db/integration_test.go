@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,19 +128,35 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if len(one) != 1 || one[0].PricingVersion != PricingUnknown {
 		t.Fatalf("folding must not re-authorize unknown history: %+v", one)
 	}
-	// Down drops the schema, up recreates it, and Down(0) is refused.
-	if err := m.Down(int(headVersion)); err != nil {
+	// The forward migration has the exact index order needed by block-based
+	// sample lookup and deletion. Rolling it back keeps the table and data,
+	// and applying it again does not require recomputation.
+	var indexDef string
+	if err := p.DB().QueryRowContext(ctx, `SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'state_samples_chain_block'`).Scan(&indexDef); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != 0 {
-		t.Fatalf("after down: %d %v", v, err)
+	if want := "(chain_id, block_number DESC, sampled_at DESC)"; !strings.Contains(indexDef, want) {
+		t.Fatalf("index definition = %q, want %q", indexDef, want)
 	}
-	var tables int
-	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('blocks','buckets','networks')`).Scan(&tables); err != nil || tables != 0 {
-		t.Fatalf("down must drop the schema: %d %v", tables, err)
+	if _, err := p.DB().ExecContext(ctx, `INSERT INTO state_samples (chain_id, sampled_at, block_number, base_fee, min_base_fee) VALUES (1, now(), 1, 1, 1)`); err != nil {
+		t.Fatal(err)
 	}
 	if err := m.Down(0); err == nil {
 		t.Fatal("Down(0) should fail")
+	}
+	if err := m.Down(1); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != headVersion-1 {
+		t.Fatalf("after down: %d %v", v, err)
+	}
+	var indexes int
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'state_samples_chain_block'`).Scan(&indexes); err != nil || indexes != 0 {
+		t.Fatalf("index after down: %d %v", indexes, err)
+	}
+	var samples int
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM state_samples WHERE chain_id = 1`).Scan(&samples); err != nil || samples != 1 {
+		t.Fatalf("samples after down: %d %v", samples, err)
 	}
 	if err := m.Up(); err != nil {
 		t.Fatal(err)
@@ -147,9 +164,88 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if v, _, err := m.Version(); err != nil || v != headVersion {
 		t.Fatalf("after up: %d %v", v, err)
 	}
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM state_samples WHERE chain_id = 1`).Scan(&samples); err != nil || samples != 1 {
+		t.Fatalf("samples after up: %d %v", samples, err)
+	}
 	if err := m.Up(); err != nil {
 		t.Fatal("Up twice should be a no-op")
 	}
+
+	// Rolling all migrations back drops the schema, and applying them
+	// recreates it.
+	if err := m.Down(int(headVersion)); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != 0 {
+		t.Fatalf("after full down: %d %v", v, err)
+	}
+	var tables int
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('blocks','buckets','networks')`).Scan(&tables); err != nil || tables != 0 {
+		t.Fatalf("down must drop the schema: %d %v", tables, err)
+	}
+	if err := m.Up(); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != headVersion {
+		t.Fatalf("after up: %d %v", v, err)
+	}
+}
+
+func TestIntegrationStateSampleBlockIndexPlans(t *testing.T) {
+	p := openIntegration(t)
+	ctx := context.Background()
+
+	// Enough rows and fresh statistics make PostgreSQL's normal cost model
+	// choose the production index without planner overrides.
+	if _, err := p.DB().ExecContext(ctx, `
+		INSERT INTO state_samples (chain_id, sampled_at, block_number, base_fee, min_base_fee)
+		SELECT chain_id, timestamptz '2026-01-01 00:00:00+00' + block_number * interval '1 second', block_number, 1, 1
+		FROM (SELECT unnest(ARRAY[$1::bigint, $2::bigint]) AS chain_id) AS chains
+		CROSS JOIN generate_series(1, 10000) AS block_number`, testChain, otherChain); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.DB().ExecContext(ctx, `ANALYZE state_samples`); err != nil {
+		t.Fatal(err)
+	}
+
+	lookupPlan := explainPlan(t, p, `EXPLAIN (COSTS OFF)
+		SELECT `+sampleColumns+` FROM state_samples
+		WHERE chain_id = $1 AND block_number <= $2
+		ORDER BY block_number DESC, sampled_at DESC LIMIT 1`, testChain, 9000)
+	if !strings.Contains(lookupPlan, "Index Scan using state_samples_chain_block") || strings.Contains(lookupPlan, "Sort") {
+		t.Fatalf("StateSampleAt plan does not use the ordered index without sorting:\n%s", lookupPlan)
+	}
+
+	deletePlan := explainPlan(t, p, `EXPLAIN (COSTS OFF)
+		DELETE FROM state_samples WHERE chain_id = $1 AND block_number > $2`, testChain, 9990)
+	if !strings.Contains(deletePlan, "state_samples_chain_block") {
+		t.Fatalf("DeleteStateSamplesAfter plan does not use the block index:\n%s", deletePlan)
+	}
+
+	t.Logf("StateSampleAt plan:\n%s", lookupPlan)
+	t.Logf("DeleteStateSamplesAfter plan:\n%s", deletePlan)
+}
+
+func explainPlan(t *testing.T, p *Postgres, query string, args ...any) string {
+	t.Helper()
+	rows, err := p.DB().QueryContext(context.Background(), query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func TestIntegrationStore(t *testing.T) {
