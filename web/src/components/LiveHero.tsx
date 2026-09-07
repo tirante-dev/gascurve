@@ -370,7 +370,7 @@ export function HeroThroughputPanel({
           <ChartReadout
             points={m.points}
             groups={[{ title: "gas", rows: m.gasRows }]}
-            note={m.note}
+            note={m.gasNote}
             title={bucketRowTitle}
             heading="Bucket inspector"
             selectLabel="Select a bucket to read its values"

@@ -7,6 +7,7 @@ import { chartView } from "@/lib/chartViews";
 import { bucketNote, describeAction, feeChartData, feeTooltipRows, formatFloor, type DrawnRow } from "@/lib/feeChart";
 import { emptyRangeNote, type GapModel, type GapWindow } from "@/lib/gaps";
 import { throughputAxis, throughputTick, type ThroughputAxis } from "@/lib/hero";
+import { missingRuns, withMissingNote, withMissingNotes, type MissingRun, type MissingSeries, type Present } from "@/lib/missing";
 import {
   hasUnknownSets,
   hasUnrecordedSplit,
@@ -26,7 +27,7 @@ import {
 } from "@/utils/chart";
 import { formatDateTime, formatGas, formatGasPerSecond, formatInteger, formatSignificant, formatTick, unbroken } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
-import { gapBands, GapNote } from "./ChartGaps";
+import { gapBands, GapNote, MissingDots, missingBandAreas, MissingNote } from "./ChartGaps";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { PointInspector } from "./ChartReadout";
 import { ChartFrame, Legend, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
@@ -101,6 +102,18 @@ export type SeriesModel = {
   indices: number[];
   hasTargets: boolean;
   note: (row: Record<string, unknown>) => string | null;
+  /**
+   * The buckets whose compute gas rate has no receipts behind it, and the
+   * tooltip note that says so. Whole buckets with a null rate, which neither
+   * the gap shading nor the partial hatch speaks for.
+   */
+  gasMissing: MissingRun[];
+  gasNote: (row: Record<string, unknown>) => string | null;
+  /** `note` plus the cause for every series with nothing in the bucket: what the bucket inspector reads out. */
+  inspectorNote: (row: Record<string, unknown>) => string | null;
+  /** The same for one backlog slot: the buckets that recorded no backlog for it, and its note. */
+  backlogMissingFor: (index: number) => MissingRun[];
+  backlogNoteFor: (index: number) => (row: Record<string, unknown>) => string | null;
   feeRows: TooltipRow[];
   contributionRows: TooltipRow[];
   gasRows: TooltipRow[];
@@ -129,6 +142,39 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   // and a compute-gas rate over that span. An unbounded gap has a null chart
   // rate, so it breaks instead of reading as low throughput.
   const note = bucketNote(markers, bucketSeconds);
+  // Two more ways a series has nothing to draw in a bucket that is otherwise
+  // whole, neither of which the gap tint or the partial hatch speaks for: a
+  // bucket aggregates poster gas as null whenever one of its blocks was
+  // stored without receipts, which leaves its compute gas rate null at full
+  // coverage, and a bucket can record no backlog for a slot. Both used to
+  // break the line and say nothing at all.
+  const gasPresent: Present = (row) => typeof row.gps === "number";
+  const backlogPresent = (i: number): Present => (row) => {
+    const own = segments.filter((s) => s.index === i && s.setId === row.constraintSetId);
+    // A slot the row's own set never defined is not missing data: the
+    // constraint did not exist then, and a panel with nothing to draw over
+    // those buckets is the truth rather than a hole in the record.
+    if (row.setKnown === true && own.length === 0) return true;
+    return own.some((s) => typeof row[s.backlogKey] === "number") || typeof row[unknownBacklogKey(i)] === "number";
+  };
+  // An api older than the rate sends no compute gas at all, which the chart
+  // rows cannot tell from a rate the api reports as null. That is the client
+  // meeting an older api rather than a chain whose receipts are missing, so
+  // it earns no band: the chart simply has nothing to draw.
+  const ratesReported = series.points.some((p) => p.computeGasPerSecond !== undefined);
+  // Read from the buckets rather than from `drawn`: the duplicate a set
+  // boundary inserts would otherwise count its bucket twice.
+  const gasMissing = ratesReported ? missingRuns(points, gasPresent, bucketSeconds, "receipts") : [];
+  const backlogMissing = indices.map((i) => missingRuns(points, backlogPresent(i), bucketSeconds, "backlog"));
+  const backlogNotes = indices.map((i) => withMissingNote(note, backlogPresent(i), "backlog"));
+  // The inspector stands in for every chart at once, and it is how a reader
+  // without a pointer reads a bucket, so it carries the cause for each series
+  // that has nothing in one.
+  const inspected: MissingSeries[] = [...(ratesReported ? [{ present: gasPresent, kind: "receipts" as const }] : []), ...indices.map((i) => ({ present: backlogPresent(i), kind: "backlog" as const }))];
+  // The contribution chart needs none of this: a null in one constraint's
+  // series means another set is in force, which the neighbouring series
+  // draws, and every bucket's x lands either under its own set or under the
+  // unknown-split series, so the stack is never silently empty.
 
   const contributionRows: TooltipRow[] = segments.map((s) => ({
     label: s.label,
@@ -191,6 +237,11 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
     indices,
     hasTargets,
     note,
+    gasMissing,
+    gasNote: ratesReported ? withMissingNote(note, gasPresent, "receipts") : note,
+    inspectorNote: withMissingNotes(note, inspected),
+    backlogMissingFor: (i) => backlogMissing[i] ?? [],
+    backlogNoteFor: (i) => backlogNotes[i] ?? note,
     feeRows: feeTooltipRows(),
     contributionRows,
     gasRows,
@@ -263,17 +314,24 @@ export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth =
       <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit} with each constraint target in force drawn as a stepped line`}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+            {m.gasMissing.length > 0 ? (
+              <defs>
+                <MissingDots />
+              </defs>
+            ) : null}
             <CartesianGrid vertical={false} />
             {gapBands(m.gaps.gaps, m.gaps.window)}
+            {missingBandAreas(m.gasMissing, m.gaps.window)}
             {timeAxis(m.span, m.gaps.window)}
             <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
-            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.note} />} />
+            <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.gasNote} />} />
             <Area type="monotone" dataKey="gps" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
             {m.hasTargets ? m.indices.map((i) => <Line key={i} type="stepAfter" dataKey={targetKey(i)} connectNulls={false} stroke={seriesColor(i)} strokeDasharray="4 3" dot={false} isAnimationActive={false} />) : null}
           </ComposedChart>
         </ResponsiveContainer>
       </ChartFrame>
       <GapNote gaps={m.gaps} />
+      <MissingNote runs={m.gasMissing} />
     </>
   );
 }
@@ -285,11 +343,17 @@ export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }:
       <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+            {m.backlogMissingFor(index).length > 0 ? (
+              <defs>
+                <MissingDots />
+              </defs>
+            ) : null}
             <CartesianGrid vertical={false} />
             {gapBands(m.gaps.gaps, m.gaps.window)}
+            {missingBandAreas(m.backlogMissingFor(index), m.gaps.window)}
             {timeAxis(m.span, m.gaps.window)}
             <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
-            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.note} />} />
+            <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.backlogNoteFor(index)} />} />
             {m.segments
               .filter((s) => s.index === index)
               .map((s) => (
@@ -302,6 +366,7 @@ export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }:
         </ResponsiveContainer>
       </ChartFrame>
       <GapNote gaps={m.gaps} />
+      <MissingNote runs={m.backlogMissingFor(index)} />
     </>
   );
 }
@@ -401,7 +466,7 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
           { title: "gas", rows: m.gasRows },
           { title: "backlog", rows: m.backlogRows },
         ]}
-        note={m.note}
+        note={m.inspectorNote}
       />
 
       <details className="text-xs text-ink-2" onToggle={(e) => setTableOpen((e.currentTarget as HTMLDetailsElement).open)}>
