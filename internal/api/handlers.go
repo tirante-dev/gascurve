@@ -509,7 +509,9 @@ func (s *Server) holesStatus(ctx context.Context, chainID uint64, st map[string]
 	holes := make([]model.Hole, 0, len(rows))
 	checkpointError := false
 	for _, row := range rows {
-		if row.ReplayState != nil {
+		// The decode only detects corruption. Once one row is malformed the
+		// remaining ones add nothing, and /status is polled often.
+		if !checkpointError && row.ReplayState != nil {
 			var state model.HoleState
 			if err := row.ReplayState.Unmarshal(&state); err != nil {
 				checkpointError = true

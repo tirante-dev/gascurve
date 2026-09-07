@@ -8,6 +8,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -538,24 +539,56 @@ func (p *Postgres) MissingRanges(ctx context.Context, chainID uint64) ([]Missing
 	return selectAll[MissingRange](ctx, p, `SELECT `+missingRangeColumns+` FROM missing_ranges WHERE chain_id = $1 ORDER BY from_block`, chainID)
 }
 
+// missingRangeBindings is the number of bound values per inserted row, one
+// short of missingRangeColumns because updated_at is always now().
+const missingRangeBindings = 17
+
+// missingRangeBatch keeps one insert well inside the 65535 bound parameters a
+// statement can carry.
+const missingRangeBatch = 1000
+
 // ReplaceMissingRanges replaces one chain's normalized intervals. Collector
 // callers hold the chain transaction, so the delete and inserts commit as one
-// durable lifecycle update.
+// durable lifecycle update. Normalization can reshape the whole set, so the
+// rewrite stays a replace, but the rows go in batched statements: a per row
+// round trip would hold the chain lock in proportion to the set size.
 func (p *Postgres) ReplaceMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error {
 	if _, err := p.exec(ctx, `DELETE FROM missing_ranges WHERE chain_id = $1`, chainID); err != nil {
 		return err
 	}
-	for _, r := range ranges {
-		if _, err := p.exec(ctx, `
-			INSERT INTO missing_ranges (`+missingRangeColumns+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, COALESCE($17, now()), now())`,
-			chainID, r.From, r.To, r.DetectedAt, r.Lifecycle, r.Reason, r.Cursor, r.ReplayState, r.Folded,
-			r.RetryCount, r.LastAttemptAt, r.NextRetryAt, r.LastError, r.PredecessorAt, r.SuccessorAt, r.CursorAt,
-			nullTime(r.CreatedAt)); err != nil {
-			return fmt.Errorf("missing range %d..%d: %w", r.From, r.To, err)
+	for chunk := range slices.Chunk(ranges, missingRangeBatch) {
+		if err := p.insertMissingRanges(ctx, chainID, chunk); err != nil {
+			return fmt.Errorf("missing ranges %d..%d: %w", chunk[0].From, chunk[len(chunk)-1].To, err)
 		}
 	}
 	return nil
+}
+
+func (p *Postgres) insertMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error {
+	var values strings.Builder
+	args := make([]any, 0, len(ranges)*missingRangeBindings)
+	for _, r := range ranges {
+		if len(args) > 0 {
+			values.WriteString(", ")
+		}
+		values.WriteByte('(')
+		for i := 1; i <= missingRangeBindings; i++ {
+			if i > 1 {
+				values.WriteString(", ")
+			}
+			if i == missingRangeBindings {
+				fmt.Fprintf(&values, "COALESCE($%d, now())", len(args)+i)
+				continue
+			}
+			fmt.Fprintf(&values, "$%d", len(args)+i)
+		}
+		values.WriteString(", now())")
+		args = append(args, chainID, r.From, r.To, r.DetectedAt, r.Lifecycle, r.Reason, r.Cursor, r.ReplayState,
+			r.Folded, r.RetryCount, r.LastAttemptAt, r.NextRetryAt, r.LastError, r.PredecessorAt, r.SuccessorAt,
+			r.CursorAt, nullTime(r.CreatedAt))
+	}
+	_, err := p.exec(ctx, `INSERT INTO missing_ranges (`+missingRangeColumns+`) VALUES `+values.String(), args...)
+	return err
 }
 
 func nullTime(t time.Time) sql.NullTime {

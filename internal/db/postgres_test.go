@@ -210,6 +210,21 @@ func TestPostgresQueries(t *testing.T) {
 	if err := p.ReplaceMissingRanges(ctx, 4663, ranges); err != nil {
 		t.Fatalf("ReplaceMissingRanges: %v", err)
 	}
+	// Every row of a replacement goes in one statement, so the chain lock is
+	// not held for a round trip per range.
+	second := ranges[0]
+	second.From, second.To = 300, 399
+	mock.ExpectExec("DELETE FROM missing_ranges WHERE chain_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO missing_ranges .* VALUES \(\$1, .*COALESCE\(\$17, now\(\)\), now\(\)\), \(\$18, .*COALESCE\(\$34, now\(\)\), now\(\)\)`).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	if err := p.ReplaceMissingRanges(ctx, 4663, append(ranges, second)); err != nil {
+		t.Fatalf("ReplaceMissingRanges batched: %v", err)
+	}
+	mock.ExpectExec("DELETE FROM missing_ranges WHERE chain_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO missing_ranges").WillReturnError(errBoom)
+	if err := p.ReplaceMissingRanges(ctx, 4663, ranges); err == nil {
+		t.Fatal("ReplaceMissingRanges insert error")
+	}
 
 	mock.ExpectExec("INSERT INTO owner_actions").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO owner_actions").WillReturnResult(sqlmock.NewResult(0, 0))

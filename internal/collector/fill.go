@@ -276,7 +276,10 @@ func mergeHole(into *hole, h hole) {
 	if into.At == "" || (h.At != "" && h.At < into.At) {
 		into.At = h.At
 	}
-	if into.PredecessorAt == "" {
+	// PredecessorAt describes the block below From. The merged entry starts at
+	// into.From, so the incoming bound only applies when both ranges start at
+	// the same block. Otherwise it names a block inside the merged interval.
+	if into.PredecessorAt == "" && h.From == into.From {
 		into.PredecessorAt = h.PredecessorAt
 	}
 	if h.To >= oldTo && h.SuccessorAt != "" {

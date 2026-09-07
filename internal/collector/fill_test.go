@@ -995,6 +995,28 @@ func TestHolesAreMergedAndDurable(t *testing.T) {
 	if len(holes) != 1 || holes[0].To != 250 || holes[0].Next != 150 || holes[0].Folded != 170 {
 		t.Fatalf("merged progress: %+v", holes)
 	}
+	// A merged entry keeps the bounds of its own start block. The later
+	// range's predecessor names a block inside the merged interval, so it
+	// only carries over when both ranges start at the same block.
+	predAt := baseTime.Add(-time.Hour).Format(time.RFC3339)
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.saveHoles(ctx, s, []hole{{From: 100, To: 199}, {From: 180, To: 250, PredecessorAt: predAt}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holes = holesOf(t, store)
+	if len(holes) != 1 || holes[0].PredecessorAt != "" {
+		t.Fatalf("a later range must not lend its predecessor bound: %+v", holes)
+	}
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.saveHoles(ctx, s, []hole{{From: 100, To: 199}, {From: 100, To: 250, PredecessorAt: predAt}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holes = holesOf(t, store)
+	if len(holes) != 1 || holes[0].PredecessorAt != predAt {
+		t.Fatalf("a shared start block shares the predecessor bound: %+v", holes)
+	}
 	// Retrying is a transient lifecycle within the fillable class. A repeated
 	// skip that overlaps it still produces one row and keeps the retry state.
 	retryAt := baseTime.Add(time.Minute).Format(time.RFC3339)
