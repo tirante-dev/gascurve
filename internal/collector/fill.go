@@ -785,16 +785,18 @@ func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Bl
 	return rows, &merged, end
 }
 
+// headerOf synthesizes a header from a stored block. Poster gas is
+// deliberately left nil: a stored row carries the block total, never the
+// per-transaction cumulative compute gas the receipt set gives, so an owner
+// action inside the block would be placed at a total-gas boundary while the
+// block contributed compute gas, mixing the two units. Total gas on both
+// sides keeps the split consistent, and the only use of a synthesized header
+// is the tail replay, whose backlogs are overwritten by the sampled anchor.
 func headerOf(block db.Block) nitro.Header {
-	header := nitro.Header{
+	return nitro.Header{
 		Number: block.Number, Hash: block.Hash, ParentHash: block.ParentHash, Timestamp: uint64(block.TS.Unix()),
 		GasUsed: block.GasUsed, BaseFee: block.BaseFee.BigInt(), L1BlockNumber: block.L1Block, TxCount: block.TxCount,
 	}
-	if block.PosterGas.Valid {
-		posterGas := uint64(block.PosterGas.Int64)
-		header.PosterGas = &posterGas
-	}
-	return header
 }
 
 // commitFill writes one batch of a hole and its progress in one chain
