@@ -232,8 +232,10 @@ metrics:
     # never fire on the dedicated one.
     dedicatedNetworks: robinhood
     # Each alert can be switched off on its own, and its window, threshold
-    # and severity changed. `for` is how long the condition must hold;
-    # `threshold` is ignored by the alerts that have no number to compare.
+    # and severity changed. `for` is how long the condition must hold. Only
+    # the alerts whose expression compares against a number take a
+    # `threshold`, and they require one; putting one on any other alert is
+    # refused as the typo it is.
     alerts:
       # Lag on a dedicated endpoint: 30 s is fifteen times the 0 to 2 s it
       # normally sits at, so only a real stall reaches it.
