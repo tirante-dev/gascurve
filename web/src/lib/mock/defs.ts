@@ -237,7 +237,7 @@ export const ROBINHOOD: MockNetworkDef = {
     networkWei: ethWei(10_706.42),
     l1RewardWei: ethWei(0.3121),
   },
-  batch: { intervalSeconds: 18, calldataBytes: 137, gasSpent: 29_036, l1BaseFeeWei: 73_500_000 },
+  batch: { intervalSeconds: 18, calldataBytes: 137, gasSpent: 279_096, l1BaseFeeWei: 73_500_000 },
   ethUsd: { basePrice: 4_200, source: "coingecko" },
 };
 

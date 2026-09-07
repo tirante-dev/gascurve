@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
@@ -30,7 +31,9 @@ func TestIntegrationUpgradeFromProductionSchema(t *testing.T) {
 		"INSERT INTO networks (chain_id, name, display_name, explorer_url) "+
 			"VALUES (900000001, 'migration-test', 'Migration Test', 'https://example.com'); "+
 			"INSERT INTO blocks (chain_id, number, ts, gas_used, base_fee, backlogs, pricing_version) "+
-			"VALUES (900000001, 42, '2026-01-01T00:00:00Z', 123, 456, '{7,8}', 1);"); err != nil {
+			"VALUES (900000001, 42, '2026-01-01T00:00:00Z', 123, 456, '{7,8}', 1); "+
+			"INSERT INTO batch_reports (chain_id, block_number, batch_number, batch_ts, poster, gas_spent, wei_spent) "+
+			"VALUES (900000001, 42, 7, '2026-01-01T00:00:00Z', '0xposter', 1234, 5678);"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -57,6 +60,22 @@ func TestIntegrationUpgradeFromProductionSchema(t *testing.T) {
 	if displayName != "Migration Test" || baseFee != "456" || backlogs != "{7,8}" {
 		t.Fatalf("production data changed during upgrade: display_name=%q base_fee=%q backlogs=%q",
 			displayName, baseFee, backlogs)
+	}
+
+	var legacyGas int64
+	var legacyWei string
+	var reportVersion, arbosVersion, perBatchGas, parentFloor, calculationVersion, attributedGas sql.NullInt64
+	var attributedWei sql.NullString
+	if err := p.DB().QueryRowContext(ctx,
+		"SELECT gas_spent, wei_spent::text, report_version, arbos_version, per_batch_gas_charge, "+
+			"parent_gas_floor_per_token, cost_calculation_version, attributed_gas_spent, attributed_wei_spent::text "+
+			"FROM batch_reports WHERE chain_id = 900000001 AND block_number = 42").
+		Scan(&legacyGas, &legacyWei, &reportVersion, &arbosVersion, &perBatchGas, &parentFloor, &calculationVersion, &attributedGas, &attributedWei); err != nil {
+		t.Fatal(err)
+	}
+	if legacyGas != 1234 || legacyWei != "5678" || reportVersion.Valid || arbosVersion.Valid || perBatchGas.Valid || parentFloor.Valid || calculationVersion.Valid || attributedGas.Valid || attributedWei.Valid {
+		t.Fatalf("legacy batch report changed during upgrade: gas=%d wei=%s metadata=%v/%v/%v/%v/%v attributed=%v/%v",
+			legacyGas, legacyWei, reportVersion, arbosVersion, perBatchGas, parentFloor, calculationVersion, attributedGas, attributedWei)
 	}
 }
 

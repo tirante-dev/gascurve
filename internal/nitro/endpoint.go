@@ -223,8 +223,8 @@ func (e *Endpoint) observe(items int, limited bool) {
 // batch sends reqs in chunks of at most the current cap, itself bounded by
 // what the endpoint's token bucket can hold at once for the calling class
 // (a budgeted endpoint never sends a batch it has not paid for in full).
-// Every typed call goes through it, not only the header batches, so an
-// eight-call L1 sample on a four calls per second budget is split rather
+// Every typed call goes through it, not only the header batches, so a
+// ten-call L1 sample on a four calls per second budget is split rather
 // than eating the fast reserve. A throttled chunk is retried after the
 // back-off at whatever the cap has become, so an oversized batch shrinks
 // instead of being resent as is; the attempt budget is the client's.

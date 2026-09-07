@@ -245,7 +245,8 @@ type OwnerAction struct {
 	Args     json.RawMessage `json:"args"`
 }
 
-// BatchPoint is one bucket of batch posting reports.
+// BatchPoint is one bucket of version-aware, ArbOS-attributed batch-poster
+// spending. WeiSpent is not an Ethereum receipt total.
 type BatchPoint struct {
 	T             int64  `json:"t"`
 	Batches       int64  `json:"batches"`

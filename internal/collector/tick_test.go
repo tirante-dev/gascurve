@@ -920,7 +920,7 @@ func TestTickReorg(t *testing.T) {
 	// Things recorded on the orphaned blocks.
 	_, _ = store.InsertOwnerActions(ctx, []db.OwnerAction{{ChainID: 4663, BlockNumber: 1005, TxHash: "0xo", TS: baseTime, Method: "setSpeedLimit"}})
 	_, _ = store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 4663, EffectiveBlock: 1005, EffectiveAt: baseTime, Source: model.SourceObserved, Constraints: entriesJSON(nil)})
-	_ = store.UpsertBatchReports(ctx, []db.BatchReport{{ChainID: 4663, BlockNumber: 1004, BatchTS: baseTime}})
+	_ = store.UpsertBatchReports(ctx, []db.BatchReport{{ChainID: 4663, BlockNumber: 1004, BatchTS: baseTime, CostCalculationVersion: 1}})
 	_ = store.SetState(ctx, 4663, db.StateOwnerLogCursor, "1006")
 	_ = store.SetState(ctx, 4663, db.StateBatchScanCursor, "1006")
 	f.mu.Lock()

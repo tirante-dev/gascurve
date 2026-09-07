@@ -269,9 +269,11 @@ func TestPostgresQueries(t *testing.T) {
 	if err := p.UpsertBatchReports(ctx, []BatchReport{{ChainID: 4663, BlockNumber: 1, BatchTS: now, L1BaseFee: WeiFromUint64(1), WeiSpent: WeiFromUint64(1)}}); err != nil {
 		t.Fatal(err)
 	}
-	brCols := []string{"chain_id", "block_number", "batch_number", "batch_ts", "poster", "calldata_len", "calldata_nonzero", "extra_gas", "l1_base_fee", "gas_spent", "wei_spent"}
-	mock.ExpectQuery("SELECT .* FROM batch_reports WHERE chain_id = \\$1 AND batch_ts >= \\$2 AND batch_ts < \\$3 ORDER BY batch_ts ASC, block_number ASC").WillReturnRows(sqlmock.NewRows(brCols).AddRow(4663, 1, 2, now, "0xp", 3, 4, 5, "6", 7, "8"))
-	if rs, err := p.BatchReports(ctx, 4663, now, now); err != nil || len(rs) != 1 || rs[0].WeiSpent.Int64() != 8 {
+	brCols := []string{"chain_id", "block_number", "batch_number", "batch_ts", "poster", "calldata_len", "calldata_nonzero", "extra_gas", "l1_base_fee",
+		"attributed_gas_spent", "attributed_wei_spent", "report_version", "arbos_version", "per_batch_gas_charge", "parent_gas_floor_per_token", "cost_calculation_version"}
+	mock.ExpectQuery("SELECT .* FROM batch_reports WHERE chain_id = \\$1 AND batch_ts >= \\$2 AND batch_ts < \\$3 AND cost_calculation_version = 1 ORDER BY batch_ts ASC, block_number ASC").
+		WillReturnRows(sqlmock.NewRows(brCols).AddRow(4663, 1, 2, now, "0xp", 3, 4, 5, "6", 7, "8", 2, 61, 210_000, 10, 1))
+	if rs, err := p.BatchReports(ctx, 4663, now, now); err != nil || len(rs) != 1 || rs[0].WeiSpent.Int64() != 8 || rs[0].ReportVersion != 2 || rs[0].ArbOSVersion != 61 || rs[0].PerBatchGasCharge != 210_000 || rs[0].ParentGasFloorPerToken != 10 || rs[0].CostCalculationVersion != 1 {
 		t.Fatalf("BatchReports: %+v %v", rs, err)
 	}
 	mock.ExpectQuery("SELECT to_timestamp").WithArgs(4663, now, now, int64(900)).WillReturnRows(sqlmock.NewRows([]string{"t", "batches", "gas_spent", "wei_spent", "l1_base_fee_avg", "calldata_bytes"}).AddRow(now, 3, 100, "200", "50", 400))

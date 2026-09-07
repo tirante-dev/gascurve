@@ -139,9 +139,10 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if len(one) != 1 || one[0].PricingVersion != PricingUnknown {
 		t.Fatalf("folding must not re-authorize unknown history: %+v", one)
 	}
-	// The forward migration has the exact index order needed by block-based
-	// sample lookup and deletion. Rolling it back keeps the table and data,
-	// and applying it again does not require recomputation.
+	// Migration 2 has the exact index order needed by block-based sample
+	// lookup and deletion. Migration 4 adds nullable batch cost metadata.
+	// Rolling each back keeps the pre-existing table data. Reapplying
+	// migration 4 restores empty metadata columns for the collector to refill.
 	var indexDef string
 	if err := p.DB().QueryRowContext(ctx, `SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'state_samples_chain_block'`).Scan(&indexDef); err != nil {
 		t.Fatal(err)
@@ -158,13 +159,24 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(0); err == nil {
 		t.Fatal("Down(0) should fail")
 	}
-	// Rolling back the missing-ranges migration preserves the basic range in
-	// the legacy JSON checkpoint before the table is removed.
+	// Rolling back the attributed-cost migration drops only its nullable
+	// columns, and the step below it preserves the basic missing range in
+	// the legacy JSON checkpoint before that table is removed.
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
 	if v, _, err := m.Version(); err != nil || v != headVersion-1 {
 		t.Fatalf("after migration down: %d %v", v, err)
+	}
+	var batchCostColumns int
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'batch_reports' AND column_name IN ('report_version', 'arbos_version', 'per_batch_gas_charge', 'parent_gas_floor_per_token', 'cost_calculation_version', 'attributed_gas_spent', 'attributed_wei_spent')`).Scan(&batchCostColumns); err != nil || batchCostColumns != 0 {
+		t.Fatalf("batch cost columns after down: %d %v", batchCostColumns, err)
+	}
+	if err := m.Down(1); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
+		t.Fatalf("after second down: %d %v", v, err)
 	}
 	if raw, ok, err := p.GetState(ctx, 1, StateHoles); err != nil || !ok || !strings.Contains(raw, `"from": 10`) {
 		t.Fatalf("rollback checkpoint: %q %v %v", raw, ok, err)
@@ -178,10 +190,10 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	// Stepping back past the owner-action transaction index removes the
 	// column, and the step below that removes the state-sample index. Both
 	// keep the original schema and the sample rows.
-	if err := m.Down(2); err != nil {
+	if err := m.Down(3); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-3 {
 		t.Fatalf("after down: %d %v", v, err)
 	}
 	var txIndexes int
@@ -191,7 +203,7 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-3 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-4 {
 		t.Fatalf("after index down: %d %v", v, err)
 	}
 	var indexes int
@@ -207,6 +219,9 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	}
 	if v, _, err := m.Version(); err != nil || v != headVersion {
 		t.Fatalf("after up: %d %v", v, err)
+	}
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'batch_reports' AND column_name IN ('report_version', 'arbos_version', 'per_batch_gas_charge', 'parent_gas_floor_per_token', 'cost_calculation_version', 'attributed_gas_spent', 'attributed_wei_spent')`).Scan(&batchCostColumns); err != nil || batchCostColumns != 7 {
+		t.Fatalf("batch cost columns after up: %d %v", batchCostColumns, err)
 	}
 	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM state_samples WHERE chain_id = 1`).Scan(&samples); err != nil || samples != 1 {
 		t.Fatalf("samples after up: %d %v", samples, err)
@@ -672,8 +687,9 @@ func TestIntegrationStore(t *testing.T) {
 
 	// Batch reports aggregate per step.
 	reports := []BatchReport{
-		{ChainID: testChain, BlockNumber: 102, BatchNumber: 1, BatchTS: base, Poster: "0xp", CalldataLen: 100, CalldataNonzero: 80, ExtraGas: 10, L1BaseFee: WeiFromUint64(100), GasSpent: 1370, WeiSpent: WeiFromUint64(137_000)},
-		{ChainID: testChain, BlockNumber: 107, BatchNumber: 2, BatchTS: base.Add(20 * time.Second), Poster: "0xp", CalldataLen: 50, CalldataNonzero: 40, ExtraGas: 10, L1BaseFee: WeiFromUint64(300), GasSpent: 690, WeiSpent: WeiFromUint64(207_000)},
+		{ChainID: testChain, BlockNumber: 102, BatchNumber: 1, BatchTS: base, Poster: "0xp", CalldataLen: 100, CalldataNonzero: 80, ExtraGas: 10, L1BaseFee: WeiFromUint64(100), GasSpent: 1370, WeiSpent: WeiFromUint64(137_000), ReportVersion: 2, ArbOSVersion: 61, PerBatchGasCharge: 210_000, ParentGasFloorPerToken: 10, CostCalculationVersion: 1},
+		{ChainID: testChain, BlockNumber: 107, BatchNumber: 2, BatchTS: base.Add(20 * time.Second), Poster: "0xp", CalldataLen: 50, CalldataNonzero: 40, ExtraGas: 10, L1BaseFee: WeiFromUint64(300), GasSpent: 690, WeiSpent: WeiFromUint64(207_000), ReportVersion: 2, ArbOSVersion: 61, PerBatchGasCharge: 210_000, ParentGasFloorPerToken: 10, CostCalculationVersion: 1},
+		{ChainID: testChain, BlockNumber: 108, BatchNumber: 3, BatchTS: base.Add(30 * time.Second), Poster: "0xold", L1BaseFee: WeiFromUint64(1), GasSpent: 999, WeiSpent: WeiFromUint64(999)},
 	}
 	if err := p.UpsertBatchReports(ctx, reports); err != nil {
 		t.Fatal(err)
@@ -689,12 +705,15 @@ func TestIntegrationStore(t *testing.T) {
 		t.Fatalf("bucket start = %v", bb[0].T)
 	}
 	// Reports sharing a second stay separate rows, ordered by time then block.
-	if err := p.UpsertBatchReports(ctx, []BatchReport{{ChainID: testChain, BlockNumber: 101, BatchNumber: 0, BatchTS: base, Poster: "0xp", L1BaseFee: WeiFromUint64(1), WeiSpent: WeiFromUint64(1)}}); err != nil {
+	if err := p.UpsertBatchReports(ctx, []BatchReport{{ChainID: testChain, BlockNumber: 101, BatchNumber: 0, BatchTS: base, Poster: "0xp", L1BaseFee: WeiFromUint64(1), WeiSpent: WeiFromUint64(1), CostCalculationVersion: 1}}); err != nil {
 		t.Fatal(err)
 	}
 	rs, err := p.BatchReports(ctx, testChain, base, base.Add(time.Minute))
 	if err != nil || len(rs) != 3 || rs[0].BlockNumber != 101 || rs[1].BlockNumber != 102 || rs[2].BlockNumber != 107 {
 		t.Fatalf("BatchReports: %+v %v", rs, err)
+	}
+	if rs[1].ReportVersion != 2 || rs[1].ArbOSVersion != 61 || rs[1].PerBatchGasCharge != 210_000 || rs[1].ParentGasFloorPerToken != 10 || rs[1].CostCalculationVersion != 1 {
+		t.Fatalf("BatchReport cost metadata: %+v", rs[1])
 	}
 	if err := p.RewindAfter(ctx, testChain, 105); err != nil {
 		t.Fatal(err)

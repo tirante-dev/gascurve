@@ -26,10 +26,12 @@ const (
 
 // Collector state keys.
 const (
-	StateHead            = "head"
-	StateBackfillCursor  = "backfill_cursor"
-	StateOwnerLogCursor  = "owner_log_cursor"
-	StateBatchScanCursor = "batch_scan_cursor"
+	StateHead           = "head"
+	StateBackfillCursor = "backfill_cursor"
+	StateOwnerLogCursor = "owner_log_cursor"
+	// StateBatchScanCursor is versioned so deploying a new batch cost
+	// calculation replays every report still recoverable from block rows.
+	StateBatchScanCursor = "batch_scan_cursor_v2"
 	StateRateLimitEvents = "rate_limit_events"
 	StateLast429At       = "last_429_at"
 	StateArbOSVersion    = "arbos_version"

@@ -120,9 +120,9 @@ export const CHART_VIEWS: readonly ChartView[] = [
   },
   {
     id: "l1",
-    title: "L2 fees against L1 posting cost",
+    title: "L2 fees against ArbOS-attributed batch cost",
     shortTitle: "L1 costs",
-    description: "What users paid in L2 fees against what the chain paid Ethereum to post the same buckets, from batchPostingReport internal transactions, on a log scale.",
+    description: "L2 fees against the version-aware batch-poster spending ArbOS attributes from batchPostingReport internal transactions, on a log scale. This is not an Ethereum receipt total.",
     section: "l1",
     range: "series",
     live: false,

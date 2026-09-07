@@ -582,12 +582,12 @@ describe("L1Section", () => {
     getBatchesMock.mockResolvedValue(batches);
     getL1Mock.mockResolvedValue(l1);
     render(<L1Section network="robinhood" range="1h" snapshot={l1Snapshot} series={costSeries} />);
-    const details = screen.getByText(/L1 pricer and posting costs/).closest("details") as HTMLDetailsElement;
+    const details = screen.getByText(/L1 pricer and attributed batch costs/).closest("details") as HTMLDetailsElement;
     details.open = true;
     fireEvent(details, new Event("toggle"));
     // Two reports share the first 15 s bucket: 0.25 ETH of L2 fees is counted once, not twice.
     expect(await screen.findByText(/L2 fees 0.25 ETH/)).toBeInTheDocument();
-    expect(screen.getByText(/L1 posting 0.0000105 ETH/)).toBeInTheDocument();
+    expect(screen.getByText(/ArbOS batch cost 0.0000105 ETH/)).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
     const summary = screen.getByText(/Data table \(2 buckets\)/);
     const table = summary.closest("details") as HTMLDetailsElement;

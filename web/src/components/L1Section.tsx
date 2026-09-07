@@ -73,16 +73,16 @@ export function useL1Costs(network: string, range: SeriesRange, series: Series |
 export function l1CostLegend(totals: L1Costs["totals"]) {
   return [
     { label: `L2 fees ${formatSignificant(totals.l2Eth, 3)} ETH`, color: "var(--series-1)", kind: "line" as const },
-    { label: `L1 posting ${formatSignificant(totals.l1Eth, 3)} ETH`, color: "var(--series-2)", kind: "line" as const },
+    { label: `ArbOS batch cost ${formatSignificant(totals.l1Eth, 3)} ETH`, color: "var(--series-2)", kind: "line" as const },
   ];
 }
 
-/** What users paid against what the chain paid Ethereum, per bucket, on a log scale. */
+/** User fees against ArbOS-attributed batch-poster spending, per bucket. */
 export function L1CostChart({ rows, span, domain, gaps = NO_GAPS, height = L1_CHART_HEIGHT }: { rows: CostRow[]; span: number; domain: [number, number]; gaps?: GapModel; height?: ChartHeight }) {
   const window = gaps.window.to > gaps.window.from ? gaps.window : { from: rows[0]?.t ?? 0, to: rows[rows.length - 1]?.t ?? 0 };
   return (
     <>
-      <ChartFrame height={height} label="L2 fees and L1 posting cost per bucket on a log scale">
+      <ChartFrame height={height} label="L2 fees and ArbOS-attributed batch-posting cost per bucket on a log scale">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={withGapBreaks(rows, gaps.gaps)} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
@@ -97,7 +97,7 @@ export function L1CostChart({ rows, span, domain, gaps = NO_GAPS, height = L1_CH
                   title={(t) => formatDateTime(t)}
                   rows={[
                     { label: "L2 fees", color: "var(--series-1)", value: (r) => `${formatSignificant(Number(r.l2Eth), 4)} ETH` },
-                    { label: "L1 posting cost", color: "var(--series-2)", value: (r) => `${formatSignificant(Number(r.l1Eth), 4)} ETH` },
+                    { label: "ArbOS-attributed cost", color: "var(--series-2)", value: (r) => `${formatSignificant(Number(r.l1Eth), 4)} ETH` },
                     { label: "batches", value: (r) => formatInteger(Number(r.batches)) },
                   ]}
                 />
@@ -115,7 +115,7 @@ export function L1CostChart({ rows, span, domain, gaps = NO_GAPS, height = L1_CH
   );
 }
 
-/** L1 pricer values and what the chain pays Ethereum against what users pay. Collapsed by default. */
+/** L1 pricer values and ArbOS-attributed batch costs. Collapsed by default. */
 export function L1Section({ network, range, snapshot, series }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null }) {
   const [open, setOpen] = useState(false);
   const { rows, span, domain, gaps, totals, batches, l1 } = useL1Costs(network, range, series, open);
@@ -129,7 +129,7 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
       onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
     >
       <summary className="cursor-pointer select-none px-4 py-3 text-sm font-semibold text-ink">
-        L1 pricer and posting costs <span className="ml-2 font-normal text-ink-3">{open ? "" : "collapsed"}</span>
+        L1 pricer and attributed batch costs <span className="ml-2 font-normal text-ink-3">{open ? "" : "collapsed"}</span>
       </summary>
       <div className="border-t border-hairline p-4">
         {l1State ? (
@@ -147,14 +147,13 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
           <p className="text-sm text-ink-2">L1 values arrive with the slow (60 s) sample.</p>
         )}
         <p className="mt-3 max-w-[65ch] text-sm text-ink-2">
-          The L1 pricer adapts its per-unit price so that collected L1 fees match batch-posting costs. With blobs and compression the cost per transaction is tiny, so the price has converged
-          near zero and <code className="rounded bg-surface-2 px-1 font-mono text-[0.9em] text-ink">gasUsedForL1</code> rounds to 0 on a normal transaction. The chart compares what users paid
-          in L2 fees with what the chain paid Ethereum for the same buckets, from <code className="rounded bg-surface-2 px-1 font-mono text-[0.9em] text-ink">batchPostingReport</code> internal
-          transactions.
+          The L1 pricer adapts its per-unit price so collected L1 fees match the spending ArbOS attributes to batch posters. The attributed amount combines Nitro&apos;s calldata and storage
+          accounting, batch extra gas, the effective per-batch charge, and the ArbOS 50+ parent calldata floor. It is not the batch poster&apos;s Ethereum receipt total. With blobs and compression
+          the cost per transaction is tiny, so <code className="rounded bg-surface-2 px-1 font-mono text-[0.9em] text-ink">gasUsedForL1</code> rounds to 0 on a normal transaction.
         </p>
         <div className="mt-4">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold text-ink">What users pay against what the chain pays Ethereum (ETH per bucket, log scale)</h3>
+            <h3 className="text-sm font-semibold text-ink">L2 fees against ArbOS-attributed batch-posting cost (ETH per bucket, log scale)</h3>
             <div className="flex items-center gap-3">
               <Legend items={l1CostLegend(totals)} />
               <EnlargeLink network={network} view={chartView("l1")} range={range} />
@@ -175,12 +174,12 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
               {tableOpen ? (
                 <div className="mt-2 max-h-[320px] overflow-auto">
                   <table className="num w-full min-w-[520px] text-left">
-                    <caption className="sr-only">L2 fees paid by users and L1 posting cost per bucket</caption>
+                    <caption className="sr-only">L2 fees paid by users and ArbOS-attributed batch-posting cost per bucket</caption>
                     <thead className="sticky top-0 bg-surface text-ink-3">
                       <tr>
                         <th scope="col" className="py-1 pr-3 font-medium">bucket</th>
                         <th scope="col" className="py-1 pr-3 font-medium">L2 fees (ETH)</th>
-                        <th scope="col" className="py-1 pr-3 font-medium">L1 posting cost (ETH)</th>
+                        <th scope="col" className="py-1 pr-3 font-medium">ArbOS-attributed cost (ETH)</th>
                         <th scope="col" className="py-1 pr-3 font-medium">batches</th>
                       </tr>
                     </thead>
