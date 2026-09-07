@@ -180,17 +180,22 @@ type ConstraintSet struct {
 
 // BatchReport is a row of the batch_reports table.
 type BatchReport struct {
-	ChainID         uint64    `db:"chain_id"`
-	BlockNumber     uint64    `db:"block_number"`
-	BatchNumber     uint64    `db:"batch_number"`
-	BatchTS         time.Time `db:"batch_ts"`
-	Poster          string    `db:"poster"`
-	CalldataLen     uint64    `db:"calldata_len"`
-	CalldataNonzero uint64    `db:"calldata_nonzero"`
-	ExtraGas        uint64    `db:"extra_gas"`
-	L1BaseFee       Wei       `db:"l1_base_fee"`
-	GasSpent        uint64    `db:"gas_spent"`
-	WeiSpent        Wei       `db:"wei_spent"`
+	ChainID                uint64    `db:"chain_id"`
+	BlockNumber            uint64    `db:"block_number"`
+	BatchNumber            uint64    `db:"batch_number"`
+	BatchTS                time.Time `db:"batch_ts"`
+	Poster                 string    `db:"poster"`
+	CalldataLen            uint64    `db:"calldata_len"`
+	CalldataNonzero        uint64    `db:"calldata_nonzero"`
+	ExtraGas               uint64    `db:"extra_gas"`
+	L1BaseFee              Wei       `db:"l1_base_fee"`
+	GasSpent               uint64    `db:"attributed_gas_spent"`
+	WeiSpent               Wei       `db:"attributed_wei_spent"`
+	ReportVersion          int       `db:"report_version"`
+	ArbOSVersion           uint64    `db:"arbos_version"`
+	PerBatchGasCharge      int64     `db:"per_batch_gas_charge"`
+	ParentGasFloorPerToken uint64    `db:"parent_gas_floor_per_token"`
+	CostCalculationVersion int       `db:"cost_calculation_version"`
 }
 
 // BatchBucket is an aggregate of batch reports over a time step.

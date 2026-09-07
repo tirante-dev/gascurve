@@ -758,24 +758,31 @@ func (p *Postgres) ConstraintSets(ctx context.Context, chainID uint64) ([]Constr
 func (p *Postgres) UpsertBatchReports(ctx context.Context, reports []BatchReport) error {
 	for _, r := range reports {
 		if _, err := p.exec(ctx, `
-			INSERT INTO batch_reports (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			INSERT INTO batch_reports (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent,
+				report_version, arbos_version, per_batch_gas_charge, parent_gas_floor_per_token, cost_calculation_version, attributed_gas_spent, attributed_wei_spent)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			ON CONFLICT (chain_id, block_number) DO UPDATE SET
 				batch_number = EXCLUDED.batch_number, batch_ts = EXCLUDED.batch_ts, poster = EXCLUDED.poster,
 				calldata_len = EXCLUDED.calldata_len, calldata_nonzero = EXCLUDED.calldata_nonzero, extra_gas = EXCLUDED.extra_gas,
-				l1_base_fee = EXCLUDED.l1_base_fee, gas_spent = EXCLUDED.gas_spent, wei_spent = EXCLUDED.wei_spent`,
-			r.ChainID, r.BlockNumber, r.BatchNumber, r.BatchTS, r.Poster, r.CalldataLen, r.CalldataNonzero, r.ExtraGas, r.L1BaseFee, r.GasSpent, r.WeiSpent); err != nil {
+				l1_base_fee = EXCLUDED.l1_base_fee, gas_spent = EXCLUDED.gas_spent, wei_spent = EXCLUDED.wei_spent,
+				report_version = EXCLUDED.report_version, arbos_version = EXCLUDED.arbos_version,
+				per_batch_gas_charge = EXCLUDED.per_batch_gas_charge, parent_gas_floor_per_token = EXCLUDED.parent_gas_floor_per_token,
+				cost_calculation_version = EXCLUDED.cost_calculation_version,
+				attributed_gas_spent = EXCLUDED.attributed_gas_spent, attributed_wei_spent = EXCLUDED.attributed_wei_spent`,
+			r.ChainID, r.BlockNumber, r.BatchNumber, r.BatchTS, r.Poster, r.CalldataLen, r.CalldataNonzero, r.ExtraGas, r.L1BaseFee, r.GasSpent, r.WeiSpent,
+			r.ReportVersion, r.ArbOSVersion, r.PerBatchGasCharge, r.ParentGasFloorPerToken, r.CostCalculationVersion, r.GasSpent, r.WeiSpent); err != nil {
 			return fmt.Errorf("batch report %d: %w", r.BlockNumber, err)
 		}
 	}
 	return nil
 }
 
-const batchReportColumns = `chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent`
+const batchReportColumns = `chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee,
+	attributed_gas_spent, attributed_wei_spent, report_version, arbos_version, per_batch_gas_charge, parent_gas_floor_per_token, cost_calculation_version`
 
 // BatchReports lists reports in a time range, one row per report.
 func (p *Postgres) BatchReports(ctx context.Context, chainID uint64, from, to time.Time) ([]BatchReport, error) {
-	return selectAll[BatchReport](ctx, p, `SELECT `+batchReportColumns+` FROM batch_reports WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 ORDER BY batch_ts ASC, block_number ASC`, chainID, from, to)
+	return selectAll[BatchReport](ctx, p, `SELECT `+batchReportColumns+` FROM batch_reports WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 AND cost_calculation_version = 1 ORDER BY batch_ts ASC, block_number ASC`, chainID, from, to)
 }
 
 // BatchBuckets aggregates reports per step.
@@ -784,12 +791,12 @@ func (p *Postgres) BatchBuckets(ctx context.Context, chainID uint64, from, to ti
 	return selectAll[BatchBucket](ctx, p, `
 		SELECT to_timestamp(floor(extract(epoch FROM batch_ts) / $4) * $4) AS t,
 			count(*)::BIGINT AS batches,
-			COALESCE(sum(gas_spent), 0)::BIGINT AS gas_spent,
-			COALESCE(sum(wei_spent), 0) AS wei_spent,
+			COALESCE(sum(attributed_gas_spent), 0)::BIGINT AS gas_spent,
+			COALESCE(sum(attributed_wei_spent), 0) AS wei_spent,
 			COALESCE(floor(avg(l1_base_fee)), 0) AS l1_base_fee_avg,
 			COALESCE(sum(calldata_len), 0)::BIGINT AS calldata_bytes
 		FROM batch_reports
-		WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3
+		WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 AND cost_calculation_version = 1
 		GROUP BY 1 ORDER BY 1 ASC`,
 		chainID, from, to, secs)
 }

@@ -238,8 +238,9 @@ func TestMemStore(t *testing.T) {
 	}
 
 	reps := []db.BatchReport{
-		{ChainID: 1, BlockNumber: 1, BatchTS: base, GasSpent: 10, WeiSpent: db.WeiFromUint64(100), L1BaseFee: db.WeiFromUint64(10), CalldataLen: 5},
-		{ChainID: 1, BlockNumber: 2, BatchTS: base.Add(10 * time.Second), GasSpent: 20, WeiSpent: db.WeiFromUint64(200), L1BaseFee: db.WeiFromUint64(30), CalldataLen: 5},
+		{ChainID: 1, BlockNumber: 1, BatchTS: base, GasSpent: 10, WeiSpent: db.WeiFromUint64(100), L1BaseFee: db.WeiFromUint64(10), CalldataLen: 5, CostCalculationVersion: 1},
+		{ChainID: 1, BlockNumber: 2, BatchTS: base.Add(10 * time.Second), GasSpent: 20, WeiSpent: db.WeiFromUint64(200), L1BaseFee: db.WeiFromUint64(30), CalldataLen: 5, CostCalculationVersion: 1},
+		{ChainID: 1, BlockNumber: 3, BatchTS: base.Add(20 * time.Second), GasSpent: 999, WeiSpent: db.WeiFromUint64(999), L1BaseFee: db.WeiFromUint64(1), CalldataLen: 5},
 	}
 	_ = m.UpsertBatchReports(ctx, reps)
 	bb, _ := m.BatchBuckets(ctx, 1, base.Add(-time.Hour), base.Add(time.Hour), time.Minute)

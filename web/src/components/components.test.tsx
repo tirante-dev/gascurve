@@ -83,8 +83,8 @@ const history: Series = {
   constraintSets: [],
   ownerActions: [{ block: 20, at: "2026-09-06T07:21:00Z", txHash: "0x" + "ab".repeat(32), method: "setMinimumL2BaseFee", selector: "0xa0188cdb", args: { priceInWei: "20000000" } }],
   points: [
-    { t: 1788679200, blocks: 12, gasUsed: 100, gasPerSecond: 1, coverage: 1, feesWei: "0", baseFeeMin: "100000000", baseFeeAvg: "300000000", baseFeeMax: "400000000", exponentBips: 10_000, constraintBips: [10_000, 0], backlogs: [1, 2], backlogsMax: [1, 2], minBaseFee: "100000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
-    { t: 1788679260, blocks: 30, gasUsed: 100, gasPerSecond: 1, coverage: 1, feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "395726000", baseFeeMax: "400000000", exponentBips: 32_425, constraintBips: [32_425, 0], backlogs: [3, 4], backlogsMax: [3, 4], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
+    { t: 1788679200, blocks: 12, gasUsed: 100, gasPerSecond: 1, coverage: 1, completeness: "complete", feesWei: "0", baseFeeMin: "100000000", baseFeeAvg: "300000000", baseFeeMax: "400000000", exponentBips: 10_000, constraintBips: [10_000, 0], backlogs: [1, 2], backlogsMax: [1, 2], minBaseFee: "100000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
+    { t: 1788679260, blocks: 30, gasUsed: 100, gasPerSecond: 1, coverage: 1, completeness: "complete", feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "395726000", baseFeeMax: "400000000", exponentBips: 32_425, constraintBips: [32_425, 0], backlogs: [3, 4], backlogsMax: [3, 4], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
   ],
 };
 

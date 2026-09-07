@@ -1,6 +1,6 @@
 # gascurve
 
-Live and historical gas pricing for Arbitrum Nitro chains. gascurve explains the multi-constraint base fee pricer and shows it working: per-block backlogs, each constraint's share of the fee, owner parameter changes, where the fees go, and what the chain actually pays Ethereum, over the last hour, day, month, and all time.
+Live and historical gas pricing for Arbitrum Nitro chains. gascurve explains the multi-constraint base fee pricer and shows it working: per-block backlogs, each constraint's share of the fee, owner parameter changes, where the fees go, and the batch-posting cost ArbOS attributes to batch posters, over the last hour, day, month, and all time.
 
 Networks: Robinhood Chain, Robinhood Chain Testnet, Arbitrum One, Arbitrum Sepolia. Adding another Nitro chain is a config entry.
 

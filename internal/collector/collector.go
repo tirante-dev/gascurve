@@ -41,7 +41,7 @@ type RPC interface {
 	BlocksWithTxs(ctx context.Context, numbers []uint64) ([]nitro.Block, error)
 	TransactionReceipts(ctx context.Context, hashes []string) ([]nitro.Receipt, error)
 	OwnerActsLogs(ctx context.Context, from, to uint64) ([]nitro.Log, error)
-	L1Sample(ctx context.Context) (*nitro.L1Sample, error)
+	L1SampleAt(ctx context.Context, number uint64) (*nitro.L1Sample, error)
 	FeeAccounts(ctx context.Context) (*nitro.FeeAccounts, error)
 	ArbOSVersion(ctx context.Context) (uint64, error)
 	BlockNumber(ctx context.Context) (uint64, error)
@@ -57,6 +57,7 @@ var _ RPC = (*nitro.Client)(nil)
 // samples go through it.
 type ArchiveRPC interface {
 	FastSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
+	L1SampleAt(ctx context.Context, number uint64) (*nitro.L1Sample, error)
 }
 
 // EndpointPool is what a nitro.Pool adds to RPC: chain id verification of
@@ -211,26 +212,28 @@ type Follower struct {
 	// head, headHash, prevTs, state, lastSample and lastResult describe
 	// the last committed tick; they are only published after the
 	// transaction that wrote it committed.
-	head          uint64
-	headHash      string
-	prevTs        uint64
-	state         *pricer.State
-	lastSample    *nitro.Sample
-	lastResult    *pricer.Result
-	sets          []db.ConstraintSet
-	setChanges    []setChange
-	minFeeChanges []minFeeChange
-	legacyChanges []legacyChange
-	liveStart     *liveStart
+	head             uint64
+	headHash         string
+	prevTs           uint64
+	state            *pricer.State
+	lastSample       *nitro.Sample
+	lastResult       *pricer.Result
+	sets             []db.ConstraintSet
+	setChanges       []setChange
+	minFeeChanges    []minFeeChange
+	legacyChanges    []legacyChange
+	batchCostChanges []batchCostChange
+	liveStart        *liveStart
 	// ownerScanThrough is the owner_scan_through checkpoint: the block
 	// through which the recorded owner-action timeline is complete, 0 until
 	// a scan pass has reached its head.
 	ownerScanThrough uint64
 	// scanOrigin is the owner_scan_origin checkpoint, nil for a chain
 	// scanned from genesis.
-	scanOrigin *scanOrigin
-	l1         *model.L1
-	accounts   *model.Accounts
+	scanOrigin      *scanOrigin
+	l1              *model.L1
+	batchCostAnchor *batchCostAnchor
+	accounts        *model.Accounts
 	// ethUsdPrice is the last quote the slow loop obtained, published in a
 	// tick only while it is younger than cfg.EthUsdMaxAge.
 	ethUsdPrice *prices.Price
@@ -265,6 +268,17 @@ type legacyChange struct {
 	method string
 	value  uint64
 	pos    actionPosition
+}
+
+type batchCostChange struct {
+	block       uint64
+	perBatchGas *int64
+	parentFloor *uint64
+}
+
+type batchCostAnchor struct {
+	block  uint64
+	params nitro.BatchPostingCostParams
 }
 
 // setChange is a constraint set taking effect at a block; a set with the
@@ -317,6 +331,8 @@ type scanOrigin struct {
 	// (parameters and backlog), nil on a constraints chain or without an
 	// archive endpoint.
 	Legacy *model.LegacyParams `json:"legacy,omitempty"`
+	// BatchCost is the batch-poster accounting state at the end of Block.
+	BatchCost *nitro.BatchPostingCostParams `json:"batchCost,omitempty"`
 }
 
 // replayFrom is the first block a replay may start at: the origin sample
@@ -764,6 +780,7 @@ func (f *Follower) reloadSetsLocked(ctx context.Context) error {
 	f.setChanges = f.setChanges[:0]
 	f.minFeeChanges = f.minFeeChanges[:0]
 	f.legacyChanges = f.legacyChanges[:0]
+	f.batchCostChanges = f.batchCostChanges[:0]
 	for i := len(actions) - 1; i >= 0; i-- { // ascending by block
 		a := actions[i]
 		pos := actionPositionOf(a)
@@ -778,6 +795,9 @@ func (f *Follower) reloadSetsLocked(ctx context.Context) error {
 		if c, ok := legacyChangeOf(a.BlockNumber, a.Method, a.Args); ok {
 			c.pos = pos
 			f.legacyChanges = append(f.legacyChanges, c)
+		}
+		if c, ok := batchCostChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			f.batchCostChanges = append(f.batchCostChanges, c)
 		}
 	}
 	return nil
@@ -803,6 +823,26 @@ func setChangeOf(block uint64, method string, args db.JSONB) (setChange, bool) {
 		return setChange{}, false
 	}
 	return setChange{block: block, entries: entriesOf(a.Constraints)}, true
+}
+
+func batchCostChangeOf(block uint64, method string, args db.JSONB) (batchCostChange, bool) {
+	switch method {
+	case "setPerBatchGasCharge":
+		var a struct {
+			Cost *int64 `json:"cost"`
+		}
+		if err := args.Unmarshal(&a); err == nil && a.Cost != nil {
+			return batchCostChange{block: block, perBatchGas: a.Cost}, true
+		}
+	case "setParentGasFloorPerToken":
+		var a struct {
+			GasFloorPerToken *uint64 `json:"gasFloorPerToken"`
+		}
+		if err := args.Unmarshal(&a); err == nil && a.GasFloorPerToken != nil {
+			return batchCostChange{block: block, parentFloor: a.GasFloorPerToken}, true
+		}
+	}
+	return batchCostChange{}, false
 }
 
 // minFeeChangeOf decodes a recorded setMinimumL2BaseFee.

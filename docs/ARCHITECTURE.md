@@ -84,14 +84,14 @@ Replay validation vector (Robinhood, 2026-09-06): constraints `[60e6,15,3_111_50
 
 `Exponent` per constraint (`c.Backlog / (c.Window*c.Target)` in bips) is exposed to the API as `exponentBips` so the UI can show each constraint's share.
 
-Replay comparison: ArbOS computes the fee in block N's `startBlock` and it applies to header N+1's `baseFeePerGas`; the replay compares `predicted(N)` with header N, so `replayErrorBips` carries at most one block of lag. The EIP-7623 floor is not applied to batch-report `gasSpent`.
+Replay comparison: ArbOS computes the fee in block N's `startBlock` and it applies to header N+1's `baseFeePerGas`; the replay compares `predicted(N)` with header N, so `replayErrorBips` carries at most one block of lag. Batch-report `gasSpent` is separate and reproduces Nitro's report-version path, including the effective per-batch charge and the ArbOS 50+ parent calldata floor.
 
 ## 4. Database (PostgreSQL 16, migrations in `internal/db/migrations`)
 
 All tables are keyed by `chain_id` first. Wei values are `NUMERIC(40,0)`. Gas values are `BIGINT`. Backlogs are `NUMERIC(20,0)[]`: a backlog is a `uint64` in the pricer and saturates at 2^64-1, which does not fit in a `BIGINT`. A nullable column means unknown, never zero, and `pricing_version` says which rows carry the full pricing breakdown (1) and which are history recorded without it (0).
 
 Production release `v1.0.1` established schema version 1 from `000001_init`. Released migrations are immutable, and every correction uses a new forward migration. CI verifies both empty-schema installation and upgrades from the last production schema. See [MIGRATIONS.md](MIGRATIONS.md) for authoring, release, rollback, and concurrent pull request rules.
-Forward migration `000002_state_samples_chain_block` adds the state-sample lookup index. Forward migration `000003_missing_ranges` adds durable recovery records for skipped history and therefore follows `000002`.
+Forward migration `000002_state_samples_chain_block` adds the state-sample lookup index, `000003_owner_action_tx_index` adds the owner-action transaction index column, and `000004_missing_ranges` adds durable recovery records for skipped history.
 
 ```sql
 networks            (chain_id PK, name, display_name, explorer_url, enabled, head_block, head_at, last_sample_at, last_error, updated_at)
@@ -118,11 +118,14 @@ owner_actions       (chain_id, block_number, tx_hash, tx_index INT NULL /* null 
                      PK(chain_id, tx_hash, log_index))
 constraint_sets     (id SERIAL PK, chain_id, effective_block, effective_at, constraints JSONB, source TEXT /* 'genesis'|'owner_action'|'observed' */)
 batch_reports       (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero,
-                     extra_gas, l1_base_fee NUMERIC, gas_spent BIGINT, wei_spent NUMERIC, PK(chain_id, block_number))
+                     extra_gas, l1_base_fee NUMERIC, gas_spent BIGINT and wei_spent NUMERIC /* compatibility columns */,
+                     report_version, arbos_version, per_batch_gas_charge, parent_gas_floor_per_token,
+                     cost_calculation_version, attributed_gas_spent BIGINT, attributed_wei_spent NUMERIC,
+                     PK(chain_id, block_number))
 missing_ranges      (chain_id, from_block, to_block, detected_at, lifecycle /* pending|retrying|blocked */, reason,
                      cursor, replay_state JSONB, folded, retry_count, last_attempt_at, next_retry_at, last_error,
                      predecessor_at, successor_at, cursor_at, created_at, updated_at, PK(chain_id, from_block))
-collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor, endpoints, generation (bumped by every rewind and by a history rebuild; writers that fetched outside the lock re-check it before committing), rpc_capacity, eth_usd, history_epoch, telemetry (collector heartbeat, loop outcomes, head progress and cumulative RPC/database accounting). A legacy holes key is deleted only after its JSON has been imported into missing_ranges successfully
+collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor_v2, endpoints, generation (bumped by every rewind and by a history rebuild; writers that fetched outside the lock re-check it before committing), rpc_capacity, eth_usd, history_epoch, telemetry (collector heartbeat, loop outcomes, head progress and cumulative RPC/database accounting). A legacy holes key is deleted only after its JSON has been imported into missing_ranges successfully
 ```
 
 `NOTIFY gascurve_live, '<json>'` is issued by the collector after each tick with the `LiveSnapshot` below (payloads stay under 8 kB; `recentBlocks` is not included in the notify payload, the API keeps its own ring buffer from `blocks` rows).
@@ -184,7 +187,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 | `GET /networks/{network}/series?range=1h\|24h\|30d\|all` | `Series` (see below) |
 | `GET /networks/{network}/constraints` | `{ current: ConstraintSet \| null, history: ConstraintSet[] }` (`null` whenever the latest state sample's model is not `constraints`, or before any set is known; `history` is still returned) |
 | `GET /networks/{network}/owner-actions` | `OwnerAction[]` newest first |
-| `GET /networks/{network}/batches?range=…` | `BatchSeries` (L1 cost per bucket, batch cadence) |
+| `GET /networks/{network}/batches?range=…` | `BatchSeries` (ArbOS-attributed batch-posting cost per bucket, not Ethereum receipt totals, plus batch cadence) |
 | `GET /networks/{network}/l1?range=…` | `L1Series` (pricer getters over time, from state samples) |
 | `GET /status` | `{ version, status, listener: { ready, reconnects, lastError }, networks: [{ ..., degraded, capacity: { configuredCallsPerSecond, requiredCallsPerSecond, observedCallsPerSecond, headroomCallsPerSecond, saturated, at, checkpointError }, holes: { pending, blocks, unfillable, retrying, oldestAgeSeconds, checkpointError, pendingBlocks, oldestPendingAt, oldestPendingAgeSeconds }, status, degradedReasons, collector: { heartbeatAt, heartbeatAgeSeconds, heartbeatStaleAfterSeconds, observedHead, indexedHead, headLagBlocks, loops: { fast, slow, history }, rpc, database } }] }`. Top-level `status` is `healthy` or `degraded`; it degrades when the notification listener or any enabled network is degraded. A network is `healthy`, `degraded` or `disabled`. The API degrades an enabled network when the heartbeat or a loop is missing or stale, a loop's newest outcome is an error, the collector trails its last observed head, queued gaps outlive the history-loop freshness window, or anything the per-network `degraded` flag covers (missing blocks, saturated RPC capacity, an unreadable checkpoint). `listener.lastError` is null while its PostgreSQL LISTEN connection is ready, and `listener.reconnects` counts successful recoveries after startup. Existing head, rate-limit, backfill, ArbOS and endpoint fields remain for compatibility; endpoint URLs are never exposed, in `error` and `wsError` either. `collector` is null until a compatible collector writes its first telemetry checkpoint. Loop entries retain both last success and last error timestamps plus the last duration. RPC accounting includes calls, HTTP requests, errors, rate limits and average HTTP latency. Database accounting includes operations, errors, average latency and last latency. `holes.pending` counts pending and retrying rows, `holes.unfillable` counts blocked rows, `holes.blocks` is the remaining block count including unfillable history, `holes.oldestAgeSeconds` is the age of the oldest range, while `pendingBlocks` and the `oldestPending*` fields cover queued work only. A checkpoint decode failure sets the related `checkpointError` instead of reporting no gaps. |
 | `GET /ws?network=…` | WebSocket, see §7 |
@@ -241,7 +244,8 @@ type SeriesPoint = {
   t: number;                               // unix seconds, bucket start
   blocks: number; gasUsed: number; gasPerSecond: number; feesWei: string;
   // minBaseFee, floorFeesWei and surplusFeesWei are null together, under one condition: any block in the bucket was written at pricing version 0.
-  coverage: number;                        // share of the bucket the collector indexed (1 = whole); gasPerSecond is the rate over that covered span, so the bucket in progress and the bucket the collector started inside read as rates, not as fractions of a bucket. Sums (gasUsed, feesWei, blocks) are over the covered span only. The live start trims only the one bucket it falls inside: a bucket that ends before it was written by the backfiller or the gap filler and is whole. Coverage does not look inside a bucket, so a hole in the middle of one is not represented (the gap filler closes those and the bucket is rebuilt whole). A bucket lying entirely at or after the serving clock is not returned at all, so coverage is always above zero
+  coverage: number | null;                 // share of the bucket the collector indexed when the time span is measurable. Bounded missing intervals reduce it; it is null when missing-range time bounds are insufficient. gasPerSecond is a usable rate only when coverage is positive and non-null. Sums (gasUsed, feesWei, blocks) always include indexed blocks only
+  completeness: 'complete' | 'partial' | 'unknown'; // complete means every block in the covered bucket is indexed; partial means the API can place a missing range in this bucket or the bucket is still in progress, even when equal block timestamps leave coverage at 1; unknown means a missing range lacks enough time bounds to decide whether it overlaps this bucket
   baseFeeMin: string; baseFeeAvg: string; baseFeeMax: string;
   exponentBips: number; constraintBips: number[] | null;   // start-of-block values of the bucket's last block; null for pricing version 0 history
   backlogs: number[]; backlogsMax: number[];
@@ -255,7 +259,7 @@ type OwnerAction = {
   args: Record<string, unknown>;           // decoded when the selector is known, else { raw: '0x…' }. setGasPricingConstraints: { constraints: [{ gasTargetPerSecond, adjustmentWindowSeconds, startingBacklog }] }; setMinimumL2BaseFee: { priceInWei: string }
 }
 
-type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; from: number; to: number; /* window as in Series */ /* 'batch' = exactly one point per report, never grouped, used for 1h */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
+type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; from: number; to: number; /* window as in Series */ /* 'batch' = exactly one point per report, never grouped, used for 1h; gasSpent and weiSpent are ArbOS-attributed values, not receipt totals */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
 type L1Series = { range: string; from: number; to: number; /* window as in Series */ points: { t: number; baseFeeEstimate: string; surplus: string; feesAvailable: string; unitsSinceUpdate: number }[] }
 ```
 

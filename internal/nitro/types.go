@@ -1,6 +1,7 @@
 package nitro
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -18,6 +19,7 @@ type Header struct {
 	GasLimit      uint64
 	BaseFee       *big.Int
 	L1BlockNumber uint64
+	ArbOSVersion  uint64
 	TxCount       int
 	TxHashes      []string
 }
@@ -76,6 +78,7 @@ type rawBlock struct {
 	GasLimit      string            `json:"gasLimit"`
 	BaseFee       string            `json:"baseFeePerGas"`
 	L1BlockNumber string            `json:"l1BlockNumber"`
+	MixHash       string            `json:"mixHash"`
 	Transactions  []json.RawMessage `json:"transactions"`
 }
 
@@ -131,6 +134,15 @@ func parseHeader(raw json.RawMessage) (*Block, error) {
 		if b.L1BlockNumber, err = HexUint64(rb.L1BlockNumber); err != nil {
 			return nil, fmt.Errorf("block %d l1BlockNumber: %w", b.Number, err)
 		}
+	}
+	if rb.MixHash != "" {
+		mixHash, err := DecodeHex(rb.MixHash)
+		if err != nil || len(mixHash) != 32 {
+			return nil, fmt.Errorf("block %d mixHash: expected 32 bytes", b.Number)
+		}
+		// Nitro HeaderInfo stores ArbOSFormatVersion in bytes 16 through 23
+		// of the mix digest. This is the version used to process the block.
+		b.ArbOSVersion = binary.BigEndian.Uint64(mixHash[16:24])
 	}
 	b.TxCount = len(rb.Transactions)
 	b.TxHashes = make([]string, 0, len(rb.Transactions))

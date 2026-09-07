@@ -879,6 +879,7 @@ export class MockWorld {
       .sort((a, b) => a.t - b.t)
       .map((b) => {
         const recorded = b.t >= recordedFrom;
+        const coverage = Math.min(1, b.duration / spec.seconds);
         return {
           t: b.t,
           blocks: b.blocks,
@@ -887,7 +888,8 @@ export class MockWorld {
           // What the collector has of the bucket: a whole one everywhere but
           // at the two ends, where the bucket in progress and the first one
           // after the world began hold only part of their span.
-          coverage: Math.min(1, b.duration / spec.seconds),
+          coverage,
+          completeness: coverage < 1 ? "partial" : "complete",
           feesWei: b.feesWei.toString(),
           baseFeeMin: b.feeMin.toString(),
           baseFeeAvg: (b.blocks > 0 ? b.feeSum / BigInt(b.blocks) : b.feeMin).toString(),

@@ -48,12 +48,14 @@ const (
 	SigGetL1RewardRecipient          = "getL1RewardRecipient()"
 	SigGetNetworkFeeAccount          = "getNetworkFeeAccount()"
 	SigGetInfraFeeAccount            = "getInfraFeeAccount()"
+	SigGetParentGasFloorPerToken     = "getParentGasFloorPerToken()"
 	SigArbOSVersion                  = "arbOSVersion()"
 
-	SigSetGasPricingConstraints = "setGasPricingConstraints(uint64[3][])"
-	SigStartBlock               = "startBlock(uint256,uint64,uint64,uint64)"
-	SigBatchPostingReportV2     = "batchPostingReportV2(uint256,address,uint64,uint64,uint64,uint64,uint256)"
-	SigBatchPostingReportV1     = "batchPostingReport(uint256,address,uint64,uint64,uint256)"
+	SigSetGasPricingConstraints  = "setGasPricingConstraints(uint64[3][])"
+	SigSetParentGasFloorPerToken = "setParentGasFloorPerToken(uint64)"
+	SigStartBlock                = "startBlock(uint256,uint64,uint64,uint64)"
+	SigBatchPostingReportV2      = "batchPostingReportV2(uint256,address,uint64,uint64,uint64,uint64,uint256)"
+	SigBatchPostingReportV1      = "batchPostingReport(uint256,address,uint64,uint64,uint256)"
 )
 
 // Constraint is one gas pricing constraint as returned by
@@ -84,14 +86,16 @@ type LegacyParams struct {
 
 // L1Sample is the set of L1 pricer getters read on the slow tick.
 type L1Sample struct {
-	BaseFeeEstimate    *big.Int
-	Surplus            *big.Int
-	FeesAvailable      *big.Int
-	UnitsSinceUpdate   uint64
-	LastUpdateTime     uint64
-	EquilibrationUnits uint64
-	PerBatchGasCharge  int64
-	RewardRate         uint64
+	BaseFeeEstimate        *big.Int
+	Surplus                *big.Int
+	FeesAvailable          *big.Int
+	UnitsSinceUpdate       uint64
+	LastUpdateTime         uint64
+	EquilibrationUnits     uint64
+	PerBatchGasCharge      int64
+	RewardRate             uint64
+	ArbOSVersion           uint64
+	ParentGasFloorPerToken uint64
 }
 
 // Account is an address with its balance.

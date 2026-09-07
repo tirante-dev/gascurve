@@ -73,6 +73,7 @@ var ownerMethods = map[string]ownerMethod{
 	"setMaxBlockGasLimit(uint64)":             {"setMaxBlockGasLimit", []string{paramLimit}, []argKind{kindUint64}},
 	"setL1PricingEquilibrationUnits(uint256)": {"setL1PricingEquilibrationUnits", []string{"equilibrationUnits"}, []argKind{kindUint256}},
 	"setPerBatchGasCharge(int64)":             {"setPerBatchGasCharge", []string{"cost"}, []argKind{kindInt64}},
+	SigSetParentGasFloorPerToken:              {"setParentGasFloorPerToken", []string{"gasFloorPerToken"}, []argKind{kindUint64}},
 	"setAmortizedCostCapBips(uint64)":         {"setAmortizedCostCapBips", []string{"cap"}, []argKind{kindUint64}},
 	"setTransactionFilteringFrom(uint64)":     {"setTransactionFilteringFrom", []string{paramTimestamp}, []argKind{kindUint64}},
 	"addTransactionFilterer(address)":         {"addTransactionFilterer", []string{"filterer"}, []argKind{kindAddress}},

@@ -89,7 +89,7 @@ export const SITE_TAGLINE = "Nitro base fee telemetry";
  * social cards. It leads with the chain the site is for, and stays inside the
  * length a search result shows without truncating the useful half.
  */
-export const SITE_DESCRIPTION = `Live and historical gas prices for ${PRIMARY_NETWORK_NAME}: the Nitro base fee pricer, its constraint backlogs, owner changes, fee destinations and L1 posting costs.`;
+export const SITE_DESCRIPTION = `Live and historical gas prices for ${PRIMARY_NETWORK_NAME}: Nitro base fees, constraint backlogs, owner changes, fee destinations and ArbOS-attributed batch costs.`;
 
 /** The default title, which is also the one the homepage wears. */
 export const SITE_TITLE = `${PRIMARY_NETWORK_NAME} gas tracker · ${SITE_NAME}`;

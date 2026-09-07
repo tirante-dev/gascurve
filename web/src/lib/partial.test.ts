@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  completenessOf,
   coverageOf,
   isPartial,
   isPartialRow,
@@ -13,6 +14,7 @@ import {
   withFeeStack,
   IN_PROGRESS_LABEL,
   PARTLY_INDEXED_LABEL,
+  UNKNOWN_COVERAGE_LABEL,
   WHOLE,
   type PartialKind,
 } from "./partial";
@@ -23,6 +25,14 @@ describe("coverage", () => {
     expect(coverageOf({ coverage: 0.25 })).toBe(0.25);
     expect(isPartial({ coverage: 0.25 })).toBe(true);
     expect(isPartial({ coverage: 1 })).toBe(false);
+  });
+  it("keeps an unmeasurable share null and reads the explicit three-state contract", () => {
+    expect(coverageOf({ coverage: null, completeness: "partial" })).toBeNull();
+    expect(completenessOf({ coverage: 1, completeness: "complete" })).toBe("complete");
+    expect(completenessOf({ coverage: null, completeness: "partial" })).toBe("partial");
+    expect(completenessOf({ coverage: null, completeness: "unknown" })).toBe("unknown");
+    expect(isPartial({ coverage: null, completeness: "partial" })).toBe(true);
+    expect(isPartial({ coverage: null, completeness: "unknown" })).toBe(true);
   });
   it("takes a point with no coverage at all as whole, so an older api draws as it always did", () => {
     expect(coverageOf({})).toBe(WHOLE);
@@ -42,9 +52,10 @@ describe("which kind of partial bucket a point is", () => {
       { t: 60, coverage: 1 },
       { t: 120, coverage: 0.2 },
     ];
-    expect(partialKinds(points, { to: 180, step: 60 })).toEqual(["leading", null, "in-progress"]);
-    // The bucket runs past the edge, which is what the one in progress does.
-    expect(partialKinds(points, { to: 150, step: 60 })).toEqual(["leading", null, "in-progress"]);
+    expect(partialKinds(points, { to: 133, step: 60 })).toEqual(["leading", null, "in-progress"]);
+    // Reaching the edge is not enough when coverage is lower than elapsed
+    // time there: that is an internal omission, not merely the live boundary.
+    expect(partialKinds(points, { to: 150, step: 60 })).toEqual(["leading", null, "leading"]);
   });
   it("calls a final partial bucket that stops short of the edge partly indexed, not in progress", () => {
     // The collector stopped part way through the bucket at 120 and the range
@@ -65,6 +76,14 @@ describe("which kind of partial bucket a point is", () => {
     // A point with no time of its own cannot be measured either.
     expect(partialKinds([{ coverage: 0.3 }, { coverage: 0.2 }], { to: 3600, step: 60 })).toEqual(["leading", "in-progress"]);
   });
+  it("does not collapse an unknown bucket into a known partial one", () => {
+    const points = [
+      { t: 0, coverage: null, completeness: "partial" as const },
+      { t: 60, coverage: null, completeness: "unknown" as const },
+    ];
+    expect(partialKinds(points, { to: 120, step: 60 })).toEqual(["leading", "unknown"]);
+    expect(partialBandLabel("unknown")).toBe(UNKNOWN_COVERAGE_LABEL);
+  });
   it("has nothing to say about an empty range or one of whole buckets", () => {
     expect(partialKinds([])).toEqual([]);
     expect(partialKinds([{ coverage: 1 }, {}])).toEqual([null, null]);
@@ -76,11 +95,17 @@ describe("the words", () => {
     expect(partialNote(1 / 3, "in-progress")).toBe("bucket in progress, 33% elapsed");
     expect(partialNote(0.25, "leading")).toBe("partially indexed, 25% of the bucket");
   });
+  it("does not invent a percentage when the exact share or completeness is unknown", () => {
+    expect(partialNote(null, "leading")).toBe("partially indexed, coverage unknown");
+    expect(partialNote(null, "unknown")).toBe("bucket completeness unknown");
+    expect(partialNote(1, "leading")).toBe("partially indexed, missing blocks share a timestamp");
+    expect(partialSumNote(null, "unknown")).toBe("bucket completeness unknown; not drawn as a bucket total");
+  });
   it("adds that a sum chart leaves the bucket out", () => {
     expect(partialSumNote(0.25, "leading")).toBe("partially indexed, 25% of the bucket; not drawn as a bucket total");
   });
   it("bounds a share it was handed anyway", () => {
-    expect(partialNote(Number.NaN, "in-progress")).toBe("bucket in progress, 100% elapsed");
+    expect(partialNote(Number.NaN, "in-progress")).toBe("bucket in progress, coverage unknown");
     expect(partialNote(-1, "leading")).toBe("partially indexed, 0% of the bucket");
   });
   it("labels the bands", () => {
@@ -98,6 +123,8 @@ describe("the tooltip footnote", () => {
     expect(partialRowNote({ partial: "in-progress", coverage: 0.5 })).toBe("bucket in progress, 50% elapsed");
     expect(partialRowNote({ partial: "leading", coverage: 0.5 })).toBe("partially indexed, 50% of the bucket");
     expect(partialRowNote({ partial: "in-progress", coverage: 0.5 }, true)).toBe("bucket in progress, 50% elapsed; not drawn as a bucket total");
+    expect(partialRowNote({ partial: "leading", coverage: null }, true)).toBe("partially indexed, coverage unknown; not drawn as a bucket total");
+    expect(partialRowNote({ partial: "unknown", coverage: null }, true)).toBe("bucket completeness unknown; not drawn as a bucket total");
   });
   it("falls back to a whole bucket's share when the row carries none", () => {
     expect(partialRowNote({ partial: "in-progress" })).toBe("bucket in progress, 100% elapsed");

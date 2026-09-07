@@ -3,6 +3,7 @@ package nitro
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 )
@@ -16,7 +17,7 @@ type StartBlock struct {
 }
 
 // BatchPostingReport is the internal transaction ArbOS receives for every
-// batch posted to L1 (V2 since ArbOS 40; V1 is accepted for older chains).
+// batch posted to L1 (V2 for ArbOS 50+; V1 is used by older chains).
 type BatchPostingReport struct {
 	Version          int
 	BatchTimestamp   uint64
@@ -30,21 +31,119 @@ type BatchPostingReport struct {
 	L1BaseFee *big.Int
 }
 
-// GasSpent is the L1 gas ArbOS attributes to the batch: 4 gas per zero
-// calldata byte, 16 per non-zero byte, plus the extra gas. The EIP-7623
-// calldata floor that newer ArbOS versions apply on top is not modeled
-// yet, so this is a lower bound on chains where the floor binds.
-func (r *BatchPostingReport) GasSpent() uint64 {
-	zeros := r.CalldataLen - min(r.CalldataLen, r.CalldataNonZeros)
-	return zeros*4 + r.CalldataNonZeros*16 + r.ExtraGas
+// BatchPostingCostCalculationVersion identifies the persisted implementation
+// of Nitro's version-aware batch-poster spending calculation.
+const BatchPostingCostCalculationVersion = 1
+
+const (
+	arbOSVersionParentGasFloor = 50
+	floorGasAdditionalTokens   = 172
+	txGas                      = 21_000
+	txDataZeroGas              = 4
+	txDataNonZeroGas           = 16
+	keccak256Gas               = 30
+	keccak256WordGas           = 6
+	sstoreSetGas               = 20_000
+)
+
+// BatchPostingCostParams is the ArbOS state used when a report executes.
+// These values are not encoded in the internal transaction and must be
+// retained with the decoded report for later recomputation.
+type BatchPostingCostParams struct {
+	ArbOSVersion           uint64 `json:"arbosVersion"`
+	PerBatchGasCharge      int64  `json:"perBatchGasCharge"`
+	ParentGasFloorPerToken uint64 `json:"parentGasFloorPerToken"`
 }
 
-// WeiSpent is l1BaseFee * GasSpent().
-func (r *BatchPostingReport) WeiSpent() *big.Int {
-	if r.L1BaseFee == nil {
-		return new(big.Int)
+// BatchPostingCost is the parent-chain spending ArbOS attributes to a batch.
+type BatchPostingCost struct {
+	GasSpent uint64
+	WeiSpent *big.Int
+}
+
+// MaxAttributedGasSpent is the largest gas figure Cost reports. Attributed
+// gas is persisted in a signed 64-bit column, so a malformed report whose
+// saturating arithmetic runs past it clamps here rather than failing the
+// write and stalling the scan. No report Nitro can produce comes near it.
+const MaxAttributedGasSpent uint64 = math.MaxInt64
+
+// Cost reproduces Nitro's ApplyInternalTxUpdate batch-report accounting. V1
+// uses its signed saturating calculation. V2 uses LegacyCostForStats, adds
+// extra gas and a nonnegative per-batch charge, then applies the ArbOS 50+
+// parent calldata floor. Saturating arithmetic preserves Nitro's behavior at
+// its explicit saturation points and prevents malformed uint64 inputs from
+// wrapping in the remaining multiplications; the result is then clamped to
+// MaxAttributedGasSpent.
+func (r *BatchPostingReport) Cost(p BatchPostingCostParams) (BatchPostingCost, error) {
+	var gas uint64
+	switch r.Version {
+	case 1:
+		dataGas := int64(min(r.ExtraGas, uint64(math.MaxInt64)))
+		signedGas := saturatingAddInt64(p.PerBatchGasCharge, dataGas)
+		if signedGas > 0 {
+			gas = uint64(signedGas)
+		}
+	case 2:
+		gas = legacyCostForStats(r.CalldataLen, r.CalldataNonZeros)
+		gas = saturatingAddUint64(gas, r.ExtraGas)
+		if p.PerBatchGasCharge > 0 {
+			gas = saturatingAddUint64(gas, uint64(p.PerBatchGasCharge))
+		}
+		if p.ArbOSVersion >= arbOSVersionParentGasFloor {
+			nonZeros := min(r.CalldataNonZeros, r.CalldataLen)
+			tokens := saturatingAddUint64(r.CalldataLen, saturatingMulUint64(nonZeros, 3))
+			tokens = saturatingAddUint64(tokens, floorGasAdditionalTokens)
+			floor := saturatingAddUint64(saturatingMulUint64(p.ParentGasFloorPerToken, tokens), txGas)
+			gas = max(gas, floor)
+		}
+	default:
+		return BatchPostingCost{}, fmt.Errorf("unsupported batch posting report version %d", r.Version)
 	}
-	return new(big.Int).Mul(r.L1BaseFee, new(big.Int).SetUint64(r.GasSpent()))
+
+	gas = min(gas, MaxAttributedGasSpent)
+
+	wei := new(big.Int)
+	if r.L1BaseFee != nil {
+		wei.Mul(r.L1BaseFee, new(big.Int).SetUint64(gas))
+	}
+	return BatchPostingCost{GasSpent: gas, WeiSpent: wei}, nil
+}
+
+func legacyCostForStats(length, nonZeros uint64) uint64 {
+	nonZeros = min(nonZeros, length)
+	zeros := length - nonZeros
+	gas := saturatingAddUint64(saturatingMulUint64(zeros, txDataZeroGas), saturatingMulUint64(nonZeros, txDataNonZeroGas))
+	words := length / 32
+	if length%32 != 0 {
+		words = saturatingAddUint64(words, 1)
+	}
+	gas = saturatingAddUint64(gas, keccak256Gas)
+	gas = saturatingAddUint64(gas, saturatingMulUint64(words, keccak256WordGas))
+	return saturatingAddUint64(gas, 2*sstoreSetGas)
+}
+
+func saturatingAddUint64(a, b uint64) uint64 {
+	if math.MaxUint64-a < b {
+		return math.MaxUint64
+	}
+	return a + b
+}
+
+func saturatingMulUint64(a, b uint64) uint64 {
+	if a != 0 && b > math.MaxUint64/a {
+		return math.MaxUint64
+	}
+	return a * b
+}
+
+func saturatingAddInt64(a, b int64) int64 {
+	if b > 0 && a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	if b < 0 && a < math.MinInt64-b {
+		return math.MinInt64
+	}
+	return a + b
 }
 
 // ErrNotInternal is returned for calldata that is not a known internal call.

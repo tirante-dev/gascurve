@@ -82,7 +82,8 @@ func newFakeRPC(head uint64) *fakeRPC {
 		},
 		minFee: big.NewInt(20_000_000),
 		l1: &nitro.L1Sample{BaseFeeEstimate: big.NewInt(2_369_608), Surplus: big.NewInt(-5), FeesAvailable: big.NewInt(190),
-			UnitsSinceUpdate: 1, LastUpdateTime: 1_700_000_000, EquilibrationUnits: 160_000_000, PerBatchGasCharge: 210_000, RewardRate: 10},
+			UnitsSinceUpdate: 1, LastUpdateTime: 1_700_000_000, EquilibrationUnits: 160_000_000, PerBatchGasCharge: 210_000, RewardRate: 10,
+			ArbOSVersion: 61, ParentGasFloorPerToken: 10},
 		accounts: &nitro.FeeAccounts{
 			Infra: nitro.Account{Address: "0x1", Balance: big.NewInt(402)}, Network: nitro.Account{Address: "0x2", Balance: big.NewInt(10706)},
 			L1Reward: nitro.Account{Address: "0x3", Balance: big.NewInt(1)},
@@ -160,7 +161,8 @@ func (f *fakeRPC) header(n uint64) nitro.Header {
 	if h, ok := f.parentOverride[n]; ok {
 		parent = h
 	}
-	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)]}
+	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50,
+		ArbOSVersion: f.arbos, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)]}
 }
 
 func (f *fakeRPC) ChainID(context.Context) (uint64, error) {
@@ -319,8 +321,8 @@ func (f *fakeRPC) OwnerActsLogs(_ context.Context, from, to uint64) ([]nitro.Log
 	return out, nil
 }
 
-func (f *fakeRPC) L1Sample(context.Context) (*nitro.L1Sample, error) {
-	if err := f.fail("L1Sample"); err != nil {
+func (f *fakeRPC) L1SampleAt(_ context.Context, _ uint64) (*nitro.L1Sample, error) {
+	if err := f.fail("L1SampleAt"); err != nil {
 		return nil, err
 	}
 	return f.l1, nil
@@ -430,5 +432,10 @@ func newTestFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore, opts ..
 	for _, apply := range opts {
 		apply(&o)
 	}
-	return NewFollower(o)
+	f := NewFollower(o)
+	f.batchCostAnchor = &batchCostAnchor{block: ^uint64(0), params: nitro.BatchPostingCostParams{
+		ArbOSVersion: rpc.l1.ArbOSVersion, PerBatchGasCharge: rpc.l1.PerBatchGasCharge,
+		ParentGasFloorPerToken: rpc.l1.ParentGasFloorPerToken,
+	}}
+	return f
 }
