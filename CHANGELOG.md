@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/tirante-dev/gascurve/compare/v1.0.0...v1.0.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **web:** build api and socket URLs from a relative base ([#19](https://github.com/tirante-dev/gascurve/issues/19)) ([425c460](https://github.com/tirante-dev/gascurve/commit/425c4605c9456a89cec4a4c1a0f88b44ace2799f))
+* **web:** keep the hero to its charts, inspectors move to the enlarged view ([#20](https://github.com/tirante-dev/gascurve/issues/20)) ([860d541](https://github.com/tirante-dev/gascurve/commit/860d541b0e10f9cb2d2edd7ffb6f02850cc24294))
+
 ## 1.0.0 (2026-09-07)
 
 
