@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -358,7 +359,7 @@ func TestMemStoreFailures(t *testing.T) {
 	if err := m.Ping(ctx); !errors.Is(err, ErrInjected) {
 		t.Fatal("ping")
 	}
-	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
+	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DiscardBucketsBelowFrontier", "BelowFrontier", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
 	for _, n := range names {
 		m.FailOn[n] = true
 	}
@@ -376,17 +377,19 @@ func TestMemStoreFailures(t *testing.T) {
 			_, err := m.MissingRanges(ctx, 1)
 			return err
 		},
-		"ReplaceMissingRanges": func() error { return m.ReplaceMissingRanges(ctx, 1, nil) },
-		"UpdateConstraintSet":  func() error { return m.UpdateConstraintSet(ctx, db.ConstraintSet{}) },
-		"UpsertNetwork":        func() error { return m.UpsertNetwork(ctx, db.Network{}) },
-		"Networks":             func() error { _, err := m.Networks(ctx); return err },
-		"NetworkByRef":         func() error { _, err := m.NetworkByRef(ctx, ""); return err },
-		"UpdateNetworkHead":    func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
-		"SetNetworkError":      func() error { return m.SetNetworkError(ctx, 1, "") },
-		"UpsertBlocks":         func() error { return m.UpsertBlocks(ctx, nil) },
-		"BlockByNumber":        func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
-		"DeleteBlocksAfter":    func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
-		"RebuildBuckets":       func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
+		"ReplaceMissingRanges":        func() error { return m.ReplaceMissingRanges(ctx, 1, nil) },
+		"UpdateConstraintSet":         func() error { return m.UpdateConstraintSet(ctx, db.ConstraintSet{}) },
+		"UpsertNetwork":               func() error { return m.UpsertNetwork(ctx, db.Network{}) },
+		"Networks":                    func() error { _, err := m.Networks(ctx); return err },
+		"NetworkByRef":                func() error { _, err := m.NetworkByRef(ctx, ""); return err },
+		"UpdateNetworkHead":           func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
+		"SetNetworkError":             func() error { return m.SetNetworkError(ctx, 1, "") },
+		"UpsertBlocks":                func() error { return m.UpsertBlocks(ctx, nil) },
+		"BlockByNumber":               func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
+		"DeleteBlocksAfter":           func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
+		"RebuildBuckets":              func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
+		"DiscardBucketsBelowFrontier": func() error { return m.DiscardBucketsBelowFrontier(ctx, 1, "1m", nil) },
+		"BelowFrontier":               func() error { _, err := m.BelowFrontier(ctx, 1, nil); return err },
 		"DeleteBucketsBefore": func() error {
 			_, err := m.DeleteBucketsBefore(ctx, 1, now)
 			return err
@@ -477,5 +480,114 @@ func TestMemStoreNesting(t *testing.T) {
 	// A top-level snapshot still runs.
 	if err := m.WithSnapshotTx(ctx, func(s db.Store) error { _, _, err := s.GetState(ctx, 10, "c"); return err }); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The store refuses to rebuild a window starting below the recorded prune
+// frontier, the same floor Postgres applies: rows there have been deleted,
+// and recomputing the window would sum only what survived. A window at or
+// above the frontier rebuilds as before, and an absent or unreadable frontier
+// constrains nothing.
+func TestMemStoreRebuildBucketsHonoursThePruneFrontier(t *testing.T) {
+	ctx := context.Background()
+	m := New()
+	base := time.Date(2026, 9, 6, 7, 0, 0, 0, time.UTC)
+	rows := []db.Block{
+		{ChainID: 1, Number: 1, TS: base, GasUsed: 10, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)},
+		{ChainID: 1, Number: 2, TS: base.Add(time.Minute), GasUsed: 20, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)},
+	}
+	if err := m.UpsertBlocks(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	starts := []time.Time{base, base.Add(time.Minute)}
+	// The frontier sits on the second window: the first has lost rows.
+	if err := m.SetState(ctx, 1, db.StatePruneFrontier, base.Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RebuildBuckets(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	bk, _ := m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour))
+	if len(bk) != 1 || !bk[0].BucketStart.Equal(base.Add(time.Minute)) {
+		t.Fatalf("rebuilt below the frontier: %+v", bk)
+	}
+	// Remove the frontier and both windows rebuild.
+	if err := m.DeleteState(ctx, 1, db.StatePruneFrontier); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RebuildBuckets(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	if bk, _ = m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour)); len(bk) != 2 {
+		t.Fatalf("without a frontier: %d buckets, want 2", len(bk))
+	}
+	// One that will not parse is no frontier at all.
+	if err := m.SetState(ctx, 1, db.StatePruneFrontier, "not a time"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RebuildBuckets(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	if bk, _ = m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour)); len(bk) != 2 {
+		t.Fatalf("with an unreadable frontier: %d buckets, want 2", len(bk))
+	}
+}
+
+// DiscardBucketsBelowFrontier removes exactly the starts RebuildBuckets
+// declines: those below the recorded frontier. Above it, or with no
+// frontier, nothing is touched.
+func TestMemStoreDiscardBucketsBelowFrontier(t *testing.T) {
+	ctx := context.Background()
+	m := New()
+	base := time.Date(2026, 9, 6, 7, 0, 0, 0, time.UTC)
+	starts := []time.Time{base, base.Add(time.Minute)}
+	for _, s := range starts {
+		m.BucketRows[bucketKey(1, "1m", s)] = db.Bucket{ChainID: 1, Resolution: "1m", BucketStart: s, Blocks: 1}
+	}
+	// No frontier: nothing lies below it.
+	if err := m.DiscardBucketsBelowFrontier(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	if bk, _ := m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour)); len(bk) != 2 {
+		t.Fatalf("discarded with no frontier: %d left", len(bk))
+	}
+	// Frontier on the second start: only the first is below it.
+	if err := m.SetState(ctx, 1, db.StatePruneFrontier, base.Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DiscardBucketsBelowFrontier(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	bk, _ := m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour))
+	if len(bk) != 1 || !bk[0].BucketStart.Equal(base.Add(time.Minute)) {
+		t.Fatalf("discard below the frontier: %+v", bk)
+	}
+	if err := m.DiscardBucketsBelowFrontier(ctx, 1, "2m", starts); err == nil {
+		t.Fatal("unknown resolution")
+	}
+}
+
+// SetPosterGas refuses a number or value past the BIGINT range, as the Postgres store does, rather
+// than wrapping it negative: a test store that accepted it could pass on a value production rejects.
+func TestMemStoreSetPosterGasRefusesValuesTheColumnCannotHold(t *testing.T) {
+	ctx := context.Background()
+	m := New()
+	if err := m.UpsertBlocks(ctx, []db.Block{{ChainID: 1, Number: 7, GasUsed: 100}}); err != nil {
+		t.Fatal(err)
+	}
+	for name, gas := range map[string]map[uint64]uint64{
+		"a block number past the column": {math.MaxInt64 + 1: 10},
+		"a gas value past the column":    {7: math.MaxInt64 + 1},
+	} {
+		if err := m.SetPosterGas(ctx, 1, gas); err == nil {
+			t.Fatalf("%s: accepted a value the column cannot hold", name)
+		}
+	}
+	// And within range it records, subject to the row's own gas total.
+	if err := m.SetPosterGas(ctx, 1, map[uint64]uint64{7: 40}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := m.BlockByNumber(ctx, 1, 7); b == nil || !b.PosterGas.Valid || b.PosterGas.Int64 != 40 {
+		t.Fatalf("in-range poster gas not recorded: %+v", b)
 	}
 }

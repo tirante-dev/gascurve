@@ -37,6 +37,7 @@ type RPC interface {
 	PricingSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
 	HeadersByNumbers(ctx context.Context, numbers []uint64) ([]nitro.Header, error)
 	HeaderByNumber(ctx context.Context, number uint64) (*nitro.Header, error)
+	PosterGasByNumbers(ctx context.Context, targets []nitro.ReceiptTarget) (map[uint64]uint64, error)
 	BlocksWithTxs(ctx context.Context, numbers []uint64) ([]nitro.Block, error)
 	TransactionReceipts(ctx context.Context, hashes []string) ([]nitro.Receipt, error)
 	OwnerActsLogs(ctx context.Context, from, to uint64) ([]nitro.Log, error)
@@ -188,6 +189,10 @@ type Follower struct {
 	behind atomic.Uint64
 	// recoveryDeferrals counts consecutive missing-range turns yielded to a lagging fast loop.
 	recoveryDeferrals atomic.Uint64
+	// repairDeferrals is the same count for the poster-gas repair, kept
+	// apart so the filler and the repair each get their guaranteed turn
+	// rather than sharing, and neither consumes the other's.
+	repairDeferrals atomic.Uint64
 
 	mu          sync.Mutex
 	initialized bool
@@ -204,6 +209,11 @@ type Follower struct {
 	legacyChanges    []legacyChange
 	batchCostChanges []batchCostChange
 	liveStart        *liveStart
+	// Narrowing after a failed read, and consecutive failures against one block, so it is retried
+	// before the pass moves past it. In memory only: a restart starts wide and retries a skipped block.
+	repairNarrow   int
+	repairBlock    uint64
+	repairAttempts int
 	// ownerScanThrough is the block through which the recorded owner-action timeline is complete, 0
 	// until a scan pass has reached its head.
 	ownerScanThrough uint64
@@ -551,6 +561,11 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	}
 	// Before the checkpoints it clears are read, so an unreadable owner-scan checkpoint cannot block
 	// the rebuild that would replace it. It needs only the live start above it for the boundary.
+	// The seed reads no cursor, so a malformed backfill cursor cannot fail it, and a raised
+	// history_epoch below still reaches and overwrites that cursor as it always could.
+	if err := f.seedPruneFrontierLocked(ctx); err != nil {
+		return err
+	}
 	if err := f.applyHistoryEpochLocked(ctx); err != nil {
 		return err
 	}
@@ -1291,17 +1306,25 @@ func (f *Follower) historyMustWait() bool {
 
 // recoveryMustWait gives the active catch-up absolute priority, and a lagging fast loop all but one of
 // every maxRecoveryDeferrals history turns, so a durable missing range is still retried eventually.
-func (f *Follower) recoveryMustWait() bool {
+func (f *Follower) recoveryMustWait() bool { return f.deferredWait(&f.recoveryDeferrals) }
+
+// repairMustWait is the same policy on the repair's own count, so a lag that never lifts cannot hold
+// it off for good while retention removes the rows it exists to repair. Neither consumes the other's turn.
+func (f *Follower) repairMustWait() bool { return f.deferredWait(&f.repairDeferrals) }
+
+// deferredWait counts the caller's deferrals: absolute priority to an active catch-up, all but one of
+// every maxRecoveryDeferrals turns to a lagging fast loop.
+func (f *Follower) deferredWait(deferrals *atomic.Uint64) bool {
 	if f.catchingUp.Load() {
 		return true
 	}
 	if f.behind.Load() <= uint64(f.cfg.HeaderBatchSize) {
-		f.recoveryDeferrals.Store(0)
+		deferrals.Store(0)
 		return false
 	}
-	if f.recoveryDeferrals.Add(1) < maxRecoveryDeferrals {
+	if deferrals.Add(1) < maxRecoveryDeferrals {
 		return true
 	}
-	f.recoveryDeferrals.Store(0)
+	deferrals.Store(0)
 	return false
 }

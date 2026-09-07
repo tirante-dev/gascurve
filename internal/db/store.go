@@ -251,6 +251,10 @@ type Store interface {
 	// DeleteBlocksAfter removes blocks with number > after (a reorg rewind)
 	// and returns the removed rows, ascending.
 	DeleteBlocksAfter(ctx context.Context, chainID, after uint64) ([]Block, error)
+	// BlocksMissingPosterGas returns up to limit blocks with number >= from and no poster gas, ascending.
+	BlocksMissingPosterGas(ctx context.Context, chainID, from uint64, limit int) ([]Block, error)
+	// SetPosterGas records poster gas on stored blocks by number, skipping a row it cannot update in place.
+	SetPosterGas(ctx context.Context, chainID uint64, gas map[uint64]uint64) error
 
 	// FoldBuckets adds partial buckets into the stored rows.
 	FoldBuckets(ctx context.Context, buckets []Bucket) error
@@ -259,6 +263,12 @@ type Store interface {
 	RebuildBuckets(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error
 	// DeleteBucketsBefore drops every resolution's buckets starting before t.
 	DeleteBucketsBefore(ctx context.Context, chainID uint64, before time.Time) (int64, error)
+	// DiscardBucketsBelowFrontier removes the buckets at those of starts below the prune frontier, for
+	// the rewind: a reorg reaching a window straddling the frontier leaves no correct aggregate for it.
+	DiscardBucketsBelowFrontier(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error
+	// BelowFrontier returns those of starts below the prune frontier, exactly what RebuildBuckets
+	// declines. Below it a window is only added to or removed, never replaced: recovered rows are folded.
+	BelowFrontier(ctx context.Context, chainID uint64, starts []time.Time) ([]time.Time, error)
 	// Buckets returns buckets with from <= bucket_start < to, ascending.
 	Buckets(ctx context.Context, chainID uint64, resolution string, from, to time.Time) ([]Bucket, error)
 

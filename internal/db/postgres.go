@@ -401,6 +401,47 @@ func (p *Postgres) DeleteBlocksAfter(ctx context.Context, chainID, after uint64)
 	return selectAll[Block](ctx, p, `DELETE FROM blocks WHERE chain_id = $1 AND number > $2 RETURNING `+blockColumns+``, chainID, after)
 }
 
+// BlocksMissingPosterGas returns blocks stored without poster gas, ascending from a number, riding
+// the (chain_id, number) key so a caller advancing its cursor keeps each pass short.
+func (p *Postgres) BlocksMissingPosterGas(ctx context.Context, chainID, from uint64, limit int) ([]Block, error) {
+	return selectAll[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks
+		WHERE chain_id = $1 AND number >= $2 AND poster_gas IS NULL
+		ORDER BY number ASC LIMIT $3`, chainID, from, limit)
+}
+
+// SetPosterGas writes poster gas onto stored rows in one statement. The join carries the column's own
+// CHECK guards, so a row rewritten, pruned or rewound since is left alone, and only a row still lacking
+// the value is touched: the repair is idempotent against a live collector writing the same blocks.
+func (p *Postgres) SetPosterGas(ctx context.Context, chainID uint64, gas map[uint64]uint64) error {
+	if len(gas) == 0 {
+		return nil
+	}
+	// Both columns are BIGINT; a value past that range describes no row this store could hold, and
+	// would be skipped without a word. Refuse it: the caller is wrong about its own numbers.
+	numbers := make([]int64, 0, len(gas))
+	for n, g := range gas {
+		if n > math.MaxInt64 || g > math.MaxInt64 {
+			return fmt.Errorf("set poster gas: block %d gas %d is outside the range the column holds", n, g)
+		}
+		numbers = append(numbers, int64(n))
+	}
+	slices.Sort(numbers)
+	values := make([]int64, len(numbers))
+	for i, n := range numbers {
+		values[i] = int64(gas[uint64(n)])
+	}
+	if _, err := p.exec(ctx, `
+		UPDATE blocks SET poster_gas = v.gas
+		FROM (SELECT unnest($2::bigint[]) AS number, unnest($3::bigint[]) AS gas) v
+		WHERE blocks.chain_id = $1 AND blocks.number = v.number
+			AND blocks.poster_gas IS NULL
+			AND v.gas >= 0 AND v.gas <= blocks.gas_used`,
+		chainID, pq.Array(numbers), pq.Array(values)); err != nil {
+		return fmt.Errorf("set poster gas on %d blocks %d..%d: %w", len(numbers), numbers[0], numbers[len(numbers)-1], err)
+	}
+	return nil
+}
+
 func (p *Postgres) LatestBlock(ctx context.Context, chainID uint64) (*Block, error) {
 	return getOne[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 ORDER BY number DESC LIMIT 1`, chainID)
 }
@@ -527,15 +568,57 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 	return nil
 }
 
+// rebuildable drops the starts below the prune frontier, where rows have been deleted: recomputing
+// such a window sums only what survived and replaces a correct aggregate with a short one. The guard
+// lives in the operation that does the damage, not in each caller. An unrecorded or unreadable
+// frontier constrains nothing, since refusing every rebuild over one bad row of state would be worse.
+func (p *Postgres) rebuildable(ctx context.Context, chainID uint64, starts []time.Time) ([]time.Time, error) {
+	if len(starts) == 0 {
+		return starts, nil
+	}
+	raw, ok, err := p.GetState(ctx, chainID, StatePruneFrontier)
+	if err != nil {
+		return nil, err
+	}
+	frontier, ok := parseFrontier(raw, ok)
+	if !ok {
+		return starts, nil
+	}
+	out := make([]time.Time, 0, len(starts))
+	for _, s := range starts {
+		if !s.Before(frontier) {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// parseFrontier reads a recorded prune frontier; false when there is none or it will not parse.
+func parseFrontier(raw string, recorded bool) (time.Time, bool) {
+	if !recorded {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t.UTC(), true
+}
+
 // RebuildBuckets recomputes buckets from the block rows in their windows, mirroring BucketBuilder in
-// SQL. A window with no rows loses its bucket. The constraint set is the one in force at the window's
-// last block, and only when its constraint count matches the block's backlogs, so a block is never
-// tagged with a set of another shape. The bucket's pricing version is the lowest of its blocks': one
-// block without the breakdown makes the window's exponents, floor and fee split unknown.
+// SQL. A window below the prune frontier is left alone (see rebuildable); one with no rows for any
+// other reason loses its bucket. The constraint set is the one in force at the window's last block,
+// and only when its constraint count matches the block's backlogs, so a block is never tagged with a
+// set of another shape. The bucket's pricing version is the lowest of its blocks': one block without
+// the breakdown makes the window's exponents, floor and fee split unknown.
 func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error {
 	width, ok := Resolutions[resolution]
 	if !ok {
 		return fmt.Errorf("rebuild buckets: unknown resolution %q", resolution)
+	}
+	starts, err := p.rebuildable(ctx, chainID, starts)
+	if err != nil {
+		return err
 	}
 	if len(starts) == 0 {
 		return nil
@@ -623,6 +706,49 @@ func (p *Postgres) DeleteBucketsBefore(ctx context.Context, chainID uint64, befo
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// BelowFrontier names those of starts below the prune frontier, the ones rebuildable declines, by the
+// same predicate: the one place the question is answered, so a caller folding into what the store
+// would not rebuild cannot disagree with it about which windows those are.
+func (p *Postgres) BelowFrontier(ctx context.Context, chainID uint64, starts []time.Time) ([]time.Time, error) {
+	if len(starts) == 0 {
+		return nil, nil
+	}
+	raw, recorded, err := p.GetState(ctx, chainID, StatePruneFrontier)
+	if err != nil {
+		return nil, err
+	}
+	frontier, ok := parseFrontier(raw, recorded)
+	if !ok {
+		return nil, nil
+	}
+	below := make([]time.Time, 0, len(starts))
+	for _, s := range starts {
+		if s.Before(frontier) {
+			below = append(below, s.UTC())
+		}
+	}
+	return below, nil
+}
+
+// DiscardBucketsBelowFrontier removes the buckets at those of starts below the prune frontier, the
+// same starts rebuildable declines; with no readable frontier nothing is removed, as nothing is declined.
+func (p *Postgres) DiscardBucketsBelowFrontier(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error {
+	if _, ok := Resolutions[resolution]; !ok {
+		return fmt.Errorf("discard buckets: unknown resolution %q", resolution)
+	}
+	below, err := p.BelowFrontier(ctx, chainID, starts)
+	if err != nil {
+		return err
+	}
+	if len(below) == 0 {
+		return nil
+	}
+	if _, err := p.exec(ctx, `DELETE FROM buckets WHERE chain_id = $1 AND resolution = $2 AND bucket_start = ANY($3::TIMESTAMPTZ[])`, chainID, resolution, pq.Array(below)); err != nil {
+		return fmt.Errorf("discard %d %s buckets below the prune frontier: %w", len(below), resolution, err)
+	}
+	return nil
 }
 
 func (p *Postgres) Buckets(ctx context.Context, chainID uint64, resolution string, from, to time.Time) ([]Bucket, error) {

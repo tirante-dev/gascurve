@@ -1566,3 +1566,63 @@ func TestCatchUpReEvaluatesAfterFailover(t *testing.T) {
 		t.Fatalf("an unlimited fallback keeps catching up, got %d batches", calls)
 	}
 }
+
+// A reorg reaching a bucket straddling the prune frontier leaves it with no correct aggregate: prune
+// took its early rows, the rewind orphans its retained ones, and what is stored is the dead fork.
+// RebuildBuckets declines the window, so the rewind discards exactly the windows the store declined.
+func TestRewindDiscardsBucketsStraddlingThePruneFrontier(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	// The same setup as the reorg test above: a backfill supplies the
+	// replay state a fork below the live start needs, so the rows the
+	// rewind re-fetches are real rows and the bucket over them a real one.
+	f.cfg.BackfillDepth = 30 * time.Second
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, f, 100)
+	rpc.setHead(1002)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Blocks arrive ten a second, so the minute bucket at 07:01 holds blocks 600 through 1199, and a
+	// frontier at 07:01:30 falls inside it. That minute is the case that matters: it starts exactly at
+	// the bucket boundary, so the rewind's own DeleteBucketsBefore leaves it alone and only the discard
+	// below the frontier can remove it. The quarter hour and hour start earlier and would go either way.
+	inside := time.Unix(int64(tsFor(900)), 0).UTC()
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, inside.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	minute := inside.Truncate(time.Minute)
+	if before, _ := store.Buckets(ctx, 4663, db.Resolution1m, minute, minute.Add(time.Minute)); len(before) != 1 {
+		t.Fatalf("the straddling minute bucket is not stored before the reorg: %d", len(before))
+	}
+
+	// A reorg reaching into the retained suffix of that bucket.
+	rpc.fork(995, "d")
+	rpc.setHead(1005)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for n := uint64(995); n <= 1005; n++ {
+		if b, _ := store.BlockByNumber(ctx, 4663, n); b == nil || b.Hash != rpc.hashFor(n) {
+			t.Fatalf("block %d not canonical after the rewind: %+v", n, b)
+		}
+	}
+	// Every window the removed rows fell in starts below the frontier, so
+	// each is declined by the rebuild and must be gone rather than stale.
+	// The minute is the case that proves the discard; see above.
+	for _, res := range db.ResolutionOrder {
+		start := inside.Truncate(db.Resolutions[res])
+		after, err := store.Buckets(ctx, 4663, res, start, start.Add(db.Resolutions[res]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(after) != 0 {
+			t.Fatalf("%s bucket %s straddles the frontier and survived the rewind with old-fork rows: %+v", res, start, after[0])
+		}
+	}
+}

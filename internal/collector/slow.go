@@ -695,27 +695,156 @@ func batchReportOf(chainID uint64, b nitro.Block, resolver *batchCostResolver) (
 	return nil, nil
 }
 
-// prune drops per-block rows and raw samples beyond retention. Rows in the hour of the first live
-// block are kept while the backfill runs: its last segment rebuilds those buckets from rows.
-func (f *Follower) prune(ctx context.Context) error {
-	now := f.now()
-	before := now.Add(-f.cfg.BlockRetention)
-	c, err := f.loadCursor(ctx)
+// pruneCutoff is the timestamp block rows are dropped below, read entirely through s so a caller
+// under the chain lock decides from the committed state and not from a head a rewind has since
+// orphaned. Retention is measured back from the latest stored block, never the host clock: a chain
+// stalled longer than retention, or a clock that jumps, would otherwise put the cutoff past the head
+// and the forward-only frontier would refuse every bucket the resumed blocks fall in. It is pinned to
+// the boundary while the backfill's last segment is unfinished, and with pinRepair while the
+// poster-gas repair is, since rows a rebuild has not reached must outlive it. Zero when nothing is stored.
+func (f *Follower) pruneCutoff(ctx context.Context, s db.Store, boundary time.Time, pinRepair bool) (time.Time, error) {
+	latest, err := s.LatestBlock(ctx, f.chainID)
+	if err != nil || latest == nil {
+		return time.Time{}, err
+	}
+	before := latest.TS.UTC().Add(-f.cfg.BlockRetention)
+	backfill, err := f.loadCursorFrom(ctx, s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	pinned := !backfill.Done
+	if pinRepair {
+		repair, err := f.loadPosterGasCursorFrom(ctx, s)
+		if err != nil {
+			return time.Time{}, err
+		}
+		pinned = pinned || !repair.Done
+	}
+	if pinned && boundary.Before(before) {
+		return boundary, nil
+	}
+	return before, nil
+}
+
+// recordPruneFrontier remembers the highest cutoff a prune has committed. It only moves forward: a
+// cutoff says rows below it are gone, and raising block_retention does not bring deleted rows back.
+func (f *Follower) recordPruneFrontier(ctx context.Context, s db.Store, before time.Time) error {
+	raw, ok, err := s.GetState(ctx, f.chainID, db.StatePruneFrontier)
 	if err != nil {
 		return err
 	}
-	if !c.Done {
-		f.mu.Lock()
-		boundary, ok := f.boundaryLocked()
-		f.mu.Unlock()
-		if ok && boundary.Before(before) {
-			before = boundary
+	if ok {
+		prev, perr := time.Parse(time.RFC3339Nano, raw)
+		switch {
+		case perr != nil:
+			f.log.Warn("unreadable prune frontier, recording this cutoff over it", "value", raw, "err", perr.Error())
+		case !before.After(prev):
+			return nil
 		}
 	}
-	var n, m int64
-	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
-		if n, err = s.PruneBlocks(ctx, f.chainID, before); err != nil {
+	// Nanoseconds, not seconds. PruneBlocks is given the cutoff whole, so a
+	// cutoff of 10:00:00.5 deletes a block stamped 10:00:00; recording only
+	// 10:00:00 would later let a bucket starting there pass as complete and
+	// be rebuilt from what survived.
+	return s.SetState(ctx, f.chainID, db.StatePruneFrontier, before.UTC().Format(time.RFC3339Nano))
+}
+
+// liveStartFrom reads the durable live_start through s: nil when none is recorded. Read under the
+// chain lock it is authoritative where the follower's own copy can be stale, and it needs no f.mu.
+func (f *Follower) liveStartFrom(ctx context.Context, s db.Store) (*liveStart, error) {
+	raw, ok, err := s.GetState(ctx, f.chainID, db.StateLiveStart)
+	if err != nil || !ok {
+		return nil, err
+	}
+	ls := &liveStart{}
+	if err := json.Unmarshal([]byte(raw), ls); err != nil {
+		return nil, fmt.Errorf("live start: %w", err)
+	}
+	return ls, nil
+}
+
+// seedPruneFrontierLocked is a one-time migration for a database pruned before the checkpoint
+// existed: the store guards only below a frontier it can read. It runs only when none is recorded,
+// since re-seeding would advance an existing one on every restart past rows a still-running repair
+// had not reached. The value is the wall clock now, less retention: a true upper bound on whatever
+// the old collector last pruned by, which was never recorded and which no stored fact reconstructs.
+// The oldest surviving row, chain time and the last sample time were each tried and each fell short
+// of it somewhere. Erring high can only refuse a rebuild, which loses at most the rows between the
+// old collector's last prune and this start; erring low would rebuild across deleted rows.
+func (f *Follower) seedPruneFrontierLocked(ctx context.Context) error {
+	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		raw, recorded, err := s.GetState(ctx, f.chainID, db.StatePruneFrontier)
+		if err != nil {
 			return err
+		}
+		if recorded {
+			if _, perr := time.Parse(time.RFC3339Nano, raw); perr == nil {
+				return nil
+			}
+			f.log.Warn("unreadable prune frontier, seeding over it", "value", raw)
+		}
+		ls, err := f.liveStartFrom(ctx, s)
+		if err != nil || ls == nil {
+			// No live start means no rows and nothing pruned; a seed here would be a fiction a
+			// stalled or development chain could never get out from under.
+			return err
+		}
+		cutoff := f.now().UTC().Add(-f.cfg.BlockRetention)
+		f.log.Info("seeding the prune frontier for a database pruned before it was recorded", "at", cutoff)
+		return f.recordPruneFrontier(ctx, s, cutoff)
+	})
+}
+
+// boundaryOf is the start of the hour holding the first live block: buckets from it on are rebuilt
+// from rows.
+func boundaryOf(ls *liveStart) time.Time {
+	return time.Unix(ls.TS, 0).UTC().Truncate(boundaryWidth)
+}
+
+// pruneFrontier is the highest cutoff a prune has committed, or the zero time when none is recorded
+// or it will not parse: no floor, the same reading the store makes, so the two cannot disagree.
+func (f *Follower) pruneFrontier(ctx context.Context) (time.Time, error) {
+	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StatePruneFrontier)
+	if err != nil || !ok {
+		return time.Time{}, err
+	}
+	t, perr := time.Parse(time.RFC3339Nano, raw)
+	if perr != nil {
+		f.log.Warn("unreadable prune frontier, going by no floor", "value", raw, "err", perr.Error())
+		return time.Time{}, nil
+	}
+	return t.UTC(), nil
+}
+
+// prune drops per-block rows and raw samples beyond retention. Rows in the hour of the first live
+// block are kept while the backfill or the poster-gas repair runs: both rebuild buckets from rows.
+func (f *Follower) prune(ctx context.Context) error {
+	now := f.now()
+	var n, m int64
+	err := f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		// Everything about block rows is decided here, under the chain lock, from the durable state:
+		// the live start (a rewind may have cleared or moved it since any snapshot), the latest block
+		// (a rewind may have orphaned it), and the cutoff. Delete and record then come from one view
+		// and cannot disagree. No live start means no rows and nothing to do. Samples carry no record
+		// and are pruned regardless.
+		ls, err := f.liveStartFrom(ctx, s)
+		if err != nil {
+			return err
+		}
+		if ls != nil {
+			before, err := f.pruneCutoff(ctx, s, boundaryOf(ls), true)
+			if err != nil {
+				return err
+			}
+			if !before.IsZero() {
+				if n, err = s.PruneBlocks(ctx, f.chainID, before); err != nil {
+					return err
+				}
+				// In the same transaction as the delete it describes.
+				if err := f.recordPruneFrontier(ctx, s, before); err != nil {
+					return err
+				}
+			}
 		}
 		m, err = s.PruneStateSamples(ctx, f.chainID, now.Add(-f.cfg.SampleRetention))
 		return err

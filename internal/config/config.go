@@ -188,6 +188,12 @@ const MaxCallsPerSecond = 10_000
 // token takes longer than any request timeout; set 0 for a dedicated node instead.
 const MinCallsPerSecond = 0.1
 
+// MinBlockRetention is the smallest accepted block_retention: the widest bucket resolution. Row-backed
+// buckets are recomputed from the rows in their windows, so a row has to outlive the widest bucket it
+// falls in; below this the hourly bucket at the head has rows pruned from under it while still filling.
+// The setting is refused rather than the bucket. A test in internal/collector pins this to db.Resolutions.
+const MinBlockRetention = time.Hour
+
 // Unlimited reports whether the network has no call budget.
 func (n NetworkConfig) Unlimited() bool { return n.CallsPerSecond <= 0 }
 
@@ -488,6 +494,9 @@ func (c *Config) Validate(requireRPC bool) error {
 		if d <= 0 {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
 		}
+	}
+	if r := c.Collector.BlockRetention; r > 0 && r < MinBlockRetention {
+		errs = append(errs, fmt.Errorf("collector.block_retention %v is below the minimum of %v, the widest bucket resolution: row-backed buckets are rebuilt from their rows, so rows must outlive the widest bucket", r, MinBlockRetention))
 	}
 	if c.Collector.HeaderBatchSize <= 0 || c.Collector.HeaderBatchSize > 100 {
 		errs = append(errs, fmt.Errorf("collector.header_batch_size %d must be between 1 and 100", c.Collector.HeaderBatchSize))

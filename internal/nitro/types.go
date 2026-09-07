@@ -276,87 +276,114 @@ func parsePosterGas(raw json.RawMessage, h Header) (uint64, error) {
 	return posterGas, err
 }
 
+// ReceiptTarget is the block a receipt set has to belong to and the totals it has to reproduce.
+type ReceiptTarget struct {
+	Number   uint64
+	Hash     string
+	TxCount  int
+	GasUsed  uint64
+	TxHashes []string
+	// HashesKnown says TxHashes is authoritative. A header read sets it and every receipt is matched to
+	// its own hash. The poster-gas repair validates against a stored row, which has the count but not
+	// the hashes, and leaves it false: block hash, index order and gas totals still have to agree,
+	// which is what rules out joining a different block.
+	HashesKnown bool
+}
+
+// receiptTarget describes a header for the receipt validator.
+func receiptTarget(h Header) ReceiptTarget {
+	return ReceiptTarget{Number: h.Number, Hash: h.Hash, TxCount: h.TxCount, GasUsed: h.GasUsed, TxHashes: h.TxHashes, HashesKnown: true}
+}
+
 // parseReceiptGas also records the cumulative compute gas before each transaction, so owner-action
 // replay does not add poster gas from earlier transactions to the compute pricer.
 func parseReceiptGas(raw json.RawMessage, h Header) (posterGas uint64, computeGasBefore []uint64, err error) {
+	return parseReceipts(raw, receiptTarget(h))
+}
+
+// parseReceipts validates a block receipt set against the block it claims to
+// belong to and returns the sum of its authoritative gasUsedForL1 fields.
+func parseReceipts(raw json.RawMessage, t ReceiptTarget) (posterGas uint64, computeGasBefore []uint64, err error) {
 	if len(raw) == 0 || string(raw) == nullJSON {
-		return 0, nil, fmt.Errorf("block %d receipts not found", h.Number)
+		return 0, nil, fmt.Errorf("block %d receipts not found", t.Number)
 	}
 	var receipts []rawReceipt
 	if err := json.Unmarshal(raw, &receipts); err != nil {
-		return 0, nil, fmt.Errorf("decode block %d receipts: %w", h.Number, err)
+		return 0, nil, fmt.Errorf("decode block %d receipts: %w", t.Number, err)
 	}
-	if len(receipts) != h.TxCount {
-		return 0, nil, fmt.Errorf("block %d receipts: got %d, want %d", h.Number, len(receipts), h.TxCount)
+	if len(receipts) != t.TxCount {
+		return 0, nil, fmt.Errorf("block %d receipts: got %d, want %d", t.Number, len(receipts), t.TxCount)
 	}
 	computeGasBefore = make([]uint64, len(receipts))
 	var total, totalGas uint64
 	for i, receipt := range receipts {
 		computeGasBefore[i] = totalGas - total
-		if receipt.BlockHash == "" || !strings.EqualFold(receipt.BlockHash, h.Hash) {
-			return 0, nil, fmt.Errorf("block %d receipt %d hash %q does not match %q", h.Number, i, receipt.BlockHash, h.Hash)
+		if receipt.BlockHash == "" || !strings.EqualFold(receipt.BlockHash, t.Hash) {
+			return 0, nil, fmt.Errorf("block %d receipt %d hash %q does not match %q", t.Number, i, receipt.BlockHash, t.Hash)
 		}
 		number, err := HexUint64(receipt.BlockNumber)
 		if err != nil {
-			return 0, nil, fmt.Errorf("block %d receipt %d number: %w", h.Number, i, err)
+			return 0, nil, fmt.Errorf("block %d receipt %d number: %w", t.Number, i, err)
 		}
-		if number != h.Number {
-			return 0, nil, fmt.Errorf("block %d receipt %d belongs to block %d", h.Number, i, number)
+		if number != t.Number {
+			return 0, nil, fmt.Errorf("block %d receipt %d belongs to block %d", t.Number, i, number)
 		}
-		if i >= len(h.TxHashes) {
-			return 0, nil, fmt.Errorf("block %d has no transaction hash for receipt %d", h.Number, i)
-		}
-		if receipt.TxHash == "" || !strings.EqualFold(receipt.TxHash, h.TxHashes[i]) {
-			return 0, nil, fmt.Errorf("block %d receipt %d transaction %q does not match %q", h.Number, i, receipt.TxHash, h.TxHashes[i])
+		if t.HashesKnown {
+			if i >= len(t.TxHashes) {
+				return 0, nil, fmt.Errorf("block %d has no transaction hash for receipt %d", t.Number, i)
+			}
+			if receipt.TxHash == "" || !strings.EqualFold(receipt.TxHash, t.TxHashes[i]) {
+				return 0, nil, fmt.Errorf("block %d receipt %d transaction %q does not match %q", t.Number, i, receipt.TxHash, t.TxHashes[i])
+			}
 		}
 		index, err := HexUint64(receipt.TxIndex)
 		if err != nil {
-			return 0, nil, fmt.Errorf("block %d receipt %d transactionIndex: %w", h.Number, i, err)
+			return 0, nil, fmt.Errorf("block %d receipt %d transactionIndex: %w", t.Number, i, err)
 		}
 		if index != uint64(i) {
-			return 0, nil, fmt.Errorf("block %d receipt %d has transaction index %d", h.Number, i, index)
+			return 0, nil, fmt.Errorf("block %d receipt %d has transaction index %d", t.Number, i, index)
 		}
 		if receipt.GasUsed == nil || *receipt.GasUsed == "" {
-			return 0, nil, fmt.Errorf("block %d receipt %d has no gasUsed", h.Number, i)
+			return 0, nil, fmt.Errorf("block %d receipt %d has no gasUsed", t.Number, i)
 		}
 		gasUsed, err := HexUint64(*receipt.GasUsed)
 		if err != nil {
-			return 0, nil, fmt.Errorf("block %d receipt %d gasUsed: %w", h.Number, i, err)
+			return 0, nil, fmt.Errorf("block %d receipt %d gasUsed: %w", t.Number, i, err)
 		}
 		if gasUsed > math.MaxUint64-totalGas {
-			return 0, nil, fmt.Errorf("block %d receipt gas overflows uint64", h.Number)
+			return 0, nil, fmt.Errorf("block %d receipt gas overflows uint64", t.Number)
 		}
 		totalGas += gasUsed
 		if receipt.CumulativeGasUsed == nil || *receipt.CumulativeGasUsed == "" {
-			return 0, nil, fmt.Errorf("block %d receipt %d has no cumulativeGasUsed", h.Number, i)
+			return 0, nil, fmt.Errorf("block %d receipt %d has no cumulativeGasUsed", t.Number, i)
 		}
 		cumulative, err := HexUint64(*receipt.CumulativeGasUsed)
 		if err != nil {
-			return 0, nil, fmt.Errorf("block %d receipt %d cumulativeGasUsed: %w", h.Number, i, err)
+			return 0, nil, fmt.Errorf("block %d receipt %d cumulativeGasUsed: %w", t.Number, i, err)
 		}
 		if cumulative != totalGas {
-			return 0, nil, fmt.Errorf("block %d receipt %d cumulative gas %d, want %d", h.Number, i, cumulative, totalGas)
+			return 0, nil, fmt.Errorf("block %d receipt %d cumulative gas %d, want %d", t.Number, i, cumulative, totalGas)
 		}
 		if receipt.GasUsedForL1 == nil || *receipt.GasUsedForL1 == "" {
-			return 0, nil, fmt.Errorf("block %d receipt %d has no gasUsedForL1", h.Number, i)
+			return 0, nil, fmt.Errorf("block %d receipt %d has no gasUsedForL1", t.Number, i)
 		}
 		gas, err := HexUint64(*receipt.GasUsedForL1)
 		if err != nil {
-			return 0, nil, fmt.Errorf("block %d receipt %d gasUsedForL1: %w", h.Number, i, err)
+			return 0, nil, fmt.Errorf("block %d receipt %d gasUsedForL1: %w", t.Number, i, err)
 		}
 		if gas > gasUsed {
-			return 0, nil, fmt.Errorf("block %d receipt %d poster gas %d exceeds gas used %d", h.Number, i, gas, gasUsed)
+			return 0, nil, fmt.Errorf("block %d receipt %d poster gas %d exceeds gas used %d", t.Number, i, gas, gasUsed)
 		}
 		if gas > math.MaxUint64-total {
-			return 0, nil, fmt.Errorf("block %d poster gas overflows uint64", h.Number)
+			return 0, nil, fmt.Errorf("block %d poster gas overflows uint64", t.Number)
 		}
 		total += gas
 	}
-	if totalGas != h.GasUsed {
-		return 0, nil, fmt.Errorf("block %d receipt gas %d does not match header gas %d", h.Number, totalGas, h.GasUsed)
+	if totalGas != t.GasUsed {
+		return 0, nil, fmt.Errorf("block %d receipt gas %d does not match header gas %d", t.Number, totalGas, t.GasUsed)
 	}
-	if total > h.GasUsed {
-		return 0, nil, fmt.Errorf("block %d poster gas %d exceeds total gas %d", h.Number, total, h.GasUsed)
+	if total > t.GasUsed {
+		return 0, nil, fmt.Errorf("block %d poster gas %d exceeds total gas %d", t.Number, total, t.GasUsed)
 	}
 	return total, computeGasBefore, nil
 }

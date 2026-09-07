@@ -68,7 +68,13 @@ func backfillState(c *backfillCursor) metrics.BackfillState {
 }
 
 func (f *Follower) loadCursor(ctx context.Context) (*backfillCursor, error) {
-	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StateBackfillCursor)
+	return f.loadCursorFrom(ctx, f.store)
+}
+
+// loadCursorFrom reads the cursor through s, so a caller inside a chain transaction sees it under
+// the lock it holds.
+func (f *Follower) loadCursorFrom(ctx context.Context, s db.Store) (*backfillCursor, error) {
+	raw, ok, err := s.GetState(ctx, f.chainID, db.StateBackfillCursor)
 	if err != nil {
 		return nil, err
 	}

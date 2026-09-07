@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"sort"
@@ -424,6 +425,45 @@ func (m *MemStore) BlocksAfter(_ context.Context, chainID, after uint64, limit i
 	return out, nil
 }
 
+// BlocksMissingPosterGas returns blocks from a number up that carry no poster gas, ascending.
+func (m *MemStore) BlocksMissingPosterGas(_ context.Context, chainID, from uint64, limit int) ([]db.Block, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("BlocksMissingPosterGas"); err != nil {
+		return nil, err
+	}
+	var out []db.Block
+	for _, b := range m.sortedBlocks(chainID) {
+		if b.Number >= from && !b.PosterGas.Valid && len(out) < limit {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+// SetPosterGas records poster gas on stored rows, skipping a number no longer stored, already set, or
+// carrying more gas than the row used. A number or value past the BIGINT range is refused, as the
+// Postgres store refuses it, so a test cannot pass on a value production would reject.
+func (m *MemStore) SetPosterGas(_ context.Context, chainID uint64, gas map[uint64]uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("SetPosterGas"); err != nil {
+		return err
+	}
+	for number, g := range gas {
+		if number > math.MaxInt64 || g > math.MaxInt64 {
+			return fmt.Errorf("set poster gas: block %d gas %d is outside the range the column holds", number, g)
+		}
+		b, ok := m.BlockRows[chainID][number]
+		if !ok || b.PosterGas.Valid || g > b.GasUsed {
+			continue
+		}
+		b.PosterGas = sql.NullInt64{Int64: int64(g), Valid: true}
+		m.BlockRows[chainID][number] = b
+	}
+	return nil
+}
+
 func (m *MemStore) BlocksBetween(_ context.Context, chainID uint64, from, to time.Time) ([]db.Block, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -534,6 +574,20 @@ func (m *MemStore) setIDAtLocked(chainID, number uint64, backlogs int) sql.NullI
 	return out
 }
 
+// pruneFrontierLocked mirrors the Postgres floor for rebuilds: the recorded frontier, or zero when
+// none is recorded or it does not parse.
+func (m *MemStore) pruneFrontierLocked(chainID uint64) time.Time {
+	raw, ok := m.StateRows[stateKey(chainID, db.StatePruneFrontier)]
+	if !ok {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
 func (m *MemStore) RebuildBuckets(_ context.Context, chainID uint64, resolution string, starts []time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -544,7 +598,13 @@ func (m *MemStore) RebuildBuckets(_ context.Context, chainID uint64, resolution 
 	if !ok {
 		return fmt.Errorf("rebuild buckets: unknown resolution %q", resolution)
 	}
+	// The same floor Postgres applies: a window below the prune frontier has
+	// lost rows, so recomputing it would sum only what survived.
+	frontier := m.pruneFrontierLocked(chainID)
 	for _, start := range starts {
+		if !frontier.IsZero() && start.UTC().Before(frontier) {
+			continue
+		}
 		start = start.UTC()
 		end := start.Add(width)
 		acc := db.NewBucketBuilder(chainID, resolution, start)
@@ -570,6 +630,48 @@ func setSize(cs db.ConstraintSet) int {
 		return -1
 	}
 	return len(entries)
+}
+
+// BelowFrontier names those of starts below the recorded frontier: the starts RebuildBuckets declines.
+func (m *MemStore) BelowFrontier(_ context.Context, chainID uint64, starts []time.Time) ([]time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("BelowFrontier"); err != nil {
+		return nil, err
+	}
+	frontier := m.pruneFrontierLocked(chainID)
+	if frontier.IsZero() {
+		return nil, nil
+	}
+	var below []time.Time
+	for _, start := range starts {
+		if start.UTC().Before(frontier) {
+			below = append(below, start.UTC())
+		}
+	}
+	return below, nil
+}
+
+// DiscardBucketsBelowFrontier removes the buckets at those of starts below the recorded frontier.
+func (m *MemStore) DiscardBucketsBelowFrontier(_ context.Context, chainID uint64, resolution string, starts []time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("DiscardBucketsBelowFrontier"); err != nil {
+		return err
+	}
+	if _, ok := db.Resolutions[resolution]; !ok {
+		return fmt.Errorf("discard buckets: unknown resolution %q", resolution)
+	}
+	frontier := m.pruneFrontierLocked(chainID)
+	if frontier.IsZero() {
+		return nil
+	}
+	for _, start := range starts {
+		if start.UTC().Before(frontier) {
+			delete(m.BucketRows, bucketKey(chainID, resolution, start.UTC()))
+		}
+	}
+	return nil
 }
 
 func (m *MemStore) DeleteBucketsBefore(_ context.Context, chainID uint64, before time.Time) (int64, error) {

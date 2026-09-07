@@ -330,7 +330,17 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 			return fmt.Errorf("delete blocks: %w", err)
 		}
 		for _, res := range db.ResolutionOrder {
-			if err := s.RebuildBuckets(ctx, f.chainID, res, db.BucketStarts(removed, res)); err != nil {
+			starts := db.BucketStarts(removed, res)
+			if err := s.RebuildBuckets(ctx, f.chainID, res, starts); err != nil {
+				return err
+			}
+			// A window the store declines to rebuild has lost its early
+			// rows to prune, and this rewind has just orphaned its retained
+			// ones: no correct aggregate exists for it, and the one stored
+			// describes the dead fork. Every other caller is right to keep
+			// what is stored over a short recompute; here what is stored is
+			// wrong, so the same windows are discarded and served as a gap.
+			if err := s.DiscardBucketsBelowFrontier(ctx, f.chainID, res, starts); err != nil {
 				return err
 			}
 		}

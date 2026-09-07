@@ -73,6 +73,13 @@ func (c *Client) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Head
 	return headersByNumbers(ctx, numbers, c.chunk)
 }
 
+// PosterGasByNumbers fetches eth_getBlockReceipts for every target and returns the validated poster
+// gas by block number: one call per block, not the two a header read costs, since the stored row
+// already carries the hash, transaction count and gas total the receipts are checked against.
+func (c *Client) PosterGasByNumbers(ctx context.Context, targets []ReceiptTarget) (map[uint64]uint64, error) {
+	return posterGasByNumbers(ctx, targets, c.chunk)
+}
+
 func (c *Client) BlockWithTxs(ctx context.Context, number uint64) (*Block, error) {
 	blocks, err := c.BlocksWithTxs(ctx, []uint64{number})
 	if err != nil {
@@ -206,6 +213,37 @@ func headersByNumbers(ctx context.Context, numbers []uint64, send batcher) ([]He
 		block.PosterGas = &posterGas
 		block.computeGasBefore = computeGasBefore
 		out = append(out, block.Header)
+	}
+	return out, nil
+}
+
+// posterGasByNumbers reads one receipt set per target and validates each against the block the caller
+// holds. Any target that does not check out fails the whole call: the repair narrows and retries.
+func posterGasByNumbers(ctx context.Context, targets []ReceiptTarget, send batcher) (map[uint64]uint64, error) {
+	if len(targets) == 0 {
+		return map[uint64]uint64{}, nil
+	}
+	reqs := make([]Request, len(targets))
+	for i, t := range targets {
+		reqs[i] = Request{Method: methodGetBlockReceipts, Params: []any{blockTag(t.Number)}}
+	}
+	results, err := send(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != len(reqs) {
+		return nil, fmt.Errorf("receipts: got %d results for %d requests", len(results), len(reqs))
+	}
+	out := make(map[uint64]uint64, len(targets))
+	for i, t := range targets {
+		if results[i].Err != nil {
+			return nil, fmt.Errorf("block %d receipts: %w", t.Number, results[i].Err)
+		}
+		gas, _, err := parseReceipts(results[i].Raw, t)
+		if err != nil {
+			return nil, err
+		}
+		out[t.Number] = gas
 	}
 	return out, nil
 }

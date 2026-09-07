@@ -410,9 +410,9 @@ func TestSlowTickBatchReportsAndPrune(t *testing.T) {
 	if rpc.calledTimes("BlocksWithTxs") != 1 {
 		t.Fatal("no new two-tx blocks should mean no fetch")
 	}
-	// Pruning removes blocks and samples older than the retention, except
-	// the rows of the first live block's hour while the backfill still
-	// runs: its last segment rebuilds those buckets from rows.
+	// Pruning removes blocks and samples older than the retention, except the rows of the first
+	// live block's hour while the backfill or the poster-gas repair still runs: both rebuild
+	// buckets from rows, and rows a rebuild has not reached must outlive it.
 	rpc.setHead(1005)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -429,10 +429,12 @@ func TestSlowTickBatchReportsAndPrune(t *testing.T) {
 		t.Fatal("samples not pruned")
 	}
 	_ = store.SetState(ctx, 4663, db.StateBackfillCursor, `{"done":true}`)
+	_ = store.SetState(ctx, 4663, db.StatePosterGasRepair, `{"done":true}`)
 	if err := f.SlowTick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Only the blocks whose timestamp equals now (1000..1005) may survive.
+	// Only the blocks sharing the latest block's timestamp (1000..1005) may survive: retention is
+	// measured from that block, not the clock.
 	if bs, _ := store.RecentBlocks(ctx, 4663, 100); len(bs) > 6 {
 		t.Fatalf("blocks not pruned: %d", len(bs))
 	}
