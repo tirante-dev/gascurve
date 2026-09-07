@@ -807,8 +807,18 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db
 				if err != nil {
 					return fmt.Errorf("gap buckets: %w", err)
 				}
+				// Only into a bucket that is still there. After a rewind discarded the window there is
+				// nothing to add to, and a fold would insert a bucket holding the recovered rows alone:
+				// pruned prefix and canonical suffix both absent, served as whole. Absent stays absent.
 				for _, b := range rowFolds {
-					if b.Resolution == res && startAmong(b.BucketStart, declined) {
+					if b.Resolution != res || !startAmong(b.BucketStart, declined) {
+						continue
+					}
+					existing, err := s.Buckets(ctx, f.chainID, res, b.BucketStart, b.BucketStart.Add(db.Resolutions[res]))
+					if err != nil {
+						return fmt.Errorf("gap buckets: %w", err)
+					}
+					if len(existing) > 0 {
 						toFold = append(toFold, b)
 					}
 				}

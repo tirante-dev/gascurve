@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,12 @@ func posterGasOf(t *testing.T, store *dbtest.MemStore, number uint64) sql.NullIn
 		t.Fatalf("block %d: %v", number, err)
 	}
 	return b.PosterGas
+}
+
+// saveCursor2 marks the poster-gas repair finished, so a test of the backfill's pin is not confounded
+// by the repair's own pin.
+func (f *Follower) saveCursor2(ctx context.Context, store *dbtest.MemStore) error {
+	return f.savePosterGasCursor(ctx, store, &posterGasCursor{Done: true})
 }
 
 func repairCursor(t *testing.T, f *Follower) *posterGasCursor {
@@ -486,14 +493,16 @@ func TestRepairStepRebuildsTheResolutionsThatAreStillWhole(t *testing.T) {
 func TestPruneFrontierPinsToTheBoundaryWhileTheBackfillRuns(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
-	later := baseTime.Add(2 * time.Hour)
-	f := repairFollower(t, newFakeRPC(1000), store, func(o *Options) { o.Now = func() time.Time { return later } })
-	if err := store.DeleteState(ctx, 4663, db.StatePruneFrontier); err != nil {
+	// Rows an hour apart: retention, at its floor of an hour, is measured from the latest row, so the
+	// cutoff lands on the first row, past the boundary, and the pin has to engage.
+	rpc := newFakeRPC(70_000)
+	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_502)
+	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BlockRetention = time.Hour
+	if err := f.saveCursor2(ctx, store); err != nil {
 		t.Fatal(err)
 	}
-	// An hour of retention, the floor, with the clock two hours on: the
-	// retention cutoff is then past the boundary, so the pin has to engage.
-	f.cfg.BlockRetention = time.Hour
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: false, Active: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -740,10 +749,14 @@ func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
 		t.Fatal(err)
 	}
+	if err := f.saveCursor2(ctx, store); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	want := f.now().Add(-time.Hour)
+	// Retention is measured from the latest stored block, not the clock two hours on.
+	want := time.Unix(int64(tsFor(905)), 0).UTC().Add(-time.Hour)
 	if got, err := f.pruneFrontier(ctx); err != nil || !got.Equal(want) {
 		t.Fatalf("seeded frontier %v %v, want the cutoff %v", got, err, want)
 	}
@@ -790,11 +803,14 @@ func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 		t.Fatalf("seeded a frontier on an empty store: %v %v", got, err)
 	}
 
-	// Backfill unfinished: the cutoff is pinned to the boundary, and so is
-	// the seed, which is what keeps it below every row a gap fill can write.
+	// Backfill unfinished: the cutoff is pinned to the boundary, and so is the seed, which is what
+	// keeps it below every row a gap fill can write. The pin only engages once the stored rows span
+	// more than retention, so this fixture has rows an hour apart.
 	pinned := dbtest.New()
-	seedBlocksWithoutPosterGas(t, rpc, pinned, 900, 905)
-	g := newTestFollower(t, rpc, pinned, clock)
+	wide := newFakeRPC(70_000)
+	seedBlocksWithoutPosterGas(t, wide, pinned, 28_500, 28_502)
+	seedBlocksWithoutPosterGas(t, wide, pinned, 64_500, 64_502)
+	g := newTestFollower(t, wide, pinned, clock)
 	g.cfg.BlockRetention = time.Hour
 	if err := g.ensureInit(ctx); err != nil {
 		t.Fatal(err)
@@ -807,55 +823,46 @@ func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 	}
 }
 
-// The review scenario end to end: an upgraded database with no record, the
-// repair running before any prune. The seed has already put the frontier at
-// the retention cutoff, so the store refuses windows below it and rebuilds
-// the rest, without the repair reading receipts for rows it cannot use.
-func TestRepairOnAnUpgradedDatabaseIsFlooredByTheSeed(t *testing.T) {
+// An upgraded database with no record, the repair running before any prune. While the repair is
+// unfinished the seed and the cutoff are pinned to the boundary, so no window above it can be refused
+// under the pass: rows an hour apart are both repaired, and the seed is the boundary, not the latest
+// row less retention. That floor only takes over once the repair is done.
+func TestRepairOnAnUpgradedDatabaseIsNotOutrunByPrune(t *testing.T) {
 	ctx := context.Background()
-	// The fake chain has to reach past the rows the test seeds.
 	rpc := newFakeRPC(70_000)
 	store := dbtest.New()
-	// Two rows an hour apart: 07:47:30 and 08:47:30. Retention reaches back
-	// only to 08:00, so the first row's windows are all below the cutoff
-	// and the second's are all above it.
 	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_502)
 	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
 	first := time.Unix(int64(tsFor(28_500)), 0).UTC()
 	second := time.Unix(int64(tsFor(64_500)), 0).UTC()
-	// The clock on the hour after the second row, with an hour of retention,
-	// the floor: the cutoff lands on that row's hour exactly.
-	now := second.Truncate(time.Hour).Add(time.Hour)
-	f := newTestFollower(t, rpc, store, func(o *Options) { o.Now = func() time.Time { return now } })
+	f := newTestFollower(t, rpc, store)
 	f.cfg.BlockRetention = time.Hour
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
 		t.Fatal(err)
 	}
 
-	for range 4 {
+	for range 6 {
 		if _, err := f.RepairStep(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got, _ := f.pruneFrontier(ctx); !got.Equal(second.Truncate(time.Hour)) {
-		t.Fatalf("frontier %v, want the seed at %v", got, second.Truncate(time.Hour))
+	boundary := first.Truncate(time.Hour)
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(boundary) {
+		t.Fatalf("frontier %v while the repair ran, want the boundary %v", got, boundary)
+	}
+	for _, n := range []uint64{28_500, 64_500} {
+		if got := posterGasOf(t, store, n); !got.Valid {
+			t.Fatalf("block %d was not repaired: prune outran the pass", n)
+		}
 	}
 	for _, res := range db.ResolutionOrder {
 		buckets, err := store.Buckets(ctx, 4663, res, first.Add(-time.Hour), second.Add(time.Hour))
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || len(buckets) == 0 {
+			t.Fatalf("%s buckets: %d %v", res, len(buckets), err)
 		}
 		for _, b := range buckets {
-			above := !b.BucketStart.Before(second.Truncate(time.Hour))
-			if b.PosterGas.Valid != above {
-				t.Fatalf("%s bucket %s: poster gas %v, want %v (above the seed: %v)", res, b.BucketStart, b.PosterGas.Valid, above, above)
-			}
-		}
-	}
-	for _, batch := range rpc.posterGasCalls {
-		for _, n := range batch {
-			if n < 64_500 {
-				t.Fatalf("read receipts for block %d, whose windows are all below the seed", n)
+			if !b.PosterGas.Valid {
+				t.Fatalf("%s bucket %s was refused while the repair was pinned", res, b.BucketStart)
 			}
 		}
 	}
@@ -991,5 +998,127 @@ func TestPruneRechecksTheDurableLiveStartUnderTheLock(t *testing.T) {
 	}
 	if b, err := store.BlockByNumber(ctx, 4663, 900); err != nil || b == nil {
 		t.Fatalf("prune deleted rows on a stale live start: %v %v", b, err)
+	}
+}
+
+// Retention is measured from the latest stored block, not the host clock. A chain that stalls longer
+// than retention would otherwise see the cutoff pass its head, and the forward-only frontier would
+// then refuse every bucket the resumed blocks fall in.
+func TestPruneMeasuresRetentionInChainTime(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	// The clock is two days past the chain's last block.
+	stalled := baseTime.Add(48 * time.Hour)
+	f := repairFollower(t, rpc, store, func(o *Options) { o.Now = func() time.Time { return stalled } })
+	f.cfg.BlockRetention = time.Hour
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.saveCursor2(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteState(ctx, 4663, db.StatePruneFrontier); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	latest := time.Unix(int64(tsFor(905)), 0).UTC()
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(latest.Add(-time.Hour)) {
+		t.Fatalf("frontier %v, want an hour before the latest block %v, not before the clock", got, latest)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 900); err != nil || b == nil {
+		t.Fatalf("a row within an hour of the chain's head was pruned: %v %v", b, err)
+	}
+}
+
+// While the poster-gas repair is unfinished prune is pinned to the boundary, as it is for the
+// backfill: rows the repair has not reached have to outlive it, or the frontier advances under the
+// pass and refuses the buckets it was about to rebuild.
+func TestPruneFrontierPinsToTheBoundaryWhileTheRepairRuns(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	rpc := newFakeRPC(70_000)
+	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_502)
+	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BlockRetention = time.Hour
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.savePosterGasCursor(ctx, store, &posterGasCursor{Next: 28_500}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	boundary, has := f.boundaryLocked()
+	f.mu.Unlock()
+	if !has {
+		t.Fatal("no boundary loaded, so the test proves nothing")
+	}
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(boundary) {
+		t.Fatalf("frontier %v with the repair unfinished, want the boundary %v", got, boundary)
+	}
+	// Once the repair is done the pin lifts and retention is what prune goes by.
+	if err := f.saveCursor2(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(latest.Add(-time.Hour)) {
+		t.Fatalf("frontier %v after the repair finished, want %v", got, latest.Add(-time.Hour))
+	}
+}
+
+// The history loop must let the repair count a deferral on every iteration. Under sustained lag with
+// a fillable hole the filler yields twenty-nine turns in thirty, and if an idle fill took the whole
+// turn the repair would count only on the thirtieth, and get its own turn once in nine hundred.
+func TestHistoryLoopGivesTheRepairItsTurnWhileTheFillerYields(t *testing.T) {
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	sleeps := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Two rounds of deferrals is plenty for the repair's own turn to come up
+	// and far too few for one in nine hundred.
+	f := newTestFollower(t, rpc, store, func(o *Options) {
+		o.Sleep = func(context.Context, time.Duration) error {
+			sleeps++
+			if sleeps >= 2*maxRecoveryDeferrals {
+				cancel()
+			}
+			return nil
+		}
+	})
+	skipGap(t, f, rpc)
+	// Rows the repair has work on: strip poster gas from the five highest stored rows, which sit
+	// just below the hole skipGap left.
+	stored := make([]uint64, 0, len(store.BlockRows[4663]))
+	for n := range store.BlockRows[4663] {
+		stored = append(stored, n)
+	}
+	slices.Sort(stored)
+	for _, n := range stored[max(0, len(stored)-5):] {
+		b := store.BlockRows[4663][n]
+		b.PosterGas = sql.NullInt64{}
+		store.BlockRows[4663][n] = b
+	}
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, baseTime.Add(-24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	f.behind.Store(uint64(f.cfg.HeaderBatchSize) + 1)
+
+	f.runHistory(ctx)
+	if len(rpc.posterGasCalls) == 0 {
+		t.Fatalf("the repair got no turn in %d iterations while the filler yielded", sleeps)
 	}
 }

@@ -1298,3 +1298,32 @@ func TestFillFoldsIntoAWindowTheStoreWillNotRebuild(t *testing.T) {
 		t.Fatalf("every block counted once: %d (was %d before the fill)", got, before)
 	}
 }
+
+// After a rewind discarded a window below the frontier there is no bucket to add to. Folding the
+// recovered rows would insert a bucket holding them alone, pruned prefix and canonical suffix both
+// absent, and the hole's completion would present it as whole. Absent stays absent.
+func TestFillLeavesADiscardedWindowAbsent(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	inside := time.Unix(int64(tsFor(900)), 0).UTC()
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, inside.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	minute := inside.Truncate(time.Minute)
+	if err := store.DiscardBucketsBelowFrontier(ctx, 4663, db.Resolution1m, []time.Time{minute}); err != nil {
+		t.Fatal(err)
+	}
+	if before, _ := store.Buckets(ctx, 4663, db.Resolution1m, minute, minute.Add(time.Minute)); len(before) != 0 {
+		t.Fatalf("the window was not discarded: %d", len(before))
+	}
+	fillAll(t, f, 40)
+	if holesOf(t, store) != nil {
+		t.Fatalf("the gap must finish: %+v", holesOf(t, store))
+	}
+	if after, _ := store.Buckets(ctx, 4663, db.Resolution1m, minute, minute.Add(time.Minute)); len(after) != 0 {
+		t.Fatalf("a fold inserted a partial bucket into a discarded window: %+v", after[0])
+	}
+}

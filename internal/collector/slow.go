@@ -695,16 +695,27 @@ func batchReportOf(chainID uint64, b nitro.Block, resolver *batchCostResolver) (
 	return nil, nil
 }
 
-// pruneCutoff is the timestamp block rows are dropped below: the retention window, or the boundary
-// while the backfill is unfinished, since its last segment rebuilds the boundary hour from rows. It
-// predicts; what a rebuild goes by is the recorded frontier, written with the delete it describes.
+// pruneCutoff is the timestamp block rows are dropped below. Retention is measured back from the
+// latest stored block, never the host clock: a chain that stalls longer than retention, or a clock
+// that jumps ahead, would otherwise put the cutoff past the head, and the forward-only frontier would
+// then refuse every bucket the resumed blocks fall in. It is pinned to the boundary while either job
+// that rebuilds from rows is unfinished, the backfill's last segment or the poster-gas repair, since
+// rows the repair has not reached must outlive it. The zero time when nothing is stored.
 func (f *Follower) pruneCutoff(ctx context.Context, boundary time.Time, hasBoundary bool) (time.Time, error) {
-	before := f.now().Add(-f.cfg.BlockRetention)
-	c, err := f.loadCursor(ctx)
+	latest, err := f.store.LatestBlock(ctx, f.chainID)
+	if err != nil || latest == nil {
+		return time.Time{}, err
+	}
+	before := latest.TS.UTC().Add(-f.cfg.BlockRetention)
+	backfill, err := f.loadCursor(ctx)
 	if err != nil {
 		return time.Time{}, err
 	}
-	if !c.Done && hasBoundary && boundary.Before(before) {
+	repair, err := f.loadPosterGasCursor(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if (!backfill.Done || !repair.Done) && hasBoundary && boundary.Before(before) {
 		return boundary, nil
 	}
 	return before, nil
@@ -751,7 +762,7 @@ func (f *Follower) seedPruneFrontierLocked(ctx context.Context) error {
 		return nil
 	}
 	cutoff, err := f.pruneCutoff(ctx, boundary, hasBoundary)
-	if err != nil {
+	if err != nil || cutoff.IsZero() {
 		return err
 	}
 	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
