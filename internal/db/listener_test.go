@@ -14,7 +14,6 @@ import (
 
 type fakeNotificationListener struct {
 	notifications chan *pq.Notification
-	listenGate    chan struct{}
 	closed        chan struct{}
 	closeOnce     sync.Once
 	callback      pq.EventCallbackType
@@ -23,17 +22,16 @@ type fakeNotificationListener struct {
 func newFakeNotificationListener() *fakeNotificationListener {
 	return &fakeNotificationListener{
 		notifications: make(chan *pq.Notification, 4),
-		listenGate:    make(chan struct{}),
 		closed:        make(chan struct{}),
 	}
 }
 
 func (f *fakeNotificationListener) Listen(string) error {
 	select {
-	case <-f.listenGate:
-		return nil
 	case <-f.closed:
 		return errors.New("closed")
+	default:
+		return nil
 	}
 }
 
@@ -44,6 +42,20 @@ func (f *fakeNotificationListener) NotificationChannel() <-chan *pq.Notification
 func (f *fakeNotificationListener) Close() error {
 	f.closeOnce.Do(func() { close(f.closed) })
 	return nil
+}
+
+func newFakeListener(t *testing.T, channels ...string) (*PQListener, *fakeNotificationListener) {
+	t.Helper()
+	raw := newFakeNotificationListener()
+	l, err := newListener(context.Background(), channels, nil, func(callback pq.EventCallbackType) notificationListener {
+		raw.callback = callback
+		return raw
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	return l, raw
 }
 
 func TestPQListenerUnreachable(t *testing.T) {
@@ -62,103 +74,28 @@ func TestPQListenerUnreachable(t *testing.T) {
 	}
 }
 
-// TestPQListenerRecoversClosedNotificationChannel proves that an unexpected
-// close of lib/pq's top-level Notify channel does not close the stable API
-// stream. Readiness drops while replacement subscriptions are blocked, then a
-// reconnect marker makes the hub reconcile notifications lost in that gap.
-func TestPQListenerRecoversClosedNotificationChannel(t *testing.T) {
-	first := newFakeNotificationListener()
-	second := newFakeNotificationListener()
-	close(first.listenGate)
-	createdSecond := make(chan struct{})
-	var mu sync.Mutex
-	created := 0
-	factory := func(callback pq.EventCallbackType) notificationListener {
-		mu.Lock()
-		defer mu.Unlock()
-		created++
-		if created == 1 {
-			first.callback = callback
-			return first
-		}
-		second.callback = callback
-		select {
-		case <-createdSecond:
-		default:
-			close(createdSecond)
-		}
-		return second
-	}
-	l, err := newListener(context.Background(), []string{ChannelLive, ChannelOwnerAction}, nil, factory, 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
+func TestPQListenerDeliversNotifications(t *testing.T) {
+	l, raw := newFakeListener(t, ChannelLive, ChannelOwnerAction)
 	if status := l.Status(); !status.Ready || status.Reconnects != 0 || status.Error != "" {
 		t.Fatalf("initial status: %+v", status)
 	}
-
-	first.notifications <- &pq.Notification{Channel: ChannelLive, Extra: "before"}
+	raw.notifications <- &pq.Notification{Channel: ChannelLive, Extra: "payload"}
 	select {
 	case got := <-l.Notifications():
-		if got.Channel != ChannelLive || got.Payload != "before" || got.Reconnected {
-			t.Fatalf("initial notification: %+v", got)
+		if got.Channel != ChannelLive || got.Payload != "payload" || got.Reconnected {
+			t.Fatalf("notification: %+v", got)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("initial notification was not delivered")
-	}
-	close(first.notifications)
-	select {
-	case <-createdSecond:
-	case <-time.After(time.Second):
-		t.Fatal("replacement listener was not created")
-	}
-	if status := l.Status(); status.Ready || status.Error != "notification channel closed" {
-		t.Fatalf("status during replacement: %+v", status)
-	}
-	select {
-	case _, ok := <-l.Notifications():
-		if !ok {
-			t.Fatal("stable notification stream closed during recovery")
-		}
-	default:
-	}
-
-	close(second.listenGate)
-	select {
-	case got := <-l.Notifications():
-		if !got.Reconnected || got.Channel != "" || got.Payload != "" {
-			t.Fatalf("reconnect marker: %+v", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("reconnect marker was not delivered")
-	}
-	if status := l.Status(); !status.Ready || status.Reconnects != 1 || status.Error != "" {
-		t.Fatalf("recovered status: %+v", status)
-	}
-	second.notifications <- &pq.Notification{Channel: ChannelOwnerAction, Extra: "after"}
-	select {
-	case got := <-l.Notifications():
-		if got.Channel != ChannelOwnerAction || got.Payload != "after" || got.Reconnected {
-			t.Fatalf("recovered notification: %+v", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("notification after recovery was not delivered")
+		t.Fatal("notification was not delivered")
 	}
 }
 
+// TestPQListenerStatusTracksLibPQReconnect covers the recovery that actually
+// happens: lib/pq drops the connection, re-establishes it, re-issues every
+// LISTEN, and marks the gap with a nil notification the hub reconciles from.
+// Readiness follows it so a replica with no feed leaves the Service.
 func TestPQListenerStatusTracksLibPQReconnect(t *testing.T) {
-	raw := newFakeNotificationListener()
-	close(raw.listenGate)
-	factory := func(callback pq.EventCallbackType) notificationListener {
-		raw.callback = callback
-		return raw
-	}
-	l, err := newListener(context.Background(), []string{ChannelLive}, nil, factory, 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
+	l, raw := newFakeListener(t, ChannelLive)
 
 	raw.callback(pq.ListenerEventDisconnected, errors.New("secret connection detail"))
 	if status := l.Status(); status.Ready || status.Error != "connection lost" {
@@ -180,5 +117,47 @@ func TestPQListenerStatusTracksLibPQReconnect(t *testing.T) {
 	}
 	if status := l.Status(); !status.Ready || status.Reconnects != 1 || status.Error != "" {
 		t.Fatalf("reconnected status: %+v", status)
+	}
+}
+
+// TestPQListenerClosedNotificationChannelEndsTheStream pins the contract
+// Hub.Run relies on. lib/pq only closes its notification channel from Close,
+// so this cannot happen while the process wants the feed; if it ever does,
+// the stream ends rather than going quiet, which is what makes the hub exit
+// instead of pinging clients it can never update again.
+func TestPQListenerClosedNotificationChannelEndsTheStream(t *testing.T) {
+	l, raw := newFakeListener(t, ChannelLive)
+	close(raw.notifications)
+	select {
+	case _, ok := <-l.Notifications():
+		if ok {
+			t.Fatal("expected the stream to end")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream stayed open after the notification channel closed")
+	}
+	if status := l.Status(); status.Ready || status.Error != "notification channel closed" {
+		t.Fatalf("status: %+v", status)
+	}
+}
+
+func TestPQListenerCloseReportsAndIsIdempotent(t *testing.T) {
+	l, _ := newFakeListener(t, ChannelLive)
+	if err := l.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if status := l.Status(); status.Ready || status.Error != "listener closed" {
+		t.Fatalf("closed status: %+v", status)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	select {
+	case _, ok := <-l.Notifications():
+		if ok {
+			t.Fatal("expected the stream to end after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream stayed open after Close")
 	}
 }
