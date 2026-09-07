@@ -51,7 +51,7 @@ config:
       - 10.244.0.0/16
 ```
 
-The example is only a placeholder. Use your cluster's controller or proxy ranges. Include every trusted hop that can appear on the right side of `X-Forwarded-For`. Do not use `0.0.0.0/0` or `::/0`: either value lets any reachable peer choose its rate-limit identity.
+The example is only a placeholder. Use your cluster's controller or proxy ranges. Include every trusted hop that can appear on the right side of `X-Forwarded-For`. `0.0.0.0/0`, `::/0` and any other `/0` are refused, because either one would let any reachable peer choose its rate-limit identity. Entries are parsed by `net.ParseIP` and `net.ParseCIDR`, so a leading zero in an octet (`01.2.3.4`) is refused too: at runtime one unparseable entry discards the whole list and silently restores the shared bucket this setting exists to avoid.
 
 The API ignores `X-Forwarded-For` and `X-Real-IP` unless the direct peer is trusted. It then walks `X-Forwarded-For` from right to left past trusted proxy hops and uses the first untrusted address. This preserves the safe behavior for direct or untrusted traffic while giving each user behind ingress a separate REST bucket and WebSocket connection count.
 

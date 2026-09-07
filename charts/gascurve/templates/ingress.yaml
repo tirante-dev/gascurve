@@ -5,6 +5,14 @@
 {{- if and .Values.api.enabled (empty .Values.config.server.trusted_proxies) -}}
 {{- fail "ingress.enabled and api.enabled are true but config.server.trusted_proxies is empty. Set it to the addresses or CIDRs of every reverse proxy hop the API should trust. Forwarded client headers remain untrusted when this list is empty. values.schema.json rejects this combination too; you are seeing this message because schema validation was skipped." -}}
 {{- end -}}
+{{- if .Values.api.enabled -}}
+{{- range .Values.config.server.trusted_proxies -}}
+{{- $proxy := . | toString | trim -}}
+{{- if or (hasSuffix "/0" $proxy) (eq $proxy "0.0.0.0") (eq $proxy "::") -}}
+{{- fail (printf "config.server.trusted_proxies contains %q, which trusts every reachable peer and so lets any of them pick its own rate limit identity with X-Forwarded-For. List the ingress controller or proxy ranges the API actually sees instead. values.schema.json rejects this combination too; you are seeing this message because schema validation was skipped." $proxy) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if and .Values.api.enabled .Values.api.networkPolicy.enabled (empty .Values.api.networkPolicy.allowedPeers) -}}
 {{- fail "api.networkPolicy.enabled is true for an ingress deployment but api.networkPolicy.allowedPeers is empty. Configure the ingress controller NetworkPolicy peers, or disable the chart policy only after applying an equivalent policy outside this chart." -}}
 {{- end -}}

@@ -252,6 +252,19 @@ reject "malformed trusted proxy CIDR" "trusted_proxies" \
   --set database.existingSecret=my-db \
   --set ingress.enabled=true --set ingress.host=gascurve.com \
   --set 'config.server.trusted_proxies[0]=not-a-cidr'
+reject "trusted proxy that trusts every peer" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=0.0.0.0/0'
+reject "trusted proxy that trusts every peer, schema validation skipped" "trusts every reachable peer" \
+  --skip-schema-validation \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=::/0'
+reject "trusted proxy octet with a leading zero" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=01.2.3.4'
 reject "empty ingress controller NetworkPolicy peers" "allowedPeers" \
   --set database.existingSecret=my-db \
   --set ingress.enabled=true --set ingress.host=gascurve.com \

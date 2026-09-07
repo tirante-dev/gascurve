@@ -133,7 +133,7 @@
             "trusted_proxies": {
               "description": "Addresses or CIDRs of reverse proxies whose X-Forwarded-For is believed. Required when both ingress and api are enabled.",
               "type": "array",
-              "items": { "$ref": "#/definitions/ipAddressOrCIDR" }
+              "items": { "$ref": "#/definitions/trustedProxyAddress" }
             },
             "ws_max_per_ip": { "type": "integer", "minimum": 1 },
             "ws_max_total": { "type": "integer", "minimum": 1 }
@@ -340,11 +340,20 @@
   "definitions": {
     "ipAddressOrCIDR": {
       "title": "IP address or CIDR",
-      "description": "An IPv4 or IPv6 address, optionally followed by its prefix length.",
+      "description": "An IPv4 or IPv6 address, optionally followed by its prefix length. A leading zero in an IPv4 octet is rejected because net.ParseIP and net.ParseCIDR reject one too.",
       "type": "string",
       "anyOf": [
-        { "title": "IPv4 address or CIDR", "pattern": "^((25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(/(3[0-2]|[12]?[0-9]))?$" },
+        { "title": "IPv4 address or CIDR", "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(/(3[0-2]|[12][0-9]|[0-9]))?$" },
         { "title": "IPv6 address or CIDR", "pattern": "^[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]+(/(12[0-8]|1[01][0-9]|[1-9]?[0-9]))?$" }
+      ]
+    },
+    "trustedProxyAddress": {
+      "title": "trusted reverse proxy address or CIDR",
+      "description": "One reverse proxy hop the API believes forwarding headers from. A /0 prefix or the unspecified address would trust every reachable peer, which is the opposite of what this list is for, so both are rejected.",
+      "allOf": [
+        { "$ref": "#/definitions/ipAddressOrCIDR" },
+        { "title": "a prefix of /0 trusts every peer", "not": { "pattern": "/0$" } },
+        { "title": "the unspecified address trusts every peer", "not": { "pattern": "^(0\\.0\\.0\\.0|::)$" } }
       ]
     },
     "cidr": {
