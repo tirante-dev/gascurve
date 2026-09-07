@@ -658,6 +658,30 @@ func setSize(cs db.ConstraintSet) int {
 }
 
 // DeleteBucketsBefore drops buckets starting before t.
+// DiscardBucketsBelowFrontier removes the buckets at the given starts that
+// lie below the recorded prune frontier, mirroring the Postgres store: the
+// same starts RebuildBuckets declines.
+func (m *MemStore) DiscardBucketsBelowFrontier(_ context.Context, chainID uint64, resolution string, starts []time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("DiscardBucketsBelowFrontier"); err != nil {
+		return err
+	}
+	if _, ok := db.Resolutions[resolution]; !ok {
+		return fmt.Errorf("discard buckets: unknown resolution %q", resolution)
+	}
+	frontier := m.pruneFrontierLocked(chainID)
+	if frontier.IsZero() {
+		return nil
+	}
+	for _, start := range starts {
+		if start.UTC().Before(frontier) {
+			delete(m.BucketRows, bucketKey(chainID, resolution, start.UTC()))
+		}
+	}
+	return nil
+}
+
 func (m *MemStore) DeleteBucketsBefore(_ context.Context, chainID uint64, before time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -358,7 +358,7 @@ func TestMemStoreFailures(t *testing.T) {
 	if err := m.Ping(ctx); !errors.Is(err, ErrInjected) {
 		t.Fatal("ping")
 	}
-	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
+	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DiscardBucketsBelowFrontier", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
 	for _, n := range names {
 		m.FailOn[n] = true
 	}
@@ -376,17 +376,18 @@ func TestMemStoreFailures(t *testing.T) {
 			_, err := m.MissingRanges(ctx, 1)
 			return err
 		},
-		"ReplaceMissingRanges": func() error { return m.ReplaceMissingRanges(ctx, 1, nil) },
-		"UpdateConstraintSet":  func() error { return m.UpdateConstraintSet(ctx, db.ConstraintSet{}) },
-		"UpsertNetwork":        func() error { return m.UpsertNetwork(ctx, db.Network{}) },
-		"Networks":             func() error { _, err := m.Networks(ctx); return err },
-		"NetworkByRef":         func() error { _, err := m.NetworkByRef(ctx, ""); return err },
-		"UpdateNetworkHead":    func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
-		"SetNetworkError":      func() error { return m.SetNetworkError(ctx, 1, "") },
-		"UpsertBlocks":         func() error { return m.UpsertBlocks(ctx, nil) },
-		"BlockByNumber":        func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
-		"DeleteBlocksAfter":    func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
-		"RebuildBuckets":       func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
+		"ReplaceMissingRanges":        func() error { return m.ReplaceMissingRanges(ctx, 1, nil) },
+		"UpdateConstraintSet":         func() error { return m.UpdateConstraintSet(ctx, db.ConstraintSet{}) },
+		"UpsertNetwork":               func() error { return m.UpsertNetwork(ctx, db.Network{}) },
+		"Networks":                    func() error { _, err := m.Networks(ctx); return err },
+		"NetworkByRef":                func() error { _, err := m.NetworkByRef(ctx, ""); return err },
+		"UpdateNetworkHead":           func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
+		"SetNetworkError":             func() error { return m.SetNetworkError(ctx, 1, "") },
+		"UpsertBlocks":                func() error { return m.UpsertBlocks(ctx, nil) },
+		"BlockByNumber":               func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
+		"DeleteBlocksAfter":           func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
+		"RebuildBuckets":              func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
+		"DiscardBucketsBelowFrontier": func() error { return m.DiscardBucketsBelowFrontier(ctx, 1, "1m", nil) },
 		"DeleteBucketsBefore": func() error {
 			_, err := m.DeleteBucketsBefore(ctx, 1, now)
 			return err
@@ -527,5 +528,39 @@ func TestMemStoreRebuildBucketsHonoursThePruneFrontier(t *testing.T) {
 	}
 	if bk, _ = m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour)); len(bk) != 2 {
 		t.Fatalf("with an unreadable frontier: %d buckets, want 2", len(bk))
+	}
+}
+
+// DiscardBucketsBelowFrontier removes exactly the starts RebuildBuckets
+// declines: those below the recorded frontier. Above it, or with no
+// frontier, nothing is touched.
+func TestMemStoreDiscardBucketsBelowFrontier(t *testing.T) {
+	ctx := context.Background()
+	m := New()
+	base := time.Date(2026, 9, 6, 7, 0, 0, 0, time.UTC)
+	starts := []time.Time{base, base.Add(time.Minute)}
+	for _, s := range starts {
+		m.BucketRows[bucketKey(1, "1m", s)] = db.Bucket{ChainID: 1, Resolution: "1m", BucketStart: s, Blocks: 1}
+	}
+	// No frontier: nothing lies below it.
+	if err := m.DiscardBucketsBelowFrontier(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	if bk, _ := m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour)); len(bk) != 2 {
+		t.Fatalf("discarded with no frontier: %d left", len(bk))
+	}
+	// Frontier on the second start: only the first is below it.
+	if err := m.SetState(ctx, 1, db.StatePruneFrontier, base.Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DiscardBucketsBelowFrontier(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	bk, _ := m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour))
+	if len(bk) != 1 || !bk[0].BucketStart.Equal(base.Add(time.Minute)) {
+		t.Fatalf("discard below the frontier: %+v", bk)
+	}
+	if err := m.DiscardBucketsBelowFrontier(ctx, 1, "2m", starts); err == nil {
+		t.Fatal("unknown resolution")
 	}
 }

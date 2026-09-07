@@ -288,6 +288,17 @@ type Store interface {
 	RebuildBuckets(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error
 	// DeleteBucketsBefore drops every resolution's buckets starting before t.
 	DeleteBucketsBefore(ctx context.Context, chainID uint64, before time.Time) (int64, error)
+	// DiscardBucketsBelowFrontier removes the buckets at those of starts
+	// whose windows lie below the prune frontier: the ones RebuildBuckets
+	// declines. It is the complement of that refusal, for the one caller
+	// whose stored aggregate is known wrong rather than merely incomplete.
+	// A reorg that reaches a window straddling the frontier orphans its
+	// retained rows while prune has already taken its early ones, so no
+	// correct aggregate exists and what is stored describes a dead fork.
+	// Absent is the only honest state, and the API serves an absent bucket
+	// as a gap. The same predicate decides both methods, in the store, so
+	// they cannot drift. Starts at or above the frontier are left alone.
+	DiscardBucketsBelowFrontier(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error
 	// Buckets returns buckets with from <= bucket_start < to, ascending.
 	Buckets(ctx context.Context, chainID uint64, resolution string, from, to time.Time) ([]Bucket, error)
 

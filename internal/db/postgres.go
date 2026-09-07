@@ -769,6 +769,40 @@ func (p *Postgres) DeleteBucketsBefore(ctx context.Context, chainID uint64, befo
 	return res.RowsAffected()
 }
 
+// DiscardBucketsBelowFrontier removes the buckets at the given starts that
+// lie below the prune frontier, the same starts rebuildable declines. With
+// no frontier recorded, or one that will not parse, nothing lies below it
+// and nothing is removed, exactly as nothing is declined.
+func (p *Postgres) DiscardBucketsBelowFrontier(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error {
+	if _, ok := Resolutions[resolution]; !ok {
+		return fmt.Errorf("discard buckets: unknown resolution %q", resolution)
+	}
+	if len(starts) == 0 {
+		return nil
+	}
+	raw, recorded, err := p.GetState(ctx, chainID, StatePruneFrontier)
+	if err != nil {
+		return err
+	}
+	frontier, ok := parseFrontier(raw, recorded)
+	if !ok {
+		return nil
+	}
+	below := make([]time.Time, 0, len(starts))
+	for _, s := range starts {
+		if s.Before(frontier) {
+			below = append(below, s.UTC())
+		}
+	}
+	if len(below) == 0 {
+		return nil
+	}
+	if _, err := p.exec(ctx, `DELETE FROM buckets WHERE chain_id = $1 AND resolution = $2 AND bucket_start = ANY($3::TIMESTAMPTZ[])`, chainID, resolution, pq.Array(below)); err != nil {
+		return fmt.Errorf("discard %d %s buckets below the prune frontier: %w", len(below), resolution, err)
+	}
+	return nil
+}
+
 // Buckets returns buckets in a range, ascending.
 func (p *Postgres) Buckets(ctx context.Context, chainID uint64, resolution string, from, to time.Time) ([]Bucket, error) {
 	return selectAll[Bucket](ctx, p, `SELECT `+bucketColumns+` FROM buckets WHERE chain_id = $1 AND resolution = $2 AND bucket_start >= $3 AND bucket_start < $4 ORDER BY bucket_start ASC`,

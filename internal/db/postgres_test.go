@@ -185,6 +185,30 @@ func TestPostgresQueries(t *testing.T) {
 	if n, err := p.DeleteBucketsBefore(ctx, 4663, now); err != nil || n != 4 {
 		t.Fatalf("DeleteBucketsBefore: %d %v", n, err)
 	}
+	// Discarding below the frontier reads it, then deletes only the starts
+	// below it; with none recorded, or none of the starts below it, there is
+	// no delete at all.
+	mock.ExpectQuery("SELECT value FROM collector_state").WithArgs(4663, StatePruneFrontier).WillReturnRows(sqlmock.NewRows([]string{"value"}))
+	if err := p.DiscardBucketsBelowFrontier(ctx, 4663, "1m", []time.Time{now}); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT value FROM collector_state").WithArgs(4663, StatePruneFrontier).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(now.Add(-time.Hour).Format(time.RFC3339Nano)))
+	if err := p.DiscardBucketsBelowFrontier(ctx, 4663, "1m", []time.Time{now}); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT value FROM collector_state").WithArgs(4663, StatePruneFrontier).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(now.Add(time.Hour).Format(time.RFC3339Nano)))
+	mock.ExpectExec("DELETE FROM buckets WHERE chain_id = \\$1 AND resolution = \\$2 AND bucket_start = ANY").WithArgs(4663, "1m", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.DiscardBucketsBelowFrontier(ctx, 4663, "1m", []time.Time{now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.DiscardBucketsBelowFrontier(ctx, 4663, "2m", []time.Time{now}); err == nil {
+		t.Fatal("unknown resolution")
+	}
+	if err := p.DiscardBucketsBelowFrontier(ctx, 4663, "1m", nil); err != nil {
+		t.Fatalf("no starts: %v", err)
+	}
 	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, 0, "5", "0", "1", "2", "3", "20", 34, "{1,2}", "{3,4}", "{5,6}", "7", "8", "9", 1, 50, 100, 1))
 	bk, err := p.Buckets(ctx, 4663, "1m", now, now)
 	if err != nil || len(bk) != 1 || bk[0].BacklogsMax[1] != 4 || bk[0].ConstraintSetID.Int64 != 1 || bk[0].LastBlock != 100 {
@@ -370,6 +394,7 @@ func TestPostgresErrors(t *testing.T) {
 		{"PruneBlocks", false, func() error { _, err := p.PruneBlocks(ctx, 1, now); return err }},
 		{"FoldBuckets", false, func() error { return p.FoldBuckets(ctx, []Bucket{{}}) }},
 		{"RebuildBuckets", true, func() error { return p.RebuildBuckets(ctx, 1, "1m", []time.Time{now}) }},
+		{"DiscardBucketsBelowFrontier", true, func() error { return p.DiscardBucketsBelowFrontier(ctx, 1, "1m", []time.Time{now}) }},
 		{"DeleteBucketsBefore", false, func() error { _, err := p.DeleteBucketsBefore(ctx, 1, now); return err }},
 		{"Buckets", true, func() error { _, err := p.Buckets(ctx, 1, "1m", now, now); return err }},
 		{"InsertStateSample", false, func() error { return p.InsertStateSample(ctx, StateSample{}) }},
