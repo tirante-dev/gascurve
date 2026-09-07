@@ -99,10 +99,6 @@ const (
 	defaultAnchorInterval = 1000
 	// ownerLogChunk is the widest eth_getLogs range.
 	ownerLogChunk = 100_000
-	// smallChainBlocks: chains below this head start the owner scan at 0.
-	smallChainBlocks = 100_000_000
-	// largeChainLookback: bigger chains start the owner scan this far back.
-	largeChainLookback = 50_000_000
 	// genesisBlockLimit: constraint sets from owner actions at or below this
 	// block are the chain's genesis configuration.
 	genesisBlockLimit = 1_000

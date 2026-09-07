@@ -151,12 +151,27 @@ func TestSlowTickOwnerActions(t *testing.T) {
 	}
 }
 
+// scanCutoff is the block the large-chain tests expect a fresh owner scan
+// to start at.
+const scanCutoff = 70_000_000
+
+// clockPastDepth sets the follower's clock so that backfill_depth plus the
+// origin margin reaches back exactly to scanCutoff: a fresh owner scan then
+// starts there rather than at genesis.
+func clockPastDepth(f *Follower) {
+	at := time.Unix(int64(tsFor(scanCutoff)), 0).Add(f.cfg.BackfillDepth + originMargin)
+	f.now = func() time.Time { return at }
+}
+
 func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(120_000_000)
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
-	// Without a fast tick the head comes from eth_blockNumber. Without an
+	clockPastDepth(f)
+	// Without a fast tick the head comes from eth_blockNumber. The scan
+	// starts at the block backfill_depth (and a margin) before now, found by
+	// a header search, never at genesis of a chain this long. Without an
 	// archive endpoint nothing before the cutoff can be priced: the range
 	// is a hole and the origin says so.
 	if err := f.SlowTick(ctx); err != nil {
@@ -184,6 +199,7 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	archive.minFee = big.NewInt(30_000_000)
 	storeA := dbtest.New()
 	fa := newTestFollower(t, rpc, storeA)
+	clockPastDepth(fa)
 	fa.archive = archive
 	rpc.logRanges = nil
 	if err := fa.SlowTick(ctx); err != nil {
@@ -223,6 +239,7 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	}
 	archive.errs["FastSampleAt"] = errRPC
 	fc := newTestFollower(t, rpc, dbtest.New())
+	clockPastDepth(fc)
 	fc.archive = archive
 	if err := fc.SlowTick(ctx); !errors.Is(err, errRPC) || fc.scanOrigin != nil {
 		t.Fatalf("origin sample failure: %v", err)
@@ -231,6 +248,7 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	failing := dbtest.New()
 	failing.FailOn["WithChainTx"] = true
 	fd := newTestFollower(t, rpc, failing)
+	clockPastDepth(fd)
 	if err := fd.SlowTick(ctx); !errors.Is(err, dbtest.ErrInjected) || fd.scanOrigin != nil {
 		t.Fatalf("origin write failure: %v", err)
 	}
@@ -277,6 +295,7 @@ func TestOriginRecordsLegacyState(t *testing.T) {
 	archive.minFee = big.NewInt(30_000_000)
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
+	clockPastDepth(f)
 	f.archive = archive
 	if err := f.SlowTick(ctx); err != nil {
 		t.Fatal(err)
@@ -318,6 +337,7 @@ func TestOriginRecordsLegacyState(t *testing.T) {
 	archive.legacy = nil
 	archive.constraints = nil
 	bad := newTestFollower(t, rpc, dbtest.New())
+	clockPastDepth(bad)
 	bad.archive = archive
 	if err := bad.SlowTick(ctx); err == nil || bad.scanOrigin != nil {
 		t.Fatalf("a legacy origin without parameters must fail: %v", err)

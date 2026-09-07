@@ -531,6 +531,11 @@ func (f *Follower) findBlockAt(ctx context.Context, t time.Time) (uint64, error)
 	if err != nil {
 		return 0, err
 	}
+	return f.blockAt(ctx, head, t)
+}
+
+// blockAt is findBlockAt below a head the caller already knows.
+func (f *Follower) blockAt(ctx context.Context, head uint64, t time.Time) (uint64, error) {
 	target := uint64(max(t.Unix(), 0))
 	lo, hi := uint64(1), head
 	for lo < hi {

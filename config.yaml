@@ -24,7 +24,8 @@ collector:
   header_batch_size: 100     # blocks per JSON-RPC batch when catching up
   block_retention: 48h       # per-block rows kept before pruning to buckets
   sample_retention: 168h     # raw state samples kept
-  backfill_depth: 720h       # how far back the resumable backfill reaches (30d)
+  backfill_depth: 1h         # how far back the owner scan and the resumable backfill reach; a development default,
+                             # production sets 720h (30d) in the chart values
   backfill_anchor_interval: 1000  # blocks between state anchors when a network is archive: true
   max_catch_up_batches: 10   # paced networks skip a catch-up gap larger than this many header batches; unlimited networks never skip
   failover_cooldown: 60s     # time on a fallback endpoint before the primary is probed again (one eth_chainId)

@@ -144,11 +144,8 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 			return fmt.Errorf("owner cursor %q: %w", cursor, perr)
 		}
 		from = last + 1
-	} else if head >= smallChainBlocks {
-		from = head - largeChainLookback
-		if err := f.establishOrigin(ctx, from, gen); err != nil {
-			return err
-		}
+	} else if from, err = f.scanStart(ctx, head, gen); err != nil {
+		return err
 	}
 	for from <= head {
 		if ctx.Err() != nil {
@@ -178,6 +175,32 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	}
 	f.ownerScanThrough = head
 	return nil
+}
+
+// originMargin is how much further back than backfill_depth a fresh owner
+// scan starts, so the pricing state is known a little before the first
+// block the backfill replays.
+const originMargin = 10 * time.Minute
+
+// scanStart is where a fresh owner scan begins: the block at backfill_depth
+// (plus originMargin) before now, so the scan covers the history the
+// backfill can use and no more; a shallow depth, as in development, never
+// re-indexes a whole chain. A chain younger than the depth starts at
+// genesis, whose pricing state is nitro's default and needs no origin.
+// Otherwise the state in force at the cutoff is established first
+// (establishOrigin) and the scan runs from the cutoff on.
+func (f *Follower) scanStart(ctx context.Context, head, gen uint64) (uint64, error) {
+	cutoff, err := f.blockAt(ctx, head, f.now().Add(-f.cfg.BackfillDepth-originMargin))
+	if err != nil {
+		return 0, err
+	}
+	if cutoff <= 1 {
+		return 0, nil
+	}
+	if err := f.establishOrigin(ctx, cutoff, gen); err != nil {
+		return 0, err
+	}
+	return cutoff, nil
 }
 
 // establishOrigin records the complete pricing state in force at the block
