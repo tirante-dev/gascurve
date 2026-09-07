@@ -278,13 +278,24 @@ src/lib/api/             core.ts (fetch with timeout and retry), networks.ts, se
 src/lib/pricer.ts        approxExpBips and helpers in TS, unit-tested against the same vectors as Go
 src/types/               the shapes above
 src/utils/               formatting (gwei, gas, durations), bips math
+src/lib/seo.ts           site metadata: canonical origin, titles, the social card, the network list the sitemap uses
 ```
 
 Every chart card carries an enlarge control linking to `/{network}/charts/{chart}`, where `chart` is one of the registry ids in `src/lib/chartViews.ts`: `base-fee`, `backlog-sawtooth`, `contribution`, `gas-per-second`, `backlogs`, `fee-flows`, `l1`, `taylor`. The enlarged page draws the same component with the same hooks at a taller frame, keeps the range in `?range=` and the constraint slot in `?constraint=`, and offers tabs across every chart plus a link back to the section it came from.
 
-Units in copy: gas carries an SI prefix on the unit, never on the number (`11.2 Tgas`, `60 Mgas/s`, `812,345 gas` below one million). Figures that animate use fixed decimal counts per band so neighbouring elements never shift. USD figures (from `ethUsd`) are shown by default with the ETH amount on hover.
+Units in copy: gas carries an SI prefix on the unit, never on the number (`11.2 Tgas`, `60 Mgas/s`, `812,345 gas` below one million). Figures that animate use fixed decimal counts per band so neighbouring elements never shift. USD figures (from `ethUsd`) are shown by default; hovering one gives the working (`ETH amount × $price/ETH = $figure`) and the quote behind it (source and age), and the same facts are in the accessible description.
 
-Environment: `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`), `NEXT_PUBLIC_WS_URL` (derived from the API URL when unset), `NEXT_PUBLIC_SITE_URL`.
+Environment: `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`), `NEXT_PUBLIC_WS_URL` (derived from the API URL when unset), `NEXT_PUBLIC_SITE_URL` (canonical origin, default `https://gascurve.com`).
+
+### Search metadata and icons
+
+The site is a Robinhood Chain gas tracker first; the other networks are carried for comparison, and that ordering is what `src/lib/seo.ts` encodes. `PRIMARY_NETWORK` names the chain the default title, the description, the social card and the index page lead with, and `SITE_NETWORKS` mirrors the `networks` block of `config.yaml`, marking that one primary. The list is duplicated there rather than fetched because the sitemap, the server rendered titles and the index page's crawlable fallback are all built on the server, where `NEXT_PUBLIC_API_URL` is a path on the site's own origin and cannot be fetched. **Add a network to `SITE_NETWORKS` whenever one is added to `config.yaml`.**
+
+`NEXT_PUBLIC_SITE_URL` is the origin every canonical link, sitemap entry and card URL resolves against, and is baked at build time by `Dockerfile.web`. Every route under `/[network]` builds its metadata through `pageMetadata`, which sets the title, description, social card and either a canonical link or, for the duplicate that a chain id route such as `/4663` serves, `noindex, follow`. The card image is named explicitly in both the `openGraph` and `twitter` objects rather than dropped in as an `opengraph-image` file: a page that declares its own `openGraph` replaces the whole object, so a card left to the file convention would be present on the index and missing from every network page.
+
+Generated routes: `/robots.txt` (`app/robots.ts`), `/sitemap.xml` (`app/sitemap.ts`, the index plus each network's page, explainer and one entry per chart, weighted so the primary chain ranks above the rest) and `/manifest.webmanifest` (`app/manifest.ts`).
+
+Icons: `app/icon.svg` is the source of truth for the mark, a base fee curve lifting off its floor with the live block as the bright tip, in the dark palette's magenta and cyan. `app/favicon.ico` (16/32/48), `app/apple-icon.png` (180) and `public/icon-192.png`, `public/icon-512.png`, `public/icon-maskable-512.png` are the same geometry on the same 64 unit grid; regenerate them together if the mark changes. `public/og-card.png` is the 1200x630 social card.
 
 Coverage gate (90% lines) applies to `src/lib/**`, `src/hooks/**`, `src/utils/**`. Components are tested where behaviour is non-trivial.
 

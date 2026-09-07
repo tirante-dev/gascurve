@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { ChartDetail } from "@/components/ChartDetail";
 import { getChartView } from "@/lib/chartViews";
+import { networkDisplayName, pageMetadata } from "@/lib/seo";
+import { isChainIdParam } from "@/utils/network";
 
 // Props are typed by hand rather than with Next's generated PageProps helper so
 // the standalone typecheck (which excludes .next) sees the same shape as the build.
@@ -9,8 +11,13 @@ type Props = { params: Promise<{ network: string; chart: string }> };
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { network, chart } = await params;
+  const name = networkDisplayName(network);
   const view = getChartView(chart);
-  return view === null ? { title: `Chart not found on ${network}` } : { title: `${view.title} on ${network}`, description: view.description };
+  const path = `/${encodeURIComponent(network)}/charts/${encodeURIComponent(chart)}`;
+  // A chart id that is not one of ours has nothing to index: the page says so
+  // and the route stays out of the index whichever form names the network.
+  if (view === null) return pageMetadata({ title: `Chart not found on ${name}`, description: `No such chart on ${name}.`, path, canonical: false });
+  return pageMetadata({ title: `${view.title} on ${name}`, description: view.description, path, canonical: !isChainIdParam(network) });
 }
 
 export default async function Page({ params }: Props) {

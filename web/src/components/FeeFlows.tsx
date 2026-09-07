@@ -1,12 +1,12 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
+import type { EthUsd, LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
 import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL, type ChartPoint } from "@/utils/chart";
 import { emptyRangeNote, gapModel, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
 import { isPartialRow, partialBands, partialRowNote, withFeeStack } from "@/lib/partial";
-import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, formatUsdFixed, freshUsdPrice, shortAddress } from "@/utils/format";
+import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, shortAddress, usdMath } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
 import { formatFloor } from "@/lib/feeChart";
 import { EnlargeLink } from "./ChartActions";
@@ -71,9 +71,21 @@ export function feeTotals(series: Pick<Series, "points">): { total: number; floo
   return { total, floorEth: floor.eth, surplusEth: surplus.eth, perDay: span > 0 ? (total / span) * 86_400 : 0, unsplit: Math.max(floor.unknown, surplus.unknown) };
 }
 
-/** The dollar line under an ETH total, or nothing at all when there is no fresh quote to convert with. */
-function usdLine(eth: number, usdPerEth: number | null): string | undefined {
-  return usdPerEth === null ? undefined : `$${formatUsdFixed(eth * usdPerEth)}`;
+/**
+ * The dollar line under an ETH total, hovering to the multiplication that
+ * produced it and the quote it used, or nothing at all when there is no fresh
+ * quote to convert with. `sig` is the significant digits the total above it is
+ * drawn to, so the working quotes the figure beside it.
+ */
+function usdLine(eth: number, ethUsd: EthUsd | null | undefined, nowMs: number, sig: number): ReactNode {
+  const math = usdMath(eth, ethUsd, nowMs, (v) => formatSignificant(v, sig));
+  if (math === null) return undefined;
+  return (
+    <span title={math.title}>
+      <span aria-hidden="true">${math.usd}</span>
+      <span className="sr-only">{math.description}</span>
+    </span>
+  );
 }
 
 /** The height the fee chart stands at on the network page; the enlarged view passes its own. */
@@ -156,7 +168,7 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
   const points = useMemo(() => (series ? buildChartPoints(series, model) : []), [series, model]);
   const gaps = useMemo(() => (series ? gapModel(series, points) : NO_GAPS), [series, points]);
   // The same rule the live tiles follow: no quote, or one older than ten minutes, and the totals stay in ETH alone.
-  const usdPerEth = freshUsdPrice(snapshot?.ethUsd, nowMs);
+  const ethUsd = snapshot?.ethUsd;
   const totals = useMemo(() => (series ? feeTotals(series) : null), [series]);
   const [tableOpen, setTableOpen] = useState(false);
   const accounts = snapshot?.accounts;
@@ -186,10 +198,10 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
         {totals && series ? (
           <>
             <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
-              <Stat label={`Fees in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, usdPerEth)} />
-              <Stat label="Per day (est.)" value={formatSignificant(totals.perDay, 4)} unit="ETH" size="sm" hint={usdLine(totals.perDay, usdPerEth)} />
-              <Stat label="Floor to infra" value={formatSignificant(totals.floorEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.floorEth, usdPerEth)} />
-              <Stat label="Congestion to network" value={formatSignificant(totals.surplusEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.surplusEth, usdPerEth)} />
+              <Stat label={`Fees in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, nowMs, 4)} />
+              <Stat label="Per day (est.)" value={formatSignificant(totals.perDay, 4)} unit="ETH" size="sm" hint={usdLine(totals.perDay, ethUsd, nowMs, 4)} />
+              <Stat label="Floor to infra" value={formatSignificant(totals.floorEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.floorEth, ethUsd, nowMs, 3)} />
+              <Stat label="Congestion to network" value={formatSignificant(totals.surplusEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.surplusEth, ethUsd, nowMs, 3)} />
             </div>
             {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}; the floor and congestion totals leave them out.</p> : null}
           </>

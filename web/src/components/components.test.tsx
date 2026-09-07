@@ -384,7 +384,7 @@ describe("LiveHero", () => {
     expect(screen.getByText("Since last block")).toBeInTheDocument();
     expect(screen.queryByText("13.4")).toBeNull();
   });
-  it("prices the transfer and swap tiles in dollars when the quote is fresh, keeping the ETH amount on hover and in the description", () => {
+  it("prices the transfer and swap tiles in dollars when the quote is fresh, keeping the working on hover and in the description", () => {
     const priced = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:15:00Z", source: "coingecko" } };
     render(<LiveHeroView network="robinhood" snapshot={priced} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     // 21,000 gas at 0.3997 gwei is 0.0000084 ETH: about four cents.
@@ -392,9 +392,9 @@ describe("LiveHero", () => {
     expect(screen.getByText("0.25")).toBeInTheDocument();
     // The dollar sign is outside the reserved box, so a changing digit cannot move it.
     expect(screen.getByText("0.04").previousSibling).toHaveTextContent("$");
-    // The ETH figure is never lost: hover and the accessible description both carry it.
-    expect(screen.getByTitle("0.00000839 ETH")).toBeInTheDocument();
-    expect(screen.getByText("0.04 US dollars, 0.00000839 ETH, at 4,200.0 dollars per ETH")).toBeInTheDocument();
+    // The ETH figure is never lost, and the quote that priced it is named: hover and the accessible description both carry the working.
+    expect(screen.getByText("0.04").closest("[title]")).toHaveAttribute("title", "0.00000839 ETH × $4,200.0/ETH = $0.04\ncoingecko, 5 min ago");
+    expect(screen.getByText("0.04 US dollars, 0.00000839 ETH at 4,200.0 dollars per ETH, quoted by coingecko 5 min ago")).toBeInTheDocument();
     expect(screen.queryByText("0.00000839")).toBeNull();
   });
   it("falls back to ETH when there is no quote at all and when the one there is has gone stale", () => {
@@ -408,11 +408,15 @@ describe("LiveHero", () => {
     expect(screen.getByText("0.00000839")).toBeInTheDocument();
     expect(screen.getByText("0.0000600")).toBeInTheDocument();
   });
-  it("shows a cost tile in ETH without a price and in dollars with one", () => {
-    const { rerender } = render(<CostTile label="21k transfer" eth={0.0000084} usdPerEth={null} />);
+  it("shows a cost tile in ETH without a price and in dollars with one, hovering to the arithmetic", () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    const { rerender } = render(<CostTile label="21k transfer" eth={0.0000084} ethUsd={null} nowMs={now} />);
     expect(screen.getByText("0.00000840")).toBeInTheDocument();
-    rerender(<CostTile label="21k transfer" eth={0.0000084} usdPerEth={4200} />);
-    expect(screen.getByText("0.04")).toBeInTheDocument();
+    rerender(<CostTile label="21k transfer" eth={0.0000084} ethUsd={{ price: "4200.00", at: "2026-09-06T07:19:26Z", source: "coinbase" }} nowMs={now} />);
+    // The dollars are what is drawn; the multiplication and the quote behind it are a hover away and in the description.
+    const usd = screen.getByText("0.04");
+    expect(usd.closest("[title]")).toHaveAttribute("title", "0.00000840 ETH × $4,200.0/ETH = $0.04\ncoinbase, 34 s ago");
+    expect(screen.getByText("0.04 US dollars, 0.00000840 ETH at 4,200.0 dollars per ETH, quoted by coinbase 34 s ago")).toBeInTheDocument();
   });
   it("measures the sample age from the wall clock", () => {
     expect(COLLECTOR_LAG_S).toBe(5);
@@ -454,10 +458,10 @@ describe("ConstraintCards", () => {
     // readable without seeing it: the peak is 40M, the threshold 60M, and the
     // axis tops out at the larger of the two.
     const chart = screen.getByRole("figure", {
-      name: "Constraint 1 backlog per block over the last 15 s, 150 blocks, 0 to 80 Mgas, with the 2 s average and a dashed threshold at 60 Mgas: it drains 60 Mgas/s at each second boundary",
+      name: "Constraint 1 backlog per block over the last 15 s, 150 blocks, 0 to 80 Mgas, with a dashed threshold at 60 Mgas: it drains 60 Mgas/s at each second boundary",
     });
-    // Two thin lines: the per-block backlog and the 2 s average.
-    expect(chart.querySelectorAll("path.recharts-curve.recharts-line-curve")).toHaveLength(2);
+    // One thin line: the per-block backlog.
+    expect(chart.querySelectorAll("path.recharts-curve.recharts-line-curve")).toHaveLength(1);
     // The y axis reads in gas with the SI prefix on the unit, the x axis in seconds before now.
     expect(within(chart).getByText("40 Mgas")).toBeInTheDocument();
     expect(within(chart).getByText("80 Mgas")).toBeInTheDocument();
@@ -517,7 +521,7 @@ describe("ConstraintCards", () => {
     expect(drainLabel(60_000_000)).toBe("drains 60 Mgas/s at each second");
   });
   it("reads a hovered block out as its number, its gas and the backlog it left", () => {
-    const row = { number: 55_812_345, gasUsed: 4_021_130, backlog: 22_000_000, average: 21_000_000 };
+    const row = { number: 55_812_345, gasUsed: 4_021_130, backlog: 22_000_000 };
     render(
       <ChartTooltip
         active
@@ -531,7 +535,6 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("55,812,345")).toBeInTheDocument();
     expect(screen.getByText("4.02 Mgas")).toBeInTheDocument();
     expect(screen.getByText("22 Mgas")).toBeInTheDocument();
-    expect(screen.getByText("21 Mgas")).toBeInTheDocument();
     expect(secondsAgoLabel(0)).toBe("now");
   });
 });
