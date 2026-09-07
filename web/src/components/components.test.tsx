@@ -540,6 +540,15 @@ describe("ConstraintCards", () => {
 });
 
 describe("DataFooter", () => {
+  it("describes the fast and slow collection cadences", () => {
+    render(<DataFooter snapshot={null} series={null} networkInfo={null} status="open" apiStatus={null} now={0} />);
+    const live = screen.getByText(/update on new heads when a WebSocket head feed is configured/);
+    expect(live).toHaveTextContent("every 3 s by default on public RPC networks");
+    expect(live).toHaveTextContent("separate slow sample every 60 s");
+    expect(live).toHaveTextContent("pushed over a WebSocket (live)");
+    expect(live).not.toHaveTextContent("one-second sample");
+  });
+
   it("credits tirante.dev with an external link after the version line", () => {
     render(<DataFooter snapshot={null} series={null} networkInfo={null} status="open" apiStatus={{ version: "1.2.3", networks: [] }} now={0} />);
     const link = screen.getByRole("link", { name: "powered by tirante.dev" });

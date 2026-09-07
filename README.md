@@ -6,7 +6,7 @@ Networks: Robinhood Chain, Robinhood Chain Testnet, Arbitrum One, Arbitrum Sepol
 
 ## How it works
 
-- **collector** (Go) is the only thing that talks to an RPC. It follows each chain's head, samples the gas precompiles every second, replays the pricer over every block, folds history into buckets, and reads owner actions and batch posting reports out of the chain itself.
+- **collector** (Go) is the only thing that talks to an RPC. It updates live gas data on new heads when a WebSocket feed is configured, or every 3 seconds by default on public RPCs. It replays the pricer over every block and folds history into buckets. Its slow sample refreshes L1 pricing, fee balances, owner actions, and batch posting reports every 60 seconds.
 - **api** (Go) serves REST and a WebSocket from PostgreSQL. It never calls an RPC.
 - **web** (Next.js) renders the page and updates live over the WebSocket. It never calls an RPC.
 
