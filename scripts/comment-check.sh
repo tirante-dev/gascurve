@@ -27,7 +27,7 @@ MIN_LINES="${MIN_LINES:-40}"
 cd "$(dirname "$0")/.."
 
 files() {
-	git ls-files -z '*.go' 'web/src/*.ts' 'web/src/*.tsx' |
+	git ls-files -z '*.go' ':(glob)web/src/**/*.ts' ':(glob)web/src/**/*.tsx' |
 		tr '\0' '\n' |
 		grep -v '/migrations/' || true
 }
