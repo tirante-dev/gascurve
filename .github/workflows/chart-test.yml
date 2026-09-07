@@ -1,0 +1,49 @@
+name: Chart Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Chart Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.21.4
+
+      # values.schema.json requires a database whenever the collector or api
+      # is enabled, so the defaults alone are not a valid install. Lint with
+      # each documented configuration under charts/gascurve/ci (the same
+      # files ct lint uses).
+      - name: helm lint
+        run: |
+          set -euo pipefail
+          for values in charts/gascurve/ci/*-values.yaml; do
+            echo "== helm lint --strict --values ${values}"
+            helm lint charts/gascurve --strict --values "${values}"
+          done
+
+      # The render assertions live in scripts/chart-checks.sh, which
+      # `make chart-template` runs too, so this job and the local target
+      # cannot drift apart.
+      - name: chart render checks
+        run: bash scripts/chart-checks.sh
+
+      - uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
+      - name: ct lint
+        run: ct lint --config charts/ct.yaml --all

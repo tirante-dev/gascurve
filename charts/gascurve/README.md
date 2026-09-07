@@ -1,0 +1,170 @@
+# gascurve Helm chart
+
+Deploys the three gascurve components: one collector (single replica, the only RPC client), the API, and the web frontend. Schema migrations run as an init container on the collector and api pods.
+
+A database is required whenever the collector or the api is enabled: set exactly one of `database.url` and `database.existingSecret`. `values.schema.json` rejects an install, upgrade or template that sets neither or both, so the default values alone do not install.
+
+`values.schema.json` models the whole `config` tree, not just the chart's own keys, because a value the chart waves through and the binary then rejects only shows up as a crash-looping pod. Intervals must be positive Go durations (`500ms`, `3s`, `720h`), `calls_per_second` is `0` for a dedicated node or a real budget from `0.1` to `10000`, `ws_url` must be `ws://` or `wss://` while `rpc_url` must be `http://` or `https://`, `eth_usd_source` is `""`, `coinbase`, `coingecko` or an `https://` URL, and chart-owned objects reject keys they do not know, so a field put at the wrong level fails the install instead of being mounted and ignored. Ingress needs a backend: enabling it with both `api.enabled` and `web.enabled` false is refused rather than rendering an Ingress with no paths.
+
+The one rule the schema cannot express is the cross-reference between a network with no `rpc_url` and a `NETWORK_<NAME>_RPC_URL` in the collector's environment; the templates check that, for fallback endpoints too. A literal override with an empty value does not count: `internal/config` ignores an empty environment override, so the schema rejects that shape outright.
+
+```bash
+helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
+  --set database.url='postgres://user:pass@postgres:5432/gascurve?sslmode=disable' \
+  --set ingress.enabled=true --set ingress.host=gascurve.com
+```
+
+## Values
+
+| Key | Description | Default |
+|---|---|---|
+| `image.registry` | Registry prefix for all three images | `registry.ahkc.win/gascurve` |
+| `image.tag` | Image tag, defaults to the chart's appVersion | `""` |
+| `collector.enabled` | Run the collector (always 1 replica) | `true` |
+| `api.replicaCount` / `web.replicaCount` | Replicas | `2` / `2` |
+| `ingress.enabled`, `ingress.host`, `ingress.tls` | One host: `/` to web, `/api` to api. Needs at least one of `api.enabled` and `web.enabled` | `false`, `gascurve.com` |
+| `collector.resources` | Portable defaults, not a production profile. See Sizing the collector | `100m` / `128Mi` requested |
+| `database.url` | Rendered into a chart-managed Secret. Exactly one of `database.url` and `database.existingSecret` is required when the collector or api is enabled | `""` |
+| `database.existingSecret`, `database.existingSecretKey` | Use an existing Secret instead of `database.url` | `""`, `DB_URL` |
+| `migrations.enabled` | Run `gascurve-migrate up` as an init container on the collector and api pods | `true` |
+| `collector.securityContext`, `api.securityContext`, `web.securityContext`, `migrations.securityContext` | Numeric `runAsUser`/`runAsGroup`, must match the image's `USER` | `65532` (Go images), `1001` (web) |
+| `config` | Rendered to `config.yaml` (networks, collector pacing, CORS) | see values.yaml |
+| `collector.extraEnv`, `api.extraEnv`, `migrations.extraEnv` | Extra env for that container only. Private RPC URLs belong in `collector.extraEnv` | `[]` |
+| `extraEnv` | Deprecated alias applied to all three. Kept so existing installs keep working; move entries to the component lists | `[]` |
+
+The web image is built with `NEXT_PUBLIC_API_URL=/api/v1`, so it talks to the API through the same host. Put the API on another host only if you rebuild the image with a different value.
+
+## RPC URLs and Secrets
+
+The collector is the only component that talks to an RPC, so RPC credentials must reach the collector and nothing else. `collector.extraEnv` is the place for them:
+
+```yaml
+collector:
+  extraEnv:
+    - name: NETWORK_ROBINHOOD_RPC_URL
+      valueFrom:
+        secretKeyRef:
+          name: gascurve-rpc
+          key: robinhood
+config:
+  networks:
+    - name: robinhood
+      chain_id: 4663
+      enabled: true
+      # rpc_url omitted on purpose: the Secret above supplies it.
+```
+
+`NETWORK_<NAME>_RPC_URL` (name upper-cased, dashes to underscores) overrides `config.networks[].rpc_url`, so the plaintext URL can be left out of the ConfigMap entirely. Every network the collector runs needs a primary URL from one of the two places: the chart refuses to render an enabled network that has neither, with a message naming the network and the environment variable. Disabled networks and installs without the collector are not checked.
+
+The three component lists are separate on purpose. Before this split, one top-level `extraEnv` was copied into the collector, the api, and both migrate init containers, so a private RPC credential also sat in the public-facing api pod. The top-level `extraEnv` still works and still goes to all three, and NOTES prints a warning while it is set; a component entry with the same name replaces the top-level one. Do not put RPC credentials there.
+
+Upgrading from a chart that only had the top-level `extraEnv`: move each entry to the component that needs it, most often
+
+```yaml
+# before
+extraEnv:
+  - name: NETWORK_ROBINHOOD_RPC_URL
+    valueFrom:
+      secretKeyRef: { name: gascurve-rpc, key: robinhood }
+
+# after
+collector:
+  extraEnv:
+    - name: NETWORK_ROBINHOOD_RPC_URL
+      valueFrom:
+        secretKeyRef: { name: gascurve-rpc, key: robinhood }
+```
+
+## Migrations
+
+Each collector and api pod runs `/app/gascurve-migrate up` in an init container from the same image as its main container, so the schema is always at the version the binary expects. There is no Helm hook, so nothing runs before the ServiceAccount, ConfigMap, and Secret exist, and Argo CD needs no hook or sync-wave configuration. golang-migrate takes a PostgreSQL advisory lock, so pods that start at the same time queue on the lock rather than racing. A failed migration keeps the pod in `Init:Error`; inspect it with `kubectl logs <pod> -c migrate`. Set `migrations.enabled=false` if migrations are applied elsewhere.
+
+What a slow or failed migration means for each component differs:
+
+- **api** (RollingUpdate): the previous ReplicaSet keeps serving until the new pods pass their init container and readiness probe, so the API stays available during the migration and during a failed upgrade.
+- **collector** (Recreate, single replica): the old collector is stopped before the new pod starts, and the new pod's migration runs after that, so collection pauses for the duration of the migration and stays paused for as long as a migration fails. This gap is the price of the single-writer rule (two collectors would double the RPC budget and race on the same rows). Keep migrations small, and if one fails roll back with `helm rollback` after repairing the schema state (golang-migrate refuses to run on a dirty version). The collector backfills the blocks it missed once it is running again.
+
+## Rolling pods on Secret changes
+
+The collector and api pod templates carry `checksum/config` and, when the chart renders the database Secret from `database.url`, `checksum/db-secret`, so changing either value rolls the pods on upgrade. Secrets the chart does not manage are not tracked: after rotating `database.existingSecret` or any Secret referenced from `collector.extraEnv`, `api.extraEnv`, `migrations.extraEnv` or the deprecated top-level `extraEnv`, run
+
+```bash
+kubectl rollout restart deploy/<release>-collector deploy/<release>-api
+```
+
+or use a reloader controller. Containers read Secret-backed environment variables only at startup.
+
+## Sizing the collector
+
+The chart's defaults (`collector.resources.requests` of `100m` CPU and `128Mi`) are portable defaults: enough for one or two networks at the default 3 second tick once the backfill has caught up, and small enough that the chart installs on a laptop cluster. They are not a production profile, and the difference is not small.
+
+A production collector is a different workload in three ways at once:
+
+- it follows **every** enabled network in one process, so the default four networks are four follower loops, not one;
+- on first install each of those replays `collector.backfill_depth` (`720h` by default) as fast as its budget allows, which is the busiest the process ever is and the longest it stays busy;
+- a dedicated endpoint (`calls_per_second: 0`) removes the pacer entirely, so the loop runs at whatever rate the node and the database can sustain rather than at four calls per second.
+
+Raise the **requests**, not only the limits. Requests are what the scheduler reserves and what decides the CPU share when a node is contended, so a collector left at `100m` competes for CPU like a sidecar exactly while it is doing the most work, and the backfill stretches out instead of finishing. A reasonable starting point for the default four networks with one unmetered endpoint is `500m` to `1` CPU and `512Mi` of memory requested, with limits at roughly twice that; `charts/gascurve/values.yaml` carries the same numbers as a commented example, and `ci/homelab-values.yaml` shows the single-network variant.
+
+Treat those numbers as a starting point to be replaced by measurements from your own cluster, not as a tested profile: the right values depend on how many networks are enabled, whether their endpoints are metered, and how far behind the collector starts. Watch four things while the first backfill runs and settle the requests afterwards:
+
+- CPU throttling on the collector container (`container_cpu_cfs_throttled_seconds_total`): sustained throttling means the limit is too low;
+- resident memory against the request and the limit, so an OOM kill during backfill is caught before it happens;
+- backlog depth, how far behind the chain head each follower is, and whether it is shrinking;
+- tick latency: a fast loop that takes longer than `tick_interval` is the signal that the process, not the endpoint, has become the bottleneck.
+
+The collector is a single replica by design (it is the only RPC client and the only writer), so it scales vertically only. There is no horizontal option to fall back on.
+
+## Releasing
+
+The chart is versioned and released separately from the application. release-please keeps two release PRs open on `main`: one for the application (tag `v<version>`, publishes the three images) and one for the chart (tag `gascurve-chart-v<version>`, packages and pushes the chart to the OCI registry). `Chart.yaml` `appVersion` is what a published chart pulls, and it is the version Helm Publish packages and verifies, so the chart tag and the application version it ships are fixed together at tag time.
+
+### The very first release has an order
+
+The chart ships with `appVersion: "0.0.0"`, a placeholder that means "the application has never been released". Merge the three PRs in this order:
+
+1. **the application release PR** (`chore: release <version>`). It tags `v<version>` and Docker Publish pushes the three images.
+2. **the appVersion sync PR** (`fix(helm): update chart app version to <version>`), which the Release Please workflow opens automatically once that release is published. It sets `Chart.yaml` `appVersion` to the version just released.
+3. **the chart release PR** (`chore: release gascurve-chart <version>`), which release-please opens because of the commit in step 2. It tags `gascurve-chart-v<version>`, and the chart tagged there records a real `appVersion`.
+
+Merging the chart PR first is the one ordering that produces a broken artifact: the chart tag freezes `appVersion: 0.0.0`, and a chart that cannot say which images it deploys is not publishable. Helm Publish refuses that tag by name and prints this ordering along with the recovery command, rather than misreporting it as a missing `v0.0.0` release. To recover without re-tagging, dispatch Helm Publish with `version=<chart version>`, `app_version=<the published application version>` and `override_app_version` checked. Only the first chart release needs this; from the second on, step 2 has already run.
+
+Every release after the first follows the same order without anyone thinking about it, because step 2 is what causes step 3 to exist.
+
+### Keeping appVersion current
+
+Automatic, with one repository prerequisite:
+
+- When an application release is published, the Release Please workflow opens the `fix(helm): update chart app version to <version>` PR and enables auto-merge on it. Merging that PR is what makes release-please open the next chart release PR.
+- **Allow auto-merge must be enabled** in the repository settings (Settings, General, Pull Requests, "Allow auto-merge"). GitHub rejects `gh pr merge --auto` when the repository setting is off, so without it the sync PR is opened and then sits there, and `appVersion` stays behind until someone merges it by hand. The workflow step prints the PR number and the exact recovery command when this happens.
+- Auto-merge still waits for required reviews and required status checks. It does not bypass branch protection.
+
+### The release token
+
+release-please needs a token other than `GITHUB_TOKEN`, so that the release PR gets CI runs and the published release triggers the publish workflows. Either form needs three permissions, all read/write: **Contents**, **Pull requests** and **Issues**.
+
+Issues write is the one that is easy to miss. release-please manages its own `autorelease:*` labels, label management counts as an Issues permission, and without it the very first run in a repository that has no such labels yet fails while creating them.
+
+- **Preferred: a GitHub App** (`RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY`), installed on this repository only. The workflow narrows its token request to exactly those three permissions, but narrowing cannot add anything: the App installation itself must have been granted Contents, Pull requests and Issues read/write by the repository owner, which is done in the App's installation settings and not from this repository.
+- **Fallback: `RELEASE_PLEASE_TOKEN`**, a fine-grained personal access token scoped to this repository only, with Contents read/write, Pull requests read/write and Issues read/write, and nothing else. Do not use a classic PAT.
+
+The chart appVersion sync job only pushes a branch and opens a PR, so it stays on Contents and Pull requests and needs no Issues permission.
+
+### Published artifacts are immutable
+
+The registry carries an immutable-tag rule on exact `MAJOR.MINOR.PATCH` tags, for images and for chart versions alike. A published version cannot be replaced, only superseded, so neither publish workflow has an `overwrite` input: there is nothing an overwrite could do except fail against that rule.
+
+That makes reruns safe rather than dangerous. Both workflows check what is already in the registry before doing anything:
+
+- if the exact artifact is missing, they build, scan and push it, so a rerun after a partial failure finishes only the images or the chart that never made it;
+- if it is present and is what this release should be (an image: both platforms, the same `org.opencontainers.image.version` and `revision`; a chart: the same name, version and `appVersion`), the run reports success and does nothing;
+- if it is present but is something else, the run fails and says so. That is not repairable in place. Publish a new patch version.
+
+Moving tags are handled separately, on every run that gets that far, so a rerun whose only job was to finish an interrupted publish still fixes up aliases the interrupted run never wrote. `latest` and `<major>.<minor>` are excluded from the immutable-tag rule and are repointed from the digest the exact tag resolves to, and only when the version being published is the greatest published stable release: repairing or back-filling an older version never rolls `latest` backward.
+
+### Repairing a publish
+
+Both workflows take a `workflow_dispatch`:
+
+- **Docker Publish** requires a published, non-prerelease release for `v<version>` and checks that `.release-please-manifest.json` at that tag agrees. Each architecture is pushed by digest with no tag, scanned with Trivy at HIGH and CRITICAL, and only then joined into the exact version tag, so nothing that fails the scan can ever be pulled by version.
+- **Helm Publish** requires a published, non-prerelease release for `gascurve-chart-v<version>`, checks that `.release-please-manifest.json` at that tag records the same chart version, checks out the chart tag and packages the `appVersion` recorded there. All three images for that `appVersion` must already exist in the registry. The `app_version` input is an explicit override and is ignored unless `override_app_version` is also set; a mismatch with the tag is logged as a warning.

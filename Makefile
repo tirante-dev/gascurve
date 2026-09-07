@@ -1,4 +1,4 @@
-.PHONY: all build build-collector build-api build-migrate run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt staticcheck govulncheck mod-verify ci clean db-up db-down db-migrate db-rollback docker-build web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
+.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
 
 GOCMD=go
 GOBUILD=$(GOCMD) build
@@ -12,6 +12,9 @@ COVERAGE_PACKAGES ?= ./internal/...
 COVERAGE_DIR=coverage
 COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
 COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
+# Cross-build matrix, same as the go-build job in .github/workflows/ci.yml.
+BUILD_PLATFORMS ?= linux/amd64 linux/arm64 darwin/arm64
+DIST_DIR=dist
 NPM=npm --prefix web
 DB_URL ?= postgres://postgres:postgres@127.0.0.1:5432/gascurve?sslmode=disable
 
@@ -29,6 +32,16 @@ build-api:
 
 build-migrate:
 	$(GOBUILD) -o $(MIGRATE_BINARY) ./cmd/migrate
+
+# Static cross-builds for every platform CI builds, into $(DIST_DIR)/.
+build-matrix:
+	@set -e; for platform in $(BUILD_PLATFORMS); do \
+		goos=$${platform%/*}; goarch=$${platform#*/}; \
+		echo "build $$goos/$$goarch"; \
+		for cmd in collector api migrate; do \
+			GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 $(GOBUILD) -o $(DIST_DIR)/gascurve-$$cmd-$$goos-$$goarch ./cmd/$$cmd; \
+		done; \
+	done
 
 run-collector: build-collector
 	./$(COLLECTOR_BINARY)
@@ -72,20 +85,33 @@ fmt:
 	gofmt -s -w .
 	goimports -w -local $(MODULE) .
 
+# Same check CI runs; never writes files.
+fmt-check:
+	@GOFMT_FILES="$$(gofmt -l -s .)"; \
+	GOIMPORTS_FILES="$$(goimports -l -local $(MODULE) .)"; \
+	if [ -n "$$GOFMT_FILES" ] || [ -n "$$GOIMPORTS_FILES" ]; then \
+		echo "FAIL: formatting issues, run 'make fmt'"; \
+		echo "gofmt:"; echo "$$GOFMT_FILES"; \
+		echo "goimports:"; echo "$$GOIMPORTS_FILES"; \
+		exit 1; \
+	fi; \
+	echo "OK: formatting"
+
 staticcheck:
 	staticcheck ./...
 
 govulncheck:
 	govulncheck ./...
 
+# `go mod tidy -diff` prints what tidy would change and exits non-zero; it
+# never writes go.mod or go.sum.
 mod-verify:
 	$(GOCMD) mod verify
-	$(GOCMD) mod tidy
-	@if [ -n "$$(git diff -- go.mod go.sum)" ]; then echo "FAIL: go.mod/go.sum not tidy"; git diff -- go.mod go.sum; exit 1; fi
+	@if ! $(GOCMD) mod tidy -diff; then echo "FAIL: go.mod/go.sum not tidy, run 'go mod tidy'"; exit 1; fi
 
 clean:
 	rm -f $(COLLECTOR_BINARY) $(API_BINARY) $(MIGRATE_BINARY)
-	rm -rf $(COVERAGE_DIR) web/.next web/coverage
+	rm -rf $(DIST_DIR) $(COVERAGE_DIR) web/.next web/coverage
 
 # ---------------------------------------------------------------- Database
 
@@ -107,6 +133,30 @@ docker-build:
 	docker build -f Dockerfile.collector -t $(COLLECTOR_BINARY) .
 	docker build -f Dockerfile.api -t $(API_BINARY) .
 	docker build -f Dockerfile.web -t gascurve-web .
+
+# Same policy as the CI Trivy step.
+docker-scan:
+	trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed $(COLLECTOR_BINARY)
+	trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed $(API_BINARY)
+	trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed gascurve-web
+
+# ---------------------------------------------------------------- Chart
+
+CHART=charts/gascurve
+
+# values.schema.json requires a database whenever the collector or api is
+# enabled, so lint runs once per documented configuration in $(CHART)/ci
+# (the same files ct lint uses). Same as .github/workflows/chart-test.yml.
+chart-lint:
+	@set -e; for values in $(CHART)/ci/*-values.yaml; do \
+		echo "== helm lint --strict --values $$values"; \
+		helm lint $(CHART) --strict --values "$$values"; \
+	done
+
+# The render assertions live in one script so this target and
+# .github/workflows/chart-test.yml can never drift apart.
+chart-template:
+	bash scripts/chart-checks.sh
 
 # ---------------------------------------------------------------- Web
 
@@ -142,6 +192,22 @@ web-ci: web-lint web-typecheck web-test-coverage web-build
 
 # ---------------------------------------------------------------- CI
 
-# Everything GitHub Actions runs, in order. Catch problems here first.
-ci: fmt vet lint staticcheck test-coverage build mod-verify web-ci
+# `make ci` is the CI workflow (.github/workflows/ci.yml) minus the jobs that
+# need external services or tools: it never writes tracked files (fmt-check,
+# not fmt; go mod tidy -diff, not tidy), cross-builds the same platform matrix
+# as the go-build job (build-matrix) and is self-contained on a fresh clone
+# (web-install). The remaining CI jobs
+# have their own targets so they can be run when the prerequisites exist:
+#   ci-integration  Postgres in TEST_DB_URL (go-integration job)
+#   ci-docker       docker + trivy (docker job)
+#   ci-chart        helm, optionally ct (chart-test.yml)
+# Secret scanning (secrets-scan.yml, gitleaks) has no local target.
+ci: fmt-check vet lint staticcheck govulncheck test-coverage test-race build-matrix mod-verify web-install web-ci
 	@echo "All CI checks passed."
+
+ci-integration: test-integration
+
+ci-docker: docker-build docker-scan
+
+ci-chart: chart-lint chart-template
+	@if command -v ct > /dev/null 2>&1; then ct lint --config charts/ct.yaml --all; else echo "ct not installed, skipping ct lint"; fi

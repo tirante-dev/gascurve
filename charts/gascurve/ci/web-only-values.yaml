@@ -1,0 +1,6 @@
+# ct lint / helm lint values: web frontend only. No database is required when
+# neither the collector nor the api is enabled.
+collector:
+  enabled: false
+api:
+  enabled: false

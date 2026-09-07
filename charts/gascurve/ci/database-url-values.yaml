@@ -1,0 +1,3 @@
+# ct lint / helm lint values: database URL rendered into the chart-managed Secret.
+database:
+  url: postgres://x:y@db/gascurve?sslmode=disable

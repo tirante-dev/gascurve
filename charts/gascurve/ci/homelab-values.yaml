@@ -1,0 +1,55 @@
+# ct lint / helm lint values: the shape the homelab install actually uses, kept
+# here so the schema can never be tightened in a way that rejects it.
+#
+# One network, whose keyed primary RPC and WebSocket URLs come from a Secret
+# through collector.extraEnv (never from the ConfigMap), a fast tick against
+# that keyed endpoint, an archive primary so the backfill can anchor, two
+# fallbacks (an unmetered in-cluster node that also serves newHeads over ws://,
+# then the public endpoint at its documented 4 calls per second), a 30-day
+# backfill, and the ETH/USD fetch switched off with an empty ETH_USD_SOURCE
+# (empty is meaningful: it disables the fetch, and every snapshot then reports
+# ethUsd: null).
+database:
+  existingSecret: gascurve-db
+
+collector:
+  extraEnv:
+    - name: NETWORK_ROBINHOOD_RPC_URL
+      valueFrom:
+        secretKeyRef:
+          name: gascurve-rpc
+          key: robinhood
+    - name: NETWORK_ROBINHOOD_WS_URL
+      valueFrom:
+        secretKeyRef:
+          name: gascurve-rpc
+          key: robinhood-ws
+    - name: ETH_USD_SOURCE
+      value: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+config:
+  collector:
+    tick_interval: 500ms
+    backfill_depth: 720h
+  networks:
+    - name: robinhood
+      display_name: Robinhood Chain
+      chain_id: 4663
+      explorer_url: https://robinhoodchain.blockscout.com
+      calls_per_second: 25
+      archive: true
+      enabled: true
+      fallbacks:
+        - rpc_url: http://nitro-rpc.chain.svc.cluster.local:8547
+          ws_url: ws://nitro-rpc.chain.svc.cluster.local:8548
+          archive: true
+          calls_per_second: 0
+        - rpc_url: https://rpc.mainnet.chain.robinhood.com
+          calls_per_second: 4

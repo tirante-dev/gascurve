@@ -5,6 +5,12 @@ server:
   cors_origins:
     - http://localhost:3000
   dev_mode: false
+  # Reverse proxies (CIDRs or addresses) whose X-Forwarded-For is believed
+  # for rate limiting. Empty: the peer address is always the client.
+  trusted_proxies: []
+  # Concurrent WebSocket connections allowed per client address and in total.
+  ws_max_per_ip: 8
+  ws_max_total: 2000
 
 database:
   url: postgres://postgres:postgres@127.0.0.1:5432/gascurve?sslmode=disable
@@ -13,16 +19,77 @@ database:
   run_migrations: false
 
 collector:
-  tick_interval: 1s          # live sample cadence per network
+  tick_interval: 3s          # live sample cadence on a polled network: a sample costs five calls, so at the
+                             # public budget of four per second a 1 s tick starved the header catch-up and
+                             # skipped gaps; dedicated endpoints override this per network (500ms with newHeads)
   slow_interval: 60s         # L1 pricer, balances, owner-action log scan
   header_batch_size: 100     # blocks per JSON-RPC batch when catching up
   block_retention: 48h       # per-block rows kept before pruning to buckets
   sample_retention: 168h     # raw state samples kept
-  backfill_depth: 720h       # how far back the resumable backfill reaches (30d)
+  backfill_depth: 1h         # how far back the owner scan and the resumable backfill reach; a development default,
+                             # production sets 720h (30d) in the chart values
+  backfill_anchor_interval: 1000  # blocks between state anchors when a network is archive: true
+  max_catch_up_batches: 10   # paced networks skip a catch-up gap larger than this many header batches; unlimited networks never skip
+  failover_cooldown: 60s     # time on a fallback endpoint before the primary is probed again (one eth_chainId)
+  # ETH/USD spot for the fee cards, fetched server side by the slow loop
+  # (the browser never calls a price API). One fetch per interval for the
+  # whole process, shared by every network. Supported: coinbase (Coinbase's
+  # public spot endpoint, no key), coingecko (the public simple price
+  # endpoint), or an https URL answering JSON with a top-level price holding
+  # a string or a number. Leave it empty to disable: every snapshot then
+  # reports ethUsd: null. Environment: ETH_USD_SOURCE, ETH_USD_MAX_AGE.
+  eth_usd_source: coinbase
+  eth_usd_max_age: 10m       # past this a quote is reported as null rather than shown as live
 
 # Every network is an Arbitrum Nitro chain. calls_per_second is the budget for
-# the public endpoint and counts JSON-RPC calls, including items inside a
-# batch request, because that is how the Robinhood public RPC meters.
+# a public endpoint and counts JSON-RPC calls, including items inside a batch
+# request, because that is how the Robinhood public RPC meters. Set it to 0 for
+# a dedicated node (unlimited); anything positive below 0.1 (one call every ten
+# seconds) is rejected, since a single token would then take longer than any
+# request timeout. A quarter of the budget (at least one call per second) is
+# reserved for the head sample, so bulk work (catch-up headers, log scans, the
+# backfill) never delays that share; what a tick wants beyond it queues first
+# come, first served with the bulk work, so a demanding tick slows the backfill
+# down rather than stopping it. Below one call per second a whole-token reserve
+# is the whole burst, so the two lanes take turns on it instead and a batch
+# carries one call at a time. A QuickNode endpoint
+# enforces 50 requests per second, counting every item inside a batch, and
+# reports the excess as a JSON-RPC error (-32007 "50/second request limit
+# reached") rather than an HTTP 429. The pacer's burst is twice the
+# sustained rate, so give it calls_per_second: 25: the one-second peaks then
+# stay under the window, where 40 tripped it several times a minute and each
+# trip cost a 2 s back-off that stalled the backfill and the gap filler.
+# Optional per network:
+#   tick_interval: overrides collector.tick_interval for this network (the
+#            polling cadence, and the safety timer while a newHeads
+#            subscription is down). A dedicated endpoint can run at 500ms;
+#            a public one should stay at 1s, since every tick costs about
+#            five calls and a 250ms tick would want most of a 4/s budget.
+#            Environment: NETWORK_<NAME>_TICK_INTERVAL.
+#   ws_url:  wss endpoint; the collector subscribes to newHeads and samples
+#            state at each head instead of polling every tick_interval.
+#   archive: true when the node serves historical state; the backfill then
+#            anchors the replay to real backlogs every backfill_anchor_interval
+#            blocks instead of relying on replay alone.
+#   fallbacks: further endpoints for the same chain, each with the same four
+#            fields (rpc_url, ws_url, archive, calls_per_second) and its own
+#            token bucket and adaptive batch cap. Ordinary calls go to the
+#            primary; after a failed request (transport error, HTTP 5xx, a 429
+#            that outlasts its back-off, chain id mismatch) they move to the
+#            next fallback for collector.failover_cooldown, then the primary
+#            is probed and taken back. newHeads uses the first endpoint with a
+#            ws_url and the backfill anchors the first with archive: true,
+#            whichever endpoint is active. Every endpoint must report chain_id
+#            or it is disabled. Never put URLs that carry keys here: set them
+#            in the environment instead (positional, comma-separated lists):
+#              NETWORK_<NAME>_FALLBACK_RPC_URLS, NETWORK_<NAME>_FALLBACK_WS_URLS,
+#              NETWORK_<NAME>_FALLBACK_ARCHIVE, NETWORK_<NAME>_FALLBACK_CALLS_PER_SECOND
+#            Example in YAML for a keyless fallback:
+#              fallbacks:
+#                - rpc_url: https://spare.example/rpc
+#                  ws_url: wss://spare.example/ws
+#                  archive: true
+#                  calls_per_second: 0
 networks:
   - name: robinhood
     display_name: Robinhood Chain

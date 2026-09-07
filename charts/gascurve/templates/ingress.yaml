@@ -1,0 +1,43 @@
+{{- if .Values.ingress.enabled -}}
+{{- if and (not .Values.api.enabled) (not .Values.web.enabled) -}}
+{{- fail "ingress.enabled is true but both api.enabled and web.enabled are false, so this Ingress would have no HTTP paths and the API server would reject it. Enable the api or the web component, or set ingress.enabled: false. values.schema.json rejects this combination too; you are seeing this message because schema validation was skipped." -}}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "gascurve.fullname" . }}
+  labels:
+    {{- include "gascurve.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- if .Values.api.enabled }}
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "gascurve.fullname" . }}-api
+                port:
+                  number: {{ .Values.api.service.port }}
+          {{- end }}
+          {{- if .Values.web.enabled }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "gascurve.fullname" . }}-web
+                port:
+                  number: {{ .Values.web.service.port }}
+          {{- end }}
+{{- end }}

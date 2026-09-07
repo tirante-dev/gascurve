@@ -44,3 +44,14 @@ updates:
     commit-message:
       prefix: "deps"
     open-pull-requests-limit: 5
+
+  - package-ecosystem: "helm"
+    directory: "/charts/gascurve"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "America/Chicago"
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 5

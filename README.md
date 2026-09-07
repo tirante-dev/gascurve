@@ -22,7 +22,7 @@ make run-api              # terminal 2
 make web-install && make web-dev   # terminal 3, http://localhost:3000
 ```
 
-`make ci` runs every check CI runs. See [CONTRIBUTING.md](CONTRIBUTING.md).
+`make ci` runs the CI workflow locally; `make ci-integration`, `make ci-docker` and `make ci-chart` cover the rest. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 

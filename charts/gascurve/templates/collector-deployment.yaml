@@ -1,0 +1,72 @@
+{{- if .Values.collector.enabled }}
+{{- include "gascurve.validateNetworkRPC" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gascurve.fullname" . }}-collector
+  labels:
+    {{- include "gascurve.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+spec:
+  # Exactly one collector. See values.yaml.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "gascurve.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: collector
+  template:
+    metadata:
+      labels:
+        {{- include "gascurve.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: collector
+      annotations:
+        {{- include "gascurve.goPodAnnotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "gascurve.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.migrations.enabled }}
+      initContainers:
+        {{- include "gascurve.migrateInitContainer" (list . .Values.collector.image) | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: collector
+          image: {{ include "gascurve.image" (list . .Values.collector.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "gascurve.containerSecurityContext" (list . .Values.collector.securityContext) | nindent 12 }}
+          env:
+            {{- include "gascurve.goEnv" (list . .Values.collector.extraEnv) | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gascurve
+              readOnly: true
+          {{- with .Values.collector.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "gascurve.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

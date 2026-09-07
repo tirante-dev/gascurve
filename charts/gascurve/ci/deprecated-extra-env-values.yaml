@@ -1,0 +1,21 @@
+# ct lint / helm lint values: the deprecated top-level extraEnv alias, which
+# still reaches the collector, api and migration containers and satisfies the
+# per-network RPC URL check.
+database:
+  url: postgres://x:y@db/gascurve?sslmode=disable
+extraEnv:
+  - name: NETWORK_ROBINHOOD_RPC_URL
+    valueFrom:
+      secretKeyRef:
+        name: gascurve-rpc
+        key: robinhood
+  - name: LEGACY_EXAMPLE
+    value: legacy
+config:
+  networks:
+    - name: robinhood
+      display_name: Robinhood Chain
+      chain_id: 4663
+      explorer_url: https://robinhoodchain.blockscout.com
+      calls_per_second: 0
+      enabled: true

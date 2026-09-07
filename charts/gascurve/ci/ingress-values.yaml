@@ -1,0 +1,6 @@
+# ct lint / helm lint values: ingress with an existing database Secret.
+database:
+  existingSecret: my-db
+ingress:
+  enabled: true
+  host: gascurve.com

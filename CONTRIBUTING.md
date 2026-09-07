@@ -17,7 +17,7 @@ make web-dev                    # http://localhost:3000
 
 ## Checks
 
-`make ci` runs everything CI runs: Go format, vet, lint, staticcheck, tests with the coverage gate, build, module verify, then the web lint, typecheck, tests with coverage gate, and build. Individual targets are listed in the Makefile and in `CLAUDE.md`.
+`make ci` runs the CI workflow locally: Go format check, vet, lint, staticcheck, govulncheck, tests with the coverage gate, race tests, build, module verify, then the web install, lint, typecheck, tests with coverage gate, and build. `make ci-integration` (needs `TEST_DB_URL`), `make ci-docker` and `make ci-chart` cover the remaining jobs. Individual targets are listed in the Makefile and in `CLAUDE.md`.
 
 ## Pull requests
 

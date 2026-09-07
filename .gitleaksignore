@@ -1,0 +1,12 @@
+# Deliberately empty of fingerprints.
+#
+# A gitleaks fingerprint is <file>:<rule>:<startline>, so it stops matching
+# the moment the suppressed line moves, and the scan silently starts failing
+# (or, worse, a genuinely new finding lands on the old line number and is
+# suppressed). The one reviewed non-secret finding, the RFC 6455 sample
+# WebSocket nonce in internal/api/ws_test.go, is allowlisted in
+# .gitleaks.toml by file and by exact value instead, which cannot drift.
+#
+# Add a fingerprint here only for a finding that cannot be pinned to a stable
+# file-and-value pair, and say why. Anything that can be expressed as a
+# targetRules allowlist in .gitleaks.toml belongs there.

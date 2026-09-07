@@ -1,0 +1,216 @@
+package db
+
+import (
+	"database/sql"
+	"math/big"
+	"time"
+
+	"github.com/lib/pq"
+
+	"github.com/tirante-dev/gascurve/internal/pricer"
+)
+
+// ResolutionOrder fixes the fold order so output is deterministic.
+var ResolutionOrder = []string{Resolution1m, Resolution15m, Resolution1h}
+
+// BucketBuilder aggregates block rows into one bucket. It is the single
+// definition of the bucket arithmetic, shared by the collector's folds, the
+// in-memory store and the tests that pin the SQL rebuild to it.
+type BucketBuilder struct {
+	b Bucket
+}
+
+// NewBucketBuilder starts an empty bucket.
+func NewBucketBuilder(chainID uint64, resolution string, start time.Time) *BucketBuilder {
+	return &BucketBuilder{b: Bucket{
+		ChainID: chainID, Resolution: resolution, BucketStart: start,
+		FeesWei: NewWei(nil), BaseFeeMin: NewWei(nil), BaseFeeAvg: NewWei(nil), BaseFeeMax: NewWei(nil), BaseFeeSum: NewNullWei(nil),
+		MinBaseFee: NewNullWei(nil), FloorFeesWei: NewNullWei(nil), SurplusFeesWei: NewNullWei(nil),
+		BacklogsEnd: Uint64Array{}, BacklogsMax: Uint64Array{}, ConstraintBipsEnd: pq.Int64Array{},
+		PricingVersion: PricingFull,
+	}}
+}
+
+// Add folds one block in. setID is the constraint set in force at the
+// block. A block without the pricing breakdown (PricingUnknown, or no
+// recorded floor) makes the bucket's floor, surplus and minimum fee
+// unknown: one block of guessed history must not be presented as an exact
+// split for the whole window.
+func (a *BucketBuilder) Add(blk Block, setID sql.NullInt64) {
+	fee := blk.BaseFee.BigInt()
+	if !blk.Known() {
+		a.b.PricingVersion = PricingUnknown
+	}
+	if a.b.Blocks == 0 || fee.Cmp(a.b.BaseFeeMin.BigInt()) < 0 {
+		a.b.BaseFeeMin = NewWei(new(big.Int).Set(fee))
+	}
+	if fee.Cmp(a.b.BaseFeeMax.BigInt()) > 0 {
+		a.b.BaseFeeMax = NewWei(new(big.Int).Set(fee))
+	}
+	a.b.Blocks++
+	a.b.GasUsed += blk.GasUsed
+	a.b.BaseFeeSum = NewNullWei(new(big.Int).Add(a.b.BaseFeeSum.Wei.BigInt(), fee))
+	gas := new(big.Int).SetUint64(blk.GasUsed)
+	fees := new(big.Int).Mul(fee, gas)
+	a.b.FeesWei = NewWei(new(big.Int).Add(fees, a.b.FeesWei.BigInt()))
+	floor := new(big.Int).Mul(blk.MinBaseFee.Wei.BigInt(), gas)
+	a.b.FloorFeesWei = NewNullWei(new(big.Int).Add(floor, a.b.FloorFeesWei.Wei.BigInt()))
+	a.b.SurplusFeesWei = NewNullWei(new(big.Int).Sub(a.b.FeesWei.BigInt(), a.b.FloorFeesWei.Wei.BigInt()))
+	if blk.Number >= a.b.LastBlock {
+		a.b.LastBlock = blk.Number
+		a.b.ExponentEndBips = blk.ExponentBips
+		a.b.BacklogsEnd = append(Uint64Array{}, blk.Backlogs...)
+		a.b.ConstraintBipsEnd = append(pq.Int64Array{}, blk.ConstraintBips...)
+		a.b.MinBaseFee = blk.MinBaseFee
+		if setID.Valid {
+			a.b.ConstraintSetID = setID
+		}
+	}
+	for i, v := range blk.Backlogs {
+		if i >= len(a.b.BacklogsMax) {
+			a.b.BacklogsMax = append(a.b.BacklogsMax, v)
+		} else if v > a.b.BacklogsMax[i] {
+			a.b.BacklogsMax[i] = v
+		}
+	}
+	if e := ReplayErrorBips(blk); e > a.b.ReplayErrorBips {
+		a.b.ReplayErrorBips = e
+	}
+}
+
+// Bucket returns the aggregate; the average is derived from the exact sum.
+// A window holding any block without the pricing breakdown reports no fee
+// split and no floor at all.
+func (a *BucketBuilder) Bucket() Bucket {
+	if a.b.Blocks > 0 {
+		a.b.BaseFeeAvg = NewWei(new(big.Int).Div(a.b.BaseFeeSum.Wei.BigInt(), big.NewInt(a.b.Blocks)))
+	}
+	if a.b.PricingVersion == PricingUnknown {
+		a.b.FloorFeesWei, a.b.SurplusFeesWei, a.b.MinBaseFee = NullWei{}, NullWei{}, NullWei{}
+		a.b.ConstraintBipsEnd = nil
+	}
+	return a.b
+}
+
+// baseFeeSumOf is the sum behind a bucket's average: the exact one when
+// known, otherwise the rounded average times the block count (the best a
+// row written before the sum existed can offer).
+func baseFeeSumOf(b Bucket) *big.Int {
+	if b.BaseFeeSum.Valid {
+		return b.BaseFeeSum.Wei.BigInt()
+	}
+	return new(big.Int).Mul(b.BaseFeeAvg.BigInt(), big.NewInt(b.Blocks))
+}
+
+// addNullWei adds two nullable values; the sum is unknown when either is.
+func addNullWei(a, b NullWei) NullWei {
+	if !a.Valid || !b.Valid {
+		return NullWei{}
+	}
+	return NewNullWei(new(big.Int).Add(a.Wei.BigInt(), b.Wei.BigInt()))
+}
+
+// Blocks returns how many blocks were folded.
+func (a *BucketBuilder) Blocks() int64 { return a.b.Blocks }
+
+// ReplayErrorBips is |predicted - actual| in bips for a stored block.
+func ReplayErrorBips(blk Block) int64 {
+	return pricer.ErrorBips(blk.PredictedBaseFee.BigInt(), blk.BaseFee.BigInt())
+}
+
+// BucketStarts returns the distinct window starts of rows at a resolution,
+// ascending.
+func BucketStarts(rows []Block, resolution string) []time.Time {
+	width := Resolutions[resolution]
+	var out []time.Time
+	seen := map[int64]bool{}
+	for _, b := range rows {
+		start := b.TS.UTC().Truncate(width)
+		if !seen[start.Unix()] {
+			seen[start.Unix()] = true
+			out = append(out, start)
+		}
+	}
+	return out
+}
+
+// FoldBlocks groups consecutive blocks (ascending by number) into partial
+// buckets for every resolution, in ResolutionOrder.
+func FoldBlocks(rows []Block, setID func(uint64) sql.NullInt64) []Bucket {
+	var out []Bucket
+	for _, res := range ResolutionOrder {
+		width := Resolutions[res]
+		var cur *BucketBuilder
+		for _, blk := range rows {
+			start := blk.TS.UTC().Truncate(width)
+			if cur == nil || !cur.b.BucketStart.Equal(start) {
+				if cur != nil {
+					out = append(out, cur.Bucket())
+				}
+				cur = NewBucketBuilder(blk.ChainID, res, start)
+			}
+			cur.Add(blk, setID(blk.Number))
+		}
+		if cur != nil {
+			out = append(out, cur.Bucket())
+		}
+	}
+	return out
+}
+
+// MergeBuckets adds partial bucket b into stored bucket old exactly like the
+// SQL fold: counters and sums add, min/max combine, *_end fields follow the
+// higher last block, array maxima are element-wise, and the pricing version
+// is the lower of the two. A sum or fee split that is unknown on either
+// side stays unknown, and a merged bucket holding any block without the
+// pricing breakdown reports no split and no floor; the average then falls
+// back to the rounded reconstruction for the unknown side.
+func MergeBuckets(old, b Bucket) Bucket {
+	merged := old
+	merged.Blocks = old.Blocks + b.Blocks
+	merged.GasUsed += b.GasUsed
+	merged.FeesWei = NewWei(new(big.Int).Add(old.FeesWei.BigInt(), b.FeesWei.BigInt()))
+	merged.BaseFeeSum = addNullWei(old.BaseFeeSum, b.BaseFeeSum)
+	merged.FloorFeesWei = addNullWei(old.FloorFeesWei, b.FloorFeesWei)
+	merged.SurplusFeesWei = addNullWei(old.SurplusFeesWei, b.SurplusFeesWei)
+	if old.Blocks == 0 || b.BaseFeeMin.BigInt().Cmp(old.BaseFeeMin.BigInt()) < 0 {
+		merged.BaseFeeMin = b.BaseFeeMin
+	}
+	if b.BaseFeeMax.BigInt().Cmp(old.BaseFeeMax.BigInt()) > 0 {
+		merged.BaseFeeMax = b.BaseFeeMax
+	}
+	if merged.Blocks > 0 {
+		sum := new(big.Int).Add(baseFeeSumOf(old), baseFeeSumOf(b))
+		merged.BaseFeeAvg = NewWei(sum.Div(sum, big.NewInt(merged.Blocks)))
+	} else {
+		merged.BaseFeeAvg = NewWei(nil)
+	}
+	merged.PricingVersion = min(old.PricingVersion, b.PricingVersion)
+	if b.LastBlock >= old.LastBlock {
+		merged.ExponentEndBips = b.ExponentEndBips
+		merged.BacklogsEnd = b.BacklogsEnd
+		merged.ConstraintBipsEnd = b.ConstraintBipsEnd
+		merged.MinBaseFee = b.MinBaseFee
+		if b.ConstraintSetID.Valid {
+			merged.ConstraintSetID = b.ConstraintSetID
+		}
+		merged.LastBlock = b.LastBlock
+	}
+	if merged.PricingVersion == PricingUnknown {
+		merged.FloorFeesWei, merged.SurplusFeesWei, merged.MinBaseFee = NullWei{}, NullWei{}, NullWei{}
+		merged.ConstraintBipsEnd = nil
+	}
+	n := max(len(old.BacklogsMax), len(b.BacklogsMax))
+	mx := make(Uint64Array, n)
+	for i := range n {
+		if i < len(old.BacklogsMax) {
+			mx[i] = old.BacklogsMax[i]
+		}
+		if i < len(b.BacklogsMax) && b.BacklogsMax[i] > mx[i] {
+			mx[i] = b.BacklogsMax[i]
+		}
+	}
+	merged.BacklogsMax = mx
+	merged.ReplayErrorBips = max(old.ReplayErrorBips, b.ReplayErrorBips)
+	return merged
+}
