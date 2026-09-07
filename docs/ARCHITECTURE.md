@@ -91,7 +91,7 @@ Replay comparison: ArbOS computes the fee in block N's `startBlock` and it appli
 All tables are keyed by `chain_id` first. Wei values are `NUMERIC(40,0)`. Gas values are `BIGINT`. Backlogs are `NUMERIC(20,0)[]`: a backlog is a `uint64` in the pricer and saturates at 2^64-1, which does not fit in a `BIGINT`. A nullable column means unknown, never zero, and `pricing_version` says which rows carry the full pricing breakdown (1) and which are history recorded without it (0).
 
 Production release `v1.0.1` established schema version 1 from `000001_init`. Released migrations are immutable, and every correction uses a new forward migration. CI verifies both empty-schema installation and upgrades from the last production schema. See [MIGRATIONS.md](MIGRATIONS.md) for authoring, release, rollback, and concurrent pull request rules.
-Forward migration `000002_state_samples_chain_block` adds the state-sample lookup index. Forward migration `000003_missing_ranges` adds durable recovery records for skipped history and therefore follows `000002`.
+Forward migration `000002_state_samples_chain_block` adds the state-sample lookup index, `000003_owner_action_tx_index` adds the owner-action transaction index column, and `000004_missing_ranges` adds durable recovery records for skipped history.
 
 ```sql
 networks            (chain_id PK, name, display_name, explorer_url, enabled, head_block, head_at, last_sample_at, last_error, updated_at)
