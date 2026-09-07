@@ -318,8 +318,6 @@ export type UsdMath = {
   line: string;
   /** Which quote priced it and how old that quote is: "coinbase, 34 s ago". */
   provenance: string;
-  /** Both, for a title attribute: a browser breaks the tooltip on the newline. */
-  title: string;
   /** The same facts in prose, for the accessible description. */
   description: string;
 };
@@ -349,7 +347,6 @@ export function usdMath(eth: number, ethUsd: EthUsd | null | undefined, nowMs: n
     usd,
     line,
     provenance,
-    title: `${line}\n${provenance}`,
     description: `${usd} US dollars, ${ethText} at ${rate} dollars per ETH, quoted by ${ethUsd.source} ${age} ago`,
   };
 }
