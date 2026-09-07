@@ -497,28 +497,82 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ns.Last429At = optString(st, db.StateLast429At)
 		ns.BackfillCursor = optString(st, db.StateBackfillCursor)
 		ns.ArbOSVersion = optString(st, db.StateArbOSVersion)
-		ns.Holes = holesStatus(st)
+		ns.Holes, err = s.holesStatus(r.Context(), n.ChainID, st)
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		ns.Capacity = capacityStatus(st)
+		ns.Degraded = ns.Capacity.Saturated || ns.Capacity.CheckpointError || ns.Holes.Blocks > 0 || ns.Holes.CheckpointError
 		ns.EndpointsStatus = endpointsStatus(st)
 		out.Networks = append(out.Networks, ns)
 	}
 	writeJSON(w, http.StatusOK, cacheNone, out)
 }
 
-// holesStatus summarizes the ranges the collector has not indexed: how
-// many are queued for the gap filler, how many blocks they still cover
-// and how many can never be filled (nothing before them is stored with a
-// pricing state). A network without a checkpoint, or with an unreadable
-// one, reports zeros.
-func holesStatus(st map[string]string) model.HolesStatus {
-	raw, ok := st[db.StateHoles]
+// holesStatus summarizes durable missing ranges. During a rolling upgrade it
+// also reads the legacy checkpoint until the collector imports it. A malformed
+// checkpoint sets an explicit degradation signal instead of looking empty.
+func (s *Server) holesStatus(ctx context.Context, chainID uint64, st map[string]string) (model.HolesStatus, error) {
+	rows, err := s.store.MissingRanges(ctx, chainID)
+	if err != nil {
+		return model.HolesStatus{}, err
+	}
+	holes := make([]model.Hole, 0, len(rows))
+	checkpointError := false
+	for _, row := range rows {
+		// The decode only detects corruption. Once one row is malformed the
+		// remaining ones add nothing, and /status is polled often.
+		if !checkpointError && row.ReplayState != nil {
+			var state model.HoleState
+			if err := row.ReplayState.Unmarshal(&state); err != nil {
+				checkpointError = true
+			}
+		}
+		holes = append(holes, model.Hole{
+			From: row.From, To: row.To, At: row.DetectedAt.UTC().Format(time.RFC3339), Lifecycle: row.Lifecycle,
+			Next: row.Cursor, Reason: row.Reason, RetryCount: row.RetryCount,
+		})
+	}
+	if raw, ok := st[db.StateHoles]; ok {
+		var legacy []model.Hole
+		if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
+			checkpointError = true
+		} else {
+			holes = append(holes, legacy...)
+		}
+	}
+	out := model.SummarizeHoles(holes)
+	out.CheckpointError = checkpointError
+	now := s.now()
+	oldest := now
+	known := false
+	for _, h := range holes {
+		at, err := time.Parse(time.RFC3339, h.At)
+		if err != nil {
+			out.CheckpointError = true
+			continue
+		}
+		if !known || at.Before(oldest) {
+			oldest, known = at, true
+		}
+	}
+	if known && oldest.Before(now) {
+		out.OldestAgeSeconds = uint64(now.Sub(oldest) / time.Second)
+	}
+	return out, nil
+}
+
+func capacityStatus(st map[string]string) model.RPCCapacity {
+	raw, ok := st[db.StateRPCCapacity]
 	if !ok {
-		return model.HolesStatus{}
+		return model.RPCCapacity{}
 	}
-	var holes []model.Hole
-	if err := json.Unmarshal([]byte(raw), &holes); err != nil {
-		return model.HolesStatus{}
+	var out model.RPCCapacity
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		out.CheckpointError = true
 	}
-	return model.SummarizeHoles(holes)
+	return out
 }
 
 // endpointsStatus decodes the collector's endpoint routing state; a

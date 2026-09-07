@@ -53,6 +53,11 @@ func fillAll(t *testing.T, f *Follower, maxSteps int) (steps int) {
 	return steps
 }
 
+func advanceRetry(f *Follower) {
+	now := f.now().Add(10 * time.Minute)
+	f.now = func() time.Time { return now }
+}
+
 // TestFillSkippedGap: a paced network skips a gap, then the filler fetches
 // the range in header batches, replays it forward from the stored block
 // before it, writes the blocks and their buckets, records the replay error
@@ -65,8 +70,11 @@ func TestFillSkippedGap(t *testing.T) {
 	skipGap(t, f, rpc)
 
 	holes := holesOf(t, store)
-	if len(holes) != 1 || holes[0].From != 1001 || holes[0].To != 1149 || holes[0].Reason != "" {
+	if len(holes) != 1 || holes[0].From != 1001 || holes[0].To != 1149 || holes[0].Lifecycle != rangePending || holes[0].Reason != reasonCatchUpLimit {
 		t.Fatalf("a skipped gap is queued work: %+v", holes)
+	}
+	if holes[0].PredecessorAt != timestampString(tsFor(1000)) || holes[0].SuccessorAt != timestampString(tsFor(1150)) {
+		t.Fatalf("the skipped interval must retain its time bounds: %+v", holes[0])
 	}
 	if steps := fillAll(t, f, 40); steps != 15 {
 		t.Fatalf("149 blocks in batches of 10: %d steps", steps)
@@ -358,6 +366,15 @@ func TestFillYieldsWhileCatchingUp(t *testing.T) {
 	if st, err := f.FillStep(ctx); err != nil || st != FillIdle || len(rpc.headerCalls) != 0 {
 		t.Fatalf("behind the chain: %v %v %v", st, err, rpc.headerCalls)
 	}
+	for i := 1; i < maxRecoveryDeferrals-1; i++ {
+		if st, err := f.FillStep(ctx); err != nil || st != FillIdle || len(rpc.headerCalls) != 0 {
+			t.Fatalf("priority deferral %d: %v %v %v", i, st, err, rpc.headerCalls)
+		}
+	}
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed || len(rpc.headerCalls) != 1 {
+		t.Fatalf("bounded recovery turn: %v %v %v", st, err, rpc.headerCalls)
+	}
+	rpc.headerCalls = nil
 	f.behind.Store(uint64(f.cfg.HeaderBatchSize))
 	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
 		t.Fatalf("after the catch-up: %v %v", st, err)
@@ -371,6 +388,34 @@ func TestFillYieldsWhileCatchingUp(t *testing.T) {
 	}
 	if calls := rpc.headerCalls; len(calls) != 1 || len(calls[0]) != minBackfillBatch {
 		t.Fatalf("the smallest batch goes without spare budget: %v", calls)
+	}
+}
+
+// TestFillRetryLifecycle persists the failure count, error, attempt time and
+// next retry across steps, then clears only the active failure when recovery
+// advances. The historical retry count remains available to status readers.
+func TestFillRetryLifecycle(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	rpc.errs["HeadersByNumbers"] = errRPC
+	if _, err := f.FillStep(ctx); !errors.Is(err, errRPC) {
+		t.Fatalf("fill failure: %v", err)
+	}
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].Lifecycle != rangeRetrying || holes[0].RetryCount != 1 || holes[0].LastError == "" || holes[0].LastAttemptAt == "" || holes[0].NextRetryAt == "" {
+		t.Fatalf("durable retry metadata: %+v", holes)
+	}
+	delete(rpc.errs, "HeadersByNumbers")
+	advanceRetry(f)
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("retry progress: %v %v", st, err)
+	}
+	holes = holesOf(t, store)
+	if len(holes) != 1 || holes[0].Lifecycle != rangePending || holes[0].RetryCount != 1 || holes[0].LastError != "" || holes[0].NextRetryAt != "" || holes[0].CursorAt != timestampString(tsFor(1010)) {
+		t.Fatalf("retry after progress: %+v", holes)
 	}
 }
 
@@ -400,6 +445,7 @@ func TestFillChainMustLink(t *testing.T) {
 	rpc.mu.Lock()
 	rpc.forks = nil
 	rpc.mu.Unlock()
+	advanceRetry(f)
 	rows := store.BlockRows[4663]
 	head := rows[1150]
 	head.ParentHash = "0xdead"
@@ -434,11 +480,15 @@ func TestFillErrors(t *testing.T) {
 		t.Fatalf("generation read: %v", err)
 	}
 	store.FailOn["GetState"] = false
-	// An unreadable checkpoint is not fatal: it is a record of what is
-	// missing, so the step reports nothing to do.
-	_ = store.SetState(ctx, 4663, db.StateHoles, "{bad")
-	if st, err := f.FillStep(ctx); err != nil || st != FillNone {
-		t.Fatalf("unreadable holes: %v %v", st, err)
+	// An unreadable legacy checkpoint is a startup error and is retained for
+	// repair instead of being treated as an empty range set.
+	legacy := dbtest.New()
+	_ = legacy.SetState(ctx, 4663, db.StateHoles, "{bad")
+	if err := newTestFollower(t, rpc, legacy).ensureInit(ctx); err == nil {
+		t.Fatal("unreadable legacy holes must stop initialization")
+	}
+	if raw, ok, _ := legacy.GetState(ctx, 4663, db.StateHoles); !ok || raw != "{bad" {
+		t.Fatalf("unreadable legacy checkpoint must remain intact: %q %v", raw, ok)
 	}
 	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
 		return f.saveHoles(ctx, s, []hole{{From: 1001, To: 1149}})
@@ -456,6 +506,7 @@ func TestFillErrors(t *testing.T) {
 	}
 	delete(rpc.errs, "HeadersByNumbers")
 	for _, method := range []string{"UpsertBlocks", "RebuildBuckets", "FoldBuckets"} {
+		advanceRetry(f)
 		store.FailOn[method] = true
 		if _, err := f.FillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
 			t.Fatalf("%s: %v", method, err)
@@ -465,18 +516,12 @@ func TestFillErrors(t *testing.T) {
 	// The progress is recorded inside the commit, reading the checkpoint
 	// again so a hole another writer appended is not lost: a failure there
 	// aborts the whole batch.
-	reads := 0
-	store.Hooks["GetState"] = func() {
-		reads++
-		if reads == 4 {
-			store.SetFailure("GetState", true)
-		}
-	}
+	store.SetFailure("ReplaceMissingRanges", true)
+	advanceRetry(f)
 	if _, err := f.FillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("progress write: %v", err)
 	}
-	delete(store.Hooks, "GetState")
-	store.SetFailure("GetState", false)
+	store.SetFailure("ReplaceMissingRanges", false)
 	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Next != 0 {
 		t.Fatalf("an aborted batch leaves the cursor alone: %+v", holes)
 	}
@@ -490,6 +535,8 @@ func TestFillErrors(t *testing.T) {
 	// comes from what was recorded before the range, never from the live
 	// sample.
 	f3 := newTestFollower(t, rpc, store)
+	due := f.now().Add(10 * time.Minute)
+	f3.now = func() time.Time { return due }
 	rpc.headerCalls = nil
 	if st, err := f3.FillStep(ctx); err != nil || st != FillProgressed {
 		t.Fatalf("a restart fills from the recorded state: %v %v", st, err)
@@ -547,6 +594,7 @@ func TestFillWithoutStoredTail(t *testing.T) {
 	delete(store.Hooks, "BlockByNumber")
 	store.SetFailure("BlockByNumber", false)
 	delete(store.BlockRows[4663], 1150)
+	advanceRetry(f)
 	fillAll(t, f, 40)
 	if holesOf(t, store) != nil {
 		t.Fatalf("the gap must fill without its following block: %+v", holesOf(t, store))
@@ -645,6 +693,7 @@ func TestFillBrokenLinksInsideTheBatch(t *testing.T) {
 	rpc.parentOverride = nil
 	rpc.noHeaders = true
 	rpc.mu.Unlock()
+	advanceRetry(f)
 	if _, err := f.FillStep(ctx); err == nil {
 		t.Fatal("an endpoint answering with nothing must be an error")
 	}
@@ -652,12 +701,14 @@ func TestFillBrokenLinksInsideTheBatch(t *testing.T) {
 	rpc.noHeaders = false
 	rpc.headerShift = 1
 	rpc.mu.Unlock()
+	advanceRetry(f)
 	if _, err := f.FillStep(ctx); err == nil {
 		t.Fatal("headers for other blocks than the ones asked for must be an error")
 	}
 	rpc.mu.Lock()
 	rpc.headerShift = 0
 	rpc.mu.Unlock()
+	advanceRetry(f)
 	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
 		t.Fatalf("the retry must progress: %v %v", st, err)
 	}
@@ -894,20 +945,20 @@ func TestFillStrandedByRetention(t *testing.T) {
 	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Reason != "" {
 		t.Fatalf("a mark for an unknown range must change nothing: %+v", holes)
 	}
-	store.FailOn["GetState"] = true
+	store.FailOn["MissingRanges"] = true
 	err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
 		return f.markHoles(ctx, s, map[uint64]string{1001: reasonNoState})
 	})
-	store.FailOn["GetState"] = false
+	store.FailOn["MissingRanges"] = false
 	if !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("unreadable checkpoint: %v", err)
 	}
 }
 
-// TestHolesAreMergedAndBounded: ranges recorded twice, overlapping or
+// TestHolesAreMergedAndDurable: ranges recorded twice, overlapping or
 // touching become one entry, ranges of different classes stay apart, and
-// neither the queue nor the checkpoint grows without end.
-func TestHolesAreMergedAndBounded(t *testing.T) {
+// no range is expired or forgotten as the durable set grows.
+func TestHolesAreMergedAndDurable(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
 	f := newTestFollower(t, newFakeRPC(1000), store)
@@ -944,10 +995,47 @@ func TestHolesAreMergedAndBounded(t *testing.T) {
 	if len(holes) != 1 || holes[0].To != 250 || holes[0].Next != 150 || holes[0].Folded != 170 {
 		t.Fatalf("merged progress: %+v", holes)
 	}
-	// The queue is bounded: the oldest ranges leave it, their blocks still
-	// counted as not indexed.
-	many := make([]hole, 0, maxPendingHoles+10)
-	for i := 0; i < maxPendingHoles+10; i++ {
+	// A merged entry keeps the bounds of its own start block. The later
+	// range's predecessor names a block inside the merged interval, so it
+	// only carries over when both ranges start at the same block.
+	predAt := baseTime.Add(-time.Hour).Format(time.RFC3339)
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.saveHoles(ctx, s, []hole{{From: 100, To: 199}, {From: 180, To: 250, PredecessorAt: predAt}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holes = holesOf(t, store)
+	if len(holes) != 1 || holes[0].PredecessorAt != "" {
+		t.Fatalf("a later range must not lend its predecessor bound: %+v", holes)
+	}
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.saveHoles(ctx, s, []hole{{From: 100, To: 199}, {From: 100, To: 250, PredecessorAt: predAt}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holes = holesOf(t, store)
+	if len(holes) != 1 || holes[0].PredecessorAt != predAt {
+		t.Fatalf("a shared start block shares the predecessor bound: %+v", holes)
+	}
+	// Retrying is a transient lifecycle within the fillable class. A repeated
+	// skip that overlaps it still produces one row and keeps the retry state.
+	retryAt := baseTime.Add(time.Minute).Format(time.RFC3339)
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.saveHoles(ctx, s, []hole{
+			{From: 100, To: 199, Lifecycle: rangePending},
+			{From: 150, To: 250, Lifecycle: rangeRetrying, RetryCount: 2, LastAttemptAt: retryAt, NextRetryAt: retryAt},
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holes = holesOf(t, store)
+	if len(holes) != 1 || holes[0].To != 250 || holes[0].Lifecycle != rangeRetrying || holes[0].RetryCount != 2 || holes[0].NextRetryAt != retryAt {
+		t.Fatalf("overlapping retry lifecycle: %+v", holes)
+	}
+	// More than the old queue cap stays recoverable in full.
+	const oldPendingCap = 64
+	many := make([]hole, 0, oldPendingCap+10)
+	for i := 0; i < oldPendingCap+10; i++ {
 		start := uint64(10_000 + i*10)
 		many = append(many, hole{From: start, To: start + 4})
 	}
@@ -956,20 +1044,21 @@ func TestHolesAreMergedAndBounded(t *testing.T) {
 	}
 	holes = holesOf(t, store)
 	summary := model.SummarizeHoles(holes)
-	if len(holes) != maxPendingHoles+10 || summary.Pending != maxPendingHoles || summary.Unfillable != 10 {
-		t.Fatalf("the queue is capped at %d: %+v", maxPendingHoles, summary)
+	if len(holes) != oldPendingCap+10 || summary.Pending != oldPendingCap+10 || summary.Unfillable != 0 {
+		t.Fatalf("every queued range stays pending: %+v", summary)
 	}
-	if summary.Blocks != uint64(5*(maxPendingHoles+10)) {
-		t.Fatalf("dropped ranges are still missing blocks: %+v", summary)
+	if summary.Blocks != uint64(5*(oldPendingCap+10)) {
+		t.Fatalf("every missing block stays counted: %+v", summary)
 	}
 	for i := 0; i < 10; i++ {
-		if holes[i].Reason != reasonExpired {
-			t.Fatalf("the oldest ranges are the ones dropped: %+v", holes[:12])
+		if holes[i].Lifecycle != rangePending || holes[i].Reason == reasonExpired {
+			t.Fatalf("old ranges must remain recoverable: %+v", holes[:12])
 		}
 	}
-	// The checkpoint itself is bounded, expired ranges included.
-	huge := make([]hole, 0, maxHoles+5)
-	for i := 0; i < maxHoles+5; i++ {
+	// More than the old whole-checkpoint cap stays recorded too.
+	const oldCheckpointCap = 256
+	huge := make([]hole, 0, oldCheckpointCap+5)
+	for i := 0; i < oldCheckpointCap+5; i++ {
 		start := uint64(100_000 + i*10)
 		huge = append(huge, hole{From: start, To: start + 4, Reason: reasonNoState})
 	}
@@ -977,8 +1066,53 @@ func TestHolesAreMergedAndBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	holes = holesOf(t, store)
-	if len(holes) != maxHoles || holes[0].From != 100_000+5*10 {
-		t.Fatalf("the checkpoint is bounded: %d entries from %d", len(holes), holes[0].From)
+	if len(holes) != oldCheckpointCap+5 || holes[0].From != 100_000 {
+		t.Fatalf("durable rows must not be forgotten: %d entries from %d", len(holes), holes[0].From)
+	}
+}
+
+// TestLegacyHolesAreImported moves every old checkpoint entry into durable
+// rows. Ranges previously expired by the 64-entry policy become pending again,
+// and the source checkpoint disappears only after the complete import.
+func TestLegacyHolesAreImported(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	legacy := `[{"from":10,"to":19,"at":"2026-09-06T06:00:00Z"},{"from":30,"to":39,"at":"2026-09-06T06:01:00Z","reason":"expired"},{"from":50,"to":59,"at":"2026-09-06T06:02:00Z","reason":"no state"}]`
+	if err := store.SetState(ctx, 4663, db.StateHoles, legacy); err != nil {
+		t.Fatal(err)
+	}
+	f := newTestFollower(t, newFakeRPC(1000), store)
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := store.GetState(ctx, 4663, db.StateHoles); ok {
+		t.Fatal("legacy checkpoint must be removed after import")
+	}
+	holes := holesOf(t, store)
+	if len(holes) != 3 || holes[0].Lifecycle != rangePending || holes[1].Lifecycle != rangePending || holes[1].Reason != reasonCatchUpLimit || holes[2].Lifecycle != rangeBlocked || holes[2].Reason != reasonNoState {
+		t.Fatalf("imported ranges: %+v", holes)
+	}
+}
+
+// TestMalformedDurableReplayStateIsRetained verifies that a structurally
+// unreadable JSONB replay state cannot make an incomplete range look absent.
+func TestMalformedDurableReplayStateIsRetained(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	row := db.MissingRange{
+		ChainID: 4663, From: 1001, To: 1010, DetectedAt: baseTime, Lifecycle: rangePending,
+		ReplayState: db.JSONB(`[]`),
+	}
+	if err := store.ReplaceMissingRanges(ctx, 4663, []db.MissingRange{row}); err != nil {
+		t.Fatal(err)
+	}
+	f := newTestFollower(t, newFakeRPC(1000), store)
+	if _, err := f.FillStep(ctx); err == nil {
+		t.Fatal("malformed replay state must stop recovery")
+	}
+	rows, err := store.MissingRanges(ctx, 4663)
+	if err != nil || len(rows) != 1 || string(rows[0].ReplayState) != `[]` {
+		t.Fatalf("malformed row was not retained: %+v %v", rows, err)
 	}
 }
 

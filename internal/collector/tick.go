@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 	"time"
@@ -26,13 +27,13 @@ var errReorgTooDeep = errors.New("reorg deeper than the stored ancestry")
 // the state sample in one transaction, then NOTIFY. Nothing in memory
 // advances before that transaction commits.
 func (f *Follower) Tick(ctx context.Context) error {
-	return f.tickWith(ctx, f.rpc.FastSample)
+	return f.tickWith(ctx, false, f.rpc.FastSample)
 }
 
 // TickAt is Tick with the sample pinned to one block number, used when a
 // newHeads event names the head so state and header match exactly.
 func (f *Follower) TickAt(ctx context.Context, number uint64) error {
-	return f.tickWith(ctx, func(ctx context.Context) (*nitro.Sample, error) {
+	return f.tickWith(ctx, true, func(ctx context.Context) (*nitro.Sample, error) {
 		return f.rpc.FastSampleAt(ctx, number)
 	})
 }
@@ -41,7 +42,7 @@ func (f *Follower) TickAt(ctx context.Context, number uint64) error {
 // head-pinned header and the state calls) is the latency critical part
 // of the tick and goes through the endpoint's fast lane; the catch-up
 // headers and everything after them are bulk work.
-func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) (*nitro.Sample, error)) (err error) {
+func (f *Follower) tickWith(ctx context.Context, pinned bool, sampleFn func(context.Context) (*nitro.Sample, error)) (err error) {
 	// The histogram covers the whole tick, a failed one included: a tick
 	// that keeps timing out is exactly what the duration is watched for.
 	start := f.now()
@@ -66,6 +67,7 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 	f.mu.Lock()
 	stored, storedHash := f.head, f.headHash
 	f.mu.Unlock()
+	capacity := f.rpcCapacity(sample, stored, pinned)
 	if head >= stored {
 		f.behind.Store(head - stored)
 	}
@@ -74,11 +76,11 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 	case stored == 0:
 		// Fresh database: nothing before the sampled head is known, so
 		// the head is persisted alone and replay starts after it.
-		return f.seed(ctx, sample, nil, nil)
+		return f.seed(ctx, sample, nil, nil, capacity)
 	case head < stored:
 		return f.headBehind(ctx, sample, stored)
 	case head == stored && !hashMismatch(storedHash, sample.Header.Hash):
-		return f.sampleOnly(ctx, sample)
+		return f.sampleOnly(ctx, sample, capacity)
 	}
 
 	f.catchingUp.Store(true)
@@ -90,7 +92,7 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 			return f.fail(ctx, err)
 		}
 	}
-	headers, err := f.catchUp(ctx, sample, stored, f.policy())
+	headers, err := f.catchUp(ctx, sample, stored, f.policy(), capacity)
 	if err != nil {
 		return f.fail(ctx, err)
 	}
@@ -103,7 +105,7 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 		if err != nil {
 			return f.fail(ctx, err)
 		}
-		if headers, err = f.catchUp(ctx, sample, ancestor, f.policy()); err != nil {
+		if headers, err = f.catchUp(ctx, sample, ancestor, f.policy(), capacity); err != nil {
 			return f.fail(ctx, err)
 		}
 		if headers == nil {
@@ -113,8 +115,57 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 	if err := verifyChain(headers); err != nil {
 		return f.fail(ctx, err)
 	}
-	return f.process(ctx, sample, headers)
+	return f.process(ctx, sample, headers, capacity)
 }
+
+// rpcCapacity estimates the sustained JSON-RPC rate this observed head
+// interval needed. A constraints sample costs four calls when pinned to a
+// newHeads block and five when polling must resolve eth_blockNumber first;
+// legacy sampling costs four more. Every intervening header is another call
+// because public endpoints meter batch items individually.
+func (f *Follower) rpcCapacity(sample *nitro.Sample, stored uint64, pinned bool) model.RPCCapacity {
+	sampleCalls := uint64(4)
+	if !pinned {
+		sampleCalls++
+	}
+	if sample.IsLegacy() {
+		sampleCalls += 4
+	}
+	needed := sampleCalls
+	if stored > 0 && sample.Header.Number > stored+1 {
+		needed += sample.Header.Number - stored - 1
+	}
+	f.mu.Lock()
+	var previous time.Time
+	if f.lastSample != nil {
+		previous = f.lastSample.SampledAt
+	}
+	f.mu.Unlock()
+	elapsed := sample.SampledAt.Sub(previous)
+	if previous.IsZero() || elapsed <= 0 {
+		elapsed = f.tickInterval
+	}
+	if elapsed <= 0 {
+		elapsed = time.Second
+	}
+	required := roundedRate(float64(needed) / elapsed.Seconds())
+	pol := f.policy()
+	configured := roundedRate(pol.rate)
+	observed := roundedRate(float64(f.rpc.Stats().CallsLast10s) / 10)
+	at := sample.SampledAt.UTC().Format(time.RFC3339)
+	out := model.RPCCapacity{
+		ConfiguredCallsPerSecond: configured, RequiredCallsPerSecond: required,
+		ObservedCallsPerSecond: observed, Saturated: !pol.unlimited && required > configured,
+		At: &at,
+	}
+	if !pol.unlimited {
+		headroom := roundedRate(configured - required)
+		out.HeadroomCallsPerSecond = &headroom
+	}
+	return out
+}
+
+func roundedRate(v float64) float64 { return math.Round(v*1000) / 1000 }
 
 // headBehind handles a reported head below the stored one. An endpoint
 // that has simply not caught up still reports the same hashes for the
@@ -183,22 +234,28 @@ var errEndpointChanged = errors.New("the pool moved to another endpoint, decidin
 // failover to a paced endpoint while the headers are being fetched makes
 // the decision again, so an unlimited catch-up is never carried on to the
 // public fallback that has to pay for it.
-func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uint64, pol policy) ([]nitro.Header, error) {
+func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uint64, pol policy, capacity model.RPCCapacity) ([]nitro.Header, error) {
 	head := sample.Header.Number
 	if stored == 0 {
-		return nil, f.seed(ctx, sample, nil, nil)
+		return nil, f.seed(ctx, sample, nil, nil, capacity)
 	}
 	from := stored + 1
 	maxGap := uint64(f.cfg.HeaderBatchSize) * uint64(f.cfg.MaxCatchUpBatches)
 	gap := head - stored
 	skip := func() ([]nitro.Header, error) {
-		h := hole{From: from, To: head - 1}
+		f.mu.Lock()
+		predecessor := timestampString(f.prevTs)
+		f.mu.Unlock()
+		h := hole{
+			From: from, To: head - 1, Lifecycle: rangePending, Reason: reasonCatchUpLimit,
+			PredecessorAt: predecessor, SuccessorAt: timestampString(sample.Header.Timestamp),
+		}
 		f.log.Warn("catch-up gap exceeds budget, skipping blocks and restarting from the sampled head", "from", h.From, "to", h.To)
 		pending, err := f.fetchOwnerRange(ctx, from, head)
 		if err != nil {
 			return nil, err
 		}
-		if err := f.seed(ctx, sample, &h, pending); err != nil {
+		if err := f.seed(ctx, sample, &h, pending, capacity); err != nil {
 			return nil, err
 		}
 		// Counted only now: the seed is the transaction that records the
@@ -477,7 +534,7 @@ func (f *Follower) findAncestor(ctx context.Context, from uint64) (uint64, error
 // sample, nothing before it is replayed. A skipped range is recorded as a
 // hole and pending owner actions found in it are kept. The replay
 // continues forward from this block.
-func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole, pending []*nitro.OwnerAction) error {
+func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole, pending []*nitro.OwnerAction, capacity model.RPCCapacity) error {
 	st := stateFromSample(sample)
 	// The start-of-block exponents that priced the seed are approximated
 	// from the sampled end-of-block backlogs minus the block's own gas.
@@ -494,7 +551,7 @@ func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole, pend
 	// No known state preceded the seed, so it carries no prediction.
 	r.Predicted, r.ErrorBips = new(big.Int).Set(hdr.BaseFee), 0
 	rows := blockRows(f.chainID, []nitro.Header{hdr}, []pricer.Result{r}, func(uint64) *big.Int { return st.MinBaseFee })
-	if err := f.persist(ctx, sample, rows, &r, h, pending); err != nil {
+	if err := f.persist(ctx, sample, rows, &r, h, pending, capacity); err != nil {
 		return f.fail(ctx, err)
 	}
 	f.publish(sample, st, &r)
@@ -507,7 +564,7 @@ func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole, pend
 // constraint sets (including a reset that leaves the shape unchanged), the
 // minimum fee and the legacy parameters, splits the replay at its block,
 // and the actions commit with the tick.
-func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []nitro.Header) error {
+func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []nitro.Header, capacity model.RPCCapacity) error {
 	head := sample.Header.Number
 	f.mu.Lock()
 	st, prevTs, err := f.replayStateLocked(ctx, sample)
@@ -516,9 +573,12 @@ func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []
 		return f.fail(ctx, err)
 	}
 	if st == nil {
-		h := hole{From: headers[0].Number, To: head - 1}
+		h := hole{
+			From: headers[0].Number, To: head - 1, Lifecycle: rangeBlocked, Reason: reasonNoState,
+			SuccessorAt: timestampString(sample.Header.Timestamp),
+		}
 		f.log.Warn("no known replay state before the first missing block, restarting from the sampled head", "from", h.From, "to", h.To)
-		return f.seed(ctx, sample, &h, nil)
+		return f.seed(ctx, sample, &h, nil, capacity)
 	}
 	pending, err := f.fetchOwnerActions(ctx, headers[0].Number, head)
 	if err != nil {
@@ -533,16 +593,26 @@ func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []
 	}
 	rows, results, ok := replayLive(f.chainID, st, prevTs, headers, sample, tl, actions)
 	if !ok {
-		h := hole{From: headers[0].Number, To: head - 1}
+		h := hole{
+			From: headers[0].Number, To: head - 1, Lifecycle: rangePending, Reason: reasonReplayDiscontinuity,
+			PredecessorAt: timestampString(prevTs), SuccessorAt: timestampString(sample.Header.Timestamp),
+		}
 		f.log.Warn("pricer parameters changed without a recorded owner action, restarting from the sampled head", "from", h.From, "to", h.To)
-		return f.seed(ctx, sample, &h, pending)
+		return f.seed(ctx, sample, &h, pending, capacity)
 	}
 	headResult := results[len(results)-1]
-	if err := f.persist(ctx, sample, rows, &headResult, nil, pending); err != nil {
+	if err := f.persist(ctx, sample, rows, &headResult, nil, pending, capacity); err != nil {
 		return f.fail(ctx, err)
 	}
 	f.publish(sample, st, &headResult)
 	return nil
+}
+
+func timestampString(ts uint64) string {
+	if ts == 0 {
+		return ""
+	}
+	return time.Unix(int64(ts), 0).UTC().Format(time.RFC3339)
 }
 
 // replayLive replays headers through st, splitting at every boundary of
@@ -671,7 +741,7 @@ func (f *Follower) stateAtLocked(number uint64, sample *nitro.Sample) *pricer.St
 
 // sampleOnly handles a tick where no new block appeared: the replay state
 // is re-anchored and a fresh snapshot is published.
-func (f *Follower) sampleOnly(ctx context.Context, sample *nitro.Sample) error {
+func (f *Follower) sampleOnly(ctx context.Context, sample *nitro.Sample, capacity model.RPCCapacity) error {
 	f.mu.Lock()
 	var st *pricer.State
 	if f.state != nil {
@@ -688,7 +758,7 @@ func (f *Follower) sampleOnly(ctx context.Context, sample *nitro.Sample) error {
 	if last == nil {
 		last = &pricer.Result{Number: sample.Header.Number}
 	}
-	if err := f.persist(ctx, sample, nil, last, nil, nil); err != nil {
+	if err := f.persist(ctx, sample, nil, last, nil, nil, capacity); err != nil {
 		return f.fail(ctx, err)
 	}
 	f.publish(sample, st, last)
@@ -751,7 +821,7 @@ func (f *Follower) observedSetLocked(sample *nitro.Sample, pending []*nitro.Owne
 // from the rows in their windows, so a retried or overlapping fold changes
 // nothing), the state sample, the head and the live start. The caches
 // follow the commit.
-func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.Block, headResult *pricer.Result, h *hole, pending []*nitro.OwnerAction) error {
+func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.Block, headResult *pricer.Result, h *hole, pending []*nitro.OwnerAction, capacity model.RPCCapacity) error {
 	head := sample.Header.Number
 	headAt := time.Unix(int64(sample.Header.Timestamp), 0).UTC()
 	f.mu.Lock()
@@ -765,10 +835,14 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 	observed := f.observedSetLocked(sample, pending)
 	f.mu.Unlock()
 	lastErr := f.endpointErrorNow()
+	capacityJSON, err := json.Marshal(capacity)
+	if err != nil {
+		return fmt.Errorf("encode rpc capacity: %w", err)
+	}
 
 	var snapshot *model.LiveSnapshot
 	reload := false
-	err := f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		recorded, err := f.storeOwnerActions(ctx, s, pending)
 		if err != nil {
 			return err
@@ -821,6 +895,9 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 		}
 		if err := s.SetState(ctx, f.chainID, db.StateHead, fmt.Sprint(head)); err != nil {
 			return fmt.Errorf("head checkpoint: %w", err)
+		}
+		if err := s.SetState(ctx, f.chainID, db.StateRPCCapacity, string(capacityJSON)); err != nil {
+			return fmt.Errorf("rpc capacity: %w", err)
 		}
 		if ls == nil {
 			if err := f.saveLiveStart(ctx, s, &liveStart{Block: head, TS: int64(sample.Header.Timestamp)}); err != nil {

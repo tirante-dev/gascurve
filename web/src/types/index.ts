@@ -197,6 +197,25 @@ export type L1Point = {
 /** `from` and `to` are the requested window, as on Series. */
 export type L1Series = { range: string; from: number; to: number; points: L1Point[] };
 
+export type RPCCapacity = {
+  configuredCallsPerSecond: number;
+  requiredCallsPerSecond: number;
+  observedCallsPerSecond: number;
+  headroomCallsPerSecond: number | null;
+  saturated: boolean;
+  at: string | null;
+  checkpointError: boolean;
+};
+
+export type MissingRangesStatus = {
+  pending: number;
+  blocks: number;
+  unfillable: number;
+  retrying: number;
+  oldestAgeSeconds: number;
+  checkpointError: boolean;
+};
+
 export type NetworkStatus = {
   name: string;
   chainId: number;
@@ -210,6 +229,9 @@ export type NetworkStatus = {
   last429At?: string | null;
   backfillCursor?: number | null;
   arbosVersion?: number | null;
+  degraded: boolean;
+  capacity: RPCCapacity;
+  holes: MissingRangesStatus;
 };
 
 export type StatusResponse = { version: string; networks: NetworkStatus[] };

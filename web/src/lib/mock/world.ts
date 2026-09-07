@@ -586,6 +586,17 @@ export class MockWorld {
       lastSampleAt: unixToIso(this.time - 1),
       lastError: null,
       rateLimitEvents: 0,
+      degraded: false,
+      capacity: {
+        configuredCallsPerSecond: 0,
+        requiredCallsPerSecond: 0,
+        observedCallsPerSecond: 0,
+        headroomCallsPerSecond: null,
+        saturated: false,
+        at: null,
+        checkpointError: false,
+      },
+      holes: { pending: 0, blocks: 0, unfillable: 0, retrying: 0, oldestAgeSeconds: 0, checkpointError: false },
     };
   }
 

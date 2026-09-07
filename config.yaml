@@ -62,6 +62,12 @@ collector:
 # sustained rate, so give it calls_per_second: 25: the one-second peaks then
 # stay under the window, where 40 tripped it several times a minute and each
 # trip cost a 2 s back-off that stalled the backfill and the gap filler.
+# Capacity must exceed live ingress for recovery to converge. On a constraints
+# chain polled every T seconds at B blocks/s, budget at least
+# (5 + max(B*T - 1, 0)) / T calls/s, plus headroom for the slow loop, retries
+# and missing-range recovery. With reliable newHeads, budget about 4*B calls/s.
+# Legacy pricing adds four calls per sample. /status.capacity reports the latest
+# observed requirement and /status.degraded turns true when it is exceeded.
 # Optional per network:
 #   tick_interval: overrides collector.tick_interval for this network (the
 #            polling cadence, and the safety timer while a newHeads

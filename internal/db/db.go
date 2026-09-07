@@ -33,12 +33,16 @@ const (
 	StateRateLimitEvents = "rate_limit_events"
 	StateLast429At       = "last_429_at"
 	StateArbOSVersion    = "arbos_version"
+	// StateRPCCapacity is the latest live-ingress demand and configured RPC
+	// capacity estimate (model.RPCCapacity), persisted for the API status.
+	StateRPCCapacity = "rpc_capacity"
 	// StateLiveStart records the first block the live loop stored
 	// ({"block":n,"ts":unix}); buckets from its hour on are rebuilt from
 	// block rows, older ones belong to the backfill alone.
 	StateLiveStart = "live_start"
-	// StateHoles is a JSON array of {from,to,at} block ranges the replay
-	// skipped (a catch-up gap over budget); no rows exist for them.
+	// StateHoles is the legacy JSON checkpoint imported transactionally into
+	// missing_ranges at collector startup. It remains only when decoding or
+	// persistence failed, so operators can repair it without data loss.
 	StateHoles = "holes"
 	// StateEndpoints is the endpoint pool's routing state
 	// (model.EndpointsStatus as JSON), refreshed by the slow loop.
