@@ -158,8 +158,16 @@ func TestPacer(t *testing.T) {
 // empty, so the two lanes alternate whole tokens instead of the bulk lane
 // running a debt. Both lanes make progress and the bucket never goes
 // negative.
+//
+// The clock is manual: a token arrives only when the test fires it, and the
+// test fires only once both lanes are waiting, which is how real time has
+// them at half a call per second (a lane re-enters within microseconds of
+// leaving, the next token is two seconds away). An instant fake sleep let
+// one goroutine loop through several tokens before the other was scheduled,
+// which made the count ratio a matter of scheduling rather than of the turn
+// rule under test.
 func TestPacerTimeSharedLanes(t *testing.T) {
-	clock := newFakeClock()
+	clock := newManualClock()
 	p := NewPacer(0.5).withClock(clock.Now, clock.Sleep)
 	if !p.timeShared() || p.MaxBatch() != 0 {
 		t.Fatalf("a half call per second leaves no bulk share: timeShared %v maxBatch %d", p.timeShared(), p.MaxBatch())
@@ -181,21 +189,33 @@ func TestPacerTimeSharedLanes(t *testing.T) {
 			bulk.Add(1)
 		}
 	}()
-	waitFor(t, "both lanes served", func() bool { return fast.Load() >= 20 && bulk.Load() >= 20 })
+	// The bucket starts with one token, which the first caller takes without
+	// sleeping; every later token is one firing of the clock.
+	const rounds = 40
+	for i := 1; i <= rounds; i++ {
+		waitFor(t, "the last token to be taken", func() bool { return fast.Load()+bulk.Load() == int64(i) })
+		waitFor(t, "both lanes waiting, one of them asleep", func() bool {
+			f, b := lanesWaiting(p)
+			return f == 1 && b == 1 && len(clock.sleeps()) > 0
+		})
+		clock.fire(t)
+	}
+	waitFor(t, "the final token to be taken", func() bool { return fast.Load()+bulk.Load() == rounds+1 })
 	cancel()
 	wg.Wait()
 	f, b := fast.Load(), bulk.Load()
 	if tokens, _ := p.levels(); tokens < 0 {
 		t.Fatalf("time sharing must never overdraw: tokens %v", tokens)
 	}
-	// The lanes take turns rather than one running a debt while the other
-	// starves: neither is more than twice the other.
-	if f > 2*b || b > 2*f {
-		t.Fatalf("lanes did not share: fast %d bulk %d", f, b)
+	// With both lanes always waiting, every token goes to the lane that did
+	// not take the last one: strict alternation.
+	if f-b > 1 || b-f > 1 {
+		t.Fatalf("lanes did not alternate: fast %d bulk %d", f, b)
 	}
 	// One lane alone still gets every token: nothing waits for a turn that
 	// will not come.
-	q := NewPacer(0.5).withClock(clock.Now, clock.Sleep)
+	fake := newFakeClock()
+	q := NewPacer(0.5).withClock(fake.Now, fake.Sleep)
 	for range 3 {
 		if err := q.Wait(context.Background(), 1); err != nil {
 			t.Fatal(err)
@@ -205,7 +225,7 @@ func TestPacerTimeSharedLanes(t *testing.T) {
 		t.Fatalf("bulk alone overdrew: %v", tokens)
 	}
 	// So does the fast lane on its own.
-	r := NewPacer(0.5).withClock(clock.Now, clock.Sleep)
+	r := NewPacer(0.5).withClock(fake.Now, fake.Sleep)
 	for range 3 {
 		if err := r.Wait(fastCtx(context.Background()), 1); err != nil {
 			t.Fatal(err)
@@ -745,4 +765,11 @@ func TestSleepContext(t *testing.T) {
 	if err := sleepContext(ctx, time.Hour); err == nil {
 		t.Fatal("expected cancellation")
 	}
+}
+
+// lanesWaiting reports how many Fast and Bulk callers are inside Wait.
+func lanesWaiting(p *Pacer) (fast, bulk int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fastPending, p.bulkPending
 }
