@@ -1192,3 +1192,141 @@ func TestPruneGoesByTheDurableLiveStart(t *testing.T) {
 		t.Fatal("the row exactly at the cutoff was pruned")
 	}
 }
+
+// The seed is a one-time migration. A recorded frontier is left alone on every later start: with the
+// repair pin off in the seed, re-seeding would advance it past rows a still-running repair had not
+// reached, and the repair would skip them for good on the first restart mid-pass.
+func TestSeedLeavesARecordedFrontierAlone(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	rpc := newFakeRPC(70_000)
+	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_502)
+	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BlockRetention = time.Hour
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Mid-repair, with the frontier where the pinned prune left it: the boundary.
+	if err := f.savePosterGasCursor(ctx, store, &posterGasCursor{Next: 28_500}); err != nil {
+		t.Fatal(err)
+	}
+	boundary := time.Unix(int64(tsFor(28_500)), 0).UTC().Truncate(time.Hour)
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, boundary.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	// A restart.
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(boundary) {
+		t.Fatalf("a restart moved the frontier from %v to %v with the repair unfinished", boundary, got)
+	}
+}
+
+// A raised history_epoch in the rollout that introduces the checkpoint resets a finished backfill
+// cursor. The seed runs first, so it still sees the backfill as finished and records the old cutoff
+// rather than pinning to the boundary on a database whose real cutoff was long past it.
+func TestSeedRunsBeforeAHistoryRebuildResetsTheBackfill(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	rpc := newFakeRPC(70_000)
+	seedSets(t, store)
+	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_502)
+	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BlockRetention = time.Hour
+	f.net.HistoryEpoch = 1
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.saveCursor2(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := f.loadCursor(ctx); c.Done {
+		t.Fatal("the history rebuild did not reset the backfill, so the test proves nothing")
+	}
+	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(latest.Add(-time.Hour)) {
+		t.Fatalf("seed %v, want the old cutoff %v: the rebuild's reset was read as an unfinished backfill", got, latest.Add(-time.Hour))
+	}
+}
+
+// The old collector pruned by the wall clock. On a chain that had stalled at the upgrade the last
+// sample's time is later than the latest block's, and it is what the old rule actually pruned by;
+// on a live chain the two agree and the later one errs toward refusing a rebuild.
+func TestSeedReproducesTheOldWallClockRule(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	rpc := newFakeRPC(70_000)
+	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_502)
+	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BlockRetention = time.Hour
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.saveCursor2(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	latest := time.Unix(int64(tsFor(64_502)), 0).UTC()
+	// The chain stalled: the old collector kept sampling, and pruning, for two more hours.
+	sampled := latest.Add(2 * time.Hour)
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: 4663, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateNetworkHead(ctx, 4663, 64_502, latest, sampled); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(sampled.Add(-time.Hour)) {
+		t.Fatalf("seed %v, want the old wall-clock cutoff %v", got, sampled.Add(-time.Hour))
+	}
+}
+
+// A fill that fails persistently backs off every turn even while the repair progresses, or a
+// malformed hole is retried once per repair batch in a tight loop.
+func TestHistoryLoopBacksOffAfterAFillErrorEvenWhenTheRepairProgresses(t *testing.T) {
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	var slept []time.Duration
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newTestFollower(t, rpc, store, func(o *Options) {
+		o.Sleep = func(_ context.Context, d time.Duration) error {
+			slept = append(slept, d)
+			if len(slept) >= 4 {
+				cancel()
+			}
+			return nil
+		}
+	})
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	if err := f.saveLiveStart(ctx, store, &liveStart{Block: 900, TS: int64(tsFor(900))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, baseTime.Add(-24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	f.cfg.HeaderBatchSize = 2 // several repair batches, so progress is interleaved with the error
+	store.FailOn["MissingRanges"] = true
+
+	f.runHistory(ctx)
+	if len(rpc.posterGasCalls) == 0 {
+		t.Fatal("the repair got no turn behind the failing fill")
+	}
+	for i, d := range slept {
+		if d != restartDelay {
+			t.Fatalf("sleep %d was %v, want the restart delay after every failed fill", i, d)
+		}
+	}
+	// Every iteration slept: a progressed repair did not let the failing fill skip its backoff.
+	if len(slept) < len(rpc.posterGasCalls) {
+		t.Fatalf("%d repair batches but only %d backoffs: the fill error was retried without delay", len(rpc.posterGasCalls), len(slept))
+	}
+}

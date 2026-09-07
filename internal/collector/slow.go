@@ -763,27 +763,63 @@ func (f *Follower) liveStartFrom(ctx context.Context, s db.Store) (*liveStart, e
 	return ls, nil
 }
 
-// seedPruneFrontierLocked records a frontier before any loop can rebuild against it: the store guards
-// only below one it can read, and a database pruned before the checkpoint existed has none until its
-// first prune. The seed reproduces what the old collector deleted, chain-time retention pinned only
-// while the backfill runs, since the old collector had no repair pin: seeding with it would record
-// the live boundary on a database whose real cutoff was long past it, and the first surviving windows
-// would be rebuilt short. Not the oldest surviving row either, which was tried and refused to bucket
-// the rows a gap fill writes below it. The one case no seed can close is stated in docs.
+// seedPruneFrontierLocked is a one-time migration for a database pruned before the checkpoint
+// existed: the store guards only below a frontier it can read. It runs only when none is recorded,
+// since re-seeding would advance an existing one on every restart past rows a still-running repair
+// had not reached. The value reproduces what the old collector deleted: retention back from the
+// later of the latest block and the last sample time, the old rule having been the wall clock, and
+// pinned only while the backfill runs, as the old rule was. Not the oldest surviving row, which was
+// tried and refused to bucket rows a gap fill writes below it.
 func (f *Follower) seedPruneFrontierLocked(ctx context.Context) error {
 	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
-		ls, err := f.liveStartFrom(ctx, s)
-		if err != nil || ls == nil {
-			// No live start means no rows and nothing pruned; a wall-clock seed here would be a
-			// fiction a stalled or development chain could never get out from under.
+		raw, recorded, err := s.GetState(ctx, f.chainID, db.StatePruneFrontier)
+		if err != nil {
 			return err
 		}
-		cutoff, err := f.pruneCutoff(ctx, s, boundaryOf(ls), false)
+		if recorded {
+			if _, perr := time.Parse(time.RFC3339Nano, raw); perr == nil {
+				return nil
+			}
+			f.log.Warn("unreadable prune frontier, seeding over it", "value", raw)
+		}
+		ls, err := f.liveStartFrom(ctx, s)
+		if err != nil || ls == nil {
+			// No live start means no rows and nothing pruned; a seed here would be a fiction a
+			// stalled or development chain could never get out from under.
+			return err
+		}
+		cutoff, err := f.migrationCutoff(ctx, s, boundaryOf(ls))
 		if err != nil || cutoff.IsZero() {
 			return err
 		}
+		f.log.Info("seeding the prune frontier for a database pruned before it was recorded", "at", cutoff)
 		return f.recordPruneFrontier(ctx, s, cutoff)
 	})
+}
+
+// migrationCutoff is the old collector's cutoff as far as it can be reconstructed: retention back
+// from the later of the latest block's time and the last sample's wall-clock time. On a live chain
+// the two agree to within a slow interval, and taking the later errs toward refusing a rebuild, which
+// loses at most a bucket of repair; on a chain that had stalled at the upgrade, the sample time is
+// what the old wall-clock rule actually pruned by.
+func (f *Follower) migrationCutoff(ctx context.Context, s db.Store, boundary time.Time) (time.Time, error) {
+	cutoff, err := f.pruneCutoff(ctx, s, boundary, false)
+	if err != nil || cutoff.IsZero() {
+		return cutoff, err
+	}
+	nets, err := s.Networks(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	for _, n := range nets {
+		if n.ChainID != f.chainID || !n.LastSampleAt.Valid {
+			continue
+		}
+		if byClock := n.LastSampleAt.Time.UTC().Add(-f.cfg.BlockRetention); byClock.After(cutoff) && !cutoff.Equal(boundary) {
+			cutoff = byClock
+		}
+	}
+	return cutoff, nil
 }
 
 // boundaryOf is the start of the hour holding the first live block: buckets from it on are rebuilt

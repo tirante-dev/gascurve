@@ -227,15 +227,17 @@ func (f *Follower) runHistory(ctx context.Context) {
 			}
 			continue
 		}
-		if status == FillProgressed || repair == RepairProgressed {
-			f.observeLoop(loopHistory, start, fillErr)
-			continue
-		}
+		// A fill error backs off whatever the repair did: it has had its one step, and retrying
+		// a hole that fails persistently once per repair batch would be a tight loop.
 		if fillErr != nil {
 			f.observeLoop(loopHistory, start, fillErr)
 			if err := f.sleep(ctx, restartDelay); err != nil {
 				return
 			}
+			continue
+		}
+		if status == FillProgressed || repair == RepairProgressed {
+			f.observeLoop(loopHistory, start, nil)
 			continue
 		}
 		if status == FillIdle || repair == RepairIdle {
