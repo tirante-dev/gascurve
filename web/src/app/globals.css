@@ -48,6 +48,16 @@
   --good: #0f7a4e;
   --warning: #8a4b00;
   --critical: #c0263d;
+  /* The fee dial, on the surface-2 tile. The figure needs 4.5:1 and the 9 px
+     bands 3:1, and no one colour per tone does both: --good misses the text
+     ratio by a hair and --warning reads as brown in a stroke. So a text
+     colour and a band colour per tone. Checked against #efe6ff. */
+  --dial-good: #0d6b45;
+  --dial-warning: #8a4b00;
+  --dial-critical: #b0203a;
+  --dial-band-good: #0f7a4e;
+  --dial-band-warning: #a67400;
+  --dial-band-critical: #c0263d;
 
   --series-1: #c0189a;
   --series-2: #0f855c;
@@ -116,6 +126,12 @@
     --good: #3ddc97;
     --warning: #ffb020;
     --critical: #ff5c7a;
+    --dial-good: #3ddc97;
+    --dial-warning: #ffb020;
+    --dial-critical: #ff5c7a;
+    --dial-band-good: #3ddc97;
+    --dial-band-warning: #ffb020;
+    --dial-band-critical: #ff5c7a;
 
     --series-1: #d62aa8;
     --series-2: #1fae78;
@@ -180,6 +196,12 @@
   --good: #3ddc97;
   --warning: #ffb020;
   --critical: #ff5c7a;
+  --dial-good: #3ddc97;
+  --dial-warning: #ffb020;
+  --dial-critical: #ff5c7a;
+  --dial-band-good: #3ddc97;
+  --dial-band-warning: #ffb020;
+  --dial-band-critical: #ff5c7a;
 
   --series-1: #d62aa8;
   --series-2: #1fae78;
@@ -236,6 +258,9 @@
   --color-good: var(--good);
   --color-warning: var(--warning);
   --color-critical: var(--critical);
+  --color-dial-good: var(--dial-good);
+  --color-dial-warning: var(--dial-warning);
+  --color-dial-critical: var(--dial-critical);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
   --font-display: var(--font-display);

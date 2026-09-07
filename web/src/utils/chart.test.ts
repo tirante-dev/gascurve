@@ -6,7 +6,7 @@ import {
   buildChartPoints,
   constraintGauge,
   constraintGaugeSpanLabel,
-  constraintGaugeTitle,
+  constraintGaugeNote,
   constraintLabel,
   contributionKey,
   contributionRampStep,
@@ -17,15 +17,12 @@ import {
   joinCosts,
   legacyGauge,
   legacyGaugeSpanLabel,
-  legacyGaugeTitle,
+  legacyGaugeNote,
   gaugeSpanLabel,
   MAX_GAUGE_MARKS,
   latestSet,
   logDomain,
   NULL_SPLIT_LABEL,
-  rampColor,
-  rampInk,
-  rampStep,
   FLOOR_COLOR,
   MARKER_COLOR,
   resampleBatches,
@@ -164,17 +161,7 @@ describe("colours and ramps", () => {
     expect(FLOOR_COLOR).toBe("var(--floor)");
     expect(MARKER_COLOR).toBe("var(--marker)");
   });
-  it("maps multipliers onto the sequential ramp", () => {
-    expect(rampStep(10_000)).toBe(1);
-    expect(rampStep(5_000)).toBe(1);
-    expect(rampStep(100_000)).toBe(5);
-    expect(rampStep(1_000_000)).toBe(9);
-    expect(rampStep(50_000_000)).toBe(9);
-    expect(rampColor(199_900)).toBe("var(--seq-6)");
-    expect(rampInk(1)).toBe("var(--seq-ink-1)");
-    expect(rampInk(6)).toBe("var(--seq-ink-6)");
-    expect(rampInk(12)).toBe("var(--seq-ink-9)");
-    expect(rampInk(0)).toBe("var(--seq-ink-1)");
+  it("maps a constraint's contribution onto the sequential ramp", () => {
     expect(contributionRampStep(0)).toBe(1);
     expect(contributionRampStep(20_000)).toBe(5);
     expect(contributionRampStep(90_000)).toBe(9);
@@ -662,10 +649,25 @@ describe("gauges", () => {
     // Robinhood's two constraints: 60 Mgas/s over 15 s, and 40 Mgas/s over a day.
     const short = constraintGauge({ target: 60_000_000, window: 15 }, 450_000_000);
     expect(constraintGaugeSpanLabel(short)).toBe("1 window of target (900 Mgas)");
-    expect(constraintGaugeTitle(short.denominator)).toBe("one window = target × window = 900 Mgas; each full window adds 1.0 to x");
+    // The equation is the constraint's own two parameters multiplied out, so
+    // the reader can check it against the target and window on the card.
+    expect(constraintGaugeNote({ target: 60_000_000, window: 15 }, short).lines[0]).toBe("1 window of target = 60 Mgas/s × 15 s = 900 Mgas");
     const long = constraintGauge({ target: 40_000_000, window: 86_400 }, 11_194_391_810_886);
     expect(constraintGaugeSpanLabel(long)).toBe("4 windows of target (13.8 Tgas)");
-    expect(constraintGaugeTitle(long.denominator)).toBe("one window = target × window = 3.46 Tgas; each full window adds 1.0 to x");
+    const note = constraintGaugeNote({ target: 40_000_000, window: 86_400 }, long);
+    expect(note.lines).toEqual([
+      "1 window of target = 40 Mgas/s × 24 h = 3.46 Tgas",
+      "The gas the chain uses in one whole window at exactly the target rate. A backlog of one window adds exactly 1.0 to x.",
+      "The bar spans whole windows, so each mark is one more unit of x and the far end moves out as the backlog crosses one.",
+    ]);
+    // A reader who gets no panel gets the label back with the same facts after it.
+    expect(note.description).toBe(
+      "4 windows of target (13.8 Tgas). 1 window of target = 40 Mgas/s × 24 h = 3.46 Tgas. The gas the chain uses in one whole window at exactly the target rate. A backlog of one window adds exactly 1.0 to x. The bar spans whole windows, so each mark is one more unit of x and the far end moves out as the backlog crosses one.",
+    );
+    // Nothing to divide by: the note says so rather than defining a zero window.
+    const none = constraintGauge({ target: 0, window: 15 }, 5);
+    expect(constraintGaugeNote({ target: 0, window: 15 }, none).lines).toEqual(["no scale: the target or the window is zero"]);
+    expect(constraintGaugeNote({ target: 0, window: 15 }, none).description).toBe("1 window of target (0 gas). no scale: the target or the window is zero.");
     // The plural follows the count, and the gas is the whole span.
     expect(gaugeSpanLabel(1, 900_000_000, "window of target", "windows of target")).toBe("1 window of target (900 Mgas)");
     expect(gaugeSpanLabel(3, 900_000_000, "window of target", "windows of target")).toBe("3 windows of target (2.7 Ggas)");
@@ -674,12 +676,15 @@ describe("gauges", () => {
   it("says the same of the legacy gauge, in the legacy pricer's own terms", () => {
     const tolerance = legacyGauge({ speedLimit: 7_000_000, inertia: 102, tolerance: 10 }, 90_000_000);
     expect(legacyGaugeSpanLabel(tolerance)).toBe("3 tolerance thresholds (210 Mgas)");
-    expect(legacyGaugeTitle(tolerance)).toBe("one threshold = tolerance × speed limit = 70 Mgas; below it the pricer charges nothing at all");
+    expect(legacyGaugeNote(tolerance).lines[0]).toBe("1 tolerance threshold = tolerance × speed limit = 70 Mgas");
+    expect(legacyGaugeNote(tolerance).lines[1]).toMatch(/charges nothing at all/);
+    expect(legacyGaugeNote(tolerance).description).toMatch(/^3 tolerance thresholds \(210 Mgas\)\. 1 tolerance threshold = /);
     const zero = legacyGauge({ speedLimit: 7_000_000, inertia: 102, tolerance: 0 }, 1_000_000_000);
     expect(legacyGaugeSpanLabel(zero)).toBe("2 units of x (1.43 Ggas)");
-    expect(legacyGaugeTitle(zero)).toBe("one unit = inertia × speed limit = 714 Mgas; each full unit adds 1.0 to x");
+    expect(legacyGaugeNote(zero).lines[0]).toBe("1 unit of x = inertia × speed limit = 714 Mgas");
+    expect(legacyGaugeNote(zero).lines[1]).toMatch(/no free region/);
     const nothing = legacyGauge({ speedLimit: 0, inertia: 0, tolerance: 0 }, 5);
     expect(legacyGaugeSpanLabel(nothing)).toBe("no scale (zero inertia or speed limit)");
-    expect(legacyGaugeTitle(nothing)).toBe("no scale: the inertia or the speed limit is zero");
+    expect(legacyGaugeNote(nothing).lines).toEqual(["no scale: the inertia or the speed limit is zero"]);
   });
 });

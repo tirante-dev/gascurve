@@ -105,6 +105,9 @@ describe("NetworkPage with a chain-id route", () => {
     const { rerender } = render(<NetworkPage network="4663" />);
     expect(screen.queryByText(/does not know a network/)).toBeNull();
     expect(screen.getByText("Robinhood Chain · chain 4663")).toBeInTheDocument();
+    // The line above the chain's name says what the page is in anyone's words.
+    expect(screen.getByText("live gas prices")).toBeInTheDocument();
+    expect(screen.queryByText(/telemetry/)).toBeNull();
     expect(screen.getByRole("combobox", { name: "Network" })).toHaveValue("robinhood");
     expect(replaceMock).not.toHaveBeenCalled();
     liveInfo = networks[0];

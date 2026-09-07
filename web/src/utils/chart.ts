@@ -16,26 +16,6 @@ export function seriesColor(index: number): string {
 /** Colour of the "unknown split" series: the muted ink, never a constraint colour. */
 export const UNKNOWN_COLOR = "var(--ink-3)";
 
-/** Sequential ramp step (1 to 9) for a multiplier over the floor, on a log scale from 1x to 100x. */
-export function rampStep(multiplierBips: number): number {
-  const m = Math.max(1, multiplierBips / 10_000);
-  const f = Math.min(1, Math.log10(m) / 2);
-  return 1 + Math.round(f * 8);
-}
-
-export function rampColor(multiplierBips: number): string {
-  return `var(--seq-${rampStep(multiplierBips)})`;
-}
-
-/**
- * Text colour that clears AA contrast on the given ramp step. Each step has
- * its own ink token because the step at which the ramp flips from light ink
- * to dark ink differs between the light and dark surfaces.
- */
-export function rampInk(step: number): string {
-  return `var(--seq-ink-${Math.max(1, Math.min(9, Math.round(step)))})`;
-}
-
 /** The floor line and its legend swatch: the cyan accent, never a constraint colour. */
 export const FLOOR_COLOR = "var(--floor)";
 
@@ -462,11 +442,40 @@ export function constraintGaugeSpanLabel(gauge: Pick<ConstraintGauge, "scale" | 
 }
 
 /**
- * What one window is, on the gauge itself: the pricer's own divisor and what
- * a full one does to x, so the scale is readable without the equation.
+ * What a gauge's far-end label opens as a note: the lines the panel draws, and
+ * the same facts in one string for a reader who never gets the panel. The
+ * description restates the label because the panel replaces it for a screen
+ * reader rather than adding to it.
  */
-export function constraintGaugeTitle(denominator: number): string {
-  return `one window = target × window = ${formatGas(denominator)}; each full window adds 1.0 to x`;
+export type GaugeNote = { lines: string[]; description: string };
+
+/**
+ * A note from the label it opens on, the equation that defines its unit and
+ * the prose that says what the unit does. The equation leads because it is the
+ * figure the reader is looking at; it carries no full stop of its own, so the
+ * description supplies one.
+ */
+function gaugeNote(label: string, equation: string, prose: readonly string[]): GaugeNote {
+  return { lines: [equation, ...prose], description: `${label}. ${equation}. ${prose.join(" ")}`.trim() };
+}
+
+/** What the gauge spans when the pricer's own divisor is zero and there is nothing to divide by. */
+const NO_CONSTRAINT_SCALE = "no scale: the target or the window is zero";
+
+/**
+ * What the far end of a constraint's gauge means. Three things the bar cannot
+ * say on its own: what one window of target is in gas, that a full one is
+ * exactly 1.0 of x, and that the span is not a fixed ceiling but the next
+ * whole window above the backlog, so the far end moves out as the backlog
+ * crosses one rather than the fill approaching a fixed edge.
+ */
+export function constraintGaugeNote(c: { target: number; window: number }, gauge: Pick<ConstraintGauge, "scale" | "denominator">): GaugeNote {
+  const label = constraintGaugeSpanLabel(gauge);
+  if (gauge.denominator <= 0) return gaugeNote(label, NO_CONSTRAINT_SCALE, []);
+  return gaugeNote(label, `1 window of target = ${formatGasPerSecond(c.target)} × ${formatDuration(c.window)} = ${formatGas(gauge.denominator)}`, [
+    "The gas the chain uses in one whole window at exactly the target rate. A backlog of one window adds exactly 1.0 to x.",
+    "The bar spans whole windows, so each mark is one more unit of x and the far end moves out as the backlog crosses one.",
+  ]);
 }
 
 /**
@@ -479,11 +488,20 @@ export function legacyGaugeSpanLabel(gauge: LegacyGauge): string {
   return "no scale (zero inertia or speed limit)";
 }
 
-/** What one step of the legacy gauge is, and what it does to the fee. */
-export function legacyGaugeTitle(gauge: LegacyGauge): string {
-  if (gauge.free > 0) return `one threshold = tolerance × speed limit = ${formatGas(gauge.free)}; below it the pricer charges nothing at all`;
-  if (gauge.unit > 0) return `one unit = inertia × speed limit = ${formatGas(gauge.unit)}; each full unit adds 1.0 to x`;
-  return "no scale: the inertia or the speed limit is zero";
+/** The same note for the legacy gauge, in the legacy pricer's own terms. */
+export function legacyGaugeNote(gauge: LegacyGauge): GaugeNote {
+  const label = legacyGaugeSpanLabel(gauge);
+  if (gauge.free > 0)
+    return gaugeNote(label, `1 tolerance threshold = tolerance × speed limit = ${formatGas(gauge.free)}`, [
+      "Below the mark the pricer charges nothing at all, so a backlog only starts pricing past it.",
+      "The bar spans whole thresholds, so the far end moves out as the backlog crosses one.",
+    ]);
+  if (gauge.unit > 0)
+    return gaugeNote(label, `1 unit of x = inertia × speed limit = ${formatGas(gauge.unit)}`, [
+      "The gas that adds exactly 1.0 to x. There is no free region here: every unit of backlog prices.",
+      "The bar spans whole units, so each mark is one more unit of x and the far end moves out as the backlog crosses one.",
+    ]);
+  return gaugeNote(label, "no scale: the inertia or the speed limit is zero", []);
 }
 
 export type LegacyGauge = {

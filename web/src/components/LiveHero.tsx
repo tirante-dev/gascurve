@@ -29,7 +29,7 @@ import {
 } from "@/lib/hero";
 import { assignPlaces, NO_PLACES, SWAP_GAS, targetValues, TRANSFER_GAS, type BlockPlaces, type LiveValues } from "@/lib/smoothing";
 import type { BlockPoint, EthUsd, LiveSnapshot, LiveStatus, PricerModel, Series } from "@/types";
-import { FLOOR_COLOR, MARKER_COLOR, rampColor, rampInk, rampStep } from "@/utils/chart";
+import { FLOOR_COLOR, MARKER_COLOR } from "@/utils/chart";
 import {
   FIXED_WIDTH_CH,
   formatDateTime,
@@ -40,7 +40,6 @@ import {
   formatGwei,
   formatGweiFixed,
   formatInteger,
-  formatMultiplierFixed,
   formatPercent,
   formatSignificant,
   formatTick,
@@ -55,7 +54,8 @@ import { ChartReadout, type ReadoutGroup } from "./ChartReadout";
 import { EnlargeLink } from "./ChartActions";
 import { gapBands, GapNote } from "./ChartGaps";
 import { buildSeriesModel, bucketRowTitle, GasPerSecondChart } from "./SeriesCharts";
-import { Figure, HoverNote, Label, type NoteAlign, Stat, StatusPill, TIME_AXIS_RIGHT } from "./primitives";
+import { FeeDial } from "./FeeDial";
+import { Figure, HoverNote, Label, type NoteAlign, Stat, StatusPill, Term, TIME_AXIS_RIGHT } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
 
 export { SWAP_GAS, TRANSFER_GAS };
@@ -329,13 +329,15 @@ export function HeroThroughputPanel({
   const rangeLabel = HERO_RANGE_LABELS[range];
   const liveUnit = useMemo(() => throughputAxis(throughputPeak(points)).unit, [points]);
   const unit = live ? liveUnit : (m?.gasAxis.unit ?? "Mgas/s");
+  // The plain reading first, the measurement after it: what the chart shows a
+  // reader who has never met the pricer, then the unit and the span for one who has.
   const caption = live
-    ? `Compute gas per second across the chain \u00b7 ${unit} \u00b7 the last ${heroSpan()} s of blocks`
-    : `Compute gas per second per bucket against each target in force \u00b7 ${unit} \u00b7 ${rangeLabel}`;
+    ? { lead: `Network load, second by second, over the last ${heroSpan()} s`, detail: `compute gas per second across the chain \u00b7 ${unit}` }
+    : { lead: `Network load per bucket against each target in force, ${rangeLabel}`, detail: `compute gas per second \u00b7 ${unit}` };
   return (
     <>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs text-ink-3">{caption}</p>
+          <Caption lead={caption.lead} detail={caption.detail} />
           {action}
         </div>
         {live ? (
@@ -386,6 +388,32 @@ export function HeroThroughputPanel({
 /** What the live throughput chart reads out without a pointer. */
 const THROUGHPUT_READOUT: ReadoutGroup[] = [{ title: "second", rows: throughputTooltipRows() }];
 
+/**
+ * A chart's caption: the plain reading, then the measurement behind it in
+ * the quieter ink. Both are one paragraph, so a reader who selects the
+ * caption gets the whole of it.
+ */
+function Caption({ lead, detail }: { lead: string; detail: string }) {
+  return (
+    <p className="text-xs text-ink-3">
+      <span className="text-ink-2">{lead}</span>
+      <span> · {detail}</span>
+    </p>
+  );
+}
+
+/** The plain words the hero labels its figures with, each with the precise term a hover away. */
+export const HERO_TERMS = {
+  baseFee: { label: "Base fee now", lines: ["the price of one unit of gas right now, in gwei", "a gwei is a billionth of an ETH; every transaction pays this much per unit of gas it uses, and there are no tips"] },
+  load10: { label: "Network load (10 s)", lines: ["compute gas per second, averaged over the last 10 s", "the gas the chain carried net of L1 poster gas, which is the rate the pricer meters"] },
+  load60: { label: "Network load (60 s)", lines: ["compute gas per second, averaged over the last 60 s", "the same rate over a longer window, so a burst and a trend read apart"] },
+  send: { label: "Send", lines: ["a 21,000 gas transfer at the base fee now", "the gas a plain ETH transfer uses, so the smallest transaction there is"] },
+  swap: { label: "Swap", lines: ["a 150,000 gas swap at the base fee now", "about what a token swap on a DEX uses"] },
+  split: { label: "Who gets the fee", lines: ["where each unit of compute gas's fee goes", "receipt poster gas is paid separately, to the L1 pricer pool"] },
+  floor: { label: "to infrastructure", lines: ["floor to infra", "the minimum base fee in force goes to the infra fee account"] },
+  congestion: { label: "to the network", lines: ["congestion to network", "everything the pricer charges above the floor goes to the network fee account"] },
+} as const;
+
 /** Where a unit of compute gas's fee goes. Poster gas is paid separately to the L1 pricer. */
 export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: LiveSnapshot }) {
   const base = BigInt(snapshot.prices.perArbGasBase);
@@ -395,7 +423,9 @@ export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: L
   const congestionShare = 1 - floorShare;
   return (
     <div>
-      <Label>Where each compute-gas fee goes</Label>
+      <Label>
+        <Term lines={HERO_TERMS.split.lines}>{HERO_TERMS.split.label}</Term>
+      </Label>
       <div className="mt-2 flex h-3 w-full gap-[2px] overflow-hidden rounded-sm" role="img" aria-label={`Floor ${formatPercent(floorShare)} to the infra account, congestion ${formatPercent(congestionShare)} to the network account`}>
         <div style={{ width: `${Math.max(1, floorShare * 100)}%`, background: "var(--seq-2)" }} />
         <div style={{ width: `${Math.max(0, congestionShare * 100)}%`, background: "var(--seq-8)" }} />
@@ -403,8 +433,8 @@ export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: L
       <dl className="mt-2 grid grid-cols-2 gap-x-3 text-xs text-ink-2">
         <div>
           <dt className="flex items-center gap-1.5">
-            <span className="inline-block h-2.5 w-2.5 rounded-[2px]" style={{ background: "var(--seq-2)" }} aria-hidden="true" />
-            floor to infra
+            <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-[2px]" style={{ background: "var(--seq-2)" }} aria-hidden="true" />
+            <Term lines={HERO_TERMS.floor.lines}>{HERO_TERMS.floor.label}</Term>
           </dt>
           <dd className="num mt-0.5 text-ink">
             {formatGwei(snapshot.prices.perArbGasBase)} gwei · {formatPercent(floorShare, 0)}
@@ -412,15 +442,14 @@ export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: L
         </div>
         <div>
           <dt className="flex items-center gap-1.5">
-            <span className="inline-block h-2.5 w-2.5 rounded-[2px]" style={{ background: "var(--seq-8)" }} aria-hidden="true" />
-            congestion to network
+            <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-[2px]" style={{ background: "var(--seq-8)" }} aria-hidden="true" />
+            <Term lines={HERO_TERMS.congestion.lines} align="end">{HERO_TERMS.congestion.label}</Term>
           </dt>
           <dd className="num mt-0.5 text-ink">
             {formatGwei(snapshot.prices.perArbGasCongestion)} gwei · {formatPercent(congestionShare, 0)}
           </dd>
         </div>
       </dl>
-      <p className="mt-2 text-xs text-ink-3">Receipt poster gas separately funds the L1 pricer pool.</p>
     </div>
   );
 });
@@ -449,7 +478,7 @@ function Freshness({ sinceBlock, age }: { sinceBlock: number; age: number }) {
  * A gas rate tile: the figure in a reserved box and the unit beside it, so the
  * SI prefix rides on the unit ("Mgas/s") and the number never carries a letter.
  */
-export function GasRateTile({ label, gasPerSecond }: { label: string; gasPerSecond: number | null }) {
+export function GasRateTile({ label, gasPerSecond }: { label: ReactNode; gasPerSecond: number | null }) {
   if (gasPerSecond === null) return <Stat label={label} value="n/a" />;
   const parts = gasPerSecondParts(gasPerSecond, true);
   return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.gasPerSecond}>{parts.value}</Figure>} unit={parts.unit} />;
@@ -461,7 +490,7 @@ export function GasRateTile({ label, gasPerSecond }: { label: string; gasPerSeco
  * in the accessible description. `align` is which way the note opens: the right-hand tile of a row has to
  * open leftwards to stay inside the card.
  */
-export function CostTile({ label, eth, ethUsd, nowMs, align }: { label: string; eth: number; ethUsd: EthUsd | null; nowMs: number; align?: NoteAlign }) {
+export function CostTile({ label, eth, ethUsd, nowMs, align }: { label: ReactNode; eth: number; ethUsd: EthUsd | null; nowMs: number; align?: NoteAlign }) {
   const math = usdMath(eth, ethUsd, nowMs);
   if (math === null) {
     return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.eth}>{formatEthFixed(eth)}</Figure>} unit="ETH" size="sm" />;
@@ -523,13 +552,14 @@ export function HeroChartPanel({
   const data = useMemo(() => feeChartData(live ? null : series, model), [live, series, model]);
   const floorGwei = weiToGweiNumber(snapshot.minBaseFee);
   const rangeLabel = HERO_RANGE_LABELS[range];
-  const caption = live
-    ? `Base fee per block \u00b7 last ${points.length} blocks \u00b7 ${formatGasFixed(snapshot.block.gasUsed)} in block ${formatInteger(snapshot.block.number)}`
-    : feeChartCaption(rangeLabel, data.points);
   const note = useMemo(() => bucketNote(data.markers, data.bucketSeconds), [data.markers, data.bucketSeconds]);
   return (
     <>
-        <p className="text-xs text-ink-3">{caption}</p>
+        {live ? (
+          <Caption lead={`Base fee, block by block, over the last ${heroSpan()} s`} detail={`${formatInteger(points.length)} blocks \u00b7 ${formatGasFixed(snapshot.block.gasUsed)} in block ${formatInteger(snapshot.block.number)}`} />
+        ) : (
+          <p className="text-xs text-ink-3">{feeChartCaption(rangeLabel, data.points)}</p>
+        )}
         {live ? (
           <HeroChart points={points} floorGwei={floorGwei} floorText={formatGwei(snapshot.minBaseFee)} height={height} />
         ) : seriesError !== null && series === null ? (
@@ -668,17 +698,18 @@ export function LiveHeroView({
     );
   }
   const v = values ?? targetValues(snapshot, blocks, 0);
-  const multiplierBips = v.multiplier * 10_000;
-  const step = rampStep(multiplierBips);
   const sinceBlock = Math.max(0, nowMs / 1000 - snapshot.block.ts);
   const age = sampleAge(snapshot.sampledAt, nowMs);
+  const floorText = formatGwei(snapshot.minBaseFee);
   return (
     <div className="vw-card p-5">
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="flex flex-col gap-4 lg:col-span-4">
           <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
             <div>
-              <Label>Base fee now</Label>
+              <Label>
+                <Term lines={HERO_TERMS.baseFee.lines}>{HERO_TERMS.baseFee.label}</Term>
+              </Label>
               <div className="num mt-1 text-4xl leading-none tracking-tight text-ink sm:text-5xl">
                 <Figure ch={FIXED_WIDTH_CH.gwei} className="vw-hero">
                   {formatGweiFixed(v.baseFeeGwei)}
@@ -686,27 +717,21 @@ export function LiveHeroView({
                 <span className="ml-1.5 text-lg font-normal text-ink-2">gwei</span>
               </div>
             </div>
-            <div
-              className="num vw-tile rounded-md px-3 py-2 text-2xl leading-none"
-              style={{ background: rampColor(multiplierBips), color: rampInk(step) }}
-              title={`Multiplier over the ${formatGwei(snapshot.minBaseFee)} gwei floor`}
-            >
-              <Figure ch={FIXED_WIDTH_CH.multiplier}>{formatMultiplierFixed(v.multiplier)}</Figure>×
-              <div className="mt-1 text-[11px] font-medium uppercase tracking-[0.08em] opacity-80">over floor</div>
-            </div>
+            {/* The multiplier tile, with the dial above the figure and the colour now meaning something. */}
+            <FeeDial baseFeeGwei={v.baseFeeGwei} floorGwei={floorText} multiplier={v.multiplier} />
           </div>
           <div className="num text-xs text-ink-3">
-            floor {formatGwei(snapshot.minBaseFee)} gwei · x <Figure ch={FIXED_WIDTH_CH.x}>{v.exponent.toFixed(4)}</Figure>
+            floor {floorText} gwei · x <Figure ch={FIXED_WIDTH_CH.x}>{v.exponent.toFixed(4)}</Figure>
           </div>
 
           <div className="grid grid-cols-2 gap-x-4 gap-y-5">
             <Stat label="Block" value={formatInteger(snapshot.block.number)} />
             <Freshness sinceBlock={sinceBlock} age={age} />
-            <GasRateTile label="Compute gas/s (10 s)" gasPerSecond={v.gasPerSecond10} />
-            <GasRateTile label="Compute gas/s (60 s)" gasPerSecond={v.gasPerSecond60} />
+            <GasRateTile label={<Term lines={HERO_TERMS.load10.lines}>{HERO_TERMS.load10.label}</Term>} gasPerSecond={v.gasPerSecond10} />
+            <GasRateTile label={<Term lines={HERO_TERMS.load60.lines} align="end">{HERO_TERMS.load60.label}</Term>} gasPerSecond={v.gasPerSecond60} />
             {/* No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all. */}
-            <CostTile label="21k transfer" eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
-            <CostTile label="150k swap" eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} align="end" />
+            <CostTile label={<Term lines={HERO_TERMS.send.lines}>{HERO_TERMS.send.label}</Term>} eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
+            <CostTile label={<Term lines={HERO_TERMS.swap.lines} align="end">{HERO_TERMS.swap.label}</Term>} eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} align="end" />
           </div>
 
           <FeeSplitBar snapshot={snapshot} />
