@@ -110,6 +110,7 @@ const series: Series = {
     gasUsed: 100,
     gasPerSecond: 41_000_000,
     coverage: 1,
+    completeness: "complete",
     feesWei: "1000000000000000000",
     baseFeeMin: "100000000",
     baseFeeAvg: "300000000",

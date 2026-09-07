@@ -2,10 +2,10 @@
 
 import { useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { EthUsd, LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
+import type { EthUsd, LiveSnapshot, PricerModel, Series, SeriesCompleteness, SeriesRange } from "@/types";
 import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL, type ChartPoint } from "@/utils/chart";
 import { emptyRangeNote, gapModel, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
-import { isPartialRow, partialBands, partialRowNote, withFeeStack } from "@/lib/partial";
+import { completenessOf, isPartialRow, partialBands, partialRowNote, withFeeStack } from "@/lib/partial";
 import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, shortAddress, usdMath } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
 import { formatFloor } from "@/lib/feeChart";
@@ -59,16 +59,53 @@ function AccountRow({ name, role, address, balance, explorerUrl }: { name: strin
 }
 
 /**
- * Fee totals over the range from the api's exact per-bucket floor and surplus
- * sums. Buckets that predate the fee split (null parts) count toward `total`
- * but not toward the floor or surplus; `unsplit` says how many there were.
+ * Fee sums over every indexed block in the range. The values remain useful as
+ * lower bounds when coverage is partial, but the per-day estimate is emitted
+ * only when every bucket and interval is complete. Buckets that predate the
+ * fee split count toward `total` but not toward the destination totals.
  */
-export function feeTotals(series: Pick<Series, "points">): { total: number; floorEth: number; surplusEth: number; perDay: number; unsplit: number } {
+export type FeeTotals = {
+  total: number;
+  floorEth: number;
+  surplusEth: number;
+  perDay: number | null;
+  unsplit: number;
+  completeness: SeriesCompleteness;
+  partialBuckets: number;
+  unknownBuckets: number;
+  emptyIntervals: number;
+};
+
+export function feeTotals(series: Pick<Series, "from" | "to" | "resolution" | "points">): FeeTotals {
   const total = sumWeiEth(series.points, "feesWei");
   const floor = sumKnownWeiEth(series.points, "floorFeesWei");
   const surplus = sumKnownWeiEth(series.points, "surplusFeesWei");
   const span = spanSeconds(series.points);
-  return { total, floorEth: floor.eth, surplusEth: surplus.eth, perDay: span > 0 ? (total / span) * 86_400 : 0, unsplit: Math.max(floor.unknown, surplus.unknown) };
+  const partialBuckets = series.points.filter((point) => completenessOf(point) === "partial").length;
+  const unknownBuckets = series.points.filter((point) => completenessOf(point) === "unknown").length;
+  const emptyIntervals = gapModel(series, series.points).gaps.length;
+  const completeness: SeriesCompleteness = partialBuckets > 0 || emptyIntervals > 0 ? "partial" : unknownBuckets > 0 ? "unknown" : "complete";
+  return {
+    total,
+    floorEth: floor.eth,
+    surplusEth: surplus.eth,
+    perDay: completeness === "complete" && span > 0 ? (total / span) * 86_400 : null,
+    unsplit: Math.max(floor.unknown, surplus.unknown),
+    completeness,
+    partialBuckets,
+    unknownBuckets,
+    emptyIntervals,
+  };
+}
+
+/** Why range totals are lower bounds, or null when the range is complete. */
+export function incompleteTotalsNote(totals: FeeTotals): string | null {
+  if (totals.completeness === "complete") return null;
+  const reasons: string[] = [];
+  if (totals.partialBuckets > 0) reasons.push(`${formatInteger(totals.partialBuckets)} partially indexed ${totals.partialBuckets === 1 ? "bucket" : "buckets"}`);
+  if (totals.unknownBuckets > 0) reasons.push(`${formatInteger(totals.unknownBuckets)} ${totals.unknownBuckets === 1 ? "bucket has" : "buckets have"} unknown completeness`);
+  if (totals.emptyIntervals > 0) reasons.push(`${formatInteger(totals.emptyIntervals)} ${totals.emptyIntervals === 1 ? "interval has" : "intervals have"} no indexed buckets`);
+  return `Indexed-block sums are lower bounds: ${reasons.join("; ")}. The per-day estimate waits for complete coverage.`;
 }
 
 /**
@@ -125,7 +162,7 @@ export function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT
   const rows = withGapBreaks(withFeeStack(points), gaps.gaps);
   return (
     <>
-      <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as the floor part and the congestion part, hatched where the split predates the record or the bucket is still filling">
+      <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as the floor part and the congestion part, hatched where the split predates the record or the bucket is incomplete">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={rows} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <defs>
@@ -173,6 +210,8 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
   const [tableOpen, setTableOpen] = useState(false);
   const accounts = snapshot?.accounts;
   const unsplit = (totals?.unsplit ?? 0) > 0;
+  const incomplete = totals?.completeness !== "complete";
+  const totalsNote = totals === null ? null : incompleteTotalsNote(totals);
   const legend = feeFlowLegend(unsplit);
 
   return (
@@ -198,11 +237,12 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
         {totals && series ? (
           <>
             <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
-              <Stat label={`Fees in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, nowMs, 4)} />
-              <Stat label="Per day (est.)" value={formatSignificant(totals.perDay, 4)} unit="ETH" size="sm" hint={usdLine(totals.perDay, ethUsd, nowMs, 4)} />
-              <Stat label="Floor to infra" value={formatSignificant(totals.floorEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.floorEth, ethUsd, nowMs, 3)} />
-              <Stat label="Congestion to network" value={formatSignificant(totals.surplusEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.surplusEth, ethUsd, nowMs, 3)} />
+              <Stat label={`${incomplete ? "Indexed fees" : "Fees"} in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, nowMs, 4)} />
+              <Stat label="Per day (est.)" value={totals.perDay === null ? "n/a" : formatSignificant(totals.perDay, 4)} unit={totals.perDay === null ? undefined : "ETH"} size="sm" hint={totals.perDay === null ? undefined : usdLine(totals.perDay, ethUsd, nowMs, 4)} />
+              <Stat label={incomplete ? "Indexed floor to infra" : "Floor to infra"} value={formatSignificant(totals.floorEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.floorEth, ethUsd, nowMs, 3)} />
+              <Stat label={incomplete ? "Indexed congestion" : "Congestion to network"} value={formatSignificant(totals.surplusEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.surplusEth, ethUsd, nowMs, 3)} />
             </div>
+            {totalsNote ? <p className="mt-2 text-xs text-ink-3">{totalsNote}</p> : null}
             {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}; the floor and congestion totals leave them out.</p> : null}
           </>
         ) : null}

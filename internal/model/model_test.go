@@ -73,7 +73,7 @@ func TestNullableTimestamps(t *testing.T) {
 	b, _ = json.Marshal(SeriesPoint{})
 	m = nil
 	_ = json.Unmarshal(b, &m)
-	for _, key := range []string{"constraintBips", "minBaseFee", "floorFeesWei", "surplusFeesWei"} {
+	for _, key := range []string{"coverage", "completeness", "constraintBips", "minBaseFee", "floorFeesWei", "surplusFeesWei"} {
 		if _, ok := m[key]; !ok {
 			t.Fatalf("SeriesPoint missing %s: %v", key, m)
 		}

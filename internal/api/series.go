@@ -73,15 +73,28 @@ func (r seriesRange) bounds(from, to time.Time, first int64, indexed bool) (star
 	return from.Unix(), to.Unix()
 }
 
-// buildSeries assembles a Series for a range.
+// buildSeries assembles a Series inside one repeatable-read transaction. The
+// bucket rows and the missing ranges that qualify them must describe the same
+// database moment, because the collector rebuilds buckets and removes a
+// completed range in one commit.
 func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRange) (*model.Series, error) {
-	now := s.now()
+	var series *model.Series
+	err := s.store.WithSnapshotTx(ctx, func(store db.Store) error {
+		var err error
+		series, err = buildSeriesIn(ctx, store, chainID, rng, s.now())
+		return err
+	})
+	return series, err
+}
+
+// buildSeriesIn is buildSeries against one store view.
+func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seriesRange, now time.Time) (*model.Series, error) {
 	from, to := rng.window(now)
-	sets, err := s.store.ConstraintSets(ctx, chainID)
+	sets, err := store.ConstraintSets(ctx, chainID)
 	if err != nil {
 		return nil, err
 	}
-	actions, err := s.store.OwnerActions(ctx, chainID, from, to, 0)
+	actions, err := store.OwnerActions(ctx, chainID, from, to, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +114,7 @@ func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRang
 		out.ConstraintSets = append(out.ConstraintSets, m)
 	}
 	if rng.resolution == "" {
-		blocks, err := s.store.BlocksBetween(ctx, chainID, from, to)
+		blocks, err := store.BlocksBetween(ctx, chainID, from, to)
 		if err != nil {
 			return nil, err
 		}
@@ -115,11 +128,11 @@ func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRang
 		out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 		return out, nil
 	}
-	buckets, err := s.store.Buckets(ctx, chainID, rng.resolution, from, to)
+	buckets, err := store.Buckets(ctx, chainID, rng.resolution, from, to)
 	if err != nil {
 		return nil, err
 	}
-	liveStart, err := s.liveStart(ctx, chainID)
+	liveStart, err := liveStart(ctx, store, chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -190,8 +203,8 @@ func setSize(cs db.ConstraintSet) int {
 // split and the exponents are null when the bucket predates them.
 // liveStart is when the collector's live loop started storing this chain,
 // from the live_start checkpoint; the zero time when there is none.
-func (s *Server) liveStart(ctx context.Context, chainID uint64) (time.Time, error) {
-	raw, ok, err := s.store.GetState(ctx, chainID, db.StateLiveStart)
+func liveStart(ctx context.Context, store db.Store, chainID uint64) (time.Time, error) {
+	raw, ok, err := store.GetState(ctx, chainID, db.StateLiveStart)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -215,12 +228,12 @@ func (s *Server) liveStart(ctx context.Context, chainID uint64) (time.Time, erro
 // progress, or the bucket the collector started in, reads as the rate the
 // chain ran at rather than as a fraction of a full bucket.
 //
-// A bucket that ends at or before the live start is whole: it was written
-// by the backfiller or by the gap filler, which index history the live
-// loop never saw, and trimming it to the live start would report a
-// complete hour as a fraction of a second. The span does not look inside a
-// bucket either: a hole in the middle of one is not represented, because
-// the gap filler closes those and the bucket is rebuilt whole.
+// A bucket that ends at or before the live start has a whole boundary span:
+// it was written by the backfiller or gap filler, which index history the
+// live loop never saw, and trimming it to the live start would report a
+// complete hour as a fraction of a second. Missing-range metadata is applied
+// separately because a whole boundary span does not prove the bucket has no
+// internal block hole.
 //
 // A zero or negative span means the bucket lies entirely at or after now.
 // Such a bucket is not a point and is not returned.
@@ -243,6 +256,17 @@ func coverage(covered, width time.Duration) (secs uint64, share float64) {
 	return max(uint64(covered/time.Second), 1), float64(covered) / float64(width)
 }
 
+// measuredCoverage pairs a known time share with the aggregate state clients
+// use. A share below one is partial even when every block observed so far is
+// present, because the bucket itself is not finished.
+func measuredCoverage(share float64) (*float64, string) {
+	state := model.SeriesComplete
+	if share < 1 {
+		state = model.SeriesPartial
+	}
+	return &share, state
+}
+
 // bucketPoint renders a bucket, or reports false for one that lies
 // entirely in the future.
 func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) (model.SeriesPoint, bool) {
@@ -255,12 +279,13 @@ func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) (mo
 	if b.ConstraintSetID.Valid {
 		setID = b.ConstraintSetID.Int64
 	}
+	pointCoverage, completeness := measuredCoverage(share)
 	avg := b.BaseFeeAvg.String()
 	if b.BaseFeeSum.Valid && b.Blocks > 0 {
 		avg = new(big.Int).Div(b.BaseFeeSum.Wei.BigInt(), big.NewInt(b.Blocks)).String()
 	}
 	return model.SeriesPoint{
-		T: b.BucketStart.Unix(), Blocks: b.Blocks, GasUsed: b.GasUsed, GasPerSecond: b.GasUsed / secs, Coverage: share,
+		T: b.BucketStart.Unix(), Blocks: b.Blocks, GasUsed: b.GasUsed, GasPerSecond: b.GasUsed / secs, Coverage: pointCoverage, Completeness: completeness,
 		FeesWei: b.FeesWei.String(), BaseFeeMin: b.BaseFeeMin.String(), BaseFeeAvg: avg, BaseFeeMax: b.BaseFeeMax.String(),
 		ExponentBips: b.ExponentEndBips, ConstraintBips: int64s(b.ConstraintBipsEnd), Backlogs: b.BacklogsEnd.Uint64s(), BacklogsMax: b.BacklogsMax.Uint64s(),
 		MinBaseFee: b.MinBaseFee.StringPtr(), FloorFeesWei: b.FloorFeesWei.StringPtr(), SurplusFeesWei: b.SurplusFeesWei.StringPtr(),
@@ -281,8 +306,9 @@ func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint
 	for _, b := range blocks {
 		gas := new(big.Int).SetUint64(b.GasUsed)
 		fees := new(big.Int).Mul(b.BaseFee.BigInt(), gas)
+		pointCoverage, completeness := measuredCoverage(1)
 		p := model.SeriesPoint{
-			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, GasPerSecond: perSecond[b.TS.Unix()], Coverage: 1,
+			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, GasPerSecond: perSecond[b.TS.Unix()], Coverage: pointCoverage, Completeness: completeness,
 			FeesWei: fees.String(), BaseFeeMin: b.BaseFee.String(), BaseFeeAvg: b.BaseFee.String(), BaseFeeMax: b.BaseFee.String(),
 			ExponentBips: b.ExponentBips, ConstraintBips: int64s(b.ConstraintBips), Backlogs: b.Backlogs.Uint64s(), BacklogsMax: b.Backlogs.Uint64s(),
 			MinBaseFee: b.MinBaseFee.StringPtr(), ConstraintSetID: setIDAt(sets, b.Number, len(b.Backlogs)), ReplayErrorBips: replayError(b),
@@ -399,8 +425,9 @@ func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
 	if a.floor == nil {
 		a.floor = new(big.Int)
 	}
+	pointCoverage, completeness := measuredCoverage(share)
 	p := model.SeriesPoint{
-		T: a.start, Blocks: a.blocks, GasUsed: a.gas, GasPerSecond: a.gas / secs, Coverage: share,
+		T: a.start, Blocks: a.blocks, GasUsed: a.gas, GasPerSecond: a.gas / secs, Coverage: pointCoverage, Completeness: completeness,
 		FeesWei: a.fees.String(), BaseFeeMin: a.minFee.String(), BaseFeeAvg: avg.String(), BaseFeeMax: a.maxFee.String(),
 		ExponentBips: a.exponent, ConstraintBips: a.constraintBips, Backlogs: a.backlogs, BacklogsMax: a.maxBacklog,
 		MinBaseFee: a.minBaseFee, ConstraintSetID: a.setID, ReplayErrorBips: a.errBips,

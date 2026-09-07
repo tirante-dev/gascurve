@@ -706,17 +706,24 @@ func TestEthUsdMaxAgeOption(t *testing.T) {
 	}
 }
 
-// TestLiveIsOneSnapshot: /live reads the sample, its block, the slow
-// sample and the gas rates inside one snapshot transaction.
-func TestLiveIsOneSnapshot(t *testing.T) {
+// TestLiveAndSeriesUseSnapshots: /live reads the sample, its block, the slow
+// sample and gas rates in one database moment. /series likewise reads buckets
+// and their completeness evidence together.
+func TestLiveAndSeriesUseSnapshots(t *testing.T) {
 	store := seed(t)
 	ts := newServer(t, store)
 	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/live"); resp.StatusCode != 200 {
 		t.Fatalf("live: %d", resp.StatusCode)
 	}
+	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/series?range=24h"); resp.StatusCode != 200 {
+		t.Fatalf("series: %d", resp.StatusCode)
+	}
 	store.SetFailure("WithSnapshotTx", true)
 	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/live"); resp.StatusCode != 500 {
 		t.Fatalf("live must run inside the snapshot transaction: %d", resp.StatusCode)
+	}
+	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/series?range=24h"); resp.StatusCode != 500 {
+		t.Fatalf("series must run inside the snapshot transaction: %d", resp.StatusCode)
 	}
 }
 
@@ -1166,19 +1173,19 @@ func TestSeriesCoverage(t *testing.T) {
 	// A bucket that ends before the live start is backfilled history, and
 	// whole: the live start must not trim it to a single second, which
 	// would multiply its rate by the width.
-	if p := out.Points[0]; p.GasPerSecond != 5 || p.Coverage != 1 {
+	if p := out.Points[0]; p.GasPerSecond != 5 || p.Coverage == nil || *p.Coverage != 1 || p.Completeness != model.SeriesComplete {
 		t.Fatalf("backfilled bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// The bucket the live start falls inside: fifteen seconds of sixty.
-	if p := out.Points[1]; p.GasPerSecond != 20 || p.Coverage != 0.25 {
+	if p := out.Points[1]; p.GasPerSecond != 20 || p.Coverage == nil || *p.Coverage != 0.25 || p.Completeness != model.SeriesPartial {
 		t.Fatalf("first live bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// A whole bucket.
-	if p := out.Points[2]; p.GasPerSecond != 5 || p.Coverage != 1 {
+	if p := out.Points[2]; p.GasPerSecond != 5 || p.Coverage == nil || *p.Coverage != 1 || p.Completeness != model.SeriesComplete {
 		t.Fatalf("full bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// The bucket in progress: twenty seconds covered.
-	if p := out.Points[3]; p.GasPerSecond != 15 || p.Coverage < 0.33 || p.Coverage > 0.34 {
+	if p := out.Points[3]; p.GasPerSecond != 15 || p.Coverage == nil || *p.Coverage < 0.33 || *p.Coverage > 0.34 || p.Completeness != model.SeriesPartial {
 		t.Fatalf("bucket in progress: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// An unreadable live_start is ignored, not an error.
@@ -1218,7 +1225,7 @@ func TestSeriesCoverage(t *testing.T) {
 		t.Fatalf("live start before the bucket: %v", span)
 	}
 	// Per-block points are whole by definition.
-	if p := blockPoints([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull}}, nil); p[0].Coverage != 1 {
+	if p := blockPoints([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull}}, nil); p[0].Coverage == nil || *p[0].Coverage != 1 || p[0].Completeness != model.SeriesComplete {
 		t.Fatalf("block coverage: %v", p[0].Coverage)
 	}
 }

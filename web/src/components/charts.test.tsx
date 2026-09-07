@@ -18,7 +18,7 @@ import { HATCH_SPACING, HATCH_STROKE, HatchPattern } from "./primitives";
 import { targetValues } from "@/lib/smoothing";
 import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
-import { FeeFlows, feeFlowRows, feeTotals, unsplitNote } from "./FeeFlows";
+import { FeeFlows, feeFlowRows, feeTotals, incompleteTotalsNote, unsplitNote } from "./FeeFlows";
 import { L1Section } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
 import { describeSplit, SeriesCharts } from "./SeriesCharts";
@@ -30,6 +30,7 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     gasUsed: 0,
     gasPerSecond: 0,
     coverage: 1,
+    completeness: "complete",
     feesWei: "0",
     baseFeeMin: "1",
     baseFeeAvg: "1",
@@ -292,6 +293,9 @@ describe("FeeFlows", () => {
     expect(totals.total).toBeCloseTo(5);
     expect(totals.floorEth).toBeCloseTo(2.2);
     expect(totals.surplusEth).toBeCloseTo(2.8);
+    expect(totals.completeness).toBe("complete");
+    expect(totals.perDay).not.toBeNull();
+    expect(incompleteTotalsNote(totals)).toBeNull();
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText("2.2")).toBeInTheDocument();
     expect(screen.getByText("2.8")).toBeInTheDocument();
@@ -378,16 +382,41 @@ describe("FeeFlows", () => {
   });
 
   it("hatches the bucket the collector is still filling rather than stacking a total it has not finished collecting", () => {
-    const filling: Series = { ...series, points: [...series.points.slice(0, 2), { ...series.points[2], coverage: 0.4 }] };
+    const filling: Series = { ...series, points: [...series.points.slice(0, 2), { ...series.points[2], coverage: 0.4, completeness: "partial" }] };
+    const totals = feeTotals(filling);
+    expect(totals.completeness).toBe("partial");
+    expect(totals.perDay).toBeNull();
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={filling} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText("Hatched and left out: bucket in progress, 40% elapsed")).toBeInTheDocument();
-    expect(screen.getByRole("figure", { name: /or the bucket is still filling/ })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /or the bucket is incomplete/ })).toBeInTheDocument();
     // Only the stack leaves it out: the bucket keeps every figure it has.
     const details = screen.getByText(/Data table \(3 buckets\)/).closest("details") as HTMLDetailsElement;
     details.open = true;
     fireEvent(details, new Event("toggle"));
     expect(within(details).getAllByRole("row")).toHaveLength(4);
     expect(within(within(details).getAllByRole("row")[3]).queryByText("n/a")).toBeNull();
+  });
+
+  it("treats a populated bucket with a bounded block hole as incomplete", () => {
+    const holed: Series = { ...series, points: [series.points[0], { ...series.points[1], gasPerSecond: 25, coverage: 0.8, completeness: "partial" }, series.points[2]] };
+    const rows = buildChartPoints(holed, "constraints");
+    expect(rows[1].gps).toBe(25);
+    const totals = feeTotals(holed);
+    expect(totals).toMatchObject({ total: 5, completeness: "partial", partialBuckets: 1, unknownBuckets: 0, emptyIntervals: 0, perDay: null });
+    expect(incompleteTotalsNote(totals)).toBe("Indexed-block sums are lower bounds: 1 partially indexed bucket. The per-day estimate waits for complete coverage.");
+
+    render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={holed} model="constraints" nowMs={NOW_MS} />);
+    expect(screen.getByText("Hatched and left out: partially indexed, 80% of the bucket")).toBeInTheDocument();
+    expect(screen.getByText("Indexed fees in last 24h")).toBeInTheDocument();
+    expect(screen.getByText("n/a")).toBeInTheDocument();
+    expect(screen.getByText(/Indexed-block sums are lower bounds/)).toBeInTheDocument();
+  });
+
+  it("keeps unknown bucket completeness distinct in the totals", () => {
+    const unknown: Series = { ...series, points: [series.points[0], { ...series.points[1], coverage: null, completeness: "unknown" }, series.points[2]] };
+    const totals = feeTotals(unknown);
+    expect(totals).toMatchObject({ completeness: "unknown", partialBuckets: 0, unknownBuckets: 1, perDay: null });
+    expect(incompleteTotalsNote(totals)).toContain("1 bucket has unknown completeness");
   });
 
   it("reads a bucket in progress out as what it has collected so far, not as what the bucket holds", () => {
