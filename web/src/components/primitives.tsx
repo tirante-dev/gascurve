@@ -54,6 +54,19 @@ export function Figure({ children, ch, className = "" }: { children: ReactNode; 
 export type NoteAlign = "start" | "end";
 
 /**
+ * Whether the note anchors to a block of its own or sits inside a line of
+ * running text. A tile is a fixed-width grid cell, so `block` places the panel
+ * against the whole tile. A word mid-sentence cannot have a block wrapper
+ * without breaking the line around it, so `inline` leaves the wrapper
+ * unpositioned and the panel anchors to the nearest positioned ancestor
+ * instead: **the line element must be `relative`**. Anchoring to the word
+ * itself is what does not work. A panel is far wider than the word it explains,
+ * so at a phone's width it runs off whichever edge the word sits nearer, and
+ * neither `align` saves it.
+ */
+export type NoteFlow = "block" | "inline";
+
+/**
  * A figure whose working is a hover away. The browser's own `title` tooltip
  * was the obvious way to carry it and the wrong one: it gives the reader
  * nothing to notice, waits about a second, and draws in the platform's chrome
@@ -84,7 +97,7 @@ export type NoteAlign = "start" | "end";
  * note permanently unopenable, which is worse than what it was fixing; a
  * missed arrival costs nothing, because the next one clears it.
  */
-export function HoverNote({ children, lines, description, align = "start" }: { children: ReactNode; lines: readonly string[]; description: string; align?: NoteAlign }) {
+export function HoverNote({ children, lines, description, align = "start", flow = "block" }: { children: ReactNode; lines: readonly string[]; description: string; align?: NoteAlign; flow?: NoteFlow }) {
   const [dismissed, setDismissed] = useState(false);
   const [under, setUnder] = useState(false);
   // Only while the pointer is on the note: a page of these should not each hold
@@ -98,9 +111,11 @@ export function HoverNote({ children, lines, description, align = "start" }: { c
   return (
     /* The panel is placed against the tile, not against the figure: a note wider
        than the digits it explains has the whole tile to open into, which is what
-       keeps the right-hand one of a pair on screen at a phone's width. */
+       keeps the right-hand one of a pair on screen at a phone's width. An inline
+       note anchors to the line it sits in for the same reason, which is the
+       call site's `relative` and not this wrapper's. */
     <span
-      className="group relative block"
+      className={flow === "inline" ? "group" : "group relative block"}
       onMouseEnter={() => {
         setUnder(true);
         setDismissed(false);
@@ -129,6 +144,29 @@ export function HoverNote({ children, lines, description, align = "start" }: { c
         </span>
       </span>
     </span>
+  );
+}
+
+/** The definition of the unit, the half that does not depend on the figure in front of it. */
+const BIPS_NOTE = "basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.";
+
+/**
+ * A figure quoted in basis points, with the unit's definition and its own
+ * value in ordinary decimal a hover away. The pricer works in integer bips and
+ * the api hands them over unchanged, so the raw unit reaches the page; rather
+ * than translate it away (the integer is the thing the pricer actually holds)
+ * the word carries what it means.
+ */
+export function Bips({ value, align = "end" }: { value: number; align?: NoteAlign }) {
+  const bips = Math.round(value);
+  // Four places is what the constraint cards already print x to, so the note
+  // reads back as the figure above it rather than as a second rounding.
+  const decimal = (bips / 10_000).toFixed(4);
+  const figure = bips.toLocaleString("en-US");
+  return (
+    <HoverNote flow="inline" align={align} lines={[`${figure} bips = ${decimal}`, BIPS_NOTE]} description={`${figure} bips is ${decimal}. ${BIPS_NOTE}`}>
+      {figure} <abbr>bips</abbr>
+    </HoverNote>
   );
 }
 
