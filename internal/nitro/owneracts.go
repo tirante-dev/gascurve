@@ -10,6 +10,7 @@ type OwnerAction struct {
 	BlockNumber uint64
 	Timestamp   uint64
 	TxHash      string
+	TxIndex     uint64
 	LogIndex    uint64
 	Owner       string
 	Selector    string
@@ -72,6 +73,7 @@ var ownerMethods = map[string]ownerMethod{
 	"setMaxBlockGasLimit(uint64)":             {"setMaxBlockGasLimit", []string{paramLimit}, []argKind{kindUint64}},
 	"setL1PricingEquilibrationUnits(uint256)": {"setL1PricingEquilibrationUnits", []string{"equilibrationUnits"}, []argKind{kindUint256}},
 	"setPerBatchGasCharge(int64)":             {"setPerBatchGasCharge", []string{"cost"}, []argKind{kindInt64}},
+	SigSetParentGasFloorPerToken:              {"setParentGasFloorPerToken", []string{"gasFloorPerToken"}, []argKind{kindUint64}},
 	"setAmortizedCostCapBips(uint64)":         {"setAmortizedCostCapBips", []string{"cap"}, []argKind{kindUint64}},
 	"setTransactionFilteringFrom(uint64)":     {"setTransactionFilteringFrom", []string{paramTimestamp}, []argKind{kindUint64}},
 	"addTransactionFilterer(address)":         {"addTransactionFilterer", []string{"filterer"}, []argKind{kindAddress}},
@@ -111,6 +113,7 @@ func DecodeOwnerActs(l Log) (*OwnerAction, error) {
 		BlockNumber: l.BlockNumber,
 		Timestamp:   l.BlockTimestamp,
 		TxHash:      l.TxHash,
+		TxIndex:     l.TxIndex,
 		LogIndex:    l.LogIndex,
 		Owner:       owner,
 		Selector:    EncodeHex(methodTopic[:4]),

@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 )
+
+var errBatchCostUnreconstructable = errors.New("batch report cost parameters are not reconstructable")
 
 // SlowTick runs the slow loop once: the ETH/USD spot, L1 getters, fee
 // accounts, ArbOS version, owner action logs, batch report scan, pruning
@@ -74,7 +77,11 @@ func (f *Follower) sampleEthUsd(ctx context.Context) error {
 // sampleSlow reads the L1 pricer getters and fee account balances; they are
 // attached to the next fast tick's state sample.
 func (f *Follower) sampleSlow(ctx context.Context) error {
-	l1, err := f.rpc.L1Sample(ctx)
+	head, err := f.currentHead(ctx)
+	if err != nil {
+		return err
+	}
+	l1, err := f.rpc.L1SampleAt(ctx, head)
 	if err != nil {
 		return err
 	}
@@ -93,6 +100,10 @@ func (f *Follower) sampleSlow(ctx context.Context) error {
 		PerBatchGasCharge:  l1.PerBatchGasCharge,
 		RewardRate:         l1.RewardRate,
 	}
+	f.batchCostAnchor = &batchCostAnchor{block: head, params: nitro.BatchPostingCostParams{
+		ArbOSVersion: l1.ArbOSVersion, PerBatchGasCharge: l1.PerBatchGasCharge,
+		ParentGasFloorPerToken: l1.ParentGasFloorPerToken,
+	}}
 	f.accounts = &model.Accounts{
 		Infra:    model.Account{Address: accounts.Infra.Address, Balance: weiString(accounts.Infra.Balance)},
 		Network:  model.Account{Address: accounts.Network.Address, Balance: weiString(accounts.Network.Balance)},
@@ -235,12 +246,20 @@ func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64) erro
 	origin := &scanOrigin{Block: cutoff}
 	var set *db.ConstraintSet
 	if f.archive != nil {
-		sample, err := f.archive.FastSampleAt(ctx, cutoff)
+		sample, err := f.archive.PricingSampleAt(ctx, cutoff)
 		if err != nil {
 			return fmt.Errorf("origin state at %d: %w", cutoff, err)
 		}
+		l1, err := f.archive.L1SampleAt(ctx, cutoff)
+		if err != nil {
+			return fmt.Errorf("origin L1 state at %d: %w", cutoff, err)
+		}
 		origin.Archive = true
 		origin.MinBaseFee = bigOrZero(sample.MinBaseFee).String()
+		origin.BatchCost = &nitro.BatchPostingCostParams{
+			ArbOSVersion: l1.ArbOSVersion, PerBatchGasCharge: l1.PerBatchGasCharge,
+			ParentGasFloorPerToken: l1.ParentGasFloorPerToken,
+		}
 		switch {
 		case sample.IsLegacy():
 			if sample.Legacy == nil {
@@ -377,7 +396,8 @@ func (f *Follower) recordAction(ctx context.Context, s db.Store, a *nitro.OwnerA
 	}
 	at := time.Unix(int64(a.Timestamp), 0).UTC()
 	row := db.OwnerAction{
-		ChainID: f.chainID, BlockNumber: a.BlockNumber, TxHash: a.TxHash, LogIndex: int64(a.LogIndex),
+		ChainID: f.chainID, BlockNumber: a.BlockNumber, TxHash: a.TxHash,
+		TxIndex: sql.NullInt64{Int64: int64(a.TxIndex), Valid: true}, LogIndex: int64(a.LogIndex),
 		TS: at, Method: a.Method, Selector: a.Selector, Args: args,
 	}
 	n, err := s.InsertOwnerActions(ctx, []db.OwnerAction{row})
@@ -466,6 +486,10 @@ func (f *Follower) currentHead(ctx context.Context) (uint64, error) {
 // discarded.
 func (f *Follower) scanBatchReports(ctx context.Context) error {
 	pol := f.policy()
+	resolver, err := f.batchCostResolver()
+	if err != nil {
+		return err
+	}
 	gen, err := f.generation(ctx, f.store)
 	if err != nil {
 		return err
@@ -502,6 +526,11 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// The fast loop keeps appending blocks while this runs, so the
+		// candidates can reach past the anchor the parameters were pinned
+		// to. Those are left for the next tick, which pins a newer one,
+		// rather than priced against a snapshot that predates them.
+		nums = capBlocks(nums, resolver.anchor.block)
 		if len(nums) == 0 {
 			return nil
 		}
@@ -513,7 +542,15 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 				return err
 			}
 			for _, b := range blocks {
-				if r := batchReportOf(f.chainID, b); r != nil {
+				r, err := batchReportOf(f.chainID, b, resolver)
+				if err != nil {
+					if errors.Is(err, errBatchCostUnreconstructable) {
+						f.log.Warn("skipping batch report with unreconstructable cost", "block", b.Number, "err", err.Error())
+						continue
+					}
+					return err
+				}
+				if r != nil {
 					reports = append(reports, *r)
 				}
 			}
@@ -539,6 +576,107 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 	}
 }
 
+type batchCostResolver struct {
+	origin  *scanOrigin
+	anchor  batchCostAnchor
+	changes []batchCostChange
+}
+
+func (f *Follower) batchCostResolver() (*batchCostResolver, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.batchCostAnchor == nil {
+		return nil, errors.New("batch report cost parameters have not been sampled")
+	}
+	r := &batchCostResolver{anchor: *f.batchCostAnchor, changes: append([]batchCostChange(nil), f.batchCostChanges...)}
+	if f.scanOrigin != nil {
+		origin := *f.scanOrigin
+		if f.scanOrigin.BatchCost != nil {
+			params := *f.scanOrigin.BatchCost
+			origin.BatchCost = &params
+		}
+		r.origin = &origin
+	}
+	return r, nil
+}
+
+func (r *batchCostResolver) paramsAt(block, arbosVersion uint64) (nitro.BatchPostingCostParams, error) {
+	if block > r.anchor.block {
+		return nitro.BatchPostingCostParams{}, fmt.Errorf("batch report block %d is above parameter anchor %d", block, r.anchor.block)
+	}
+	params := nitro.BatchPostingCostParams{ArbOSVersion: arbosVersion}
+	var perBatchKnown, floorKnown bool
+	switch {
+	case r.origin == nil:
+		params.PerBatchGasCharge = defaultPerBatchGasCharge(arbosVersion)
+		params.ParentGasFloorPerToken = 0
+		perBatchKnown, floorKnown = true, true
+	case r.origin.BatchCost != nil && block > r.origin.Block:
+		params.PerBatchGasCharge = r.origin.BatchCost.PerBatchGasCharge
+		params.ParentGasFloorPerToken = r.origin.BatchCost.ParentGasFloorPerToken
+		perBatchKnown, floorKnown = true, true
+	}
+
+	perBatchAfter, floorAfter := false, false
+	for _, change := range r.changes {
+		if r.origin != nil && r.origin.BatchCost != nil && change.block <= r.origin.Block {
+			continue
+		}
+		if change.block <= block {
+			if change.perBatchGas != nil {
+				params.PerBatchGasCharge, perBatchKnown = *change.perBatchGas, true
+			}
+			if change.parentFloor != nil {
+				params.ParentGasFloorPerToken, floorKnown = *change.parentFloor, true
+			}
+			continue
+		}
+		if change.block <= r.anchor.block {
+			perBatchAfter = perBatchAfter || change.perBatchGas != nil
+			floorAfter = floorAfter || change.parentFloor != nil
+		}
+	}
+
+	// A truncated scan without archive state can still use the current
+	// anchor for a parameter when no setter lies between the report and the
+	// anchor. If there is one, the pre-setter value cannot be inferred.
+	if !perBatchAfter {
+		params.PerBatchGasCharge, perBatchKnown = r.anchor.params.PerBatchGasCharge, true
+	}
+	if !floorAfter {
+		params.ParentGasFloorPerToken, floorKnown = r.anchor.params.ParentGasFloorPerToken, true
+	}
+	if !perBatchKnown {
+		return nitro.BatchPostingCostParams{}, fmt.Errorf("%w: per-batch gas charge at block %d", errBatchCostUnreconstructable, block)
+	}
+	if arbosVersion >= 50 && !floorKnown {
+		return nitro.BatchPostingCostParams{}, fmt.Errorf("%w: parent gas floor at block %d", errBatchCostUnreconstructable, block)
+	}
+	return params, nil
+}
+
+func defaultPerBatchGasCharge(arbosVersion uint64) int64 {
+	switch {
+	case arbosVersion >= 11:
+		return 210_000
+	case arbosVersion >= 6:
+		return 100_000
+	default:
+		return 0
+	}
+}
+
+// capBlocks truncates an ascending block list at the last entry that is
+// not above through.
+func capBlocks(nums []uint64, through uint64) []uint64 {
+	for i, n := range nums {
+		if n > through {
+			return nums[:i]
+		}
+	}
+	return nums
+}
+
 // batchCandidates lists the next blocks to inspect after the cursor: every
 // block on an unlimited endpoint, only two-transaction blocks on a
 // budgeted one.
@@ -559,7 +697,7 @@ func (f *Follower) batchCandidates(ctx context.Context, after uint64, pol policy
 
 // batchReportOf decodes a batch posting report from a block's internal
 // transactions, or returns nil.
-func batchReportOf(chainID uint64, b nitro.Block) *db.BatchReport {
+func batchReportOf(chainID uint64, b nitro.Block, resolver *batchCostResolver) (*db.BatchReport, error) {
 	for _, tx := range b.Txs {
 		if !nitro.IsInternalTx(tx) {
 			continue
@@ -572,14 +710,25 @@ func batchReportOf(chainID uint64, b nitro.Block) *db.BatchReport {
 		if !ok {
 			continue
 		}
+		params, err := resolver.paramsAt(b.Number, b.ArbOSVersion)
+		if err != nil {
+			return nil, fmt.Errorf("batch report %d parameters: %w", b.Number, err)
+		}
+		cost, err := r.Cost(params)
+		if err != nil {
+			return nil, fmt.Errorf("batch report %d cost: %w", b.Number, err)
+		}
 		return &db.BatchReport{
 			ChainID: chainID, BlockNumber: b.Number, BatchNumber: r.BatchNumber,
 			BatchTS: time.Unix(int64(r.BatchTimestamp), 0).UTC(), Poster: r.Poster,
 			CalldataLen: r.CalldataLen, CalldataNonzero: r.CalldataNonZeros, ExtraGas: r.ExtraGas,
-			L1BaseFee: db.NewWei(r.L1BaseFee), GasSpent: r.GasSpent(), WeiSpent: db.NewWei(r.WeiSpent()),
-		}
+			L1BaseFee: db.NewWei(r.L1BaseFee), GasSpent: cost.GasSpent, WeiSpent: db.NewWei(cost.WeiSpent),
+			ReportVersion: r.Version, ArbOSVersion: params.ArbOSVersion,
+			PerBatchGasCharge: params.PerBatchGasCharge, ParentGasFloorPerToken: params.ParentGasFloorPerToken,
+			CostCalculationVersion: nitro.BatchPostingCostCalculationVersion,
+		}, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // prune drops per-block rows and raw samples beyond retention. Rows in the
@@ -618,15 +767,23 @@ func (f *Follower) prune(ctx context.Context) error {
 }
 
 // persistStats records rate limit accounting and, with a pool, the
-// endpoint routing state for /status.
+// endpoint routing state for /status. It is also where the RPC counters
+// reach the instruments: they are observed before the checkpoint writes,
+// so a database that is refusing writes does not also take the endpoint
+// series away.
 func (f *Follower) persistStats(ctx context.Context) error {
 	st := f.rpc.Stats()
+	var status *nitro.PoolStatus
+	if f.pool != nil {
+		ps := f.pool.Status()
+		status = &ps
+	}
+	f.metrics.ObservePool(poolMetrics(st, status))
 	if err := f.store.SetState(ctx, f.chainID, db.StateRateLimitEvents, strconv.FormatUint(st.RateLimitEvents, 10)); err != nil {
 		return err
 	}
-	if f.pool != nil {
-		status := f.pool.Status()
-		b, err := json.Marshal(endpointsStatus(status))
+	if status != nil {
+		b, err := json.Marshal(endpointsStatus(*status))
 		if err != nil {
 			return fmt.Errorf("encode endpoints: %w", err)
 		}
@@ -635,7 +792,7 @@ func (f *Follower) persistStats(ctx context.Context) error {
 		}
 		// A disabled endpoint is an error the operator must see even though
 		// the network keeps running on another one.
-		if msg := endpointError(status); msg != "" {
+		if msg := endpointError(*status); msg != "" {
 			if err := f.store.SetNetworkError(ctx, f.chainID, msg); err != nil {
 				return err
 			}

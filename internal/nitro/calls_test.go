@@ -46,12 +46,29 @@ func setupChain(f *fakeRPC) {
 			return nil
 		}
 		if full {
-			b = blockJSON(320, 1_700_000_032, 5, "0x1312d00", []any{
-				map[string]any{"hash": "0x01", "type": "0x6a", "from": ArbosAddress, "to": ArbosAddress, "input": EncodeHex(EncodeStartBlock(StartBlock{L1BaseFee: big.NewInt(0), L1BlockNumber: 7, L2BlockNumber: 320, TimePassed: 1}))},
+			n, _ := HexUint64(tag)
+			b = blockJSON(n, 1_700_000_000+n/10, 5, "0x1312d00", []any{
+				map[string]any{"hash": "0x01", "type": "0x6a", "from": ArbosAddress, "to": ArbosAddress, "input": EncodeHex(EncodeStartBlock(StartBlock{L1BaseFee: big.NewInt(0), L1BlockNumber: 7, L2BlockNumber: n, TimePassed: 1}))},
 				map[string]any{"hash": "0x02", "type": "0x2", "to": "0xdead", "input": "0x"},
 			}, 50)
 		}
 		return b
+	}
+	f.handlers["eth_getBlockReceipts"] = func(params []json.RawMessage) any {
+		tag := paramString(params[0])
+		if tag == "latest" {
+			tag = blockTag(320)
+		}
+		n, err := HexUint64(tag)
+		if err != nil || n < 100 || n > 320 {
+			return nil
+		}
+		gas := 1_000_000 * n
+		first := gas / 3
+		return []any{
+			map[string]any{"blockHash": "0xabc", "blockNumber": tag, "transactionHash": "0xaa", "transactionIndex": "0x0", "gasUsed": blockTag(first), "cumulativeGasUsed": blockTag(first), "gasUsedForL1": "0x1e9"},
+			map[string]any{"blockHash": "0xabc", "blockNumber": tag, "transactionHash": "0xbb", "transactionIndex": "0x1", "gasUsed": blockTag(gas - first), "cumulativeGasUsed": blockTag(gas), "gasUsedForL1": "0x116"},
+		}
 	}
 	f.handlers["eth_getLogs"] = func(params []json.RawMessage) any {
 		var filter map[string]any
@@ -66,8 +83,18 @@ func setupChain(f *fakeRPC) {
 				"0xa0188cdb00000000000000000000000000000000000000000000000000000000",
 				"0x0000000000000000000000002a153c6a1b66dbc930a8d7017230ab0253005c09",
 			},
-			"data": "0x00", "blockNumber": "0x10", "transactionHash": "0xtx", "logIndex": "0x1", "blockTimestamp": "0x5",
+			"data": "0x00", "blockNumber": "0x10", "transactionHash": "0xtx", "transactionIndex": "0x2", "logIndex": "0x1", "blockTimestamp": "0x5",
 		}}
+	}
+	f.handlers["eth_getTransactionReceipt"] = func(params []json.RawMessage) any {
+		hash := paramString(params[0])
+		if hash == "0xmissing" {
+			return nil
+		}
+		return map[string]any{
+			"transactionHash": hash, "blockNumber": "0x140", "transactionIndex": "0x1",
+			"gasUsed": "0x3", "cumulativeGasUsed": "0x5",
+		}
 	}
 	f.handlers["eth_getBalance"] = func(params []json.RawMessage) any {
 		switch paramString(params[0]) {
@@ -101,6 +128,7 @@ func setupChain(f *fakeRPC) {
 	f.setCall(SigGetInfraFeeAccount, addrWord("0x5a2b80a9b7effc06129bd5462d77bc20a8a59be7"))
 	f.setCall(SigGetNetworkFeeAccount, addrWord("0xbc5c3a7adecf54d34169fd90dbd1b7d3142df067"))
 	f.setCall(SigArbOSVersion, wordsOf(116))
+	f.setCall(SigGetParentGasFloorPerToken, wordsOf(10))
 }
 
 func TestTypedCalls(t *testing.T) {
@@ -128,11 +156,11 @@ func TestTypedCalls(t *testing.T) {
 	}
 	before := f.requests
 	hs, err := c.HeadersByNumbers(ctx, nums)
-	if err != nil || len(hs) != 150 || hs[149].Number != 249 {
+	if err != nil || len(hs) != 150 || hs[149].Number != 249 || hs[0].PosterGas == nil || *hs[0].PosterGas != 767 || hs[0].ComputeGas() != 99_999_233 {
 		t.Fatalf("HeadersByNumbers: %d %v", len(hs), err)
 	}
-	if f.requests-before != 2 {
-		t.Fatalf("expected 2 batches, got %d", f.requests-before)
+	if f.requests-before != 3 {
+		t.Fatalf("expected 3 batches, got %d", f.requests-before)
 	}
 	if _, err := c.HeadersByNumbers(ctx, []uint64{100, 5}); err == nil {
 		t.Fatal("missing block in batch should error")
@@ -144,8 +172,15 @@ func TestTypedCalls(t *testing.T) {
 	if _, err := c.BlocksWithTxs(ctx, []uint64{5}); err == nil {
 		t.Fatal("missing full block should error")
 	}
+	receipts, err := c.TransactionReceipts(ctx, []string{"0x01", "0x02"})
+	if err != nil || len(receipts) != 2 || receipts[1].TxHash != "0x02" || receipts[1].BlockNumber != 320 || receipts[1].TxIndex != 1 || receipts[1].GasUsed != 3 || receipts[1].CumulativeGasUsed != 5 {
+		t.Fatalf("TransactionReceipts: %+v %v", receipts, err)
+	}
+	if _, err := c.TransactionReceipts(ctx, []string{"0xmissing"}); err == nil {
+		t.Fatal("missing receipt should error")
+	}
 	logs, err := c.OwnerActsLogs(ctx, 0, 100)
-	if err != nil || len(logs) != 1 || logs[0].BlockNumber != 16 || logs[0].LogIndex != 1 || logs[0].BlockTimestamp != 5 {
+	if err != nil || len(logs) != 1 || logs[0].BlockNumber != 16 || logs[0].TxIndex != 2 || logs[0].LogIndex != 1 || logs[0].BlockTimestamp != 5 {
 		t.Fatalf("Logs: %+v %v", logs, err)
 	}
 	if logs, err := c.Logs(ctx, 0, 1, "0x1", nil); err != nil || len(logs) != 0 {
@@ -173,6 +208,28 @@ func TestTypedCalls(t *testing.T) {
 	}
 }
 
+func TestNumberedBlockCallsRejectAnotherBlock(t *testing.T) {
+	f := newFakeRPC(t)
+	setupChain(f)
+	f.handlers["eth_getBlockByNumber"] = func(params []json.RawMessage) any {
+		full := false
+		_ = json.Unmarshal(params[1], &full)
+		txs := []any{"0xaa", "0xbb"}
+		if full {
+			txs = []any{}
+		}
+		return blockJSON(101, 1_700_000_010, 101_000_000, "0x1312d00", txs, 50)
+	}
+	c, _ := newTestClient(t, f, 1000)
+	ctx := context.Background()
+	if _, err := c.HeadersByNumbers(ctx, []uint64{100}); err == nil {
+		t.Fatal("header response for another block must fail")
+	}
+	if _, err := c.BlocksWithTxs(ctx, []uint64{100}); err == nil {
+		t.Fatal("full block response for another block must fail")
+	}
+}
+
 func TestFastSample(t *testing.T) {
 	f := newFakeRPC(t)
 	setupChain(f)
@@ -183,7 +240,7 @@ func TestFastSample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Header.Number != 320 || len(s.Constraints) != 2 || s.Constraints[1].Backlog != 11_194_391_810_886 || s.IsLegacy() {
+	if s.Header.Number != 320 || s.Header.PosterGas == nil || *s.Header.PosterGas != 767 || len(s.Constraints) != 2 || s.Constraints[1].Backlog != 11_194_391_810_886 || s.IsLegacy() {
 		t.Fatalf("sample: %+v", s)
 	}
 	if s.Prices.PerArbGasTotal.Int64() != 6 || s.Prices.PerL1CalldataByte.Int64() != 2 || s.MinBaseFee.Int64() != 20_000_000 || s.Legacy != nil {
@@ -284,8 +341,19 @@ func TestFastSampleAt(t *testing.T) {
 	if s.Header.Number != 200 || len(s.Constraints) != 2 || s.MinBaseFee.Int64() != 20_000_000 {
 		t.Fatalf("sample at 200: %+v", s)
 	}
-	// Every state call in the batch carries the head's block tag.
-	if len(f.callTags) != 3 {
+	receiptCalls := 0
+	receipts := f.handlers["eth_getBlockReceipts"]
+	f.handlers["eth_getBlockReceipts"] = func(params []json.RawMessage) any {
+		receiptCalls++
+		return receipts(params)
+	}
+	pricing, err := c.PricingSampleAt(ctx, 200)
+	if err != nil || pricing.Header.Number != 200 || len(pricing.Constraints) != 2 || receiptCalls != 0 {
+		t.Fatalf("pricing-only sample: %+v receipts=%d err=%v", pricing, receiptCalls, err)
+	}
+	// Every state call in the full and pricing-only batches carries the
+	// requested block tag.
+	if len(f.callTags) != 5 {
 		t.Fatalf("call tags = %v", f.callTags)
 	}
 	for _, tag := range f.callTags {
@@ -335,9 +403,27 @@ func TestL1SampleAndFeeAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if l1.BaseFeeEstimate.Int64() != 2_369_608 || l1.Surplus.Int64() != -1 || l1.FeesAvailable.Int64() != 190_000_000_000_000 ||
-		l1.UnitsSinceUpdate != 1234 || l1.LastUpdateTime != 1_700_000_000 || l1.EquilibrationUnits != 160_000_000 || l1.PerBatchGasCharge != 210_000 || l1.RewardRate != 10 {
+		l1.UnitsSinceUpdate != 1234 || l1.LastUpdateTime != 1_700_000_000 || l1.EquilibrationUnits != 160_000_000 || l1.PerBatchGasCharge != 210_000 || l1.RewardRate != 10 ||
+		l1.ArbOSVersion != 61 || l1.ParentGasFloorPerToken != 10 {
 		t.Fatalf("l1: %+v", l1)
 	}
+	f.callTags = nil
+	if _, err := c.L1SampleAt(ctx, 123); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range f.callTags {
+		if tag != blockTag(123) {
+			t.Fatalf("L1SampleAt call tag = %q", tag)
+		}
+	}
+	f.setCall(SigArbOSVersion, wordsOf(104))
+	f.setCallErr(SigGetParentGasFloorPerToken, &RPCError{Code: -32601, Message: "not available"})
+	pre50, err := c.L1Sample(ctx)
+	if err != nil || pre50.ArbOSVersion != 49 || pre50.ParentGasFloorPerToken != 0 {
+		t.Fatalf("pre-50 L1 sample: %+v %v", pre50, err)
+	}
+	delete(f.callErrs, SelectorHex(SigGetParentGasFloorPerToken))
+	f.setCall(SigArbOSVersion, wordsOf(116))
 	acc, err := c.FeeAccounts(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +434,7 @@ func TestL1SampleAndFeeAccounts(t *testing.T) {
 
 	sigs := []string{
 		SigGetL1BaseFeeEstimate, SigGetL1PricingSurplus, SigGetL1FeesAvailable, SigGetL1PricingUnitsSinceUpdate,
-		SigGetLastL1PricingUpdateTime, SigGetL1PricingEquilibrationUnit, SigGetPerBatchGasCharge, SigGetL1RewardRate,
+		SigGetLastL1PricingUpdateTime, SigGetL1PricingEquilibrationUnit, SigGetPerBatchGasCharge, SigGetL1RewardRate, SigArbOSVersion, SigGetParentGasFloorPerToken,
 	}
 	for _, sig := range sigs {
 		f.setCallErr(sig, &RPCError{Code: 1, Message: "x"})
@@ -408,6 +494,9 @@ func TestL1SampleAndFeeAccounts(t *testing.T) {
 	if _, err := c.BlocksWithTxs(ctx, []uint64{1}); err == nil {
 		t.Fatal("transport")
 	}
+	if _, err := c.TransactionReceipts(ctx, []string{"0x1"}); err == nil {
+		t.Fatal("transport")
+	}
 	if _, err := c.ArbOSVersion(ctx); err == nil {
 		t.Fatal("transport")
 	}
@@ -462,20 +551,73 @@ func TestParseHeaderErrors(t *testing.T) {
 	if err != nil || b.BaseFee.Sign() != 0 || b.TxCount != 0 {
 		t.Fatalf("minimal header: %+v %v", b, err)
 	}
+	b, err = parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1","mixHash":"0x00000000000000000000000000000000000000000000003d0000000000000000"}`))
+	if err != nil || b.ArbOSVersion != 61 {
+		t.Fatalf("ArbOS version from mixHash: %+v %v", b, err)
+	}
+	if _, err := parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1","mixHash":"0x01"}`)); err == nil {
+		t.Fatal("short mixHash")
+	}
 	for _, c := range []string{
 		`[{"data":"0xzz"}]`,
 		`[{"data":"0x","blockNumber":"zz"}]`,
 		`[{"data":"0x","blockNumber":"0x1","logIndex":"zz"}]`,
-		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1","blockTimestamp":"zz"}]`,
+		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1","transactionIndex":"zz"}]`,
+		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1"}]`,
+		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1","transactionIndex":"0x1","blockTimestamp":"zz"}]`,
 	} {
 		if _, err := parseLogs(json.RawMessage(c)); err == nil {
 			t.Errorf("expected log error for %s", c)
 		}
 	}
+	for _, c := range []string{
+		`null`, `"str"`,
+		`{"blockNumber":"zz"}`,
+		`{"blockNumber":"0x1","transactionIndex":"zz"}`,
+		`{"blockNumber":"0x1","transactionIndex":"0x1","gasUsed":"zz"}`,
+		`{"blockNumber":"0x1","transactionIndex":"0x1","gasUsed":"0x1","cumulativeGasUsed":"zz"}`,
+	} {
+		if _, err := parseReceipt(json.RawMessage(c)); err == nil {
+			t.Errorf("expected receipt error for %s", c)
+		}
+	}
+}
+
+func TestParsePosterGas(t *testing.T) {
+	h := Header{Number: 1_000_000, Hash: "0xac00", GasUsed: 422_716, TxCount: 2, TxHashes: []string{"0xaaa", "0xbbb"}}
+	raw := json.RawMessage(`[
+		{"blockHash":"0xAC00","blockNumber":"0xf4240","transactionHash":"0xAAA","transactionIndex":"0x0","gasUsed":"0x222e0","cumulativeGasUsed":"0x222e0","gasUsedForL1":"0x1e9"},
+		{"blockHash":"0xac00","blockNumber":"0xf4240","transactionHash":"0xbbb","transactionIndex":"0x1","gasUsed":"0x4505c","cumulativeGasUsed":"0x6733c","gasUsedForL1":"0x116"}
+	]`)
+	poster, err := parsePosterGas(raw, h)
+	if err != nil || poster != 767 {
+		t.Fatalf("poster gas: %d %v", poster, err)
+	}
+	tooMuch := uint64(11)
+	if got := (Header{GasUsed: 10, PosterGas: &tooMuch}).ComputeGas(); got != 0 {
+		t.Fatalf("saturating compute gas: %d", got)
+	}
+	for _, tc := range []json.RawMessage{
+		json.RawMessage(`null`),
+		json.RawMessage(`[]`),
+		json.RawMessage(`[{} , {}]`),
+		json.RawMessage(`[{"blockHash":"0xnope"},{}]`),
+		json.RawMessage(`[{"blockHash":"0xac00","blockNumber":"zz"},{}]`),
+		json.RawMessage(`[{"blockHash":"0xac00","blockNumber":"0x1","transactionHash":"0xnope"},{}]`),
+		json.RawMessage(`[{"blockHash":"0xac00","blockNumber":"0xf4240","transactionHash":"0xaaa","transactionIndex":"0x1"},{}]`),
+		json.RawMessage(`[
+			{"blockHash":"0xac00","blockNumber":"0xf4240","transactionHash":"0xaaa","transactionIndex":"0x0","gasUsed":"0x222e0","cumulativeGasUsed":"0x222e0"},
+			{"blockHash":"0xac00","blockNumber":"0xf4240","transactionHash":"0xbbb","transactionIndex":"0x1","gasUsed":"0x4505c","cumulativeGasUsed":"0x6733c","gasUsedForL1":"0x116"}
+		]`),
+	} {
+		if _, err := parsePosterGas(tc, h); err == nil {
+			t.Fatalf("expected receipt validation error for %s", tc)
+		}
+	}
 }
 
 // TestTypedBatchesAreChunked: every typed request list goes through the
-// endpoint's chunker, not straight to Batch, so an eight-call L1 sample on
+// endpoint's chunker, not straight to Batch, so a ten-call L1 sample on
 // a four calls per second budget is split into what the bulk share holds
 // rather than overdrawing the bucket and eating the fast reserve.
 func TestTypedBatchesAreChunked(t *testing.T) {
@@ -502,10 +644,10 @@ func TestTypedBatchesAreChunked(t *testing.T) {
 	if _, err := p.L1Sample(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Eight getters, seven of which the bulk share holds: two requests, no
+	// Ten getters, seven of which the bulk share holds: two requests, no
 	// throttling, and the fast reserve untouched.
 	if n := f.requestCount() - before; n != 2 {
-		t.Fatalf("the eight L1 getters must be split: %d requests", n)
+		t.Fatalf("the ten L1 getters must be split: %d requests", n)
 	}
 	if p.Stats().RateLimitEvents != 0 {
 		t.Fatalf("chunked batches must not be refused: %+v", p.Stats())
@@ -524,7 +666,7 @@ func TestTypedBatchesAreChunked(t *testing.T) {
 		t.Fatalf("fee accounts: %d requests", n)
 	}
 	// A fast sample may carry the reserve more than a bulk batch, so its
-	// four calls still go in one request under bulk pressure.
+	// five batched calls still go in one request under bulk pressure.
 	clock.Advance(time.Hour)
 	before = f.requestCount()
 	if _, err := p.FastSampleAt(WithClass(ctx, Fast), 200); err != nil {

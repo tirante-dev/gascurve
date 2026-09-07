@@ -71,17 +71,10 @@ func (c *Client) HeaderByNumber(ctx context.Context, number uint64) (*Header, er
 	return &b.Header, nil
 }
 
-// HeadersByNumbers fetches headers in batches of at most MaxBatch, in order.
+// HeadersByNumbers fetches headers and their receipt-backed poster gas in
+// batches of at most MaxBatch RPC items, in order.
 func (c *Client) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
-	blocks, err := blocksByNumbers(ctx, numbers, false, c.chunk)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Header, len(blocks))
-	for i := range blocks {
-		out[i] = blocks[i].Header
-	}
-	return out, nil
+	return headersByNumbers(ctx, numbers, c.chunk)
 }
 
 // BlockWithTxs fetches a block including full transactions.
@@ -97,6 +90,12 @@ func (c *Client) BlockWithTxs(ctx context.Context, number uint64) (*Block, error
 // per MaxBatch items.
 func (c *Client) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, error) {
 	return blocksByNumbers(ctx, numbers, true, c.chunk)
+}
+
+// TransactionReceipts fetches receipts in batches of at most MaxBatch, in
+// the same order as hashes.
+func (c *Client) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
+	return transactionReceipts(ctx, hashes, c.chunk)
 }
 
 // batcher sends a request list of any length, splitting it into HTTP
@@ -141,7 +140,81 @@ func blocksByNumbers(ctx context.Context, numbers []uint64, full bool, send batc
 		if err != nil {
 			return nil, fmt.Errorf("block %d: %w", numbers[i], err)
 		}
+		if b.Number != numbers[i] {
+			return nil, fmt.Errorf("block %d: response is block %d", numbers[i], b.Number)
+		}
 		out = append(out, *b)
+	}
+	return out, nil
+}
+
+func transactionReceipts(ctx context.Context, hashes []string, send batcher) ([]Receipt, error) {
+	reqs := make([]Request, len(hashes))
+	for i, hash := range hashes {
+		reqs[i] = Request{Method: "eth_getTransactionReceipt", Params: []any{hash}}
+	}
+	results, err := send(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != len(hashes) {
+		return nil, fmt.Errorf("receipts: got %d results for %d transactions", len(results), len(hashes))
+	}
+	out := make([]Receipt, 0, len(hashes))
+	for i, result := range results {
+		if result.Err != nil {
+			return nil, fmt.Errorf("receipt %s: %w", hashes[i], result.Err)
+		}
+		receipt, err := parseReceipt(result.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("receipt %s: %w", hashes[i], err)
+		}
+		out = append(out, *receipt)
+	}
+	return out, nil
+}
+
+// headersByNumbers fetches each header beside eth_getBlockReceipts and joins
+// them only after the receipt set has been validated against that header.
+func headersByNumbers(ctx context.Context, numbers []uint64, send batcher) ([]Header, error) {
+	reqs := make([]Request, 0, len(numbers)*2)
+	for _, n := range numbers {
+		tag := blockTag(n)
+		reqs = append(reqs,
+			Request{Method: methodGetBlockByNumber, Params: []any{tag, false}},
+			Request{Method: methodGetBlockReceipts, Params: []any{tag}},
+		)
+	}
+	results, err := send(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != len(reqs) {
+		return nil, fmt.Errorf("headers: got %d results for %d requests", len(results), len(reqs))
+	}
+	out := make([]Header, 0, len(numbers))
+	for i, n := range numbers {
+		blockResult, receiptResult := results[i*2], results[i*2+1]
+		if blockResult.Err != nil {
+			return nil, fmt.Errorf("block %d: %w", n, blockResult.Err)
+		}
+		block, err := parseHeader(blockResult.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("block %d: %w", n, err)
+		}
+		if block.Number != n {
+			return nil, fmt.Errorf("block %d: response is block %d", n, block.Number)
+		}
+		if receiptResult.Err != nil {
+			return nil, fmt.Errorf("block %d receipts: %w", n, receiptResult.Err)
+		}
+		posterGas, computeGasBefore, err := parseReceiptGas(receiptResult.Raw, block.Header)
+		if err != nil {
+			return nil, err
+		}
+		block.PosterGas = &posterGas
+		block.computeGasBefore = computeGasBefore
+		out = append(out, block.Header)
 	}
 	return out, nil
 }
@@ -194,6 +267,10 @@ func (c *Client) ArbOSVersion(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	return decodeArbOSVersion(data)
+}
+
+func decodeArbOSVersion(data []byte) (uint64, error) {
 	v, err := DecodeUint64(data)
 	if err != nil {
 		return 0, err
@@ -205,8 +282,8 @@ func (c *Client) ArbOSVersion(ctx context.Context) (uint64, error) {
 }
 
 // FastSample performs the fast tick: it resolves the head number first
-// (eth_blockNumber) and then samples header, constraints, prices and
-// minimum base fee pinned to that block, so a batch whose items execute
+// (eth_blockNumber) and then samples header, receipts, constraints, prices
+// and minimum base fee pinned to that block, so a batch whose items execute
 // at different "latest" heights can never mix two blocks. When the
 // constraints call reverts or returns an empty list a second batch reads
 // the legacy pricer parameters at the same block.
@@ -225,9 +302,61 @@ func (c *Client) FastSampleAt(ctx context.Context, number uint64) (*Sample, erro
 	return c.sampleAt(ctx, blockTag(number))
 }
 
+// PricingSampleAt reads only the block and pricer state needed for a
+// historical anchor. Receipt poster gas is fetched with the ordinary header
+// path, so an archive anchor does not duplicate that metered call.
+func (c *Client) PricingSampleAt(ctx context.Context, number uint64) (*Sample, error) {
+	tag := blockTag(number)
+	results, err := c.chunk(ctx, []Request{
+		{Method: methodGetBlockByNumber, Params: []any{tag, false}},
+		SelectorCallAt(ArbGasInfoAddress, SigGetGasPricingConstraints, tag),
+		SelectorCallAt(ArbGasInfoAddress, SigGetMinimumGasPrice, tag),
+	})
+	if err != nil {
+		return nil, err
+	}
+	s := &Sample{SampledAt: c.now()}
+	if results[0].Err != nil {
+		return nil, fmt.Errorf("block %s: %w", tag, results[0].Err)
+	}
+	b, err := parseHeader(results[0].Raw)
+	if err != nil {
+		return nil, err
+	}
+	if b.Number != number {
+		return nil, fmt.Errorf("block %d: response is block %d", number, b.Number)
+	}
+	s.Header = b.Header
+	if results[1].Err == nil {
+		data, err := callBytes(results[1])
+		if err != nil {
+			return nil, err
+		}
+		if s.Constraints, err = DecodeConstraints(data); err != nil {
+			return nil, err
+		}
+	} else if !IsRevert(results[1].Err) {
+		return nil, fmt.Errorf("getGasPricingConstraints: %w", results[1].Err)
+	}
+	data, err := callBytes(results[2])
+	if err != nil {
+		return nil, fmt.Errorf("getMinimumGasPrice: %w", err)
+	}
+	if s.MinBaseFee, err = DecodeUint256(data); err != nil {
+		return nil, fmt.Errorf("getMinimumGasPrice: %w", err)
+	}
+	if len(s.Constraints) == 0 {
+		if s.Legacy, err = c.legacyParamsAt(ctx, tag); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
 func (c *Client) sampleAt(ctx context.Context, tag string) (*Sample, error) {
 	results, err := c.chunk(ctx, []Request{
 		{Method: methodGetBlockByNumber, Params: []any{tag, false}},
+		{Method: methodGetBlockReceipts, Params: []any{tag}},
 		SelectorCallAt(ArbGasInfoAddress, SigGetGasPricingConstraints, tag),
 		SelectorCallAt(ArbGasInfoAddress, SigGetPricesInWei, tag),
 		SelectorCallAt(ArbGasInfoAddress, SigGetMinimumGasPrice, tag),
@@ -243,21 +372,36 @@ func (c *Client) sampleAt(ctx context.Context, tag string) (*Sample, error) {
 	if err != nil {
 		return nil, err
 	}
+	if tag != latestTag {
+		want, err := HexUint64(tag)
+		if err != nil || b.Number != want {
+			return nil, fmt.Errorf("block %s: response is block %d", tag, b.Number)
+		}
+	}
+	if results[1].Err != nil {
+		return nil, fmt.Errorf("block %s receipts: %w", tag, results[1].Err)
+	}
+	posterGas, computeGasBefore, err := parseReceiptGas(results[1].Raw, b.Header)
+	if err != nil {
+		return nil, err
+	}
+	b.PosterGas = &posterGas
+	b.computeGasBefore = computeGasBefore
 	s.Header = b.Header
 
-	if results[1].Err == nil {
-		data, err := callBytes(results[1])
+	if results[2].Err == nil {
+		data, err := callBytes(results[2])
 		if err != nil {
 			return nil, err
 		}
 		if s.Constraints, err = DecodeConstraints(data); err != nil {
 			return nil, err
 		}
-	} else if !IsRevert(results[1].Err) {
-		return nil, fmt.Errorf("getGasPricingConstraints: %w", results[1].Err)
+	} else if !IsRevert(results[2].Err) {
+		return nil, fmt.Errorf("getGasPricingConstraints: %w", results[2].Err)
 	}
 
-	data, err := callBytes(results[2])
+	data, err := callBytes(results[3])
 	if err != nil {
 		return nil, fmt.Errorf("getPricesInWei: %w", err)
 	}
@@ -267,7 +411,7 @@ func (c *Client) sampleAt(ctx context.Context, tag string) (*Sample, error) {
 	}
 	s.Prices = *prices
 
-	data, err = callBytes(results[3])
+	data, err = callBytes(results[4])
 	if err != nil {
 		return nil, fmt.Errorf("getMinimumGasPrice: %w", err)
 	}
@@ -324,50 +468,86 @@ func (c *Client) legacyParamsAt(ctx context.Context, tag string) (*LegacyParams,
 	return lp, nil
 }
 
-// L1Sample reads the L1 pricer getters in one batch.
+// L1Sample reads the L1 pricer getters at the latest block.
 func (c *Client) L1Sample(ctx context.Context) (*L1Sample, error) {
-	sigs := []string{
-		SigGetL1BaseFeeEstimate, SigGetL1PricingSurplus, SigGetL1FeesAvailable, SigGetL1PricingUnitsSinceUpdate,
-		SigGetLastL1PricingUpdateTime, SigGetL1PricingEquilibrationUnit, SigGetPerBatchGasCharge, SigGetL1RewardRate,
+	return c.l1SampleAt(ctx, latestTag)
+}
+
+// L1SampleAt reads the L1 pricer getters and batch-cost parameters at one
+// block. The historical parameter snapshot is used to anchor report-cost
+// reconstruction without making one state call per report.
+func (c *Client) L1SampleAt(ctx context.Context, number uint64) (*L1Sample, error) {
+	return c.l1SampleAt(ctx, blockTag(number))
+}
+
+func (c *Client) l1SampleAt(ctx context.Context, tag string) (*L1Sample, error) {
+	calls := []struct {
+		address string
+		sig     string
+	}{
+		{ArbGasInfoAddress, SigGetL1BaseFeeEstimate},
+		{ArbGasInfoAddress, SigGetL1PricingSurplus},
+		{ArbGasInfoAddress, SigGetL1FeesAvailable},
+		{ArbGasInfoAddress, SigGetL1PricingUnitsSinceUpdate},
+		{ArbGasInfoAddress, SigGetLastL1PricingUpdateTime},
+		{ArbGasInfoAddress, SigGetL1PricingEquilibrationUnit},
+		{ArbGasInfoAddress, SigGetPerBatchGasCharge},
+		{ArbGasInfoAddress, SigGetL1RewardRate},
+		{ArbSysAddress, SigArbOSVersion},
+		{ArbOwnerPublicAddress, SigGetParentGasFloorPerToken},
 	}
-	reqs := make([]Request, len(sigs))
-	for i, sig := range sigs {
-		reqs[i] = SelectorCall(ArbGasInfoAddress, sig)
+	reqs := make([]Request, len(calls))
+	for i, call := range calls {
+		reqs[i] = SelectorCallAt(call.address, call.sig, tag)
 	}
 	results, err := c.chunk(ctx, reqs)
 	if err != nil {
 		return nil, err
 	}
 	datas := make([][]byte, len(results))
-	for i, r := range results {
+	// The parent floor getter is unavailable before ArbOS 50. Decode every
+	// earlier result first, including the version that controls that gate.
+	for i, r := range results[:len(results)-1] {
 		if datas[i], err = callBytes(r); err != nil {
-			return nil, fmt.Errorf("%s: %w", sigs[i], err)
+			return nil, fmt.Errorf("%s: %w", calls[i].sig, err)
 		}
 	}
 	l := &L1Sample{}
 	if l.BaseFeeEstimate, err = DecodeUint256(datas[0]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[0], err)
+		return nil, fmt.Errorf("%s: %w", calls[0].sig, err)
 	}
 	if l.Surplus, err = DecodeInt256(datas[1]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[1], err)
+		return nil, fmt.Errorf("%s: %w", calls[1].sig, err)
 	}
 	if l.FeesAvailable, err = DecodeUint256(datas[2]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[2], err)
+		return nil, fmt.Errorf("%s: %w", calls[2].sig, err)
 	}
 	if l.UnitsSinceUpdate, err = DecodeUint64(datas[3]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[3], err)
+		return nil, fmt.Errorf("%s: %w", calls[3].sig, err)
 	}
 	if l.LastUpdateTime, err = DecodeUint64(datas[4]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[4], err)
+		return nil, fmt.Errorf("%s: %w", calls[4].sig, err)
 	}
 	if l.EquilibrationUnits, err = DecodeUint64(datas[5]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[5], err)
+		return nil, fmt.Errorf("%s: %w", calls[5].sig, err)
 	}
 	if l.PerBatchGasCharge, err = DecodeInt64(datas[6]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[6], err)
+		return nil, fmt.Errorf("%s: %w", calls[6].sig, err)
 	}
 	if l.RewardRate, err = DecodeUint64(datas[7]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[7], err)
+		return nil, fmt.Errorf("%s: %w", calls[7].sig, err)
+	}
+	if l.ArbOSVersion, err = decodeArbOSVersion(datas[8]); err != nil {
+		return nil, fmt.Errorf("%s: %w", calls[8].sig, err)
+	}
+	if l.ArbOSVersion >= arbOSVersionParentGasFloor {
+		floorData, err := callBytes(results[9])
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", calls[9].sig, err)
+		}
+		if l.ParentGasFloorPerToken, err = DecodeUint64(floorData); err != nil {
+			return nil, fmt.Errorf("%s: %w", calls[9].sig, err)
+		}
 	}
 	return l, nil
 }

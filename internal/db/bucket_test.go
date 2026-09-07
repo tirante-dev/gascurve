@@ -11,8 +11,42 @@ import (
 )
 
 func mkBlock(n uint64, ts time.Time, fee int64, gas uint64, minFee int64, backlogs ...uint64) Block {
-	return Block{ChainID: 1, Number: n, TS: ts, GasUsed: gas, BaseFee: WeiFromUint64(uint64(fee)), PredictedBaseFee: WeiFromUint64(uint64(fee + 1)),
+	return Block{ChainID: 1, Number: n, TS: ts, GasUsed: gas, PosterGas: sql.NullInt64{Valid: true}, BaseFee: WeiFromUint64(uint64(fee)), PredictedBaseFee: WeiFromUint64(uint64(fee + 1)),
 		MinBaseFee: NullWeiFromUint64(uint64(minFee)), PricingVersion: PricingFull, Backlogs: Uint64Array(backlogs), ConstraintBips: pq.Int64Array{int64(n), 1}, ExponentBips: int64(n)}
+}
+
+func TestBucketPosterGasVector(t *testing.T) {
+	t0 := time.Date(2026, 9, 6, 8, 0, 0, 0, time.UTC)
+	b := mkBlock(1_000_000, t0, 20_036_000, 422_716, 20_000_000)
+	b.PosterGas = sql.NullInt64{Int64: 767, Valid: true}
+	got := FoldBlocks([]Block{b}, func(uint64) sql.NullInt64 { return sql.NullInt64{} })[0]
+	if got.FeesWei.String() != "8469537776000" || got.FloorFeesWei.StringPtr() == nil || *got.FloorFeesWei.StringPtr() != "8438980000000" || *got.SurplusFeesWei.StringPtr() != "15190164000" || *got.PosterFeesWei.StringPtr() != "15367612000" {
+		t.Fatalf("receipt-backed fee split: %+v", got)
+	}
+	if got.PosterGas.Int64 != 767 {
+		t.Fatalf("poster gas: %+v", got.PosterGas)
+	}
+	sum := new(big.Int).Add(got.FloorFeesWei.Wei.BigInt(), got.SurplusFeesWei.Wei.BigInt())
+	sum.Add(sum, got.PosterFeesWei.Wei.BigInt())
+	if sum.Cmp(got.FeesWei.BigInt()) != 0 {
+		t.Fatalf("destination sum %s, total %s", sum, got.FeesWei.String())
+	}
+	belowFloor := mkBlock(1_000_001, t0.Add(time.Second), 10, 100, 20)
+	belowFloor.PosterGas = sql.NullInt64{Int64: 10, Valid: true}
+	clamped := FoldBlocks([]Block{belowFloor}, func(uint64) sql.NullInt64 { return sql.NullInt64{} })[0]
+	if clamped.FloorFeesWei.Wei.Int64() != 900 || clamped.SurplusFeesWei.Wei.Sign() != 0 || clamped.PosterFeesWei.Wei.Int64() != 100 || clamped.FeesWei.Int64() != 1_000 {
+		t.Fatalf("base fee below minimum must clamp the infrastructure rate: %+v", clamped)
+	}
+
+	unknown := b
+	unknown.PosterGas = sql.NullInt64{}
+	mixed := FoldBlocks([]Block{b, unknown}, func(uint64) sql.NullInt64 { return sql.NullInt64{} })[0]
+	if mixed.PosterGas.Valid || mixed.FloorFeesWei.Valid || mixed.SurplusFeesWei.Valid || mixed.PosterFeesWei.Valid {
+		t.Fatalf("unknown receipt input must null destinations: %+v", mixed)
+	}
+	if !mixed.MinBaseFee.Valid || mixed.PricingVersion != PricingFull {
+		t.Fatalf("receipt availability must not erase pricing data: %+v", mixed)
+	}
 }
 
 func TestFoldBlocks(t *testing.T) {

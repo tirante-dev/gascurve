@@ -46,14 +46,32 @@ function isApiErrorBody(value: unknown): value is ApiErrorBody {
   return typeof code === "string" && typeof message === "string";
 }
 
+/**
+ * True when the configured base is a path on the page's own origin rather
+ * than an absolute URL. The published image bakes NEXT_PUBLIC_API_URL as
+ * /api/v1, because the api and the app are served from one hostname behind
+ * the tunnel, and a path is not something `new URL` can parse on its own.
+ */
+export function isRelativeBase(base: string = API_BASE_URL): boolean {
+  return !/^[a-z][a-z0-9+.-]*:/i.test(base);
+}
+
+/**
+ * The absolute or origin-relative URL of an api path, with the query
+ * appended. Built by string rather than through `new URL`, which throws on
+ * a relative base; `fetch` resolves a leading-slash URL against the
+ * document, which is exactly what a same-origin deployment wants.
+ */
 export function buildUrl(path: string, query?: Record<string, QueryValue>): string {
-  const url = new URL(API_BASE_URL + (path.startsWith("/") ? path : `/${path}`));
+  const url = API_BASE_URL + (path.startsWith("/") ? path : `/${path}`);
+  const params = new URLSearchParams();
   if (query) {
     for (const [key, value] of Object.entries(query)) {
-      if (value !== undefined) url.searchParams.set(key, String(value));
+      if (value !== undefined) params.set(key, String(value));
     }
   }
-  return url.toString();
+  const search = params.toString();
+  return search === "" ? url : `${url}?${search}`;
 }
 
 function sleep(ms: number): Promise<void> {

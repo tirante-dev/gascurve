@@ -19,7 +19,10 @@ database:
   run_migrations: false
 
 collector:
-  tick_interval: 3s          # live sample cadence on a polled network: a sample costs five calls, so at the
+  metrics_port: 9090         # the collector's own HTTP server, serving /metrics and nothing else; 0 disables it.
+                             # The api has an HTTP server already and serves /metrics on server.port.
+                             # Environment: METRICS_PORT.
+  tick_interval: 3s          # live sample cadence on a polled network: a sample costs six calls, so at the
                              # public budget of four per second a 1 s tick starved the header catch-up and
                              # skipped gaps; dedicated endpoints override this per network (500ms with newHeads)
   slow_interval: 60s         # L1 pricer, balances, owner-action log scan
@@ -59,18 +62,35 @@ collector:
 # sustained rate, so give it calls_per_second: 25: the one-second peaks then
 # stay under the window, where 40 tripped it several times a minute and each
 # trip cost a 2 s back-off that stalled the backfill and the gap filler.
+# Capacity must exceed live ingress for recovery to converge. On a constraints
+# chain polled every T seconds at B blocks/s, budget at least
+# (5 + max(B*T - 1, 0)) / T calls/s, plus headroom for the slow loop, retries
+# and missing-range recovery. With reliable newHeads, budget about 4*B calls/s.
+# Legacy pricing adds four calls per sample. /status.capacity reports the latest
+# observed requirement and /status.degraded turns true when it is exceeded.
 # Optional per network:
 #   tick_interval: overrides collector.tick_interval for this network (the
 #            polling cadence, and the safety timer while a newHeads
 #            subscription is down). A dedicated endpoint can run at 500ms;
 #            a public one should stay at 1s, since every tick costs about
-#            five calls and a 250ms tick would want most of a 4/s budget.
+#            six calls and a 250ms tick would exceed a 4/s budget.
 #            Environment: NETWORK_<NAME>_TICK_INTERVAL.
 #   ws_url:  wss endpoint; the collector subscribes to newHeads and samples
 #            state at each head instead of polling every tick_interval.
 #   archive: true when the node serves historical state; the backfill then
 #            anchors the replay to real backlogs every backfill_anchor_interval
 #            blocks instead of relying on replay alone.
+#   history_epoch: raise it to rebuild this network's reconstructed history
+#            once. The collector stores the epoch it last rebuilt at and
+#            compares it at start, so a raised number rebuilds and a pod
+#            that restarts on the same number does not. Raise it after
+#            giving the network an archive endpoint: enabling archive on
+#            its own changes nothing already stored, since the backfill has
+#            finished and its buckets are never revisited. The rebuild
+#            drops the backfill's buckets and checkpoints and replays them
+#            again, anchored this time; block rows, owner actions and
+#            constraint sets are kept. Environment:
+#            NETWORK_<NAME>_HISTORY_EPOCH.
 #   fallbacks: further endpoints for the same chain, each with the same four
 #            fields (rpc_url, ws_url, archive, calls_per_second) and its own
 #            token bucket and adaptive batch cap. Ordinary calls go to the

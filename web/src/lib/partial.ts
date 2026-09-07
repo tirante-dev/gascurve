@@ -1,13 +1,10 @@
-// Buckets the collector indexed only part of. Two of them exist in any range:
-// the one at the right edge, which is still filling, and the first one after
-// the collector started. The api reports the share as `coverage`, and
-// `gasPerSecond` is already the rate over that covered span, so rates and
-// averages read normally there. The sums (fees, gas used, blocks) are sums
-// over the covered span alone, so a chart that draws one as a bucket value
-// dips at the right edge for a reason that has nothing to do with the chain.
-// These are the pure parts of not doing that: the classification, the words
-// the tooltips and bands wear, and the rows a stacked chart leaves out.
+// Buckets whose aggregates are not known to be whole. A bucket can be partial
+// at either time boundary, partial because blocks are missing inside it, or
+// unknown when a missing range has insufficient time bounds to place it. The
+// sums (fees, gas used, blocks) are never presented as full bucket totals for
+// any of those states.
 
+import type { SeriesCompleteness } from "@/types";
 import { formatPercent } from "@/utils/format";
 
 /**
@@ -15,33 +12,41 @@ import { formatPercent } from "@/utils/format";
  * older than it sends nothing, and a bucket nobody said anything about is a
  * whole bucket.
  */
-export type Covered = { coverage?: number };
+export type Covered = { coverage?: number | null; completeness?: SeriesCompleteness };
 
 /** Coverage of a whole bucket. */
 export const WHOLE = 1;
 
 /**
- * Which kind of partial bucket a point is. "in-progress" is a bucket that
- * runs up to the right edge of the range, the one the collector is still
- * filling; "leading" is any other partial bucket, one the collector only
- * reached part way into.
+ * Which kind of incomplete bucket a point is. "in-progress" is the bucket at
+ * the right edge that is still filling; "leading" is a known partial bucket
+ * elsewhere; "unknown" has insufficient bounds to determine completeness.
  */
-export type PartialKind = "in-progress" | "leading";
+export type PartialKind = "in-progress" | "leading" | "unknown";
 
 /**
- * The share of the bucket a point covers, always between 0 and 1. A missing
- * field (an older api) and a value that is not a number are both a whole
- * bucket, so nothing is hatched on a payload that never mentioned coverage.
+ * The share of the bucket a point covers, between 0 and 1 when known. Null is
+ * preserved because a block-number gap may have no exact timestamp share. A
+ * missing field from an older API and a non-number both retain the old whole
+ * bucket behavior.
  */
-export function coverageOf(point: Covered): number {
+export function coverageOf(point: Covered): number | null {
   const raw = point.coverage;
+  if (raw === null) return null;
   if (raw === undefined || !Number.isFinite(raw)) return WHOLE;
   return Math.min(WHOLE, Math.max(0, raw));
 }
 
-/** True when the collector indexed less than the whole bucket. */
+/** The explicit API state, or the state an older API's numeric coverage implies. */
+export function completenessOf(point: Covered): SeriesCompleteness {
+  if (point.completeness === "complete" || point.completeness === "partial" || point.completeness === "unknown") return point.completeness;
+  const coverage = coverageOf(point);
+  return coverage === null ? "unknown" : coverage < WHOLE ? "partial" : "complete";
+}
+
+/** True when the bucket is partial or its completeness is unknown. */
 export function isPartial(point: Covered): boolean {
-  return coverageOf(point) < WHOLE;
+  return completenessOf(point) !== "complete";
 }
 
 /**
@@ -51,9 +56,19 @@ export function isPartial(point: Covered): boolean {
  */
 export type RangeEdge = { to: number; step: number };
 
-/** True when the bucket starting at `t` runs up to (or past) the right edge of the range. */
-function reachesEdge(t: number, edge: RangeEdge): boolean {
-  return t + edge.step >= edge.to;
+/**
+ * True when the bucket reaches the range edge and its coverage matches elapsed
+ * time there. The API window ends one second after its serving clock, so one
+ * bucket-second of tolerance keeps that convention from misclassifying the
+ * live bucket. A bounded internal hole near the edge has lower coverage and
+ * remains a generic partial bucket.
+ */
+function isInProgress(point: Covered, t: number, edge: RangeEdge): boolean {
+  if (t + edge.step < edge.to) return false;
+  const coverage = coverageOf(point);
+  if (coverage === null) return false;
+  const elapsed = Math.min(WHOLE, Math.max(0, (edge.to - t) / edge.step));
+  return Math.abs(coverage - elapsed) <= 1 / edge.step + Number.EPSILON;
 }
 
 /**
@@ -69,9 +84,11 @@ function reachesEdge(t: number, edge: RangeEdge): boolean {
 export function partialKinds(points: readonly (Covered & { t?: number })[], edge?: RangeEdge): (PartialKind | null)[] {
   const usable = edge !== undefined && Number.isFinite(edge.to) && Number.isFinite(edge.step) && edge.step > 0 ? edge : null;
   return points.map((p, i) => {
-    if (!isPartial(p)) return null;
+    const completeness = completenessOf(p);
+    if (completeness === "complete") return null;
+    if (completeness === "unknown") return "unknown";
     if (usable === null || typeof p.t !== "number") return i === points.length - 1 ? "in-progress" : "leading";
-    return reachesEdge(p.t, usable) ? "in-progress" : "leading";
+    return isInProgress(p, p.t, usable) ? "in-progress" : "leading";
   });
 }
 
@@ -81,8 +98,12 @@ export const IN_PROGRESS_LABEL = "in progress";
 /** What the band over a bucket the collector only reached part way into says. */
 export const PARTLY_INDEXED_LABEL = "partly indexed";
 
+/** What a band with insufficient bounds says. */
+export const UNKNOWN_COVERAGE_LABEL = "coverage unknown";
+
 export function partialBandLabel(kind: PartialKind): string {
-  return kind === "in-progress" ? IN_PROGRESS_LABEL : PARTLY_INDEXED_LABEL;
+  if (kind === "in-progress") return IN_PROGRESS_LABEL;
+  return kind === "unknown" ? UNKNOWN_COVERAGE_LABEL : PARTLY_INDEXED_LABEL;
 }
 
 /**
@@ -90,22 +111,25 @@ export function partialBandLabel(kind: PartialKind): string {
  * elapsed" at the right edge, "partially indexed, 25% of the bucket" for one
  * further back.
  */
-export function partialNote(coverage: number, kind: PartialKind): string {
-  const share = formatPercent(Math.min(WHOLE, Math.max(0, Number.isFinite(coverage) ? coverage : WHOLE)), 0);
+export function partialNote(coverage: number | null, kind: PartialKind): string {
+  if (kind === "unknown") return "bucket completeness unknown";
+  if (coverage === null || !Number.isFinite(coverage)) return kind === "in-progress" ? "bucket in progress, coverage unknown" : "partially indexed, coverage unknown";
+  if (kind === "leading" && coverage >= WHOLE) return "partially indexed, missing blocks share a timestamp";
+  const share = formatPercent(Math.min(WHOLE, Math.max(0, coverage)), 0);
   return kind === "in-progress" ? `bucket in progress, ${share} elapsed` : `partially indexed, ${share} of the bucket`;
 }
 
 /** The same, for a chart that draws sums: the bucket is not drawn at all, and the tooltip says so. */
-export function partialSumNote(coverage: number, kind: PartialKind): string {
+export function partialSumNote(coverage: number | null, kind: PartialKind): string {
   return `${partialNote(coverage, kind)}; not drawn as a bucket total`;
 }
 
 /** A row of a chart that has been through `partialKinds`. */
-export type PartialRow = { partial: PartialKind | null; coverage: number };
+export type PartialRow = { partial: PartialKind | null; coverage: number | null };
 
 /** True when a chart row stands for a bucket the collector indexed only part of. */
 export function isPartialRow(row: Record<string, unknown>): boolean {
-  return row.partial === "in-progress" || row.partial === "leading";
+  return row.partial === "in-progress" || row.partial === "leading" || row.partial === "unknown";
 }
 
 /**
@@ -115,13 +139,13 @@ export function isPartialRow(row: Record<string, unknown>): boolean {
  */
 export function partialRowNote(row: Record<string, unknown>, sums = false): string | null {
   if (!isPartialRow(row)) return null;
-  const kind: PartialKind = row.partial === "in-progress" ? "in-progress" : "leading";
-  const coverage = typeof row.coverage === "number" ? row.coverage : WHOLE;
+  const kind: PartialKind = row.partial === "in-progress" ? "in-progress" : row.partial === "unknown" ? "unknown" : "leading";
+  const coverage = typeof row.coverage === "number" ? row.coverage : row.coverage === null ? null : WHOLE;
   return sums ? partialSumNote(coverage, kind) : partialNote(coverage, kind);
 }
 
 /** A span of the time axis a partial bucket occupies, in unix seconds. */
-export type PartialBand = { from: number; to: number; kind: PartialKind; coverage: number };
+export type PartialBand = { from: number; to: number; kind: PartialKind; coverage: number | null };
 
 /**
  * The bands over the partial buckets of a range: one bucket wide each, so a
@@ -152,14 +176,14 @@ export function partialCaption(bands: readonly PartialBand[]): string | null {
 
 /**
  * The fee destination stack, as a chart draws it. The keys are separate from
- * the bucket's own `floorFeesEth` and `surplusFeesEth` so a bucket in
- * progress can be left out of the stack while its tooltip and the data table
- * still read out what it has collected so far.
+ * the bucket's own infrastructure, network, and poster fee fields so a bucket
+ * in progress can be left out of the stack while its tooltip and the data
+ * table still read out what it has collected so far.
  */
-export type FeeStack = { stackFloorEth: number | null; stackSurplusEth: number | null; stackUnsplitEth: number | null };
+export type FeeStack = { stackFloorEth: number | null; stackSurplusEth: number | null; stackPosterEth: number | null; stackUnsplitEth: number | null };
 
 /** The fields of a row the fee stack is drawn from. */
-export type FeeSums = PartialRow & { floorFeesEth: number | null; surplusFeesEth: number | null; unsplitFeesEth: number | null };
+export type FeeSums = PartialRow & { floorFeesEth: number | null; surplusFeesEth: number | null; posterFeesEth?: number | null; unsplitFeesEth: number | null };
 
 /**
  * `rows` with the stack keys added: the bucket's own parts on a whole bucket,
@@ -170,7 +194,7 @@ export type FeeSums = PartialRow & { floorFeesEth: number | null; surplusFeesEth
 export function withFeeStack<T extends FeeSums>(rows: readonly T[]): (T & FeeStack)[] {
   return rows.map((row) =>
     row.partial === null
-      ? { ...row, stackFloorEth: row.floorFeesEth, stackSurplusEth: row.surplusFeesEth, stackUnsplitEth: row.unsplitFeesEth }
-      : { ...row, stackFloorEth: null, stackSurplusEth: null, stackUnsplitEth: null },
+      ? { ...row, stackFloorEth: row.floorFeesEth, stackSurplusEth: row.surplusFeesEth, stackPosterEth: row.posterFeesEth ?? null, stackUnsplitEth: row.unsplitFeesEth }
+      : { ...row, stackFloorEth: null, stackSurplusEth: null, stackPosterEth: null, stackUnsplitEth: null },
   );
 }

@@ -71,7 +71,7 @@ export function describeSplit(row: ChartPoint, segments: readonly Segment[]): st
   return own.map((s) => `C${s.index + 1} ${known(row[s.key], (v) => v.toFixed(4))}`).join(" · ");
 }
 
-/** "0.1234" for a known fee part, "n/a" for one that predates the fee split. */
+/** "0.1234" for a known fee part, "n/a" when the destination split was not recorded. */
 function formatFeePart(eth: number | null): string {
   return eth === null ? "n/a" : formatSignificant(eth, 4);
 }
@@ -125,9 +125,9 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   const unrecorded = hasUnrecordedSplit(series);
   const count = seriesCount(series, model);
   const indices = Array.from({ length: count }, (_, i) => i);
-  // Rates and averages are drawn on a partial bucket as they are (the api's
-  // gasPerSecond is already the rate over the covered span), so the note is
-  // the only place these charts say the bucket is not whole.
+  // A boundary partial bucket and a bounded block gap have measured coverage
+  // and a compute-gas rate over that span. An unbounded gap has a null chart
+  // rate, so it breaks instead of reading as low throughput.
   const note = bucketNote(markers, bucketSeconds);
 
   const contributionRows: TooltipRow[] = segments.map((s) => ({
@@ -141,7 +141,7 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   if (unrecorded) contributionRows.push({ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => known(r[UNKNOWN_KEY], (v) => v.toFixed(4)), when: (r) => r.setKnown === true && r.splitKnown === false });
   contributionRows.push({ label: "x total", value: (r) => Number(r.x).toFixed(4) });
 
-  const gasRows: TooltipRow[] = [{ label: "gas per second", color: "var(--series-1)", value: (r) => formatGasPerSecond(Number(r.gps)) }];
+  const gasRows: TooltipRow[] = [{ label: "compute gas per second", color: "var(--series-1)", value: (r) => known(r.gps, (v) => formatGasPerSecond(v)) }];
   indices.forEach((i) => gasRows.push({ label: `target C${i + 1} in force`, color: seriesColor(i), value: (r) => formatGasPerSecond(Number(r[targetKey(i)])), when: (r) => typeof r[targetKey(i)] === "number" }));
 
   const backlogRowsFor = (i: number): TooltipRow[] => [
@@ -174,8 +174,8 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   // The targets are drawn as thresholds on the same axis as the rate, so the
   // axis has to hold the taller of the two. Its unit is named once, in the
   // legend, because every tick on it is a bare figure.
-  const gasAxis = throughputAxis(Math.max(0, ...points.map((p) => p.gps), ...points.flatMap((p) => indices.map((i) => p[targetKey(i)] ?? 0))));
-  const gasLegend = [{ label: `gas per second (${gasAxis.unit})`, color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
+  const gasAxis = throughputAxis(Math.max(0, ...points.flatMap((p) => (p.gps === null ? [] : [p.gps])), ...points.flatMap((p) => indices.map((i) => p[targetKey(i)] ?? 0))));
+  const gasLegend = [{ label: `compute gas per second (${gasAxis.unit})`, color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
 
   return {
     points,
@@ -260,7 +260,7 @@ export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: Seri
 export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth = GAS_AXIS_WIDTH, minWidth }: { m: SeriesModel; height?: ChartHeight; axisWidth?: number; minWidth?: number }) {
   return (
     <>
-      <ChartFrame height={height} minWidth={minWidth} label={`Gas used per second in ${m.gasAxis.unit} with each constraint target in force drawn as a stepped line`}>
+      <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit} with each constraint target in force drawn as a stepped line`}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
@@ -409,7 +409,7 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
         {tableOpen ? (
           <div className="mt-2 max-h-[480px] overflow-auto">
             <table className="num w-full min-w-[960px] text-left">
-              <caption className="sr-only">History buckets with base fee, floor, exponent split, gas per second, backlogs and fee destinations</caption>
+              <caption className="sr-only">History buckets with base fee, floor, exponent split, compute gas per second, backlogs and fee destinations</caption>
               <thead className="sticky top-0 bg-surface text-ink-3">
                 <tr>
                   <th scope="col" className="py-1 pr-3 font-medium">bucket</th>
@@ -419,7 +419,7 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
                   <th scope="col" className="py-1 pr-3 font-medium">floor</th>
                   <th scope="col" className="py-1 pr-3 font-medium">x</th>
                   <th scope="col" className="py-1 pr-3 font-medium">split (set)</th>
-                  <th scope="col" className="py-1 pr-3 font-medium">gas/s</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">compute gas/s</th>
                   {m.indices.map((i) => (
                     <th key={i} scope="col" className="py-1 pr-3 font-medium">
                       backlog C{i + 1}
@@ -428,6 +428,7 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
                   <th scope="col" className="py-1 pr-3 font-medium">fees (ETH)</th>
                   <th scope="col" className="py-1 pr-3 font-medium">floor fees</th>
                   <th scope="col" className="py-1 pr-3 font-medium">surplus fees</th>
+                  <th scope="col" className="py-1 pr-3 font-medium">poster fees</th>
                   <th scope="col" className="py-1 pr-3 font-medium">blocks</th>
                 </tr>
               </thead>
@@ -443,7 +444,7 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
                     <td className="py-1 pr-3">
                       {describeSplit(p, m.segments)} ({p.setKnown ? `set ${p.constraintSetId}` : "unknown set"})
                     </td>
-                    <td className="py-1 pr-3">{formatGasPerSecond(p.gps)}</td>
+                    <td className="py-1 pr-3">{p.gps === null ? "n/a" : formatGasPerSecond(p.gps)}</td>
                     {m.indices.map((i) => {
                       const s = p.setKnown ? m.segments.find((seg) => seg.setId === p.constraintSetId && seg.index === i) : undefined;
                       const v = s ? p[s.backlogKey] : p.setKnown ? null : p[unknownBacklogKey(i)];
@@ -456,6 +457,7 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
                     <td className="py-1 pr-3">{formatSignificant(p.feesEth, 4)}</td>
                     <td className="py-1 pr-3">{formatFeePart(p.floorFeesEth)}</td>
                     <td className="py-1 pr-3">{formatFeePart(p.surplusFeesEth)}</td>
+                    <td className="py-1 pr-3">{formatFeePart(p.posterFeesEth)}</td>
                     <td className="py-1 pr-3">{formatInteger(p.blocks)}</td>
                   </tr>
                 ))}

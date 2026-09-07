@@ -8,19 +8,39 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 // Postgres implements Store on sqlx.
 type Postgres struct {
-	db *sqlx.DB
-	q  sqlx.ExtContext
+	db    *sqlx.DB
+	q     sqlx.ExtContext
+	stats *stats
 	// tx describes the open transaction this store is bound to, nil when it
 	// is the pool. Nested calls read it to tell whether they can reuse the
 	// transaction, must add a lock to it, or are incompatible with it.
 	tx *txMode
+}
+
+// Stats is cumulative database operation accounting for health and metrics.
+// Latency measures driver calls, including connection pool waits.
+type Stats struct {
+	Operations   uint64
+	Errors       uint64
+	TotalLatency time.Duration
+	LastLatency  time.Duration
+}
+
+type stats struct {
+	operations   atomic.Uint64
+	errors       atomic.Uint64
+	totalLatency atomic.Int64
+	lastLatency  atomic.Int64
 }
 
 // txMode is the metadata of an open transaction: the chain locks it holds,
@@ -51,15 +71,36 @@ var (
 
 // NewPostgres wraps an open connection pool.
 func NewPostgres(d *sqlx.DB) *Postgres {
-	return &Postgres{db: d, q: d}
+	return &Postgres{db: d, q: d, stats: &stats{}}
 }
 
 // DB exposes the underlying pool (for migrations and shutdown).
 func (p *Postgres) DB() *sqlx.DB { return p.db }
 
+// Stats returns a concurrency-safe snapshot of database operation accounting.
+func (p *Postgres) Stats() Stats {
+	return Stats{
+		Operations: p.stats.operations.Load(), Errors: p.stats.errors.Load(),
+		TotalLatency: time.Duration(p.stats.totalLatency.Load()), LastLatency: time.Duration(p.stats.lastLatency.Load()),
+	}
+}
+
+func (p *Postgres) observe(start time.Time, err error) {
+	d := time.Since(start)
+	p.stats.operations.Add(1)
+	p.stats.totalLatency.Add(int64(d))
+	p.stats.lastLatency.Store(int64(d))
+	if err != nil {
+		p.stats.errors.Add(1)
+	}
+}
+
 // Ping checks connectivity.
 func (p *Postgres) Ping(ctx context.Context) error {
-	return p.db.PingContext(ctx)
+	start := time.Now()
+	err := p.db.PingContext(ctx)
+	p.observe(start, err)
+	return err
 }
 
 // WithTx runs fn in a transaction. Nested inside any open transaction it
@@ -132,11 +173,13 @@ func (p *Postgres) WithSnapshotTx(ctx context.Context, fn func(Store) error) err
 // store so nested calls can check compatibility, runs setup and then fn on
 // it, and commits unless either failed.
 func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, mode *txMode, setup func(*Postgres) error, fn func(Store) error) error {
+	start := time.Now()
 	tx, err := p.db.BeginTxx(ctx, opts)
+	p.observe(start, err)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	bound := &Postgres{db: p.db, q: tx, tx: mode}
+	bound := &Postgres{db: p.db, q: tx, stats: p.stats, tx: mode}
 	if setup != nil {
 		err = setup(bound)
 	}
@@ -144,17 +187,24 @@ func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, mode *txMo
 		err = fn(bound)
 	}
 	if err != nil {
-		_ = tx.Rollback()
+		start = time.Now()
+		rollbackErr := tx.Rollback()
+		p.observe(start, rollbackErr)
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	start = time.Now()
+	err = tx.Commit()
+	p.observe(start, err)
+	if err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
 
 func (p *Postgres) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	start := time.Now()
 	res, err := p.q.ExecContext(ctx, query, args...)
+	p.observe(start, err)
 	if err != nil {
 		return nil, fmt.Errorf("exec: %w", err)
 	}
@@ -163,7 +213,10 @@ func (p *Postgres) exec(ctx context.Context, query string, args ...any) (sql.Res
 
 func selectAll[T any](ctx context.Context, p *Postgres, query string, args ...any) ([]T, error) {
 	var out []T
-	if err := sqlx.SelectContext(ctx, p.q, &out, query, args...); err != nil {
+	start := time.Now()
+	err := sqlx.SelectContext(ctx, p.q, &out, query, args...)
+	p.observe(start, err)
+	if err != nil {
 		return nil, fmt.Errorf("select: %w", err)
 	}
 	return out, nil
@@ -171,7 +224,14 @@ func selectAll[T any](ctx context.Context, p *Postgres, query string, args ...an
 
 func getOne[T any](ctx context.Context, p *Postgres, query string, args ...any) (*T, error) {
 	var out T
-	if err := sqlx.GetContext(ctx, p.q, &out, query, args...); err != nil {
+	start := time.Now()
+	err := sqlx.GetContext(ctx, p.q, &out, query, args...)
+	observed := err
+	if errors.Is(err, sql.ErrNoRows) {
+		observed = nil
+	}
+	p.observe(start, observed)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -256,24 +316,106 @@ func (p *Postgres) SetNetworkError(ctx context.Context, chainID uint64, msg stri
 	return err
 }
 
-const blockColumns = `chain_id, number, hash, parent_hash, ts, gas_used, base_fee, l1_block, tx_count, backlogs, constraint_bips, exponent_bips, predicted_base_fee, min_base_fee, anchored, pricing_version`
+const blockColumns = `chain_id, number, hash, parent_hash, ts, gas_used, poster_gas, base_fee, l1_block, tx_count, backlogs, constraint_bips, exponent_bips, predicted_base_fee, min_base_fee, anchored, pricing_version`
+
+// PostgreSQL accepts at most 65,535 bind parameters. Keeping a little room
+// below that limit also avoids sending unnecessarily large statements if a
+// caller supplies more rows than the collector's configured batch size.
+const postgresBatchParameters = 60_000
+
+// valueTuples builds ($1, ...), ($n, ...) for a multi-row INSERT. Values stay
+// in bind parameters, so batching does not interpolate any row data into SQL.
+func valueTuples(rows, columns int) string {
+	var b strings.Builder
+	for row := range rows {
+		if row > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteByte('(')
+		for column := range columns {
+			if column > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(row*columns + column + 1))
+		}
+		b.WriteByte(')')
+	}
+	return b.String()
+}
+
+// uniqueLayers partitions rows so a single INSERT never contains the same
+// conflict key twice. PostgreSQL rejects an INSERT whose ON CONFLICT clause
+// would update one target row twice. Later occurrences go in later statements,
+// retaining the old per-row conflict order for duplicate input keys.
+func uniqueLayers[T any, K comparable](rows []T, key func(T) K) [][]T {
+	counts := make(map[K]int, len(rows))
+	var layers [][]T
+	for _, row := range rows {
+		k := key(row)
+		layer := counts[k]
+		if layer == len(layers) {
+			layers = append(layers, nil)
+		}
+		layers[layer] = append(layers[layer], row)
+		counts[k]++
+	}
+	return layers
+}
+
+// blockSpan is the lowest and highest block number in a batch. A batched
+// statement fails as a whole, so its error names the rows it carried
+// rather than only the statement that carried them.
+func blockSpan(batch []Block) (lo, hi uint64) {
+	lo, hi = batch[0].Number, batch[0].Number
+	for _, b := range batch[1:] {
+		lo, hi = min(lo, b.Number), max(hi, b.Number)
+	}
+	return lo, hi
+}
+
+// bucketSpan is the earliest and latest bucket start in a batch, for the
+// same reason as blockSpan. One batch may hold several resolutions, so
+// only the window they cover is named.
+func bucketSpan(batch []Bucket) (first, last time.Time) {
+	first, last = batch[0].BucketStart, batch[0].BucketStart
+	for _, b := range batch[1:] {
+		if b.BucketStart.Before(first) {
+			first = b.BucketStart
+		}
+		if b.BucketStart.After(last) {
+			last = b.BucketStart
+		}
+	}
+	return first, last
+}
 
 // UpsertBlocks writes blocks, replacing replay fields on conflict.
 func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
-	for _, b := range blocks {
-		if _, err := p.exec(ctx, `
+	const columns = 17
+	for _, layer := range uniqueLayers(blocks, func(b Block) struct{ chainID, number uint64 } {
+		return struct{ chainID, number uint64 }{b.ChainID, b.Number}
+	}) {
+		for from := 0; from < len(layer); from += postgresBatchParameters / columns {
+			batch := layer[from:min(from+postgresBatchParameters/columns, len(layer))]
+			args := make([]any, 0, len(batch)*columns)
+			for _, b := range batch {
+				args = append(args, b.ChainID, b.Number, b.Hash, b.ParentHash, b.TS, b.GasUsed, b.PosterGas, b.BaseFee, b.L1Block, b.TxCount, b.Backlogs, b.ConstraintBips,
+					b.ExponentBips, b.PredictedBaseFee, b.MinBaseFee, b.Anchored, b.PricingVersion)
+			}
+			if _, err := p.exec(ctx, `
 			INSERT INTO blocks (`+blockColumns+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			VALUES `+valueTuples(len(batch), columns)+`
 			ON CONFLICT (chain_id, number) DO UPDATE SET
 				hash = EXCLUDED.hash, parent_hash = EXCLUDED.parent_hash,
-				ts = EXCLUDED.ts, gas_used = EXCLUDED.gas_used, base_fee = EXCLUDED.base_fee,
+				ts = EXCLUDED.ts, gas_used = EXCLUDED.gas_used, poster_gas = EXCLUDED.poster_gas, base_fee = EXCLUDED.base_fee,
 				l1_block = EXCLUDED.l1_block, tx_count = EXCLUDED.tx_count, backlogs = EXCLUDED.backlogs,
 				constraint_bips = EXCLUDED.constraint_bips, exponent_bips = EXCLUDED.exponent_bips,
 				predicted_base_fee = EXCLUDED.predicted_base_fee, min_base_fee = EXCLUDED.min_base_fee,
-				anchored = EXCLUDED.anchored, pricing_version = EXCLUDED.pricing_version`,
-			b.ChainID, b.Number, b.Hash, b.ParentHash, b.TS, b.GasUsed, b.BaseFee, b.L1Block, b.TxCount, b.Backlogs, b.ConstraintBips,
-			b.ExponentBips, b.PredictedBaseFee, b.MinBaseFee, b.Anchored, b.PricingVersion); err != nil {
-			return fmt.Errorf("block %d: %w", b.Number, err)
+				anchored = EXCLUDED.anchored, pricing_version = EXCLUDED.pricing_version`, args...); err != nil {
+				lo, hi := blockSpan(batch)
+				return fmt.Errorf("upsert %d blocks %d..%d: %w", len(batch), lo, hi, err)
+			}
 		}
 	}
 	return nil
@@ -314,19 +456,37 @@ func (p *Postgres) BlocksBetween(ctx context.Context, chainID uint64, from, to t
 	return selectAll[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 AND ts >= $2 AND ts < $3 ORDER BY number ASC`, chainID, from, to)
 }
 
-// GasUsedBetween sums gas over (from, to].
-func (p *Postgres) GasUsedBetween(ctx context.Context, chainID uint64, from, to time.Time) (uint64, error) {
-	var total int64
-	if err := sqlx.GetContext(ctx, p.q, &total, `SELECT COALESCE(SUM(gas_used), 0)::BIGINT FROM blocks WHERE chain_id = $1 AND ts > $2 AND ts <= $3`, chainID, from, to); err != nil {
-		return 0, fmt.Errorf("gas used: %w", err)
+// GasBetween sums total gas and, when receipt coverage is complete, compute
+// gas over (from, to].
+func (p *Postgres) GasBetween(ctx context.Context, chainID uint64, from, to time.Time) (total uint64, compute *uint64, err error) {
+	var row struct {
+		Total   int64         `db:"total"`
+		Compute sql.NullInt64 `db:"compute"`
 	}
-	return uint64(max(total, 0)), nil
+	start := time.Now()
+	err = sqlx.GetContext(ctx, p.q, &row, `
+		SELECT COALESCE(SUM(gas_used), 0)::BIGINT AS total,
+			CASE WHEN count(*) = count(poster_gas) THEN COALESCE(SUM(gas_used - poster_gas), 0)::BIGINT END AS compute
+		FROM blocks WHERE chain_id = $1 AND ts > $2 AND ts <= $3`, chainID, from, to)
+	p.observe(start, err)
+	if err != nil {
+		return 0, nil, fmt.Errorf("gas between: %w", err)
+	}
+	total = uint64(max(row.Total, 0))
+	if !row.Compute.Valid {
+		return total, nil, nil
+	}
+	computeTotal := uint64(max(row.Compute.Int64, 0))
+	return total, &computeTotal, nil
 }
 
 // TwoTxBlocks lists candidate batch-report blocks.
 func (p *Postgres) TwoTxBlocks(ctx context.Context, chainID, after uint64, limit int) ([]uint64, error) {
 	var nums []int64
-	if err := sqlx.SelectContext(ctx, p.q, &nums, `SELECT number FROM blocks WHERE chain_id = $1 AND tx_count = 2 AND number > $2 ORDER BY number ASC LIMIT $3`, chainID, after, limit); err != nil {
+	start := time.Now()
+	err := sqlx.SelectContext(ctx, p.q, &nums, `SELECT number FROM blocks WHERE chain_id = $1 AND tx_count = 2 AND number > $2 ORDER BY number ASC LIMIT $3`, chainID, after, limit)
+	p.observe(start, err)
+	if err != nil {
 		return nil, fmt.Errorf("two tx blocks: %w", err)
 	}
 	return Uint64s(nums), nil
@@ -341,26 +501,46 @@ func (p *Postgres) PruneBlocks(ctx context.Context, chainID uint64, before time.
 	return res.RowsAffected()
 }
 
-const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, fees_wei, base_fee_min, base_fee_avg, base_fee_max, base_fee_sum, exponent_end_bips, backlogs_end, backlogs_max, constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, constraint_set_id, replay_error_bips, last_block, pricing_version`
+const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, poster_gas, fees_wei, poster_fees_wei, base_fee_min, base_fee_avg, base_fee_max, base_fee_sum, exponent_end_bips, backlogs_end, backlogs_max, constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, constraint_set_id, replay_error_bips, last_block, pricing_version`
 
 // FoldBuckets adds partial buckets into the stored rows (the backfill's
 // path for windows without block rows; the cursor commits with it). A sum
 // or fee split that is unknown (NULL) on either side stays unknown; the
 // average then uses the rounded reconstruction for the unknown side.
 func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
-	for _, b := range buckets {
-		if _, err := p.exec(ctx, `
+	type bucketKey struct {
+		chainID     uint64
+		resolution  string
+		bucketStart time.Time
+	}
+	const columns = 23
+	for _, layer := range uniqueLayers(buckets, func(b Bucket) bucketKey {
+		return bucketKey{b.ChainID, b.Resolution, b.BucketStart.UTC()}
+	}) {
+		for from := 0; from < len(layer); from += postgresBatchParameters / columns {
+			batch := layer[from:min(from+postgresBatchParameters/columns, len(layer))]
+			args := make([]any, 0, len(batch)*columns)
+			for _, b := range batch {
+				args = append(args, b.ChainID, b.Resolution, b.BucketStart, b.Blocks, b.GasUsed, b.PosterGas, b.FeesWei, b.PosterFeesWei, b.BaseFeeMin, b.BaseFeeAvg, b.BaseFeeMax, b.BaseFeeSum,
+					b.ExponentEndBips, b.BacklogsEnd, b.BacklogsMax, b.ConstraintBipsEnd, b.MinBaseFee, b.FloorFeesWei, b.SurplusFeesWei,
+					b.ConstraintSetID, b.ReplayErrorBips, b.LastBlock, b.PricingVersion)
+			}
+			if _, err := p.exec(ctx, `
 			INSERT INTO buckets (`+bucketColumns+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+			VALUES `+valueTuples(len(batch), columns)+`
 			ON CONFLICT (chain_id, resolution, bucket_start) DO UPDATE SET
 				pricing_version = LEAST(buckets.pricing_version, EXCLUDED.pricing_version),
 				blocks = buckets.blocks + EXCLUDED.blocks,
 				gas_used = buckets.gas_used + EXCLUDED.gas_used,
+				poster_gas = CASE WHEN buckets.poster_gas IS NULL OR EXCLUDED.poster_gas IS NULL THEN NULL
+					ELSE buckets.poster_gas + EXCLUDED.poster_gas END,
 				fees_wei = buckets.fees_wei + EXCLUDED.fees_wei,
+				poster_fees_wei = CASE WHEN buckets.poster_fees_wei IS NULL OR EXCLUDED.poster_fees_wei IS NULL THEN NULL
+					ELSE buckets.poster_fees_wei + EXCLUDED.poster_fees_wei END,
 				base_fee_sum = buckets.base_fee_sum + EXCLUDED.base_fee_sum,
-				floor_fees_wei = CASE WHEN LEAST(buckets.pricing_version, EXCLUDED.pricing_version) = 0 THEN NULL
+				floor_fees_wei = CASE WHEN LEAST(buckets.pricing_version, EXCLUDED.pricing_version) = 0 OR buckets.floor_fees_wei IS NULL OR EXCLUDED.floor_fees_wei IS NULL THEN NULL
 					ELSE buckets.floor_fees_wei + EXCLUDED.floor_fees_wei END,
-				surplus_fees_wei = CASE WHEN LEAST(buckets.pricing_version, EXCLUDED.pricing_version) = 0 THEN NULL
+				surplus_fees_wei = CASE WHEN LEAST(buckets.pricing_version, EXCLUDED.pricing_version) = 0 OR buckets.surplus_fees_wei IS NULL OR EXCLUDED.surplus_fees_wei IS NULL THEN NULL
 					ELSE buckets.surplus_fees_wei + EXCLUDED.surplus_fees_wei END,
 				base_fee_min = CASE WHEN buckets.blocks = 0 THEN EXCLUDED.base_fee_min ELSE LEAST(buckets.base_fee_min, EXCLUDED.base_fee_min) END,
 				base_fee_max = GREATEST(buckets.base_fee_max, EXCLUDED.base_fee_max),
@@ -376,11 +556,10 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 				backlogs_max = ARRAY(SELECT GREATEST(a, b) FROM unnest(buckets.backlogs_max, EXCLUDED.backlogs_max) AS u(a, b)),
 				constraint_set_id = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN COALESCE(EXCLUDED.constraint_set_id, buckets.constraint_set_id) ELSE buckets.constraint_set_id END,
 				replay_error_bips = GREATEST(buckets.replay_error_bips, EXCLUDED.replay_error_bips),
-				last_block = GREATEST(buckets.last_block, EXCLUDED.last_block)`,
-			b.ChainID, b.Resolution, b.BucketStart, b.Blocks, b.GasUsed, b.FeesWei, b.BaseFeeMin, b.BaseFeeAvg, b.BaseFeeMax, b.BaseFeeSum,
-			b.ExponentEndBips, b.BacklogsEnd, b.BacklogsMax, b.ConstraintBipsEnd, b.MinBaseFee, b.FloorFeesWei, b.SurplusFeesWei,
-			b.ConstraintSetID, b.ReplayErrorBips, b.LastBlock, b.PricingVersion); err != nil {
-			return fmt.Errorf("bucket %s %s: %w", b.Resolution, b.BucketStart.Format(time.RFC3339), err)
+				last_block = GREATEST(buckets.last_block, EXCLUDED.last_block)`, args...); err != nil {
+				first, last := bucketSpan(batch)
+				return fmt.Errorf("fold %d buckets %s..%s: %w", len(batch), first.UTC().Format(time.RFC3339), last.UTC().Format(time.RFC3339), err)
+			}
 		}
 	}
 	return nil
@@ -399,59 +578,85 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 	if !ok {
 		return fmt.Errorf("rebuild buckets: unknown resolution %q", resolution)
 	}
-	for _, start := range starts {
-		end := start.Add(width)
-		if _, err := p.exec(ctx, `
-			WITH w AS (
-				SELECT * FROM blocks WHERE chain_id = $1 AND ts >= $3 AND ts < $4
+	if len(starts) == 0 {
+		return nil
+	}
+	// The upserted CTE below is deliberately not referenced by the DELETE.
+	// A data-modifying CTE always runs to completion whether or not the
+	// primary query reads its output, and the two touch disjoint rows: the
+	// insert covers exactly the requested starts that have blocks, the
+	// delete exactly the ones that do not. Joining the delete to it would
+	// be worse than redundant, since a rebuild that inserts nothing would
+	// then delete nothing and leave the emptied buckets behind.
+	if _, err := p.exec(ctx, `
+			WITH requested AS (
+				SELECT DISTINCT bucket_start, bucket_start + $3::BIGINT * interval '1 second' AS bucket_end
+				FROM unnest($4::TIMESTAMPTZ[]) AS r(bucket_start)
+			), w AS (
+				SELECT requested.bucket_start, blocks.*
+				FROM requested
+				JOIN blocks ON blocks.chain_id = $1 AND blocks.ts >= requested.bucket_start AND blocks.ts < requested.bucket_end
 			), lastb AS (
-				SELECT * FROM w ORDER BY number DESC LIMIT 1
+				SELECT DISTINCT ON (bucket_start) * FROM w ORDER BY bucket_start, number DESC
 			), agg AS (
-				SELECT count(*) AS blocks,
+				SELECT bucket_start, count(*) AS blocks,
 					COALESCE(sum(gas_used), 0)::BIGINT AS gas_used,
+					CASE WHEN count(poster_gas) = count(*) THEN sum(poster_gas)::BIGINT END AS poster_gas,
 					COALESCE(sum(base_fee * gas_used), 0) AS fees_wei,
+					CASE WHEN count(poster_gas) = count(*)
+						THEN sum(base_fee * poster_gas) END AS poster_fees_wei,
 					COALESCE(min(base_fee), 0) AS base_fee_min,
 					COALESCE(max(base_fee), 0) AS base_fee_max,
 					COALESCE(sum(base_fee), 0) AS base_fee_sum,
 					COALESCE(min(pricing_version), 1)::SMALLINT AS pricing_version,
-					COALESCE(sum(min_base_fee * gas_used), 0) AS floor_fees_wei,
+					CASE WHEN min(pricing_version) > 0 AND count(min_base_fee) = count(*) AND count(poster_gas) = count(*)
+						THEN sum(LEAST(base_fee, min_base_fee) * (gas_used - poster_gas)) END AS floor_fees_wei,
+					CASE WHEN min(pricing_version) > 0 AND count(min_base_fee) = count(*) AND count(poster_gas) = count(*)
+						THEN sum((base_fee - LEAST(base_fee, min_base_fee)) * (gas_used - poster_gas)) END AS surplus_fees_wei,
 					COALESCE(max(CASE WHEN base_fee > 0
 						THEN LEAST(floor(abs(predicted_base_fee - base_fee) * 10000 / base_fee), $5::NUMERIC)
 						ELSE 0 END), 0)::BIGINT AS replay_error_bips
 				FROM w
+				GROUP BY bucket_start
+			), backlog_values AS (
+				SELECT w.bucket_start, u.i, max(u.v) AS v
+				FROM w CROSS JOIN LATERAL unnest(w.backlogs) WITH ORDINALITY AS u(v, i)
+				GROUP BY w.bucket_start, u.i
 			), bmax AS (
-				SELECT COALESCE(ARRAY(SELECT max(u.v) FROM w, unnest(w.backlogs) WITH ORDINALITY AS u(v, i) GROUP BY u.i ORDER BY u.i), '{}'::NUMERIC[]) AS backlogs_max
-			)
+				SELECT agg.bucket_start,
+					COALESCE(array_agg(backlog_values.v ORDER BY backlog_values.i) FILTER (WHERE backlog_values.i IS NOT NULL), '{}'::NUMERIC[]) AS backlogs_max
+				FROM agg LEFT JOIN backlog_values USING (bucket_start)
+				GROUP BY agg.bucket_start
+			), upserted AS (
 			INSERT INTO buckets (`+bucketColumns+`)
-			SELECT $1, $2, $3, agg.blocks, agg.gas_used, agg.fees_wei, agg.base_fee_min, floor(agg.base_fee_sum / agg.blocks), agg.base_fee_max, agg.base_fee_sum,
+			SELECT $1, $2, agg.bucket_start, agg.blocks, agg.gas_used, agg.poster_gas, agg.fees_wei, agg.poster_fees_wei, agg.base_fee_min, floor(agg.base_fee_sum / agg.blocks), agg.base_fee_max, agg.base_fee_sum,
 				lastb.exponent_bips, lastb.backlogs, bmax.backlogs_max,
 				CASE WHEN agg.pricing_version = 0 THEN NULL ELSE lastb.constraint_bips END,
 				CASE WHEN agg.pricing_version = 0 THEN NULL ELSE lastb.min_base_fee END,
-				CASE WHEN agg.pricing_version = 0 THEN NULL ELSE agg.floor_fees_wei END,
-				CASE WHEN agg.pricing_version = 0 THEN NULL ELSE agg.fees_wei - agg.floor_fees_wei END,
+				agg.floor_fees_wei, agg.surplus_fees_wei,
 				(SELECT cs.id FROM constraint_sets cs WHERE cs.chain_id = $1 AND cs.effective_block <= lastb.number
 					AND jsonb_array_length(cs.constraints) = COALESCE(array_length(lastb.backlogs, 1), 0)
 					ORDER BY cs.effective_block DESC, cs.id DESC LIMIT 1),
 				agg.replay_error_bips, lastb.number, agg.pricing_version
-			FROM agg, bmax, lastb
+			FROM agg JOIN bmax USING (bucket_start) JOIN lastb USING (bucket_start)
 			ON CONFLICT (chain_id, resolution, bucket_start) DO UPDATE SET
-				blocks = EXCLUDED.blocks, gas_used = EXCLUDED.gas_used, fees_wei = EXCLUDED.fees_wei,
+				blocks = EXCLUDED.blocks, gas_used = EXCLUDED.gas_used, poster_gas = EXCLUDED.poster_gas,
+				fees_wei = EXCLUDED.fees_wei, poster_fees_wei = EXCLUDED.poster_fees_wei,
 				base_fee_min = EXCLUDED.base_fee_min, base_fee_avg = EXCLUDED.base_fee_avg, base_fee_max = EXCLUDED.base_fee_max,
 				base_fee_sum = EXCLUDED.base_fee_sum, exponent_end_bips = EXCLUDED.exponent_end_bips,
 				backlogs_end = EXCLUDED.backlogs_end, backlogs_max = EXCLUDED.backlogs_max,
 				constraint_bips_end = EXCLUDED.constraint_bips_end, min_base_fee = EXCLUDED.min_base_fee,
 				floor_fees_wei = EXCLUDED.floor_fees_wei, surplus_fees_wei = EXCLUDED.surplus_fees_wei,
 				constraint_set_id = EXCLUDED.constraint_set_id, replay_error_bips = EXCLUDED.replay_error_bips,
-				last_block = EXCLUDED.last_block, pricing_version = EXCLUDED.pricing_version`,
-			chainID, resolution, start, end, strconv.FormatInt(math.MaxInt64, 10)); err != nil {
-			return fmt.Errorf("rebuild bucket %s %s: %w", resolution, start.Format(time.RFC3339), err)
-		}
-		if _, err := p.exec(ctx, `
-			DELETE FROM buckets WHERE chain_id = $1 AND resolution = $2 AND bucket_start = $3
-				AND NOT EXISTS (SELECT 1 FROM blocks WHERE chain_id = $1 AND ts >= $3 AND ts < $4)`,
-			chainID, resolution, start, end); err != nil {
-			return fmt.Errorf("drop empty bucket %s %s: %w", resolution, start.Format(time.RFC3339), err)
-		}
+				last_block = EXCLUDED.last_block, pricing_version = EXCLUDED.pricing_version
+			RETURNING bucket_start
+			)
+			DELETE FROM buckets
+			USING requested
+			WHERE buckets.chain_id = $1 AND buckets.resolution = $2 AND buckets.bucket_start = requested.bucket_start
+				AND NOT EXISTS (SELECT 1 FROM w WHERE w.bucket_start = requested.bucket_start)`,
+		chainID, resolution, int64(width/time.Second), pq.Array(starts), strconv.FormatInt(math.MaxInt64, 10)); err != nil {
+		return fmt.Errorf("rebuild %d buckets at %s: %w", len(starts), resolution, err)
 	}
 	return nil
 }
@@ -531,7 +736,70 @@ func (p *Postgres) DeleteStateSamplesAfter(ctx context.Context, chainID, block u
 	return res.RowsAffected()
 }
 
-const ownerActionColumns = `chain_id, block_number, tx_hash, log_index, ts, method, selector, args`
+const missingRangeColumns = `chain_id, from_block, to_block, detected_at, lifecycle, reason, cursor, replay_state, folded, retry_count, last_attempt_at, next_retry_at, last_error, predecessor_at, successor_at, cursor_at, created_at, updated_at`
+
+// MissingRanges lists every durable missing interval in block order.
+func (p *Postgres) MissingRanges(ctx context.Context, chainID uint64) ([]MissingRange, error) {
+	return selectAll[MissingRange](ctx, p, `SELECT `+missingRangeColumns+` FROM missing_ranges WHERE chain_id = $1 ORDER BY from_block`, chainID)
+}
+
+// missingRangeBindings is the number of bound values per inserted row, one
+// short of missingRangeColumns because updated_at is always now().
+const missingRangeBindings = 17
+
+// missingRangeBatch keeps one insert well inside the 65535 bound parameters a
+// statement can carry.
+const missingRangeBatch = 1000
+
+// ReplaceMissingRanges replaces one chain's normalized intervals. Collector
+// callers hold the chain transaction, so the delete and inserts commit as one
+// durable lifecycle update. Normalization can reshape the whole set, so the
+// rewrite stays a replace, but the rows go in batched statements: a per row
+// round trip would hold the chain lock in proportion to the set size.
+func (p *Postgres) ReplaceMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error {
+	if _, err := p.exec(ctx, `DELETE FROM missing_ranges WHERE chain_id = $1`, chainID); err != nil {
+		return err
+	}
+	for chunk := range slices.Chunk(ranges, missingRangeBatch) {
+		if err := p.insertMissingRanges(ctx, chainID, chunk); err != nil {
+			return fmt.Errorf("missing ranges %d..%d: %w", chunk[0].From, chunk[len(chunk)-1].To, err)
+		}
+	}
+	return nil
+}
+
+func (p *Postgres) insertMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error {
+	var values strings.Builder
+	args := make([]any, 0, len(ranges)*missingRangeBindings)
+	for _, r := range ranges {
+		if len(args) > 0 {
+			values.WriteString(", ")
+		}
+		values.WriteByte('(')
+		for i := 1; i <= missingRangeBindings; i++ {
+			if i > 1 {
+				values.WriteString(", ")
+			}
+			if i == missingRangeBindings {
+				fmt.Fprintf(&values, "COALESCE($%d, now())", len(args)+i)
+				continue
+			}
+			fmt.Fprintf(&values, "$%d", len(args)+i)
+		}
+		values.WriteString(", now())")
+		args = append(args, chainID, r.From, r.To, r.DetectedAt, r.Lifecycle, r.Reason, r.Cursor, r.ReplayState,
+			r.Folded, r.RetryCount, r.LastAttemptAt, r.NextRetryAt, r.LastError, r.PredecessorAt, r.SuccessorAt,
+			r.CursorAt, nullTime(r.CreatedAt))
+	}
+	_, err := p.exec(ctx, `INSERT INTO missing_ranges (`+missingRangeColumns+`) VALUES `+values.String(), args...)
+	return err
+}
+
+func nullTime(t time.Time) sql.NullTime {
+	return sql.NullTime{Time: t, Valid: !t.IsZero()}
+}
+
+const ownerActionColumns = `chain_id, block_number, tx_hash, tx_index, log_index, ts, method, selector, args`
 
 // InsertOwnerActions inserts new actions and returns the number added.
 func (p *Postgres) InsertOwnerActions(ctx context.Context, actions []OwnerAction) (int, error) {
@@ -539,14 +807,20 @@ func (p *Postgres) InsertOwnerActions(ctx context.Context, actions []OwnerAction
 	for _, a := range actions {
 		res, err := p.exec(ctx, `
 			INSERT INTO owner_actions (`+ownerActionColumns+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (chain_id, tx_hash, log_index) DO NOTHING`,
-			a.ChainID, a.BlockNumber, a.TxHash, a.LogIndex, a.TS, a.Method, a.Selector, a.Args)
+			a.ChainID, a.BlockNumber, a.TxHash, a.TxIndex, a.LogIndex, a.TS, a.Method, a.Selector, a.Args)
 		if err != nil {
 			return inserted, fmt.Errorf("owner action %s/%d: %w", a.TxHash, a.LogIndex, err)
 		}
 		n, _ := res.RowsAffected()
 		inserted += int(n)
+		if n == 0 && a.TxIndex.Valid {
+			if _, err := p.exec(ctx, `UPDATE owner_actions SET tx_index = $4 WHERE chain_id = $1 AND tx_hash = $2 AND log_index = $3 AND tx_index IS NULL`,
+				a.ChainID, a.TxHash, a.LogIndex, a.TxIndex); err != nil {
+				return inserted, fmt.Errorf("owner action %s/%d transaction index: %w", a.TxHash, a.LogIndex, err)
+			}
+		}
 	}
 	return inserted, nil
 }
@@ -594,12 +868,15 @@ func (p *Postgres) RewindAfter(ctx context.Context, chainID, block uint64) error
 // InsertConstraintSet upserts a set and returns its id.
 func (p *Postgres) InsertConstraintSet(ctx context.Context, cs ConstraintSet) (int64, error) {
 	var id int64
-	if err := sqlx.GetContext(ctx, p.q, &id, `
+	start := time.Now()
+	err := sqlx.GetContext(ctx, p.q, &id, `
 		INSERT INTO constraint_sets (chain_id, effective_block, effective_at, constraints, source)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (chain_id, effective_block, source) DO UPDATE SET constraints = EXCLUDED.constraints, effective_at = EXCLUDED.effective_at
 		RETURNING id`,
-		cs.ChainID, cs.EffectiveBlock, cs.EffectiveAt, cs.Constraints, cs.Source); err != nil {
+		cs.ChainID, cs.EffectiveBlock, cs.EffectiveAt, cs.Constraints, cs.Source)
+	p.observe(start, err)
+	if err != nil {
 		return 0, fmt.Errorf("constraint set: %w", err)
 	}
 	return id, nil
@@ -621,24 +898,31 @@ func (p *Postgres) ConstraintSets(ctx context.Context, chainID uint64) ([]Constr
 func (p *Postgres) UpsertBatchReports(ctx context.Context, reports []BatchReport) error {
 	for _, r := range reports {
 		if _, err := p.exec(ctx, `
-			INSERT INTO batch_reports (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			INSERT INTO batch_reports (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent,
+				report_version, arbos_version, per_batch_gas_charge, parent_gas_floor_per_token, cost_calculation_version, attributed_gas_spent, attributed_wei_spent)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			ON CONFLICT (chain_id, block_number) DO UPDATE SET
 				batch_number = EXCLUDED.batch_number, batch_ts = EXCLUDED.batch_ts, poster = EXCLUDED.poster,
 				calldata_len = EXCLUDED.calldata_len, calldata_nonzero = EXCLUDED.calldata_nonzero, extra_gas = EXCLUDED.extra_gas,
-				l1_base_fee = EXCLUDED.l1_base_fee, gas_spent = EXCLUDED.gas_spent, wei_spent = EXCLUDED.wei_spent`,
-			r.ChainID, r.BlockNumber, r.BatchNumber, r.BatchTS, r.Poster, r.CalldataLen, r.CalldataNonzero, r.ExtraGas, r.L1BaseFee, r.GasSpent, r.WeiSpent); err != nil {
+				l1_base_fee = EXCLUDED.l1_base_fee, gas_spent = EXCLUDED.gas_spent, wei_spent = EXCLUDED.wei_spent,
+				report_version = EXCLUDED.report_version, arbos_version = EXCLUDED.arbos_version,
+				per_batch_gas_charge = EXCLUDED.per_batch_gas_charge, parent_gas_floor_per_token = EXCLUDED.parent_gas_floor_per_token,
+				cost_calculation_version = EXCLUDED.cost_calculation_version,
+				attributed_gas_spent = EXCLUDED.attributed_gas_spent, attributed_wei_spent = EXCLUDED.attributed_wei_spent`,
+			r.ChainID, r.BlockNumber, r.BatchNumber, r.BatchTS, r.Poster, r.CalldataLen, r.CalldataNonzero, r.ExtraGas, r.L1BaseFee, r.GasSpent, r.WeiSpent,
+			r.ReportVersion, r.ArbOSVersion, r.PerBatchGasCharge, r.ParentGasFloorPerToken, r.CostCalculationVersion, r.GasSpent, r.WeiSpent); err != nil {
 			return fmt.Errorf("batch report %d: %w", r.BlockNumber, err)
 		}
 	}
 	return nil
 }
 
-const batchReportColumns = `chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent`
+const batchReportColumns = `chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee,
+	attributed_gas_spent, attributed_wei_spent, report_version, arbos_version, per_batch_gas_charge, parent_gas_floor_per_token, cost_calculation_version`
 
 // BatchReports lists reports in a time range, one row per report.
 func (p *Postgres) BatchReports(ctx context.Context, chainID uint64, from, to time.Time) ([]BatchReport, error) {
-	return selectAll[BatchReport](ctx, p, `SELECT `+batchReportColumns+` FROM batch_reports WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 ORDER BY batch_ts ASC, block_number ASC`, chainID, from, to)
+	return selectAll[BatchReport](ctx, p, `SELECT `+batchReportColumns+` FROM batch_reports WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 AND cost_calculation_version = 1 ORDER BY batch_ts ASC, block_number ASC`, chainID, from, to)
 }
 
 // BatchBuckets aggregates reports per step.
@@ -647,19 +931,25 @@ func (p *Postgres) BatchBuckets(ctx context.Context, chainID uint64, from, to ti
 	return selectAll[BatchBucket](ctx, p, `
 		SELECT to_timestamp(floor(extract(epoch FROM batch_ts) / $4) * $4) AS t,
 			count(*)::BIGINT AS batches,
-			COALESCE(sum(gas_spent), 0)::BIGINT AS gas_spent,
-			COALESCE(sum(wei_spent), 0) AS wei_spent,
+			COALESCE(sum(attributed_gas_spent), 0)::BIGINT AS gas_spent,
+			COALESCE(sum(attributed_wei_spent), 0) AS wei_spent,
 			COALESCE(floor(avg(l1_base_fee)), 0) AS l1_base_fee_avg,
 			COALESCE(sum(calldata_len), 0)::BIGINT AS calldata_bytes
 		FROM batch_reports
-		WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3
+		WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 AND cost_calculation_version = 1
 		GROUP BY 1 ORDER BY 1 ASC`,
 		chainID, from, to, secs)
 }
 
 // GetState reads a checkpoint.
 func (p *Postgres) GetState(ctx context.Context, chainID uint64, key string) (value string, found bool, err error) {
+	start := time.Now()
 	err = sqlx.GetContext(ctx, p.q, &value, `SELECT value FROM collector_state WHERE chain_id = $1 AND key = $2`, chainID, key)
+	observed := err
+	if errors.Is(err, sql.ErrNoRows) {
+		observed = nil
+	}
+	p.observe(start, observed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}

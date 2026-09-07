@@ -176,6 +176,7 @@ func TestEnvOverrides(t *testing.T) {
 		"NETWORK_ARBITRUM_ONE_WS_URL":           "wss://arb.example/ws",
 		"NETWORK_ARBITRUM_ONE_ARCHIVE":          "true",
 		"NETWORK_ARBITRUM_ONE_TICK_INTERVAL":    "500ms",
+		"NETWORK_ARBITRUM_ONE_HISTORY_EPOCH":    "3",
 		"NETWORK_DEDICATED_ARCHIVE":             "false",
 		"NETWORK_DEDICATED_TICK_INTERVAL":       "1s",
 	})
@@ -189,6 +190,15 @@ func TestEnvOverrides(t *testing.T) {
 	arb := cfg.Networks[1]
 	if arb.RPCURL != "https://arb.example" || !arb.Enabled || arb.CallsPerSecond != 7.5 || arb.WSURL != "wss://arb.example/ws" || !arb.Archive || arb.TickInterval != 500*time.Millisecond {
 		t.Fatalf("network overrides not applied: %+v", arb)
+	}
+	// The history epoch is an operator's request to rebuild the
+	// reconstructed history once, so it has to be settable per network
+	// without editing the mounted config.
+	if arb.HistoryEpoch != 3 || cfg.Networks[0].HistoryEpoch != 0 {
+		t.Fatalf("history epoch overrides: %d %d", arb.HistoryEpoch, cfg.Networks[0].HistoryEpoch)
+	}
+	if !arb.HasArchive() || cfg.Networks[2].HasArchive() {
+		t.Fatalf("HasArchive follows the configured endpoints: %+v %+v", arb, cfg.Networks[2])
 	}
 	if cfg.Networks[2].Archive || cfg.Networks[2].TickInterval != time.Second {
 		t.Fatalf("NETWORK_DEDICATED_ARCHIVE=false and NETWORK_DEDICATED_TICK_INTERVAL=1s not applied: %+v", cfg.Networks[2])
@@ -245,8 +255,12 @@ func TestEnvErrors(t *testing.T) {
 		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "+Inf"},
 		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "Infinity"},
 		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "10001"},
+		{"METRICS_PORT": "not-a-port"},
+		{"METRICS_PORT": "70000"},
 		{"NETWORK_ROBINHOOD_TICK_INTERVAL": "soon"},
 		{"NETWORK_ROBINHOOD_TICK_INTERVAL": "-1s"},
+		{"NETWORK_ROBINHOOD_HISTORY_EPOCH": "once"},
+		{"NETWORK_ROBINHOOD_HISTORY_EPOCH": "-1"},
 	} {
 		if _, err := LoadWith(Options{Path: p, Getenv: envOf(m)}); err == nil {
 			t.Fatalf("expected error for %v", m)
@@ -315,20 +329,22 @@ func TestValidate(t *testing.T) {
 		t.Fatalf("unlimited archive network rejected: %v", err)
 	}
 	cases := map[string]func(*Config){
-		"port":       func(c *Config) { c.Server.Port = 0 },
-		"port high":  func(c *Config) { c.Server.Port = 70000 },
-		"rate limit": func(c *Config) { c.Server.RateLimitBurst = 0 },
-		"db url":     func(c *Config) { c.Database.URL = "" },
-		"tick":       func(c *Config) { c.Collector.TickInterval = 0 },
-		"batch size": func(c *Config) { c.Collector.HeaderBatchSize = 101 },
-		"empty name": func(c *Config) { c.Networks[0].Name = "" },
-		"dup name":   func(c *Config) { c.Networks = append(c.Networks, c.Networks[0]) },
-		"zero chain": func(c *Config) { c.Networks[0].ChainID = 0 },
-		"dup chain":  func(c *Config) { n := c.Networks[0]; n.Name = "b"; c.Networks = append(c.Networks, n) },
-		"calls":      func(c *Config) { c.Networks[0].CallsPerSecond = -4 },
-		"calls nan":  func(c *Config) { c.Networks[0].CallsPerSecond = math.NaN() },
-		"calls inf":  func(c *Config) { c.Networks[0].CallsPerSecond = math.Inf(1) },
-		"calls huge": func(c *Config) { c.Networks[0].CallsPerSecond = MaxCallsPerSecond + 1 },
+		"port":                  func(c *Config) { c.Server.Port = 0 },
+		"port high":             func(c *Config) { c.Server.Port = 70000 },
+		"rate limit":            func(c *Config) { c.Server.RateLimitBurst = 0 },
+		"db url":                func(c *Config) { c.Database.URL = "" },
+		"tick":                  func(c *Config) { c.Collector.TickInterval = 0 },
+		"batch size":            func(c *Config) { c.Collector.HeaderBatchSize = 101 },
+		"metrics port negative": func(c *Config) { c.Collector.MetricsPort = -1 },
+		"metrics port high":     func(c *Config) { c.Collector.MetricsPort = 70000 },
+		"empty name":            func(c *Config) { c.Networks[0].Name = "" },
+		"dup name":              func(c *Config) { c.Networks = append(c.Networks, c.Networks[0]) },
+		"zero chain":            func(c *Config) { c.Networks[0].ChainID = 0 },
+		"dup chain":             func(c *Config) { n := c.Networks[0]; n.Name = "b"; c.Networks = append(c.Networks, n) },
+		"calls":                 func(c *Config) { c.Networks[0].CallsPerSecond = -4 },
+		"calls nan":             func(c *Config) { c.Networks[0].CallsPerSecond = math.NaN() },
+		"calls inf":             func(c *Config) { c.Networks[0].CallsPerSecond = math.Inf(1) },
+		"calls huge":            func(c *Config) { c.Networks[0].CallsPerSecond = MaxCallsPerSecond + 1 },
 		// Below one call every ten seconds a token takes longer than any
 		// request timeout: that is a mistake, not a budget (use 0).
 		"calls tiny":          func(c *Config) { c.Networks[0].CallsPerSecond = MinCallsPerSecond / 2 },
@@ -408,5 +424,32 @@ func TestTrustedProxyNets(t *testing.T) {
 	}
 	if !nets[2].Contains(net.ParseIP("fd00::1")) || nets[2].Contains(net.ParseIP("fd00::2")) {
 		t.Fatal("single ipv6 is a /128")
+	}
+}
+
+// TestMetricsPort: the collector's metrics server has a default port, the
+// environment overrides it, and zero switches it off.
+func TestMetricsPort(t *testing.T) {
+	p := writeYAML(t, sampleYAML)
+	cfg, err := LoadWith(Options{Path: p, Getenv: envOf(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Collector.MetricsPort != DefaultMetricsPort || !cfg.Collector.MetricsEnabled() {
+		t.Fatalf("default metrics port = %d, enabled = %v", cfg.Collector.MetricsPort, cfg.Collector.MetricsEnabled())
+	}
+	cfg, err = LoadWith(Options{Path: p, Getenv: envOf(map[string]string{"METRICS_PORT": "9111"})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Collector.MetricsPort != 9111 {
+		t.Fatalf("METRICS_PORT not applied: %d", cfg.Collector.MetricsPort)
+	}
+	cfg, err = LoadWith(Options{Path: p, Getenv: envOf(map[string]string{"METRICS_PORT": "0"})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Collector.MetricsEnabled() {
+		t.Fatal("METRICS_PORT=0 must disable the metrics server")
 	}
 }

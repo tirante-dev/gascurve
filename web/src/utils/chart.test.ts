@@ -56,8 +56,11 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     t: 0,
     blocks: 1,
     gasUsed: 0,
+    posterGas: 0,
     gasPerSecond: 0,
+    computeGasPerSecond: 0,
     coverage: 1,
+    completeness: "complete",
     feesWei: "0",
     baseFeeMin: "1",
     baseFeeAvg: "1",
@@ -69,6 +72,7 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     minBaseFee: "1",
     floorFeesWei: "0",
     surplusFeesWei: "0",
+    posterFeesWei: "0",
     constraintSetId: 0,
     replayErrorBips: 0,
     ...overrides,
@@ -235,6 +239,15 @@ describe("segments", () => {
 describe("chart points", () => {
   const rows = buildChartPoints(series, "constraints");
 
+  it("keeps a measured partial rate but hides one whose divisor is unknown or empty", () => {
+    const measured = buildChartPoints({ ...series, points: [point({ gasPerSecond: 20, computeGasPerSecond: 20, coverage: 0.5, completeness: "partial" })] }, "constraints")[0];
+    const unknown = buildChartPoints({ ...series, points: [point({ gasPerSecond: 20, computeGasPerSecond: 20, coverage: null, completeness: "unknown" })] }, "constraints")[0];
+    const empty = buildChartPoints({ ...series, points: [point({ gasPerSecond: 20, computeGasPerSecond: 20, coverage: 0, completeness: "partial" })] }, "constraints")[0];
+    expect(measured.gps).toBe(20);
+    expect(unknown.gps).toBeNull();
+    expect(empty.gps).toBeNull();
+  });
+
   it("takes contributions from the api's start-of-block integer bips, never from end-of-block backlogs", () => {
     // 34 bips is 0.0034, not 3_111_506 / 900_000_000 = 0.00345.
     expect(rows[0].c6_0).toBe(0.0034);
@@ -257,7 +270,7 @@ describe("chart points", () => {
     expect(rows[0].setKnown).toBe(true);
     expect(rows[0].cUnknown).toBeNull();
     expect(rows[0].bu0).toBeNull();
-    expect(Object.keys(rows[0]).filter((k) => k.startsWith("c") || k.startsWith("b"))).toEqual(["blocks", "coverage", "constraintSetId", "cUnknown", "c5_0", "b5_0", "c5_1", "b5_1", "c6_0", "b6_0", "c6_1", "b6_1", "bu0", "bu1"]);
+    expect(Object.keys(rows[0]).filter((k) => k.startsWith("c") || k.startsWith("b"))).toEqual(["blocks", "coverage", "completeness", "constraintSetId", "cUnknown", "c5_0", "b5_0", "c5_1", "b5_1", "c6_0", "b6_0", "c6_1", "b6_1", "bu0", "bu1"]);
   });
   it("closes a set with a duplicated boundary row where its successor starts, so the replacement is a vertical edge", () => {
     const drawn = withSetBoundaries(rows);
@@ -333,6 +346,23 @@ describe("chart points", () => {
     expect(rows[0].feesEth).toBeCloseTo(1);
     expect(rows[0].floorFeesEth).toBeCloseTo(0.004);
     expect(rows[0].surplusFeesEth).toBeCloseTo(0.996);
+  });
+  it("keeps total fees intact across all three receipt-backed destinations", () => {
+    const [row] = buildChartPoints({
+      ...series,
+      points: [point({ gasUsed: 422_716, posterGas: 767, computeGasPerSecond: 421_949, feesWei: "8469537776000", floorFeesWei: "8438980000000", surplusFeesWei: "15190164000", posterFeesWei: "15367612000" })],
+    }, "constraints");
+    expect(row.gps).toBe(421_949);
+    expect(row.floorFeesEth! + row.surplusFeesEth! + row.posterFeesEth!).toBeCloseTo(row.feesEth, 18);
+  });
+
+  it("leaves compute throughput unknown while historical poster gas is unavailable", () => {
+    const [row] = buildChartPoints({ ...series, points: [point({ posterGas: null, computeGasPerSecond: null })] }, "constraints");
+    expect(row.gps).toBeNull();
+  });
+  it("does not treat an old api total-gas rate as compute gas", () => {
+    const [row] = buildChartPoints({ ...series, points: [point({ gasPerSecond: 123, computeGasPerSecond: undefined })] }, "constraints");
+    expect(row.gps).toBeNull();
   });
   it("handles legacy networks as one series", () => {
     const legacy = buildChartPoints({ ...series, constraintSets: [], points: [point({ exponentBips: 1260, constraintBips: [1260], backlogs: [160_000_000] })] }, "legacy");
@@ -507,7 +537,7 @@ describe("curves and domains", () => {
 
 describe("shape-aware set resolution", () => {
   const genesis = { id: 1, effectiveBlock: 28, effectiveAt: "2026-04-30T20:37:23Z", source: "genesis" as const, constraints: [60e6, 41e6, 29e6, 20e6, 14e6, 10e6].map((target, i) => ({ target, window: [9, 52, 329, 2105, 13485, 86400][i], startingBacklog: 0 })) };
-  const point = { t: 1, blocks: 1, gasUsed: 1, gasPerSecond: 1, coverage: 1, feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "20000000", baseFeeMax: "20000000", exponentBips: 31313, constraintBips: [0, 31313], backlogs: [6042415, 10822088492758], backlogsMax: [6042415, 10822088492758], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 1, replayErrorBips: 0 };
+  const point = { t: 1, blocks: 1, gasUsed: 1, gasPerSecond: 1, coverage: 1, completeness: "complete" as const, feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "20000000", baseFeeMax: "20000000", exponentBips: 31313, constraintBips: [0, 31313], backlogs: [6042415, 10822088492758], backlogsMax: [6042415, 10822088492758], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 1, replayErrorBips: 0 };
   it("treats a set whose constraint count differs from the point's data as unknown", () => {
     const series = { range: "1h" as const, resolution: "block" as const, from: 0, to: 0, constraintSets: [genesis], ownerActions: [], points: [point] };
     expect(hasUnknownSets(series, "constraints")).toBe(true);

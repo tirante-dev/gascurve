@@ -81,8 +81,8 @@ export function bipsFor(definition: PricingDefinition, backlogs: readonly number
 export type LiveValues = {
   baseFeeGwei: number;
   multiplier: number;
-  gasPerSecond10: number;
-  gasPerSecond60: number;
+  gasPerSecond10: number | null;
+  gasPerSecond60: number | null;
   transferEth: number;
   swapEth: number;
   /** The exponent that priced the sampled block, as x. */
@@ -197,24 +197,9 @@ export function sawtoothSamples(blocks: readonly BlockPoint[], index: number, la
 
 /**
  * A sample placed on a time axis, in seconds before now: 0 is the right edge
- * and the span reaches back to minus the window. `average` is the same
- * trailing mean the card's backlog figure shows, so the chart carries both
- * the raw sawtooth and the number beside it.
+ * and the span reaches back to minus the window.
  */
-export type SawtoothPoint = { x: number; number: number; ts: number; gasUsed: number; backlog: number; average: number };
-
-/** Mean backlog over the samples of the `seconds` timestamp seconds ending with sample `i`, per block, as averageBacklog computes it. */
-function trailingMean(samples: readonly SawtoothSample[], i: number, seconds: number): number {
-  const from = samples[i].ts - seconds + 1;
-  let sum = 0;
-  let n = 0;
-  for (let j = i; j >= 0; j--) {
-    if (samples[j].ts < from) break;
-    sum += samples[j].backlog;
-    n++;
-  }
-  return sum / n;
-}
+export type SawtoothPoint = { x: number; number: number; ts: number; gasUsed: number; backlog: number };
 
 /**
  * Where each block of a standalone list sits on a time axis, in seconds of
@@ -320,10 +305,10 @@ export function liveNow(nowMs: number, newestPlace: number | undefined): number 
  * where the caller has one, so this chart puts a block exactly where the hero
  * above it does; without one the samples are placed on their own.
  */
-export function sawtoothChart(samples: readonly SawtoothSample[], nowMs: number, averageSeconds = AVERAGE_WINDOW_S, places?: BlockPlaces): SawtoothPoint[] {
+export function sawtoothChart(samples: readonly SawtoothSample[], nowMs: number, places?: BlockPlaces): SawtoothPoint[] {
   const own = places === undefined ? placeBlocks(samples) : samples.map((s) => placeOf(places, s));
   const now = liveNow(nowMs, own[own.length - 1]);
-  return samples.map((s, i) => ({ x: own[i] - now, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog, average: trailingMean(samples, i, averageSeconds) }));
+  return samples.map((s, i) => ({ x: own[i] - now, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog }));
 }
 
 /** A backlog paid down at `rate` gas per second for `seconds`, floored at zero. */
@@ -345,8 +330,8 @@ export function targetValues(snapshot: LiveSnapshot, blocks: readonly BlockPoint
   const base = {
     baseFeeGwei: weiToGweiNumber(fee),
     multiplier: snapshot.multiplierBips / 10_000,
-    gasPerSecond10: snapshot.gasPerSecond.s10,
-    gasPerSecond60: snapshot.gasPerSecond.s60,
+    gasPerSecond10: snapshot.computeGasPerSecond?.s10 ?? null,
+    gasPerSecond60: snapshot.computeGasPerSecond?.s60 ?? null,
     transferEth: weiToEthNumber(costWei(TRANSFER_GAS, fee)),
     swapEth: weiToEthNumber(costWei(SWAP_GAS, fee)),
     exponent: snapshot.exponentBips / 10_000,
@@ -404,12 +389,19 @@ export function tweenValues(current: LiveValues | null, target: LiveValues, dtMs
     if (v !== a) moved = true;
     return v;
   };
+  const easeNullable = (a: number | null, b: number | null): number | null => {
+    if (a === null || b === null) {
+      if (a !== b) moved = true;
+      return b;
+    }
+    return ease(a, b);
+  };
   const backlogs = current.backlogs.map((v, i) => ease(v, target.backlogs[i]));
   const next: LiveValues = {
     baseFeeGwei: ease(current.baseFeeGwei, target.baseFeeGwei),
     multiplier: ease(current.multiplier, target.multiplier),
-    gasPerSecond10: ease(current.gasPerSecond10, target.gasPerSecond10),
-    gasPerSecond60: ease(current.gasPerSecond60, target.gasPerSecond60),
+    gasPerSecond10: easeNullable(current.gasPerSecond10, target.gasPerSecond10),
+    gasPerSecond60: easeNullable(current.gasPerSecond60, target.gasPerSecond60),
     transferEth: ease(current.transferEth, target.transferEth),
     swapEth: ease(current.swapEth, target.swapEth),
     exponent: ease(current.exponent, target.exponent),

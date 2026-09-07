@@ -78,7 +78,7 @@ describe("HowItWorks", () => {
     render(<HowItWorks network="robinhood" />);
     expect(screen.getByRole("heading", { name: "How the fee works", level: 2 })).toBeInTheDocument();
     // The prose, with this chain's floor filled into it.
-    expect(screen.getByRole("heading", { name: "Two parts, one fee" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Three destinations, one fee" })).toBeInTheDocument();
     expect(screen.getByText(/the floor \(0.02 gwei\) multiplied by/)).toBeInTheDocument();
     // The quoted floor and the set in force, from the api.
     expect(screen.getByText("0.02 gwei")).toBeInTheDocument();
@@ -133,7 +133,10 @@ describe("the /[network]/how-it-works route", () => {
   });
 
   it("renders the explainer for the network in the path and titles the tab with it", async () => {
-    await expect(generateMetadata({ params: Promise.resolve({ network: "robinhood" }) })).resolves.toEqual({ title: "How the robinhood fee works" });
+    await expect(generateMetadata({ params: Promise.resolve({ network: "robinhood" }) })).resolves.toMatchObject({
+      title: "How the Robinhood Chain gas fee works",
+      alternates: { canonical: "/robinhood/how-it-works" },
+    });
     render(await HowItWorksRoute({ params: Promise.resolve({ network: "robinhood" }) }));
     expect(screen.getByRole("heading", { name: "How the fee works", level: 2 })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "← Live view" })).toHaveAttribute("href", "/robinhood");

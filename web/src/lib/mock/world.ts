@@ -41,6 +41,7 @@ export type WorldRecord = {
   dt: number;
   blocks: number;
   gas: number;
+  posterGas: number;
   feeMin: bigint;
   feeMax: bigint;
   /** Sum of block base fees, so the bucket average is weighted by block count. */
@@ -53,9 +54,10 @@ export type WorldRecord = {
   backlogsMax: number[];
   /** Floor in force at the record's last block. */
   minFee: bigint;
-  /** Σ gasUsed × minBaseFee per block, and feesWei minus that, exact. */
+  /** Compute-floor, compute-congestion, and poster fee destinations, exact. */
   floorFeesWei: bigint;
   surplusFeesWei: bigint;
+  posterFeesWei: bigint;
   setId: number;
   replayErrorBips: number;
 };
@@ -342,17 +344,21 @@ export class MockWorld {
   private coarseStep(t: number, dt: number): void {
     this.applyParamsAt(t);
     const gas = Math.round(this.demand.average(t, dt) * dt);
+    const posterGas = gas > 0 ? Math.max(1, Math.floor(gas / 50)) : 0;
+    const computeGas = gas - posterGas;
     const blocks = this.blockAt(t + dt) - this.blockAt(t);
     const { fee, exponent, contributions } = this.priceCurrent();
-    this.fluidUpdate(BigInt(dt), BigInt(gas));
+    this.fluidUpdate(BigInt(dt), BigInt(computeGas));
     const backlogs = this.currentBacklogs();
     const feesWei = BigInt(gas) * fee;
-    const floorFeesWei = BigInt(gas) * this.minFee;
+    const floorFeesWei = BigInt(computeGas) * (fee < this.minFee ? fee : this.minFee);
+    const posterFeesWei = BigInt(posterGas) * fee;
     this.records.push({
       t,
       dt,
       blocks,
       gas,
+      posterGas,
       feeMin: fee,
       feeMax: fee,
       feeSum: fee * BigInt(blocks),
@@ -363,7 +369,8 @@ export class MockWorld {
       backlogsMax: backlogs,
       minFee: this.minFee,
       floorFeesWei,
-      surplusFeesWei: feesWei - floorFeesWei,
+      surplusFeesWei: BigInt(computeGas) * (fee - (fee < this.minFee ? fee : this.minFee)),
+      posterFeesWei,
       setId: this.currentSetId(),
       replayErrorBips: 0,
     });
@@ -381,13 +388,15 @@ export class MockWorld {
 
   /** Prices and appends one block: an exact pricer step over `dt`, then its gas absorbed. */
   private mintBlock(number: number, ts: number, dt: bigint, gas: number, anchored: boolean): BlockPoint {
-    const { fee, exponent, contributions } = this.blockStep(dt, BigInt(gas));
+    const posterGas = gas > 0 ? Math.max(1, Math.floor(gas / 50)) : 0;
+    const { fee, exponent, contributions } = this.blockStep(dt, BigInt(gas - posterGas));
     const err = this.replayError(number);
     const predicted = (fee * (ONE_IN_BIPS - BigInt(err))) / ONE_IN_BIPS;
     const block: BlockPoint = {
       number,
       ts,
       gasUsed: gas,
+      posterGas,
       baseFee: fee.toString(),
       predictedBaseFee: predicted.toString(),
       backlogs: this.currentBacklogs(),
@@ -406,11 +415,11 @@ export class MockWorld {
 
   /** Adds (`sign` 1n) or removes (`sign` -1n) a block's fees from the sampled account balances. */
   private credit(block: BlockPoint, sign: bigint): void {
-    const gas = BigInt(block.gasUsed);
+    const gas = BigInt(block.gasUsed - (block.posterGas ?? 0));
     const fee = BigInt(block.baseFee);
-    const minFee = floorOf(block);
+    const minFee = floorOf(block) < fee ? floorOf(block) : fee;
     this.accumulatedInfra += sign * gas * minFee;
-    this.accumulatedNetwork += sign * gas * (fee > minFee ? fee - minFee : 0n);
+    this.accumulatedNetwork += sign * gas * (fee - minFee);
   }
 
   /**
@@ -427,7 +436,10 @@ export class MockWorld {
     let feeSum = 0n;
     let feesWei = 0n;
     let floorFeesWei = 0n;
+    let surplusFeesWei = 0n;
+    let posterFeesWei = 0n;
     let gas = 0;
+    let posterGas = 0;
     let backlogsMax = before;
     blocks.forEach((b, k) => {
       const fee = BigInt(b.baseFee);
@@ -435,8 +447,13 @@ export class MockWorld {
       feeMax = maxBigInt(feeMax, fee);
       feeSum += fee;
       feesWei += BigInt(b.gasUsed) * fee;
-      floorFeesWei += BigInt(b.gasUsed) * floorOf(b);
+      const computeGas = BigInt(b.gasUsed - (b.posterGas ?? 0));
+      const floor = floorOf(b) < fee ? floorOf(b) : fee;
+      floorFeesWei += computeGas * floor;
+      surplusFeesWei += computeGas * (fee - floor);
+      posterFeesWei += BigInt(b.posterGas ?? 0) * fee;
       gas += b.gasUsed;
+      posterGas += b.posterGas ?? 0;
       backlogsMax = b.backlogs.map((v, i) => Math.max(v, backlogsMax[i] ?? 0));
     });
     return {
@@ -444,6 +461,7 @@ export class MockWorld {
       dt: 1,
       blocks: blocks.length,
       gas,
+      posterGas,
       feeMin,
       feeMax,
       feeSum,
@@ -454,7 +472,8 @@ export class MockWorld {
       backlogsMax,
       minFee: floorOf(last),
       floorFeesWei,
-      surplusFeesWei: feesWei - floorFeesWei,
+      surplusFeesWei,
+      posterFeesWei,
       setId: this.currentSetId(),
       replayErrorBips: this.replayError(last.number),
     };
@@ -577,15 +596,58 @@ export class MockWorld {
   }
 
   status(now: number): NetworkStatus {
+    const at = unixToIso(this.time - 1);
+    const loop = { lastSuccessAt: at, lastErrorAt: null, lastError: null, lastDurationMs: 1, staleAfterSeconds: 30 };
     return {
       name: this.def.name,
       chainId: this.def.chainId,
+      enabled: true,
       headBlock: this.headBlock,
-      headAt: unixToIso(this.time - 1),
+      headAt: at,
       lagSeconds: Math.max(0, now - (this.time - 1)),
-      lastSampleAt: unixToIso(this.time - 1),
+      lastSampleAt: at,
       lastError: null,
       rateLimitEvents: 0,
+      last429At: null,
+      backfillCursor: null,
+      arbosVersion: "61",
+      degraded: false,
+      capacity: {
+        configuredCallsPerSecond: 0,
+        requiredCallsPerSecond: 0,
+        observedCallsPerSecond: 0,
+        headroomCallsPerSecond: null,
+        saturated: false,
+        at: null,
+        checkpointError: false,
+      },
+      holes: {
+        pending: 0,
+        blocks: 0,
+        unfillable: 0,
+        retrying: 0,
+        oldestAgeSeconds: 0,
+        checkpointError: false,
+        pendingBlocks: 0,
+        oldestPendingAt: null,
+        oldestPendingAgeSeconds: null,
+      },
+      status: "healthy",
+      degradedReasons: [],
+      collector: {
+        heartbeatAt: at,
+        heartbeatAgeSeconds: Math.max(0, now - (this.time - 1)),
+        heartbeatStaleAfterSeconds: 30,
+        observedHead: this.headBlock,
+        indexedHead: this.headBlock,
+        headLagBlocks: 0,
+        loops: { fast: loop, slow: { ...loop, staleAfterSeconds: 180 }, history: { ...loop, staleAfterSeconds: 180 } },
+        rpc: { calls: 0, requests: 0, errors: 0, callsLast10Seconds: 0, rateLimitEvents: 0, last429At: null, averageLatencyMs: 0 },
+        database: { operations: 0, errors: 0, averageLatencyMs: 0, lastLatencyMs: 0 },
+      },
+      activeEndpoint: 0,
+      failovers: 0,
+      endpoints: [],
     };
   }
 
@@ -677,6 +739,7 @@ export class MockWorld {
         number: block.number,
         ts: block.ts,
         gasUsed: block.gasUsed,
+        posterGas: block.posterGas ?? 0,
         baseFee: block.baseFee,
         txCount: 1 + Math.max(0, Math.round(block.gasUsed / 45_000)),
       },
@@ -705,6 +768,7 @@ export class MockWorld {
         perArbGasTotal: fee.toString(),
       },
       gasPerSecond: { s10: this.gasPerSecondUpTo(10, block), s60: this.gasPerSecondUpTo(60, block) },
+      computeGasPerSecond: { s10: this.computeGasPerSecondUpTo(10, block), s60: this.computeGasPerSecondUpTo(60, block) },
       l1,
       accounts: {
         infra: { address: accounts.infra, balance: (accounts.infraWei + this.accumulatedInfra).toString() },
@@ -745,6 +809,19 @@ export class MockWorld {
       if (b.number > last.number) continue;
       if (b.ts < from) break;
       gas += b.gasUsed;
+    }
+    return Math.round(gas / windowSeconds);
+  }
+
+  /** Receipt-backed compute gas over the same window as gasPerSecondUpTo. */
+  private computeGasPerSecondUpTo(windowSeconds: number, last: BlockPoint): number {
+    const from = last.ts + 1 - windowSeconds;
+    let gas = 0;
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      if (b.number > last.number) continue;
+      if (b.ts < from) break;
+      gas += b.gasUsed - (b.posterGas ?? 0);
     }
     return Math.round(gas / windowSeconds);
   }
@@ -819,12 +896,14 @@ export class MockWorld {
       acc.duration += r.dt;
       acc.blocks += r.blocks;
       acc.gas += r.gas;
+      acc.posterGas += r.posterGas;
       acc.feeMin = minBigInt(acc.feeMin, r.feeMin);
       acc.feeMax = maxBigInt(acc.feeMax, r.feeMax);
       acc.feeSum += r.feeSum;
       acc.feesWei += r.feesWei;
       acc.floorFeesWei += r.floorFeesWei;
       acc.surplusFeesWei += r.surplusFeesWei;
+      acc.posterFeesWei += r.posterFeesWei;
       acc.backlogsMax = acc.backlogsMax.map((v, j) => Math.max(v, r.backlogsMax[j] ?? 0));
       acc.replayErrorBips = Math.max(acc.replayErrorBips, r.replayErrorBips);
     }
@@ -836,15 +915,19 @@ export class MockWorld {
       .sort((a, b) => a.t - b.t)
       .map((b) => {
         const recorded = b.t >= recordedFrom;
+        const coverage = Math.min(1, b.duration / spec.seconds);
         return {
           t: b.t,
           blocks: b.blocks,
           gasUsed: b.gas,
+          posterGas: b.posterGas,
           gasPerSecond: b.duration > 0 ? Math.round(b.gas / b.duration) : 0,
+          computeGasPerSecond: b.duration > 0 ? Math.round((b.gas - b.posterGas) / b.duration) : 0,
           // What the collector has of the bucket: a whole one everywhere but
           // at the two ends, where the bucket in progress and the first one
           // after the world began hold only part of their span.
-          coverage: Math.min(1, b.duration / spec.seconds),
+          coverage,
+          completeness: coverage < 1 ? "partial" : "complete",
           feesWei: b.feesWei.toString(),
           baseFeeMin: b.feeMin.toString(),
           baseFeeAvg: (b.blocks > 0 ? b.feeSum / BigInt(b.blocks) : b.feeMin).toString(),
@@ -856,6 +939,7 @@ export class MockWorld {
           minBaseFee: recorded ? b.minFee.toString() : null,
           floorFeesWei: recorded ? b.floorFeesWei.toString() : null,
           surplusFeesWei: recorded ? b.surplusFeesWei.toString() : null,
+          posterFeesWei: b.posterFeesWei.toString(),
           constraintSetId: b.setId,
           replayErrorBips: b.replayErrorBips,
         };

@@ -1,0 +1,30 @@
+{{- if and .Values.collector.enabled (gt (int .Values.config.collector.metrics_port) 0) }}
+{{/*
+The collector answers no traffic: it is the only RPC client and the only
+writer, and nothing in the cluster calls it. This Service exists so a
+ServiceMonitor has endpoints to scrape, which is why it is headless: there
+is nothing to load balance across, and the pod is always exactly one.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gascurve.fullname" . }}-collector
+  labels:
+    {{- include "gascurve.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+spec:
+  type: ClusterIP
+  clusterIP: None
+  # The readiness probe drops on an RPC or database outage. Endpoints must
+  # keep the pod anyway, or the scrape stops exactly when the metrics that
+  # explain the outage are the ones being collected.
+  publishNotReadyAddresses: true
+  ports:
+    - port: {{ .Values.config.collector.metrics_port }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "gascurve.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+{{- end }}

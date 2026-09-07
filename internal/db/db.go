@@ -26,19 +26,25 @@ const (
 
 // Collector state keys.
 const (
-	StateHead            = "head"
-	StateBackfillCursor  = "backfill_cursor"
-	StateOwnerLogCursor  = "owner_log_cursor"
-	StateBatchScanCursor = "batch_scan_cursor"
+	StateHead           = "head"
+	StateBackfillCursor = "backfill_cursor"
+	StateOwnerLogCursor = "owner_log_cursor"
+	// StateBatchScanCursor is versioned so deploying a new batch cost
+	// calculation replays every report still recoverable from block rows.
+	StateBatchScanCursor = "batch_scan_cursor_v2"
 	StateRateLimitEvents = "rate_limit_events"
 	StateLast429At       = "last_429_at"
 	StateArbOSVersion    = "arbos_version"
+	// StateRPCCapacity is the latest live-ingress demand and configured RPC
+	// capacity estimate (model.RPCCapacity), persisted for the API status.
+	StateRPCCapacity = "rpc_capacity"
 	// StateLiveStart records the first block the live loop stored
 	// ({"block":n,"ts":unix}); buckets from its hour on are rebuilt from
 	// block rows, older ones belong to the backfill alone.
 	StateLiveStart = "live_start"
-	// StateHoles is a JSON array of {from,to,at} block ranges the replay
-	// skipped (a catch-up gap over budget); no rows exist for them.
+	// StateHoles is the legacy JSON checkpoint imported transactionally into
+	// missing_ranges at collector startup. It remains only when decoding or
+	// persistence failed, so operators can repair it without data loss.
 	StateHoles = "holes"
 	// StateEndpoints is the endpoint pool's routing state
 	// (model.EndpointsStatus as JSON), refreshed by the slow loop.
@@ -63,6 +69,15 @@ const (
 	// ({"price":"…","at":"RFC3339","source":"…"}), recorded per chain so the
 	// API can serve it in /live without an outbound call of its own.
 	StateEthUsd = "eth_usd"
+	// StateHistoryEpoch is the network's history_epoch the collector last
+	// rebuilt the reconstructed history at, as a decimal string. A
+	// configured epoch above it drops the backfill's buckets and
+	// checkpoints once and records the new value, so the rebuild runs on
+	// a raised setting rather than on every restart.
+	StateHistoryEpoch = "history_epoch"
+	// StateTelemetry is the collector's heartbeat, per-loop outcomes and
+	// cumulative RPC and database accounting for /status.
+	StateTelemetry = "telemetry"
 )
 
 // Open connects to Postgres and applies pool limits.

@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/time/rate"
 
 	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/logger"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/model"
 )
 
@@ -63,6 +65,11 @@ type Hub struct {
 	ethUsdMaxAge time.Duration
 	// queueSize is the per-client outbound queue depth.
 	queueSize int
+	// metrics counts subscribed clients, the frames written to them and
+	// the ones dropped for a full queue. api.New replaces it with the
+	// server's; a hub built on its own still has one, so no call site has
+	// to guard it.
+	metrics *metrics.API
 
 	mu       sync.Mutex
 	networks map[uint64]*netState
@@ -159,6 +166,7 @@ func NewHub(store db.Store, log *logger.Logger, opts ...HubOption) *Hub {
 		perIP: map[string]int{}, cache: map[string]cachedNetwork{}, now: time.Now,
 		maxPerIP: defaultWSPerIP, maxTotal: defaultWSTotal,
 		ethUsdMaxAge: config.DefaultEthUsdMaxAge, queueSize: clientQueue,
+		metrics: metrics.NewAPI(prometheus.NewRegistry()),
 	}
 	for _, o := range opts {
 		o(h)
@@ -175,15 +183,22 @@ func (h *Hub) setLimits(perIP, total int) {
 	}
 }
 
-// Run consumes notifications until ctx ends or the listener closes.
-func (h *Hub) Run(ctx context.Context, l db.Listener) {
+// Run consumes notifications until ctx ends. A listener closure without
+// cancellation is fatal because otherwise connected clients would keep getting
+// pings from a hub that can never deliver another chain update.
+func (h *Hub) Run(ctx context.Context, l db.Listener) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case n, ok := <-l.Notifications():
 			if !ok {
-				return
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					return errors.New("notification listener closed")
+				}
 			}
 			h.Handle(ctx, n)
 		}
@@ -854,7 +869,11 @@ func (c *client) close() {
 // writing to the peer that caused the overflow; CloseNow does not wait for
 // a close handshake, so it never blocks the hub lock the caller holds.
 func (c *client) drop() {
-	c.dropped.Store(true)
+	// Two goroutines can find the queue full at once, so the counter moves
+	// on the transition alone; everything after it is idempotent already.
+	if c.dropped.CompareAndSwap(false, true) {
+		c.hub.metrics.WSClientDropped()
+	}
 	c.close()
 	if c.conn != nil {
 		_ = c.conn.CloseNow()
@@ -921,6 +940,8 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.subscribe(c, n.ChainID, p)
+	h.metrics.WSConnected()
+	defer h.metrics.WSDisconnected()
 	defer h.unsubscribe(c)
 
 	pongs := make(chan struct{}, 1)
@@ -1093,7 +1114,11 @@ func (c *client) writeLoop(ctx context.Context, pongs <-chan struct{}) {
 func (c *client) write(ctx context.Context, msg []byte) error {
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	return c.conn.Write(wctx, websocket.MessageText, msg)
+	err := c.conn.Write(wctx, websocket.MessageText, msg)
+	if err == nil {
+		c.hub.metrics.WSFrameSent()
+	}
+	return err
 }
 
 func mustJSON(v any) json.RawMessage {

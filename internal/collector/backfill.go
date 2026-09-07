@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tirante-dev/gascurve/internal/db"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
@@ -46,11 +47,31 @@ type backfillCursor struct {
 	Next                uint64   `json:"next"`
 	End                 uint64   `json:"end"`
 	PrevTs              uint64   `json:"prevTs"`
+	PrevHash            string   `json:"prevHash,omitempty"`
 	Backlogs            []uint64 `json:"backlogs"`
 	SetID               int64    `json:"setId"`
 	LastAnchor          uint64   `json:"lastAnchor,omitempty"`
 	LastAnchorErrorBips int64    `json:"lastAnchorErrorBips,omitempty"`
 	AnchorMinFee        string   `json:"anchorMinFee,omitempty"`
+}
+
+// backfillState renders the cursor for the instruments: where the active
+// segment has replayed to, the oldest block the configured depth reaches,
+// and how many blocks are still to be replayed, counting the segments
+// below the active one. A cursor that has not chosen a segment yet reports
+// the whole range below its end.
+func backfillState(c *backfillCursor) metrics.BackfillState {
+	out := metrics.BackfillState{Cursor: c.Next, Floor: c.DepthStart, Done: c.Done}
+	if c.Done {
+		return out
+	}
+	if !c.Active {
+		out.Cursor = c.SegStart
+		out.Remaining = pricer.SaturatingUSub(c.End, c.DepthStart)
+		return out
+	}
+	out.Remaining = pricer.SaturatingUSub(c.End, c.Next) + pricer.SaturatingUSub(c.SegStart, c.DepthStart)
+	return out
 }
 
 func (f *Follower) loadCursor(ctx context.Context) (*backfillCursor, error) {
@@ -111,6 +132,9 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err != nil {
 		return BackfillIdle, err
 	}
+	// The committed cursor is what the instruments report, so the gauges
+	// never claim progress a failed commit did not make.
+	f.metrics.ObserveBackfill(backfillState(c))
 	if c.Done {
 		return BackfillDone, nil
 	}
@@ -133,7 +157,7 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	// for that it queues first come, first served with the other bulk
 	// work. The fast tick keeps its reserve either way.
 	n := min(uint64(f.cfg.HeaderBatchSize), remaining)
-	if avail := uint64(max(f.rpc.Available(), 0)); avail < n {
+	if avail := uint64(max(f.rpc.Available(), 0)) / 2; avail < n {
 		n = max(avail, min(minBackfillBatch, remaining))
 	}
 	numbers := make([]uint64, 0, n)
@@ -144,15 +168,30 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err != nil {
 		return BackfillIdle, fmt.Errorf("backfill headers %d..%d: %w", c.Next, c.Next+n-1, err)
 	}
+	if len(headers) != len(numbers) {
+		return BackfillIdle, fmt.Errorf("backfill headers %d..%d: got %d of %d", c.Next, c.Next+n-1, len(headers), len(numbers))
+	}
+	if headers[0].Number != c.Next {
+		return BackfillIdle, fmt.Errorf("backfill headers start at %d, asked for %d", headers[0].Number, c.Next)
+	}
+	if err := verifyChain(headers); err != nil {
+		return BackfillIdle, err
+	}
+	if hashMismatch(c.PrevHash, headers[0].ParentHash) {
+		return BackfillIdle, fmt.Errorf("backfill header %d does not build on the prior batch, retrying", headers[0].Number)
+	}
 	st, setID, err := f.segmentState(ctx, c)
 	if err != nil {
 		return BackfillIdle, err
 	}
-	anchor, anchorFees, err := f.backfillAnchors(ctx, st, numbers)
+	anchor, anchorFees, err := f.backfillAnchors(ctx, st, headers)
 	if err != nil {
 		return BackfillIdle, err
 	}
-	rows := f.replaySegment(st, c, headers, anchor, anchorFees)
+	rows, err := f.replaySegment(ctx, st, c, headers, anchor, anchorFees)
+	if err != nil {
+		return BackfillIdle, err
+	}
 	for _, r := range rows {
 		if r.Anchored {
 			c.LastAnchor, c.LastAnchorErrorBips = r.Number, db.ReplayErrorBips(r)
@@ -177,6 +216,7 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 
 	c.Next += n
 	c.PrevTs = headers[len(headers)-1].Timestamp
+	c.PrevHash = headers[len(headers)-1].Hash
 	c.Backlogs = st.Backlogs()
 	if c.Next >= c.End {
 		c.Active = false
@@ -250,20 +290,24 @@ func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor, gen uint6
 // in range. An anchor whose model differs from the segment's constraint
 // set is skipped with a warning: the replay state cannot change shape mid
 // segment.
-func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, numbers []uint64) (pricer.Anchor, map[uint64]*big.Int, error) {
+func (f *Follower) backfillAnchors(ctx context.Context, st *pricer.State, headers []nitro.Header) (pricer.Anchor, map[uint64]*big.Int, error) {
 	if f.archive == nil {
 		return nil, nil, nil
 	}
 	interval := uint64(f.cfg.BackfillAnchorInterval)
 	backlogs := map[uint64][]uint64{}
 	fees := map[uint64]*big.Int{}
-	for _, n := range numbers {
+	for _, header := range headers {
+		n := header.Number
 		if n%interval != 0 {
 			continue
 		}
-		sample, err := f.archive.FastSampleAt(ctx, n)
+		sample, err := f.archive.PricingSampleAt(ctx, n)
 		if err != nil {
 			return nil, nil, fmt.Errorf("backfill anchor %d: %w", n, err)
+		}
+		if hashMismatch(header.Hash, sample.Header.Hash) {
+			return nil, nil, fmt.Errorf("backfill anchor %d hash does not match replay headers", n)
 		}
 		if !sameShape(st, sample) {
 			f.log.Warn("backfill anchor skipped, sampled model differs from the segment's set", "block", n)
@@ -313,16 +357,20 @@ func (f *Follower) backfillFees(tl *timeline, c *backfillCursor, headers []nitro
 // limit, inertia and tolerance changes) and pinning backlogs wherever
 // anchor says so. Segmenting on fees alone would price historical legacy
 // blocks with today's parameters.
-func (f *Follower) replaySegment(st *pricer.State, c *backfillCursor, headers []nitro.Header, anchor pricer.Anchor, anchorFees map[uint64]*big.Int) []db.Block {
+func (f *Follower) replaySegment(ctx context.Context, st *pricer.State, c *backfillCursor, headers []nitro.Header, anchor pricer.Anchor, anchorFees map[uint64]*big.Int) ([]db.Block, error) {
 	f.mu.Lock()
 	tl := f.timelineLocked(nil)
 	f.mu.Unlock()
+	actions, err := f.resolveActionBlocks(ctx, headers, tl)
+	if err != nil {
+		return nil, err
+	}
 	fees := f.backfillFees(tl, c, headers, anchorFees)
 	legacies := make([]*pricer.Legacy, len(headers))
 	if st.Legacy != nil {
 		base := *st.Legacy
 		for i, h := range headers {
-			legacies[i] = tl.legacyAt(h.Number, &base)
+			legacies[i] = tl.legacyBefore(h.Number, &base)
 		}
 	}
 	rows := make([]db.Block, 0, len(headers))
@@ -336,17 +384,12 @@ func (f *Follower) replaySegment(st *pricer.State, c *backfillCursor, headers []
 			end++
 		}
 		chunk := headers[start:end]
-		blocks := make([]pricer.Block, len(chunk))
-		for i, h := range chunk {
-			blocks[i] = pricer.Block{Number: h.Number, Timestamp: h.Timestamp, GasUsed: h.GasUsed, BaseFee: h.BaseFee}
-		}
-		results := pricer.Replay(st, prevTs, blocks, anchor)
-		fee := st.MinBaseFee
-		rows = append(rows, blockRows(f.chainID, chunk, results, func(uint64) *big.Int { return fee })...)
+		chunkRows, _ := replayForward(f.chainID, st, prevTs, chunk, tl, anchor, actions)
+		rows = append(rows, chunkRows...)
 		prevTs = chunk[len(chunk)-1].Timestamp
 		start = end
 	}
-	return rows
+	return rows, nil
 }
 
 // applyLegacyParams copies the parameters in force into the replay state,
@@ -451,6 +494,7 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 	c.Verified = true
 	c.Next = c.SegStart
 	c.PrevTs = 0
+	c.PrevHash = ""
 	c.LastAnchor, c.LastAnchorErrorBips, c.AnchorMinFee = 0, 0, ""
 	f.log.Info("backfill segment", "from", c.SegStart, "to", c.End, "setId", c.SetID)
 	return BackfillProgressed, f.withGeneration(ctx, gen, func(s db.Store) error { return f.saveCursor(ctx, s, c) })

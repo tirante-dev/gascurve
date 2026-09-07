@@ -3,7 +3,8 @@
 // DEV_MODE, ETH_USD_SOURCE, ETH_USD_MAX_AGE and per-network
 // NETWORK_<NAME>_RPC_URL, NETWORK_<NAME>_WS_URL,
 // NETWORK_<NAME>_ENABLED, NETWORK_<NAME>_CALLS_PER_SECOND,
-// NETWORK_<NAME>_ARCHIVE and NETWORK_<NAME>_TICK_INTERVAL, where NAME is
+// NETWORK_<NAME>_ARCHIVE, NETWORK_<NAME>_TICK_INTERVAL and
+// NETWORK_<NAME>_HISTORY_EPOCH, where NAME is
 // the network name upper-cased with dashes replaced by underscores.
 // Fallback endpoints come from the positional, comma-separated
 // NETWORK_<NAME>_FALLBACK_RPC_URLS,
@@ -130,7 +131,20 @@ type CollectorConfig struct {
 	// it the tick and /live report ethUsd: null rather than a stale price
 	// (default 10m). Environment: ETH_USD_MAX_AGE.
 	EthUsdMaxAge time.Duration `mapstructure:"eth_usd_max_age"`
+	// MetricsPort is the port the collector serves Prometheus metrics on
+	// (default 9090). Its only HTTP server also answers startup, liveness and
+	// readiness probes. Zero disables the server and those probes. The api
+	// has an HTTP server already and serves /metrics on server.port.
+	// Environment: METRICS_PORT.
+	MetricsPort int `mapstructure:"metrics_port"`
 }
+
+// DefaultMetricsPort is the fallback for collector.metrics_port.
+const DefaultMetricsPort = 9090
+
+// MetricsEnabled reports whether the collector should run its metrics
+// server.
+func (c CollectorConfig) MetricsEnabled() bool { return c.MetricsPort > 0 }
 
 // DefaultEthUsdMaxAge is the fallback for collector.eth_usd_max_age, used
 // by the API when it is not configured.
@@ -182,6 +196,17 @@ type NetworkConfig struct {
 	// calls against its budget.
 	TickInterval time.Duration `mapstructure:"tick_interval"`
 	Enabled      bool          `mapstructure:"enabled"`
+	// HistoryEpoch requests a rebuild of this network's reconstructed
+	// history. The collector stores the epoch it last rebuilt at and
+	// compares it at start: a value above the stored one drops the
+	// backfill's buckets and checkpoints once and lets the history loop
+	// replay them again, a value equal to it does nothing. It is a
+	// counter rather than a flag so a restarted pod carrying the same
+	// configuration does not rebuild again; raise it (0 to 1, 1 to 2)
+	// after giving the network an archive endpoint, so the replay is
+	// anchored to real state instead of running blind. Lowering it is
+	// ignored. Zero (the default) never rebuilds.
+	HistoryEpoch int `mapstructure:"history_epoch"`
 	// Fallbacks are further endpoints for the same chain, tried in order
 	// when the active endpoint fails (see collector.failover_cooldown).
 	// Capabilities are routed independently of the order: the first
@@ -224,6 +249,19 @@ func (n NetworkConfig) Endpoints() []EndpointConfig {
 	out := make([]EndpointConfig, 0, 1+len(n.Fallbacks))
 	out = append(out, n.Primary())
 	return append(out, n.Fallbacks...)
+}
+
+// HasArchive reports whether any of the network's endpoints serves
+// historical state. It reads the configuration rather than the endpoint
+// the follower ends up bound to, so it answers before the pool has been
+// verified.
+func (n NetworkConfig) HasArchive() bool {
+	for _, e := range n.Endpoints() {
+		if e.Archive {
+			return true
+		}
+	}
+	return false
 }
 
 // fallback returns the i-th fallback, growing the list with zero-valued
@@ -315,6 +353,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collector.failover_cooldown", "60s")
 	v.SetDefault("collector.eth_usd_source", "coinbase")
 	v.SetDefault("collector.eth_usd_max_age", DefaultEthUsdMaxAge.String())
+	v.SetDefault("collector.metrics_port", DefaultMetricsPort)
 	v.SetDefault("log_level", "info")
 }
 
@@ -328,6 +367,13 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 			return fmt.Errorf("PORT: %w", err)
 		}
 		cfg.Server.Port = p
+	}
+	if s, ok := getenv("METRICS_PORT"); ok && s != "" {
+		p, err := strconv.Atoi(s)
+		if err != nil {
+			return fmt.Errorf("METRICS_PORT: %w", err)
+		}
+		cfg.Collector.MetricsPort = p
 	}
 	if s, ok := getenv("LOG_LEVEL"); ok && s != "" {
 		cfg.LogLevel = s
@@ -387,6 +433,13 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 				return fmt.Errorf("%s_TICK_INTERVAL: %w", key, err)
 			}
 			n.TickInterval = d
+		}
+		if s, ok := getenv(key + "_HISTORY_EPOCH"); ok && s != "" {
+			e, err := strconv.Atoi(s)
+			if err != nil {
+				return fmt.Errorf("%s_HISTORY_EPOCH: %w", key, err)
+			}
+			n.HistoryEpoch = e
 		}
 		if err := applyFallbackEnv(n, getenv); err != nil {
 			return err
@@ -492,6 +545,10 @@ func (c *Config) Validate(requireRPC bool) error {
 	if c.Collector.MaxCatchUpBatches <= 0 {
 		errs = append(errs, fmt.Errorf("collector.max_catch_up_batches %d must be positive", c.Collector.MaxCatchUpBatches))
 	}
+	// Zero switches the metrics server off; anything else must be a port.
+	if c.Collector.MetricsPort < 0 || c.Collector.MetricsPort > 65535 {
+		errs = append(errs, fmt.Errorf("collector.metrics_port %d out of range (0 disables it)", c.Collector.MetricsPort))
+	}
 	if err := prices.ValidateSource(c.Collector.EthUsdSource); err != nil {
 		errs = append(errs, fmt.Errorf("collector.eth_usd_source: %w", err))
 	}
@@ -516,6 +573,9 @@ func (c *Config) Validate(requireRPC bool) error {
 		errs = append(errs, validateEndpoint("network "+n.Name, n.Primary())...)
 		if n.TickInterval < 0 {
 			errs = append(errs, fmt.Errorf("network %s: tick_interval %v must be positive (omit it for collector.tick_interval)", n.Name, n.TickInterval))
+		}
+		if n.HistoryEpoch < 0 {
+			errs = append(errs, fmt.Errorf("network %s: history_epoch %d must not be negative", n.Name, n.HistoryEpoch))
 		}
 		if requireRPC && n.Enabled && n.RPCURL == "" {
 			errs = append(errs, fmt.Errorf("network %s: rpc_url is required (set %s_RPC_URL)", n.Name, n.EnvKey()))

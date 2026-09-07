@@ -40,6 +40,10 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "not_ready", "database unavailable")
 		return
 	}
+	if s.listener != nil && !s.listener.Status().Ready {
+		writeError(w, http.StatusServiceUnavailable, "not_ready", "notification listener unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, cacheNone, map[string]string{"status": "ready"})
 }
 
@@ -217,17 +221,18 @@ func buildLiveIn(ctx context.Context, store db.Store, chainID uint64, now time.T
 		}
 	}
 	if block != nil {
-		snap.Block = model.LiveBlock{Number: block.Number, TS: uint64(block.TS.Unix()), GasUsed: block.GasUsed, BaseFee: block.BaseFee.String(), TxCount: block.TxCount}
+		snap.Block = model.LiveBlock{Number: block.Number, TS: uint64(block.TS.Unix()), GasUsed: block.GasUsed, PosterGas: uint64Ptr(block.PosterGas), BaseFee: block.BaseFee.String(), TxCount: block.TxCount}
 		snap.ReplayErrorBips = replayError(*block)
-		g10, err := store.GasUsedBetween(ctx, chainID, block.TS.Add(-10*time.Second), block.TS)
+		g10, c10, err := store.GasBetween(ctx, chainID, block.TS.Add(-10*time.Second), block.TS)
 		if err != nil {
 			return nil, err
 		}
-		g60, err := store.GasUsedBetween(ctx, chainID, block.TS.Add(-60*time.Second), block.TS)
+		g60, c60, err := store.GasBetween(ctx, chainID, block.TS.Add(-60*time.Second), block.TS)
 		if err != nil {
 			return nil, err
 		}
 		snap.GasPerSecond = model.GasPerSecond{S10: g10 / 10, S60: g60 / 60}
+		snap.ComputeGasPerSecond = model.NullableGasPerSecond{S10: dividedPtr(c10, 10), S60: dividedPtr(c60, 60)}
 	} else {
 		snap.Block = model.LiveBlock{Number: sample.BlockNumber, BaseFee: sample.BaseFee.String()}
 	}
@@ -459,14 +464,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, err)
 		return
 	}
-	out := model.Status{Version: s.version, Networks: make([]model.NetworkStatus, 0, len(rows))}
+	out := model.Status{Version: s.version, Status: model.StatusHealthy, Networks: make([]model.NetworkStatus, 0, len(rows))}
+	if s.listener != nil {
+		status := s.listener.Status()
+		listener := &model.ListenerStatus{Ready: status.Ready, Reconnects: status.Reconnects}
+		if status.Error != "" {
+			listener.LastError = &status.Error
+		}
+		out.Listener = listener
+		if !status.Ready {
+			out.Status = model.StatusDegraded
+		}
+	}
 	for _, n := range rows {
 		st, err := s.store.States(r.Context(), n.ChainID)
 		if err != nil {
 			s.internal(w, err)
 			return
 		}
-		ns := model.NetworkStatus{Name: n.Name, ChainID: n.ChainID, Enabled: n.Enabled}
+		ns := model.NetworkStatus{Name: n.Name, ChainID: n.ChainID, Enabled: n.Enabled, Status: model.StatusHealthy, DegradedReasons: []string{}}
 		if n.HeadBlock.Valid {
 			ns.HeadBlock = uint64(max(n.HeadBlock.Int64, 0))
 		}
@@ -485,28 +501,183 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ns.Last429At = optString(st, db.StateLast429At)
 		ns.BackfillCursor = optString(st, db.StateBackfillCursor)
 		ns.ArbOSVersion = optString(st, db.StateArbOSVersion)
-		ns.Holes = holesStatus(st)
+		ns.Holes, err = s.holesStatus(r.Context(), n.ChainID, st)
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		ns.Capacity = capacityStatus(st)
+		ns.Degraded = ns.Capacity.Saturated || ns.Capacity.CheckpointError || ns.Holes.Blocks > 0 || ns.Holes.CheckpointError
 		ns.EndpointsStatus = endpointsStatus(st)
+		ns.Collector = collectorTelemetry(st, s.now())
+		if ns.Collector != nil {
+			ns.RateLimitEvents = ns.Collector.RPC.RateLimitEvents
+			ns.Last429At = ns.Collector.RPC.Last429At
+		}
+		ns.Status, ns.DegradedReasons = networkHealth(ns, s.now())
+		if ns.Status == model.StatusDegraded {
+			out.Status = model.StatusDegraded
+		}
 		out.Networks = append(out.Networks, ns)
 	}
 	writeJSON(w, http.StatusOK, cacheNone, out)
 }
 
-// holesStatus summarizes the ranges the collector has not indexed: how
-// many are queued for the gap filler, how many blocks they still cover
-// and how many can never be filled (nothing before them is stored with a
-// pricing state). A network without a checkpoint, or with an unreadable
-// one, reports zeros.
-func holesStatus(st map[string]string) model.HolesStatus {
-	raw, ok := st[db.StateHoles]
+// holesStatus summarizes durable missing ranges. During a rolling upgrade it
+// also reads the legacy checkpoint until the collector imports it. A malformed
+// checkpoint sets an explicit degradation signal instead of looking empty.
+func (s *Server) holesStatus(ctx context.Context, chainID uint64, st map[string]string) (model.HolesStatus, error) {
+	rows, err := s.store.MissingRanges(ctx, chainID)
+	if err != nil {
+		return model.HolesStatus{}, err
+	}
+	holes := make([]model.Hole, 0, len(rows))
+	checkpointError := false
+	for _, row := range rows {
+		// The decode only detects corruption. Once one row is malformed the
+		// remaining ones add nothing, and /status is polled often.
+		if !checkpointError && row.ReplayState != nil {
+			var state model.HoleState
+			if err := row.ReplayState.Unmarshal(&state); err != nil {
+				checkpointError = true
+			}
+		}
+		holes = append(holes, model.Hole{
+			From: row.From, To: row.To, At: row.DetectedAt.UTC().Format(time.RFC3339), Lifecycle: row.Lifecycle,
+			Next: row.Cursor, Reason: row.Reason, RetryCount: row.RetryCount,
+		})
+	}
+	if raw, ok := st[db.StateHoles]; ok {
+		var legacy []model.Hole
+		if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
+			checkpointError = true
+		} else {
+			holes = append(holes, legacy...)
+		}
+	}
+	now := s.now()
+	out := model.SummarizeHolesAt(holes, now)
+	out.CheckpointError = checkpointError
+	oldest := now
+	known := false
+	for _, h := range holes {
+		at, err := time.Parse(time.RFC3339, h.At)
+		if err != nil {
+			out.CheckpointError = true
+			continue
+		}
+		if !known || at.Before(oldest) {
+			oldest, known = at, true
+		}
+	}
+	if known && oldest.Before(now) {
+		out.OldestAgeSeconds = uint64(now.Sub(oldest) / time.Second)
+	}
+	return out, nil
+}
+
+func capacityStatus(st map[string]string) model.RPCCapacity {
+	raw, ok := st[db.StateRPCCapacity]
 	if !ok {
-		return model.HolesStatus{}
+		return model.RPCCapacity{}
 	}
-	var holes []model.Hole
-	if err := json.Unmarshal([]byte(raw), &holes); err != nil {
-		return model.HolesStatus{}
+	var out model.RPCCapacity
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		out.CheckpointError = true
 	}
-	return model.SummarizeHoles(holes)
+	return out
+}
+
+func collectorTelemetry(st map[string]string, now time.Time) *model.CollectorTelemetry {
+	raw, ok := st[db.StateTelemetry]
+	if !ok {
+		return nil
+	}
+	var out model.CollectorTelemetry
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	if out.HeartbeatAt != nil {
+		if at, err := time.Parse(time.RFC3339, *out.HeartbeatAt); err == nil {
+			age := max(int64(now.Sub(at).Seconds()), 0)
+			out.HeartbeatAgeSeconds = &age
+		}
+	}
+	return &out
+}
+
+func networkHealth(n model.NetworkStatus, now time.Time) (status string, reasons []string) {
+	if !n.Enabled {
+		return model.StatusDisabled, []string{}
+	}
+	telemetry := n.Collector
+	if telemetry == nil || telemetry.HeartbeatAt == nil || telemetry.HeartbeatAgeSeconds == nil {
+		reasons = append(reasons, "collector heartbeat missing")
+	} else if *telemetry.HeartbeatAgeSeconds > telemetry.HeartbeatStaleAfterSeconds {
+		reasons = append(reasons, "collector heartbeat stale")
+	}
+	if telemetry != nil {
+		for _, item := range []struct {
+			name string
+			loop model.LoopStatus
+		}{
+			{name: "fast", loop: telemetry.Loops.Fast},
+			{name: "slow", loop: telemetry.Loops.Slow},
+			{name: "history", loop: telemetry.Loops.History},
+		} {
+			name, loop := item.name, item.loop
+			success := parseStatusTime(loop.LastSuccessAt)
+			failure := parseStatusTime(loop.LastErrorAt)
+			switch {
+			case success.IsZero():
+				reasons = append(reasons, name+" loop has not succeeded")
+			case failure.After(success):
+				reasons = append(reasons, name+" loop failing")
+			case loop.StaleAfterSecs > 0 && now.Sub(success) > time.Duration(loop.StaleAfterSecs)*time.Second:
+				reasons = append(reasons, name+" loop stale")
+			}
+		}
+		if telemetry.HeadLagBlocks > 0 {
+			reasons = append(reasons, "collector behind observed head")
+		}
+		if n.LagSeconds != nil && telemetry.Loops.Fast.StaleAfterSecs > 0 && *n.LagSeconds > telemetry.Loops.Fast.StaleAfterSecs {
+			reasons = append(reasons, "chain head stale")
+		}
+	}
+	for _, endpoint := range n.Endpoints {
+		if endpoint.Disabled {
+			reasons = append(reasons, "RPC endpoint disabled")
+			break
+		}
+	}
+	if n.Holes.OldestPendingAgeSeconds != nil && telemetry != nil && telemetry.Loops.History.StaleAfterSecs > 0 &&
+		*n.Holes.OldestPendingAgeSeconds > telemetry.Loops.History.StaleAfterSecs {
+		reasons = append(reasons, "pending gaps are stale")
+	}
+	if n.Holes.Blocks > 0 {
+		reasons = append(reasons, "blocks missing from history")
+	}
+	if n.Holes.CheckpointError {
+		reasons = append(reasons, "missing range checkpoint unreadable")
+	}
+	if n.Capacity.Saturated {
+		reasons = append(reasons, "RPC capacity saturated")
+	}
+	if n.Capacity.CheckpointError {
+		reasons = append(reasons, "RPC capacity checkpoint unreadable")
+	}
+	if len(reasons) > 0 {
+		return model.StatusDegraded, reasons
+	}
+	return model.StatusHealthy, []string{}
+}
+
+func parseStatusTime(raw *string) time.Time {
+	if raw == nil {
+		return time.Time{}
+	}
+	at, _ := time.Parse(time.RFC3339, *raw)
+	return at
 }
 
 // endpointsStatus decodes the collector's endpoint routing state; a
@@ -545,10 +716,25 @@ func intParam(r *http.Request, name string, def, lo, hi int) int {
 
 func blockPoint(b db.Block) model.BlockPoint {
 	return model.BlockPoint{
-		Number: b.Number, TS: uint64(b.TS.Unix()), GasUsed: b.GasUsed, BaseFee: b.BaseFee.String(),
+		Number: b.Number, TS: uint64(b.TS.Unix()), GasUsed: b.GasUsed, PosterGas: uint64Ptr(b.PosterGas), BaseFee: b.BaseFee.String(),
 		PredictedBaseFee: b.PredictedBaseFee.String(), Backlogs: b.Backlogs.Uint64s(), ConstraintBips: int64s(b.ConstraintBips),
 		ExponentBips: b.ExponentBips, MinBaseFee: b.MinBaseFee.StringPtr(), Anchored: b.Anchored,
 	}
+}
+
+func uint64Ptr(v sql.NullInt64) *uint64 {
+	if !v.Valid || v.Int64 < 0 {
+		return nil
+	}
+	u := uint64(v.Int64)
+	return &u
+}
+
+func dividedPtr(v *uint64, divisor uint64) *uint64 {
+	if v == nil {
+		return nil
+	}
+	return uint64ValuePtr(*v / divisor)
 }
 
 // int64s copies a BIGINT[]: a stored array (even empty) becomes a JSON

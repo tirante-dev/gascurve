@@ -15,11 +15,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/time/rate"
 
 	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/logger"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/model"
 )
 
@@ -34,20 +36,32 @@ const (
 	rateEntryTTL = 10 * time.Minute
 	// rateSweepEvery bounds how often idle entries are expired.
 	rateSweepEvery = time.Minute
+	// unmatchedRoute is the route label for a request no route claimed. The
+	// path of a 404 is whatever the caller sent, so it must never become a
+	// label value.
+	unmatchedRoute = "unmatched"
+	// wsPath is the WebSocket route.
+	wsPath = "/api/v1/ws"
 )
 
 // Server holds the handlers' dependencies.
 type Server struct {
-	store   db.Store
-	cfg     config.ServerConfig
-	log     *logger.Logger
-	hub     *Hub
-	version string
-	now     func() time.Time
-	router  chi.Router
+	store    db.Store
+	cfg      config.ServerConfig
+	log      *logger.Logger
+	hub      *Hub
+	listener db.ListenerStatusReporter
+	version  string
+	now      func() time.Time
+	router   chi.Router
 	// ethUsdMaxAge mirrors collector.eth_usd_max_age: a recorded spot older
 	// than this is served as null.
 	ethUsdMaxAge time.Duration
+	// metrics is where requests and WebSocket activity are recorded, and
+	// gatherer is what /metrics serves. Both are always set: New builds a
+	// registry of its own when the caller passes none.
+	metrics  *metrics.API
+	gatherer prometheus.Gatherer
 }
 
 // Option customizes a Server.
@@ -58,6 +72,21 @@ func WithClock(now func() time.Time) Option { return func(s *Server) { s.now = n
 
 // WithVersion sets the version reported by /status.
 func WithVersion(v string) Option { return func(s *Server) { s.version = v } }
+
+// WithMetrics records requests and WebSocket activity on m and serves g at
+// /metrics. Production passes the process registry; without it the server
+// builds one of its own, so /metrics always answers.
+func WithMetrics(m *metrics.API, g prometheus.Gatherer) Option {
+	return func(s *Server) {
+		if m != nil && g != nil {
+			s.metrics, s.gatherer = m, g
+		}
+	}
+}
+
+// WithListener exposes the notification listener through readiness and
+// status. It is optional for servers built without the live WebSocket feed.
+func WithListener(l db.ListenerStatusReporter) Option { return func(s *Server) { s.listener = l } }
 
 // WithEthUsdMaxAge sets how long a recorded ETH/USD spot is served before
 // /live reports null. It must match the collector's
@@ -80,6 +109,10 @@ func New(store db.Store, cfg config.ServerConfig, hub *Hub, log *logger.Logger, 
 	for _, o := range opts {
 		o(s)
 	}
+	if s.metrics == nil {
+		reg := metrics.NewRegistry()
+		s.metrics, s.gatherer = metrics.NewAPI(reg), reg
+	}
 	if s.hub != nil {
 		s.hub.live = s.buildLive
 		s.hub.network = s.networkModel
@@ -88,6 +121,7 @@ func New(store db.Store, cfg config.ServerConfig, hub *Hub, log *logger.Logger, 
 		// cutoff /live applies, so both endpoints agree on what is live.
 		s.hub.ethUsdMaxAge = s.ethUsdMaxAge
 		s.hub.now = s.now
+		s.hub.metrics = s.metrics
 	}
 	s.router = s.routes()
 	return s
@@ -105,6 +139,7 @@ func (s *Server) routes() chi.Router {
 		trusted = nil
 	}
 	r.Use(realIP(trusted))
+	r.Use(requestMetrics(s.metrics))
 	r.Use(requestLogger(s.log))
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
@@ -152,9 +187,56 @@ func (s *Server) routes() chi.Router {
 		})
 	})
 	if s.hub != nil {
-		r.Get("/api/v1/ws", s.hub.ServeWS)
+		r.Get(wsPath, s.hub.ServeWS)
 	}
+	// Scraped, not browsed: no request timeout, no cache header and no
+	// JSON envelope, and the exposition format is the whole response.
+	r.Get(metrics.Path, metrics.Handler(s.gatherer).ServeHTTP)
 	return r
+}
+
+// requestMetrics records one served request. The route label is the
+// router's pattern, resolved only once the handler has returned, so a
+// block number or a network name in the path never becomes a series of its
+// own. The scrape does not count itself, and a WebSocket that upgraded is
+// not a request: its duration is the life of the socket, which says
+// nothing about request latency. A handshake the server refused is an
+// ordinary answer and is counted like one, so sustained WebSocket errors
+// reach the error rate instead of disappearing.
+func requestMetrics(m *metrics.API) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == metrics.Path {
+				next.ServeHTTP(w, r)
+				return
+			}
+			start := time.Now()
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			next.ServeHTTP(ww, r)
+			status := ww.Status()
+			if status == 0 {
+				// A handler that wrote nothing at all still answered 200.
+				status = http.StatusOK
+			}
+			if r.URL.Path == wsPath && status < http.StatusBadRequest {
+				return
+			}
+			m.ObserveRequest(routePattern(r), r.Method, status, time.Since(start))
+		})
+	}
+}
+
+// routePattern is the chi pattern that served r, or unmatchedRoute when no
+// route claimed it.
+func routePattern(r *http.Request) string {
+	rc := chi.RouteContext(r.Context())
+	if rc == nil {
+		return unmatchedRoute
+	}
+	if p := rc.RoutePattern(); p != "" {
+		return p
+	}
+	return unmatchedRoute
 }
 
 // writeJSON writes v with the given status and Cache-Control.
@@ -337,6 +419,15 @@ func clientIP(addr string) string {
 
 func (rl *rateLimiter) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The scrape is exempt: where a proxy or a mesh makes ordinary
+		// traffic and Prometheus share one peer address, a throttled
+		// /metrics reads as a dead api and pages for it. The endpoint is
+		// not routed by the chart's Ingress, so it is reachable from
+		// inside the cluster only.
+		if r.URL.Path == metrics.Path {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !rl.allow(clientIP(r.RemoteAddr)) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")

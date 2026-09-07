@@ -31,6 +31,7 @@ type MemStore struct {
 	BlockRows     map[uint64]map[uint64]db.Block
 	BucketRows    map[string]db.Bucket
 	SampleRows    []db.StateSample
+	MissingRows   map[uint64][]db.MissingRange
 	ActionRows    map[string]db.OwnerAction
 	SetRows       []db.ConstraintSet
 	ReportRows    map[string]db.BatchReport
@@ -55,6 +56,7 @@ func New() *MemStore {
 	return &MemStore{
 		NetworkRows: map[uint64]db.Network{},
 		BlockRows:   map[uint64]map[uint64]db.Block{},
+		MissingRows: map[uint64][]db.MissingRange{},
 		BucketRows:  map[string]db.Bucket{},
 		ActionRows:  map[string]db.OwnerAction{},
 		ReportRows:  map[string]db.BatchReport{},
@@ -63,6 +65,40 @@ func New() *MemStore {
 		Hooks:       map[string]func(){},
 		chainMu:     map[uint64]*sync.Mutex{},
 	}
+}
+
+// MissingRanges lists a copy of one chain's durable missing intervals.
+func (m *MemStore) MissingRanges(_ context.Context, chainID uint64) ([]db.MissingRange, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("MissingRanges"); err != nil {
+		return nil, err
+	}
+	out := append([]db.MissingRange(nil), m.MissingRows[chainID]...)
+	sort.Slice(out, func(i, j int) bool { return out[i].From < out[j].From })
+	return out, nil
+}
+
+// ReplaceMissingRanges replaces one chain's intervals after copying their
+// byte slices, matching the value semantics of committed database rows.
+func (m *MemStore) ReplaceMissingRanges(_ context.Context, chainID uint64, ranges []db.MissingRange) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("ReplaceMissingRanges"); err != nil {
+		return err
+	}
+	out := make([]db.MissingRange, len(ranges))
+	copy(out, ranges)
+	for i := range out {
+		out[i].ChainID = chainID
+		out[i].ReplayState = append(db.JSONB(nil), out[i].ReplayState...)
+	}
+	if len(out) == 0 {
+		delete(m.MissingRows, chainID)
+		return nil
+	}
+	m.MissingRows[chainID] = out
+	return nil
 }
 
 // hook runs the test hook of a method, outside the store lock so it may
@@ -426,20 +462,30 @@ func (m *MemStore) BlocksBetween(_ context.Context, chainID uint64, from, to tim
 	return out, nil
 }
 
-// GasUsedBetween sums gas over (from, to].
-func (m *MemStore) GasUsedBetween(_ context.Context, chainID uint64, from, to time.Time) (uint64, error) {
+// GasBetween sums total gas and, with complete receipt coverage, compute gas
+// over (from, to].
+func (m *MemStore) GasBetween(_ context.Context, chainID uint64, from, to time.Time) (total uint64, compute *uint64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.fail("GasUsedBetween"); err != nil {
-		return 0, err
+	if err := m.fail("GasBetween"); err != nil {
+		return 0, nil, err
 	}
-	var total uint64
+	var computeTotal uint64
+	known := true
 	for _, b := range m.BlockRows[chainID] {
 		if b.TS.After(from) && !b.TS.After(to) {
 			total += b.GasUsed
+			if !b.PosterGas.Valid || b.PosterGas.Int64 < 0 || uint64(b.PosterGas.Int64) > b.GasUsed {
+				known = false
+				continue
+			}
+			computeTotal += b.GasUsed - uint64(b.PosterGas.Int64)
 		}
 	}
-	return total, nil
+	if !known {
+		return total, nil, nil
+	}
+	return total, &computeTotal, nil
 }
 
 // TwoTxBlocks lists two-transaction blocks above a number.
@@ -732,7 +778,11 @@ func (m *MemStore) InsertOwnerActions(_ context.Context, actions []db.OwnerActio
 	n := 0
 	for _, a := range actions {
 		key := fmt.Sprintf("%d/%s/%d", a.ChainID, a.TxHash, a.LogIndex)
-		if _, ok := m.ActionRows[key]; ok {
+		if existing, ok := m.ActionRows[key]; ok {
+			if !existing.TxIndex.Valid && a.TxIndex.Valid {
+				existing.TxIndex = a.TxIndex
+				m.ActionRows[key] = existing
+			}
 			continue
 		}
 		m.ActionRows[key] = a
@@ -903,7 +953,7 @@ func (m *MemStore) BatchReports(_ context.Context, chainID uint64, from, to time
 	}
 	var out []db.BatchReport
 	for _, r := range m.ReportRows {
-		if r.ChainID == chainID && !r.BatchTS.Before(from) && r.BatchTS.Before(to) {
+		if r.CostCalculationVersion == 1 && r.ChainID == chainID && !r.BatchTS.Before(from) && r.BatchTS.Before(to) {
 			out = append(out, r)
 		}
 	}
@@ -927,7 +977,7 @@ func (m *MemStore) BatchBuckets(_ context.Context, chainID uint64, from, to time
 	agg := map[int64]*db.BatchBucket{}
 	sums := map[int64]*big.Int{}
 	for _, r := range m.ReportRows {
-		if r.ChainID != chainID || r.BatchTS.Before(from) || !r.BatchTS.Before(to) {
+		if r.CostCalculationVersion != 1 || r.ChainID != chainID || r.BatchTS.Before(from) || !r.BatchTS.Before(to) {
 			continue
 		}
 		k := (r.BatchTS.Unix() / secs) * secs

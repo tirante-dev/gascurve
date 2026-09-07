@@ -28,7 +28,7 @@ import {
   type ThroughputPoint,
 } from "@/lib/hero";
 import { assignPlaces, NO_PLACES, SWAP_GAS, targetValues, TRANSFER_GAS, type BlockPlaces, type LiveValues } from "@/lib/smoothing";
-import type { BlockPoint, LiveSnapshot, LiveStatus, PricerModel, Series } from "@/types";
+import type { BlockPoint, EthUsd, LiveSnapshot, LiveStatus, PricerModel, Series } from "@/types";
 import { FLOOR_COLOR, MARKER_COLOR, rampColor, rampInk, rampStep } from "@/utils/chart";
 import {
   FIXED_WIDTH_CH,
@@ -45,9 +45,8 @@ import {
   formatSignificant,
   formatTick,
   formatTime,
-  formatUsdFixed,
-  freshUsdPrice,
   gasPerSecondParts,
+  usdMath,
   weiToGweiNumber,
 } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
@@ -229,7 +228,7 @@ export function throughputTooltipRows(): TooltipRow[] {
   return [
     // A second the ring has a hole across carries no measurement at all, and
     // "0 gas/s" is a different claim from "nobody can say".
-    { label: "gas in the second", color: THROUGHPUT_COLOR, value: (r) => (typeof r.gas === "number" ? formatGasPerSecond(r.gas) : "n/a") },
+    { label: "compute gas in the second", color: THROUGHPUT_COLOR, value: (r) => (typeof r.gas === "number" ? formatGasPerSecond(r.gas) : "n/a") },
     { label: "blocks", value: (r) => (typeof r.blocks === "number" ? formatInteger(r.blocks) : "n/a") },
     { label: "time", value: (r) => formatTime(Number(r.ts)) },
   ];
@@ -244,7 +243,7 @@ export function throughputPeak(points: readonly ThroughputPoint[]): number {
 const livePointTitle = (row: Record<string, unknown>) => heroPointTitle(Number(row.x));
 
 /**
- * Gas per second from the block ring, on the same clock-anchored axis as the
+ * Compute gas per second from the block ring, on the same clock-anchored axis as the
  * base fee above it: each whole second's blocks summed and placed at the
  * second's end. The y axis carries one unit for the whole scale, named in the
  * caption, so its labels are bare figures of the same width and the plot
@@ -258,14 +257,16 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, h
   // Seconds the ring can speak for. A null second is drawn as a break, so it
   // is not one of the seconds the description counts.
   const measured = points.filter((p) => p.gas !== null).length;
-  const label =
-    measured < 2
-      ? "Gas per second, waiting for blocks"
-      : `Gas carried per second over the last ${span} seconds, ${measured} seconds of blocks, up to ${formatGasPerSecond(throughputPeak(points))}`;
+  const waitingForBlocks = points.length < 2;
+  const label = waitingForBlocks
+    ? "Compute gas per second, waiting for blocks"
+    : measured < 2
+      ? "Compute gas per second, receipt data unavailable"
+      : `Compute gas carried per second over the last ${span} seconds, ${measured} seconds of blocks, up to ${formatGasPerSecond(throughputPeak(points))}`;
   return (
-    <ChartBox label={label} busy={measured < 2} height={height}>
+    <ChartBox label={label} busy={waitingForBlocks} height={height}>
       {measured < 2 ? (
-        <ChartNote>Waiting for blocks.</ChartNote>
+        <ChartNote>{waitingForBlocks ? "Waiting for blocks." : "Receipt data unavailable."}</ChartNote>
       ) : (
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={points} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
@@ -283,7 +284,7 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, h
 
 /**
  * The throughput chart under the hero's base fee, at the hero's own range:
- * gas per second from the block ring on Live, and the same figure per bucket
+ * compute gas per second from the block ring on Live, and the same figure per bucket
  * against every constraint target in force on a history range. The bucketed
  * view is the history chart itself, not a second implementation of it.
  */
@@ -298,6 +299,7 @@ export function HeroThroughputPanel({
   model = "unknown",
   height = HERO_THROUGHPUT_HEIGHT,
   minWidth = 280,
+  readout = false,
   action,
 }: {
   blocks: BlockPoint[];
@@ -311,6 +313,12 @@ export function HeroThroughputPanel({
   model?: PricerModel;
   height?: string;
   minWidth?: number;
+  /**
+   * Whether to render the keyboard inspector and the data table under the
+   * chart. Off in the hero, which stays a chart and its figures; on where
+   * the chart is enlarged and there is room to read it point by point.
+   */
+  readout?: boolean;
   /** The control the caption row carries, the enlarge link on the network page and nothing on the chart's own page. */
   action?: ReactNode;
 }) {
@@ -322,8 +330,8 @@ export function HeroThroughputPanel({
   const liveUnit = useMemo(() => throughputAxis(throughputPeak(points)).unit, [points]);
   const unit = live ? liveUnit : (m?.gasAxis.unit ?? "Mgas/s");
   const caption = live
-    ? `Gas per second across the chain \u00b7 ${unit} \u00b7 the last ${heroSpan()} s of blocks`
-    : `Gas per second per bucket against each target in force \u00b7 ${unit} \u00b7 ${rangeLabel}`;
+    ? `Compute gas per second across the chain \u00b7 ${unit} \u00b7 the last ${heroSpan()} s of blocks`
+    : `Compute gas per second per bucket against each target in force \u00b7 ${unit} \u00b7 ${rangeLabel}`;
   return (
     <>
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -333,29 +341,29 @@ export function HeroThroughputPanel({
         {live ? (
           <HeroThroughputChart points={points} height={height} />
         ) : seriesError !== null && series === null ? (
-          <ChartBox label={`Gas per second over ${rangeLabel}, unavailable`} height={height}>
+          <ChartBox label={`Compute gas per second over ${rangeLabel}, unavailable`} height={height}>
             <ChartNote>Could not load {rangeLabel}: {seriesError}</ChartNote>
           </ChartBox>
         ) : m === null ? (
-          <ChartBox label={`Gas per second over ${rangeLabel}, loading`} busy height={height}>
+          <ChartBox label={`Compute gas per second over ${rangeLabel}, loading`} busy height={height}>
             <ChartNote>{seriesLoading ? `Loading ${rangeLabel}.` : `No history for ${rangeLabel} yet.`}</ChartNote>
           </ChartBox>
         ) : m.points.length === 0 ? (
-          <ChartBox label={`Gas per second over ${rangeLabel}, nothing indexed`} height={height}>
+          <ChartBox label={`Compute gas per second over ${rangeLabel}, nothing indexed`} height={height}>
             <ChartNote>{emptyRangeNote(m.gaps.first)}</ChartNote>
           </ChartBox>
         ) : (
           <GasPerSecondChart m={m} height={height} axisWidth={HERO_AXIS_WIDTH} minWidth={minWidth} />
         )}
-        {live ? (
+        {!readout ? null : live ? (
           <ChartReadout
             points={points}
             groups={THROUGHPUT_READOUT}
             title={livePointTitle}
             heading="Second inspector"
             selectLabel="Select a second to read its values"
-            caption="Every whole second of the live throughput chart with the gas it carried and how many blocks carried it"
-            summary="Gas per second, as a table"
+            caption="Every whole second of the live throughput chart with its compute gas and block count"
+            summary="Compute gas per second, as a table"
             timeLabel="when"
           />
         ) : m !== null && m.points.length > 0 ? (
@@ -367,7 +375,7 @@ export function HeroThroughputPanel({
             heading="Bucket inspector"
             selectLabel="Select a bucket to read its values"
             caption={`Every bucket of the throughput chart over ${rangeLabel} with its rate and the targets in force`}
-            summary={`Gas per second over ${rangeLabel}, as a table`}
+            summary={`Compute gas per second over ${rangeLabel}, as a table`}
             timeLabel="bucket"
           />
         ) : null}
@@ -378,7 +386,7 @@ export function HeroThroughputPanel({
 /** What the live throughput chart reads out without a pointer. */
 const THROUGHPUT_READOUT: ReadoutGroup[] = [{ title: "second", rows: throughputTooltipRows() }];
 
-/** Where a unit of gas's fee goes: the floor to the infra account, the rest to the network account. Memoised on the snapshot. */
+/** Where a unit of compute gas's fee goes. Poster gas is paid separately to the L1 pricer. */
 export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: LiveSnapshot }) {
   const base = BigInt(snapshot.prices.perArbGasBase);
   const congestion = BigInt(snapshot.prices.perArbGasCongestion);
@@ -387,7 +395,7 @@ export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: L
   const congestionShare = 1 - floorShare;
   return (
     <div>
-      <Label>Where the fee goes</Label>
+      <Label>Where each compute-gas fee goes</Label>
       <div className="mt-2 flex h-3 w-full gap-[2px] overflow-hidden rounded-sm" role="img" aria-label={`Floor ${formatPercent(floorShare)} to the infra account, congestion ${formatPercent(congestionShare)} to the network account`}>
         <div style={{ width: `${Math.max(1, floorShare * 100)}%`, background: "var(--seq-2)" }} />
         <div style={{ width: `${Math.max(0, congestionShare * 100)}%`, background: "var(--seq-8)" }} />
@@ -412,6 +420,7 @@ export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: L
           </dd>
         </div>
       </dl>
+      <p className="mt-2 text-xs text-ink-3">Receipt poster gas separately funds the L1 pricer pool.</p>
     </div>
   );
 });
@@ -440,7 +449,8 @@ function Freshness({ sinceBlock, age }: { sinceBlock: number; age: number }) {
  * A gas rate tile: the figure in a reserved box and the unit beside it, so the
  * SI prefix rides on the unit ("Mgas/s") and the number never carries a letter.
  */
-export function GasRateTile({ label, gasPerSecond }: { label: string; gasPerSecond: number }) {
+export function GasRateTile({ label, gasPerSecond }: { label: string; gasPerSecond: number | null }) {
+  if (gasPerSecond === null) return <Stat label={label} value="n/a" />;
   const parts = gasPerSecondParts(gasPerSecond, true);
   return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.gasPerSecond}>{parts.value}</Figure>} unit={parts.unit} />;
 }
@@ -448,28 +458,28 @@ export function GasRateTile({ label, gasPerSecond }: { label: string; gasPerSeco
 /**
  * What a transaction of a given size costs, in dollars when the collector has
  * a fresh quote and in ETH when it does not. The dollar figure is the primary
- * one because it is the one people hold in their heads; the ETH amount stays
- * a hover away and is always in the accessible description, so nothing is
- * only available to a pointer.
+ * one because it is the one people hold in their heads; the multiplication
+ * behind it, the quote it used and that quote's age stay a hover away and are
+ * always in the accessible description, so nothing is only available to a
+ * pointer.
  */
-export function CostTile({ label, eth, usdPerEth }: { label: string; eth: number; usdPerEth: number | null }) {
-  if (usdPerEth === null) {
+export function CostTile({ label, eth, ethUsd, nowMs }: { label: string; eth: number; ethUsd: EthUsd | null; nowMs: number }) {
+  const math = usdMath(eth, ethUsd, nowMs);
+  if (math === null) {
     return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.eth}>{formatEthFixed(eth)}</Figure>} unit="ETH" size="sm" />;
   }
-  const ethText = `${formatEthFixed(eth)} ETH`;
-  const usd = formatUsdFixed(eth * usdPerEth);
   return (
     <Stat
       label={label}
       size="sm"
       value={
-        <span title={ethText}>
+        <span title={math.title}>
           {/* The dollar sign sits outside the reserved box, so a changing digit never shifts it. */}
           <span aria-hidden="true">
             <span className="text-ink-2">$</span>
-            <Figure ch={FIXED_WIDTH_CH.usd}>{usd}</Figure>
+            <Figure ch={FIXED_WIDTH_CH.usd}>{math.usd}</Figure>
           </span>
-          <span className="sr-only">{`${usd} US dollars, ${ethText}, at ${formatUsdFixed(usdPerEth)} dollars per ETH`}</span>
+          <span className="sr-only">{math.description}</span>
         </span>
       }
     />
@@ -493,6 +503,7 @@ export function HeroChartPanel({
   seriesError = null,
   model = "unknown",
   height,
+  readout = false,
 }: {
   snapshot: LiveSnapshot;
   blocks: BlockPoint[];
@@ -505,6 +516,8 @@ export function HeroChartPanel({
   seriesError?: string | null;
   model?: PricerModel;
   height?: string;
+  /** See HeroThroughputPanel: the inspector belongs to the enlarged view. */
+  readout?: boolean;
 }) {
   const live = range === "live";
   // Against the frame's wall clock: the chart slides every frame, and a block
@@ -541,7 +554,7 @@ export function HeroChartPanel({
         )}
         {/* The same values without a pointer: one block or bucket at a time in
             the inspector, all of them in the table. */}
-        {live ? (
+        {!readout ? null : live ? (
           <ChartReadout
             points={points}
             groups={FEE_READOUT}
@@ -668,8 +681,6 @@ export function LiveHeroView({
   const step = rampStep(multiplierBips);
   const sinceBlock = Math.max(0, nowMs / 1000 - snapshot.block.ts);
   const age = sampleAge(snapshot.sampledAt, nowMs);
-  // No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all.
-  const usdPerEth = freshUsdPrice(snapshot.ethUsd, nowMs);
   return (
     <div className="vw-card p-5">
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -700,10 +711,11 @@ export function LiveHeroView({
           <div className="grid grid-cols-2 gap-x-4 gap-y-5">
             <Stat label="Block" value={formatInteger(snapshot.block.number)} />
             <Freshness sinceBlock={sinceBlock} age={age} />
-            <GasRateTile label="Gas/s (10 s)" gasPerSecond={v.gasPerSecond10} />
-            <GasRateTile label="Gas/s (60 s)" gasPerSecond={v.gasPerSecond60} />
-            <CostTile label="21k transfer" eth={v.transferEth} usdPerEth={usdPerEth} />
-            <CostTile label="150k swap" eth={v.swapEth} usdPerEth={usdPerEth} />
+            <GasRateTile label="Compute gas/s (10 s)" gasPerSecond={v.gasPerSecond10} />
+            <GasRateTile label="Compute gas/s (60 s)" gasPerSecond={v.gasPerSecond60} />
+            {/* No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all. */}
+            <CostTile label="21k transfer" eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
+            <CostTile label="150k swap" eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
           </div>
 
           <FeeSplitBar snapshot={snapshot} />

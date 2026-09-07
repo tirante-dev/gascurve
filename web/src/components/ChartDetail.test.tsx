@@ -110,6 +110,7 @@ const series: Series = {
     gasUsed: 100,
     gasPerSecond: 41_000_000,
     coverage: 1,
+    completeness: "complete",
     feesWei: "1000000000000000000",
     baseFeeMin: "100000000",
     baseFeeAvg: "300000000",
@@ -288,7 +289,7 @@ describe("a chart on a page of its own", () => {
     expect(screen.getByRole("figure", { name: /Fees collected per bucket in ETH/ })).toBeInTheDocument();
     unmount();
     render(<ChartDetail network="robinhood" chart="l1" />);
-    expect(screen.getByRole("figure", { name: /L2 fees and L1 posting cost per bucket/ })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /L2 fees and ArbOS-attributed batch-posting cost per bucket/ })).toBeInTheDocument();
     // Only the L1 page asks for batches, and it asks for the range on screen.
     expect(apiKeys).toContain("robinhood:1h:batches");
   });

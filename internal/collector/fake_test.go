@@ -40,6 +40,7 @@ type fakeRPC struct {
 	arbos       uint64
 	logs        []nitro.Log
 	fullBlocks  map[uint64]nitro.Block
+	receipts    map[string]nitro.Receipt
 	available   int
 	stats       nitro.Stats
 	errs        map[string]error
@@ -59,6 +60,7 @@ type fakeRPC struct {
 	backlogsAt    func(uint64) []uint64
 	constraintsAt func(uint64) []nitro.Constraint
 	txCount       func(uint64) int
+	posterGas     func(uint64) uint64
 	// parentOverride replaces the parent hash a header reports, so a test
 	// can break the links a fetched range has to satisfy without moving
 	// the blocks themselves onto a fork.
@@ -81,19 +83,22 @@ func newFakeRPC(head uint64) *fakeRPC {
 		},
 		minFee: big.NewInt(20_000_000),
 		l1: &nitro.L1Sample{BaseFeeEstimate: big.NewInt(2_369_608), Surplus: big.NewInt(-5), FeesAvailable: big.NewInt(190),
-			UnitsSinceUpdate: 1, LastUpdateTime: 1_700_000_000, EquilibrationUnits: 160_000_000, PerBatchGasCharge: 210_000, RewardRate: 10},
+			UnitsSinceUpdate: 1, LastUpdateTime: 1_700_000_000, EquilibrationUnits: 160_000_000, PerBatchGasCharge: 210_000, RewardRate: 10,
+			ArbOSVersion: 61, ParentGasFloorPerToken: 10},
 		accounts: &nitro.FeeAccounts{
 			Infra: nitro.Account{Address: "0x1", Balance: big.NewInt(402)}, Network: nitro.Account{Address: "0x2", Balance: big.NewInt(10706)},
 			L1Reward: nitro.Account{Address: "0x3", Balance: big.NewInt(1)},
 		},
 		arbos:      61,
 		fullBlocks: map[uint64]nitro.Block{},
+		receipts:   map[string]nitro.Receipt{},
 		available:  1000,
 		errs:       map[string]error{},
 		hooks:      map[string]func(){},
 		calls:      map[string]int{},
 		classes:    map[string]nitro.Class{},
 		txCount:    func(uint64) int { return 3 },
+		posterGas:  func(uint64) uint64 { return 0 },
 		sampledAt:  baseTime,
 	}
 }
@@ -158,7 +163,9 @@ func (f *fakeRPC) header(n uint64) nitro.Header {
 	if h, ok := f.parentOverride[n]; ok {
 		parent = h
 	}
-	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)]}
+	posterGas := f.posterGas(n)
+	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50,
+		ArbOSVersion: f.arbos, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)], PosterGas: &posterGas}
 }
 
 func (f *fakeRPC) ChainID(context.Context) (uint64, error) {
@@ -183,6 +190,28 @@ func (f *fakeRPC) FastSample(ctx context.Context) (*nitro.Sample, error) {
 func (f *fakeRPC) FastSampleAt(ctx context.Context, n uint64) (*nitro.Sample, error) {
 	f.note(ctx, "FastSampleAt")
 	if err := f.fail("FastSampleAt"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sampleAt = append(f.sampleAt, n)
+	if n > f.head {
+		return nil, fmt.Errorf("block %d not found", n)
+	}
+	var backlogs []uint64
+	if f.backlogsAt != nil {
+		backlogs = f.backlogsAt(n)
+	}
+	constraints := f.constraints
+	if f.constraintsAt != nil {
+		constraints = f.constraintsAt(n)
+	}
+	return f.sampleLocked(n, constraints, backlogs), nil
+}
+
+func (f *fakeRPC) PricingSampleAt(ctx context.Context, n uint64) (*nitro.Sample, error) {
+	f.note(ctx, "PricingSampleAt")
+	if err := f.fail("PricingSampleAt"); err != nil {
 		return nil, err
 	}
 	f.mu.Lock()
@@ -273,6 +302,34 @@ func (f *fakeRPC) BlocksWithTxs(_ context.Context, numbers []uint64) ([]nitro.Bl
 	return out, nil
 }
 
+func (f *fakeRPC) TransactionReceipts(_ context.Context, hashes []string) ([]nitro.Receipt, error) {
+	if err := f.fail("TransactionReceipts"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]nitro.Receipt, 0, len(hashes))
+	for _, hash := range hashes {
+		if receipt, ok := f.receipts[hash]; ok {
+			out = append(out, receipt)
+			continue
+		}
+		var log *nitro.Log
+		for i := range f.logs {
+			if f.logs[i].TxHash == hash {
+				log = &f.logs[i]
+				break
+			}
+		}
+		if log == nil {
+			return nil, fmt.Errorf("receipt %s not found", hash)
+		}
+		gas := f.header(log.BlockNumber).GasUsed
+		out = append(out, nitro.Receipt{TxHash: hash, BlockNumber: log.BlockNumber, TxIndex: log.TxIndex, GasUsed: gas, CumulativeGasUsed: gas})
+	}
+	return out, nil
+}
+
 func (f *fakeRPC) OwnerActsLogs(_ context.Context, from, to uint64) ([]nitro.Log, error) {
 	if err := f.fail("OwnerActsLogs"); err != nil {
 		return nil, err
@@ -289,8 +346,8 @@ func (f *fakeRPC) OwnerActsLogs(_ context.Context, from, to uint64) ([]nitro.Log
 	return out, nil
 }
 
-func (f *fakeRPC) L1Sample(context.Context) (*nitro.L1Sample, error) {
-	if err := f.fail("L1Sample"); err != nil {
+func (f *fakeRPC) L1SampleAt(_ context.Context, _ uint64) (*nitro.L1Sample, error) {
+	if err := f.fail("L1SampleAt"); err != nil {
 		return nil, err
 	}
 	return f.l1, nil
@@ -357,6 +414,7 @@ func fixtureLogs(t *testing.T) []nitro.Log {
 			Data        string   `json:"data"`
 			BlockNumber string   `json:"blockNumber"`
 			TxHash      string   `json:"transactionHash"`
+			TxIndex     string   `json:"transactionIndex"`
 			LogIndex    string   `json:"logIndex"`
 		} `json:"result"`
 	}
@@ -370,8 +428,9 @@ func fixtureLogs(t *testing.T) []nitro.Log {
 			t.Fatal(err)
 		}
 		bn, _ := nitro.HexUint64(r.BlockNumber)
+		ti, _ := nitro.HexUint64(r.TxIndex)
 		li, _ := nitro.HexUint64(r.LogIndex)
-		out = append(out, nitro.Log{Address: r.Address, Topics: r.Topics, Data: data, BlockNumber: bn, TxHash: r.TxHash, LogIndex: li})
+		out = append(out, nitro.Log{Address: r.Address, Topics: r.Topics, Data: data, BlockNumber: bn, TxHash: r.TxHash, TxIndex: ti, LogIndex: li})
 	}
 	return out
 }
@@ -383,10 +442,10 @@ func testConfig() config.CollectorConfig {
 	}
 }
 
-func newTestFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore) *Follower {
+func newTestFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore, opts ...func(*Options)) *Follower {
 	t.Helper()
 	clock := baseTime.Add(1000 * time.Second / 10)
-	f := NewFollower(Options{
+	o := Options{
 		Network:   config.NetworkConfig{Name: "robinhood", DisplayName: "Robinhood Chain", ChainID: 4663, ExplorerURL: "https://x", CallsPerSecond: 4, Enabled: true},
 		Collector: testConfig(),
 		RPC:       rpc,
@@ -394,6 +453,14 @@ func newTestFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore) *Follow
 		Log:       logger.Nop(),
 		Now:       func() time.Time { return clock },
 		Sleep:     func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
-	})
+	}
+	for _, apply := range opts {
+		apply(&o)
+	}
+	f := NewFollower(o)
+	f.batchCostAnchor = &batchCostAnchor{block: ^uint64(0), params: nitro.BatchPostingCostParams{
+		ArbOSVersion: rpc.l1.ArbOSVersion, PerBatchGasCharge: rpc.l1.PerBatchGasCharge,
+		ParentGasFloorPerToken: rpc.l1.ParentGasFloorPerToken,
+	}}
 	return f
 }

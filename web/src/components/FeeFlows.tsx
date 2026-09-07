@@ -1,12 +1,12 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
+import type { EthUsd, LiveSnapshot, PricerModel, Series, SeriesCompleteness, SeriesRange } from "@/types";
 import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL, type ChartPoint } from "@/utils/chart";
 import { emptyRangeNote, gapModel, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
-import { isPartialRow, partialBands, partialRowNote, withFeeStack } from "@/lib/partial";
-import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, formatUsdFixed, freshUsdPrice, shortAddress } from "@/utils/format";
+import { completenessOf, isPartialRow, partialBands, partialRowNote, withFeeStack } from "@/lib/partial";
+import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, shortAddress, usdMath } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
 import { formatFloor } from "@/lib/feeChart";
 import { EnlargeLink } from "./ChartActions";
@@ -16,14 +16,15 @@ import { Card, ChartFrame, HatchPattern, Label, Legend, Stat, TIME_AXIS_RIGHT, t
 
 const FLOOR_FILL = "var(--seq-2)";
 const SURPLUS_FILL = "var(--seq-8)";
+const POSTER_FILL = "var(--series-3)";
 /**
- * The hatch that fills buckets whose destination split predates the record:
+ * The hatch that fills buckets whose destination split is unavailable:
  * muted ink, never a destination colour, drawn at full strength so the lines
  * clear 3:1 against the chart surface in both themes.
  */
 const UNSPLIT_PATTERN_ID = "fee-unsplit-hatch";
 
-/** "0.1234" for a known part, "n/a" for one that predates the fee split. */
+/** "0.1234" for a known part, "n/a" for an unavailable split. */
 function formatPart(eth: number | null): string {
   return eth === null ? "n/a" : formatSignificant(eth, 4);
 }
@@ -33,9 +34,9 @@ function ethCell(value: unknown): string {
   return typeof value === "number" ? `${formatSignificant(value, 4)} ETH` : "n/a";
 }
 
-/** "3 buckets predate the fee split", singular when it is one. */
+/** "3 buckets have no destination split", singular when it is one. */
 export function unsplitNote(count: number): string {
-  return `${formatInteger(count)} ${count === 1 ? "bucket predates" : "buckets predate"} the fee split`;
+  return `${formatInteger(count)} ${count === 1 ? "bucket has" : "buckets have"} no recorded destination split`;
 }
 
 function AccountRow({ name, role, address, balance, explorerUrl }: { name: string; role: string; address: string; balance: string; explorerUrl?: string }) {
@@ -59,21 +60,77 @@ function AccountRow({ name, role, address, balance, explorerUrl }: { name: strin
 }
 
 /**
- * Fee totals over the range from the api's exact per-bucket floor and surplus
- * sums. Buckets that predate the fee split (null parts) count toward `total`
- * but not toward the floor or surplus; `unsplit` says how many there were.
+ * Fee sums over every indexed block in the range. The values remain useful as
+ * lower bounds when coverage is partial, but the per-day estimate is emitted
+ * only when every bucket and interval is complete. A bucket contributes to
+ * destination totals only when all three parts are known; `unsplit` counts
+ * the buckets left out of every destination total.
  */
-export function feeTotals(series: Pick<Series, "points">): { total: number; floorEth: number; surplusEth: number; perDay: number; unsplit: number } {
+export type FeeTotals = {
+  total: number;
+  floorEth: number;
+  surplusEth: number;
+  posterEth: number;
+  perDay: number | null;
+  known: number;
+  unsplit: number;
+  completeness: SeriesCompleteness;
+  partialBuckets: number;
+  unknownBuckets: number;
+  emptyIntervals: number;
+};
+
+export function feeTotals(series: Pick<Series, "from" | "to" | "resolution" | "points">): FeeTotals {
   const total = sumWeiEth(series.points, "feesWei");
-  const floor = sumKnownWeiEth(series.points, "floorFeesWei");
-  const surplus = sumKnownWeiEth(series.points, "surplusFeesWei");
+  const known = series.points.filter((p) => typeof p.floorFeesWei === "string" && typeof p.surplusFeesWei === "string" && typeof p.posterFeesWei === "string");
+  const floor = sumKnownWeiEth(known, "floorFeesWei");
+  const surplus = sumKnownWeiEth(known, "surplusFeesWei");
+  const poster = sumKnownWeiEth(known, "posterFeesWei");
   const span = spanSeconds(series.points);
-  return { total, floorEth: floor.eth, surplusEth: surplus.eth, perDay: span > 0 ? (total / span) * 86_400 : 0, unsplit: Math.max(floor.unknown, surplus.unknown) };
+  const partialBuckets = series.points.filter((point) => completenessOf(point) === "partial").length;
+  const unknownBuckets = series.points.filter((point) => completenessOf(point) === "unknown").length;
+  const emptyIntervals = gapModel(series, series.points).gaps.length;
+  const completeness: SeriesCompleteness = partialBuckets > 0 || emptyIntervals > 0 ? "partial" : unknownBuckets > 0 ? "unknown" : "complete";
+  return {
+    total,
+    floorEth: floor.eth,
+    surplusEth: surplus.eth,
+    posterEth: poster.eth,
+    perDay: completeness === "complete" && span > 0 ? (total / span) * 86_400 : null,
+    known: known.length,
+    unsplit: series.points.length - known.length,
+    completeness,
+    partialBuckets,
+    unknownBuckets,
+    emptyIntervals,
+  };
 }
 
-/** The dollar line under an ETH total, or nothing at all when there is no fresh quote to convert with. */
-function usdLine(eth: number, usdPerEth: number | null): string | undefined {
-  return usdPerEth === null ? undefined : `$${formatUsdFixed(eth * usdPerEth)}`;
+/** Why range totals are lower bounds, or null when the range is complete. */
+export function incompleteTotalsNote(totals: FeeTotals): string | null {
+  if (totals.completeness === "complete") return null;
+  const reasons: string[] = [];
+  if (totals.partialBuckets > 0) reasons.push(`${formatInteger(totals.partialBuckets)} partially indexed ${totals.partialBuckets === 1 ? "bucket" : "buckets"}`);
+  if (totals.unknownBuckets > 0) reasons.push(`${formatInteger(totals.unknownBuckets)} ${totals.unknownBuckets === 1 ? "bucket has" : "buckets have"} unknown completeness`);
+  if (totals.emptyIntervals > 0) reasons.push(`${formatInteger(totals.emptyIntervals)} ${totals.emptyIntervals === 1 ? "interval has" : "intervals have"} no indexed buckets`);
+  return `Indexed-block sums are lower bounds: ${reasons.join("; ")}. The per-day estimate waits for complete coverage.`;
+}
+
+/**
+ * The dollar line under an ETH total, hovering to the multiplication that
+ * produced it and the quote it used, or nothing at all when there is no fresh
+ * quote to convert with. `sig` is the significant digits the total above it is
+ * drawn to, so the working quotes the figure beside it.
+ */
+function usdLine(eth: number, ethUsd: EthUsd | null | undefined, nowMs: number, sig: number): ReactNode {
+  const math = usdMath(eth, ethUsd, nowMs, (v) => formatSignificant(v, sig));
+  if (math === null) return undefined;
+  return (
+    <span title={math.title}>
+      <span aria-hidden="true">${math.usd}</span>
+      <span className="sr-only">{math.description}</span>
+    </span>
+  );
 }
 
 /** The height the fee chart stands at on the network page; the enlarged view passes its own. */
@@ -88,6 +145,7 @@ export function feeFlowRows(unsplit: boolean): TooltipRow[] {
     { label: "fees so far", value: (r) => `${formatSignificant(Number(r.feesEth), 4)} ETH`, when: isPartialRow },
     { label: "floor to infra", color: FLOOR_FILL, kind: "rect", value: (r) => ethCell(r.floorFeesEth), when: (r) => r.unsplitFeesEth === null },
     { label: "congestion to network", color: SURPLUS_FILL, kind: "rect", value: (r) => ethCell(r.surplusFeesEth), when: (r) => r.unsplitFeesEth === null },
+    { label: "poster fee to L1 pricer", color: POSTER_FILL, kind: "rect", value: (r) => ethCell(r.posterFeesEth), when: (r) => r.unsplitFeesEth === null },
     ...(unsplit ? [{ label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR, kind: "hatch" as const, value: (r: Record<string, unknown>) => ethCell(r.unsplitFeesEth), when: (r: Record<string, unknown>) => r.unsplitFeesEth !== null }] : []),
     { label: "floor in force", value: (r) => (typeof r.floor === "number" ? `${formatFloor(r.floor)} gwei` : "n/a") },
   ];
@@ -95,7 +153,7 @@ export function feeFlowRows(unsplit: boolean): TooltipRow[] {
 
 /**
  * Fees per bucket in ETH, stacked by destination. Buckets whose split
- * predates the record are hatched rather than assigned to either account.
+ * is unavailable are hatched rather than assigned to a destination.
  */
 export function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT }: { points: ChartPoint[]; gaps?: GapModel; height?: ChartHeight }) {
   const window = gaps.window.to > gaps.window.from ? gaps.window : { from: points[0]?.t ?? 0, to: (points[points.length - 1]?.t ?? 0) + gaps.step };
@@ -113,7 +171,7 @@ export function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT
   const rows = withGapBreaks(withFeeStack(points), gaps.gaps);
   return (
     <>
-      <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as the floor part and the congestion part, hatched where the split predates the record or the bucket is still filling">
+      <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as infrastructure, network, and L1 poster destinations, hatched where the split is unavailable or the bucket is incomplete">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={rows} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <defs>
@@ -128,6 +186,7 @@ export function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={feeFlowRows(unsplit)} note={(r) => partialRowNote(r, true)} />} />
             <Area type="monotone" dataKey="stackFloorEth" stackId="fees" connectNulls={false} stroke={FLOOR_FILL} strokeWidth={1} fill={FLOOR_FILL} fillOpacity={0.6} isAnimationActive={false} activeDot={false} />
             <Area type="monotone" dataKey="stackSurplusEth" stackId="fees" connectNulls={false} stroke={SURPLUS_FILL} strokeWidth={1} fill={SURPLUS_FILL} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
+            <Area type="monotone" dataKey="stackPosterEth" stackId="fees" connectNulls={false} stroke={POSTER_FILL} strokeWidth={1} fill={POSTER_FILL} fillOpacity={0.55} isAnimationActive={false} activeDot={false} />
             {unsplit ? (
               <Area type="monotone" dataKey="stackUnsplitEth" stackId="fees" connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={1} strokeDasharray="4 3" fill={`url(#${UNSPLIT_PATTERN_ID})`} isAnimationActive={false} activeDot={false} />
             ) : null}
@@ -145,6 +204,7 @@ export function feeFlowLegend(unsplit: boolean) {
   return [
     { label: "floor to infra", color: FLOOR_FILL },
     { label: "congestion to network", color: SURPLUS_FILL },
+    { label: "poster fee to L1 pricer", color: POSTER_FILL },
     // The unknown series is drawn as a hatch, so its swatch is the same hatch:
     // the legend has to carry the pattern, not only the colour.
     ...(unsplit ? [{ label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR, kind: "hatch" as const }] : []),
@@ -156,11 +216,13 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
   const points = useMemo(() => (series ? buildChartPoints(series, model) : []), [series, model]);
   const gaps = useMemo(() => (series ? gapModel(series, points) : NO_GAPS), [series, points]);
   // The same rule the live tiles follow: no quote, or one older than ten minutes, and the totals stay in ETH alone.
-  const usdPerEth = freshUsdPrice(snapshot?.ethUsd, nowMs);
+  const ethUsd = snapshot?.ethUsd;
   const totals = useMemo(() => (series ? feeTotals(series) : null), [series]);
   const [tableOpen, setTableOpen] = useState(false);
   const accounts = snapshot?.accounts;
   const unsplit = (totals?.unsplit ?? 0) > 0;
+  const incomplete = totals?.completeness !== "complete";
+  const totalsNote = totals === null ? null : incompleteTotalsNote(totals);
   const legend = feeFlowLegend(unsplit);
 
   return (
@@ -169,29 +231,31 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
         <Label>Fee accounts (sampled balances)</Label>
         {accounts ? (
           <div className="mt-2">
-            <AccountRow name="Infra fee account" role="receives the floor part of every fee" address={accounts.infra.address} balance={accounts.infra.balance} explorerUrl={explorerUrl} />
-            <AccountRow name="Network fee account" role="receives the congestion part above the floor" address={accounts.network.address} balance={accounts.network.balance} explorerUrl={explorerUrl} />
+            <AccountRow name="Infra fee account" role="receives the compute-gas floor" address={accounts.infra.address} balance={accounts.infra.balance} explorerUrl={explorerUrl} />
+            <AccountRow name="Network fee account" role="receives compute-gas congestion fees" address={accounts.network.address} balance={accounts.network.balance} explorerUrl={explorerUrl} />
             <AccountRow name="L1 reward recipient" role="10 wei per L1 unit" address={accounts.l1Reward.address} balance={accounts.l1Reward.balance} explorerUrl={explorerUrl} />
           </div>
         ) : (
           <p className="mt-2 text-sm text-ink-2">Balances are sampled once a minute; none yet.</p>
         )}
         <p className="mt-3 text-xs text-ink-3">
-          A balance that drops is a withdrawal, not a refund. Fees per period below come from Σ gasUsed × baseFee over blocks, split by the minimum base fee in force at each block (owner changes to the
-          floor are respected), which withdrawals do not affect.
+          A balance that drops is a withdrawal, not a refund. Total fees remain Σ gasUsed × baseFee. Receipt poster gas funds the L1 pricer pool; only compute gas is split between infrastructure and
+          network by the minimum base fee in force at each block.
         </p>
       </Card>
 
       <Card>
         {totals && series ? (
           <>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
-              <Stat label={`Fees in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, usdPerEth)} />
-              <Stat label="Per day (est.)" value={formatSignificant(totals.perDay, 4)} unit="ETH" size="sm" hint={usdLine(totals.perDay, usdPerEth)} />
-              <Stat label="Floor to infra" value={formatSignificant(totals.floorEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.floorEth, usdPerEth)} />
-              <Stat label="Congestion to network" value={formatSignificant(totals.surplusEth, 3)} unit="ETH" size="sm" hint={usdLine(totals.surplusEth, usdPerEth)} />
+            <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-5">
+              <Stat label={`${incomplete ? "Indexed fees" : "Fees"} in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, nowMs, 4)} />
+              <Stat label="Per day (est.)" value={totals.perDay === null ? "n/a" : formatSignificant(totals.perDay, 4)} unit={totals.perDay === null ? undefined : "ETH"} size="sm" hint={totals.perDay === null ? undefined : usdLine(totals.perDay, ethUsd, nowMs, 4)} />
+              <Stat label={incomplete ? "Indexed floor to infra" : "Floor to infra"} value={totals.known > 0 ? formatSignificant(totals.floorEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.floorEth, ethUsd, nowMs, 3) : undefined} />
+              <Stat label={incomplete ? "Indexed congestion" : "Congestion to network"} value={totals.known > 0 ? formatSignificant(totals.surplusEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.surplusEth, ethUsd, nowMs, 3) : undefined} />
+              <Stat label={incomplete ? "Indexed poster fee" : "Poster fee to L1 pricer"} value={totals.known > 0 ? formatSignificant(totals.posterEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.posterEth, ethUsd, nowMs, 3) : undefined} />
             </div>
-            {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}; the floor and congestion totals leave them out.</p> : null}
+            {totalsNote ? <p className="mt-2 text-xs text-ink-3">{totalsNote}</p> : null}
+            {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}; all three destination totals leave them out.</p> : null}
           </>
         ) : null}
         <div className="mt-4">
@@ -210,13 +274,14 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
                 {tableOpen ? (
                   <div className="mt-2 max-h-[320px] overflow-auto">
                     <table className="num w-full min-w-[520px] text-left">
-                      <caption className="sr-only">Fees per bucket split into the floor part and the congestion part</caption>
+                      <caption className="sr-only">Fees per bucket split among infrastructure, network, and the L1 pricer</caption>
                       <thead className="sticky top-0 bg-surface text-ink-3">
                         <tr>
                           <th scope="col" className="py-1 pr-3 font-medium">bucket</th>
                           <th scope="col" className="py-1 pr-3 font-medium">fees (ETH)</th>
                           <th scope="col" className="py-1 pr-3 font-medium">floor to infra</th>
                           <th scope="col" className="py-1 pr-3 font-medium">congestion to network</th>
+                          <th scope="col" className="py-1 pr-3 font-medium">poster fee to L1 pricer</th>
                           <th scope="col" className="py-1 pr-3 font-medium">floor (gwei)</th>
                         </tr>
                       </thead>
@@ -227,6 +292,7 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
                             <td className="py-1 pr-3">{formatSignificant(p.feesEth, 4)}</td>
                             <td className="py-1 pr-3">{formatPart(p.floorFeesEth)}</td>
                             <td className="py-1 pr-3">{formatPart(p.surplusFeesEth)}</td>
+                            <td className="py-1 pr-3">{formatPart(p.posterFeesEth)}</td>
                             <td className="py-1 pr-3">{formatFloor(p.floor)}</td>
                           </tr>
                         ))}

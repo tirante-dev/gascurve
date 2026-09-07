@@ -57,11 +57,11 @@ func (h *wsHarness) dial(t *testing.T, network string) *websocket.Conn {
 	return conn
 }
 
-func readMsg(t *testing.T, conn *websocket.Conn) (string, json.RawMessage) {
+func readMsg(t *testing.T, conn *websocket.Conn) (typ string, data json.RawMessage) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, data, err := conn.Read(ctx)
+	_, raw, err := conn.Read(ctx)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -69,8 +69,8 @@ func readMsg(t *testing.T, conn *websocket.Conn) (string, json.RawMessage) {
 		Type string          `json:"type"`
 		Data json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("decode %s: %v", data, err)
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
 	}
 	return m.Type, m.Data
 }
@@ -354,7 +354,9 @@ func TestWebSocketErrors(t *testing.T) {
 	// A slow consumer is dropped instead of blocking the hub, and nothing
 	// more is queued for it: a closing client accepts no further messages,
 	// so the write loop's flush is bounded by what is already there.
-	slow := &client{send: make(chan []byte, 1), closed: make(chan struct{})}
+	// The hub is the client's owner: it is what counts the drop, so even a
+	// hand-built client gets one.
+	slow := &client{hub: NewHub(nil, nil), send: make(chan []byte, 1), closed: make(chan struct{})}
 	slow.enqueue([]byte("a"))
 	slow.enqueue([]byte("b"))
 	select {
@@ -606,6 +608,87 @@ func TestWebSocketConnectionCaps(t *testing.T) {
 	}
 }
 
+// TestWebSocketConnectionCapsUseRealIP verifies that the HTTP real-IP
+// middleware also provides the identity used by the WebSocket per-IP cap.
+// Trusted ingress clients get separate counts, while an untrusted peer
+// cannot choose a count by forging X-Forwarded-For.
+func TestWebSocketConnectionCapsUseRealIP(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		trusted       []string
+		secondAllowed bool
+	}{
+		{name: "trusted ingress", trusted: []string{"127.0.0.1", "::1"}, secondAllowed: true},
+		{name: "untrusted forwarding header", secondAllowed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := seed(t)
+			hub := NewHub(store, logger.Nop(), WithPingInterval(time.Hour), WithOrigins(nil), WithConnectionLimits(1, 4))
+			cfg := config.ServerConfig{
+				RateLimitPerSecond: 1000,
+				RateLimitBurst:     1000,
+				TrustedProxies:     tc.trusted,
+				WSMaxPerIP:         1,
+				WSMaxTotal:         4,
+			}
+			s := New(store, cfg, hub, logger.Nop(), WithClock(func() time.Time { return now }))
+			ts := httptest.NewServer(s.Handler())
+			defer ts.Close()
+
+			dial := func(ip string) (*websocket.Conn, *http.Response, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/ws?network=robinhood"
+				return websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: http.Header{"X-Forwarded-For": []string{ip}}})
+			}
+
+			first, resp, err := dial("198.51.100.1")
+			if err != nil {
+				t.Fatalf("first dial: %v", err)
+			}
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+			defer first.CloseNow()
+			readMsg(t, first)
+
+			second, resp, err := dial("198.51.100.2")
+			if tc.secondAllowed {
+				if err != nil {
+					t.Fatalf("second client dial: %v", err)
+				}
+				if resp != nil && resp.Body != nil {
+					resp.Body.Close()
+				}
+				defer second.CloseNow()
+				readMsg(t, second)
+
+				third, refused, err := dial("198.51.100.2")
+				if third != nil {
+					third.CloseNow()
+				}
+				if err == nil || refused == nil || refused.StatusCode != http.StatusTooManyRequests {
+					t.Fatalf("same client cap: err %v response %+v", err, refused)
+				}
+				if refused.Body != nil {
+					refused.Body.Close()
+				}
+				return
+			}
+
+			if second != nil {
+				second.CloseNow()
+			}
+			if err == nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("untrusted forwarded address bypassed cap: err %v response %+v", err, resp)
+			}
+			if resp.Body != nil {
+				resp.Body.Close()
+			}
+		})
+	}
+}
+
 // TestWebSocketHelloAtomic: a tick that lands while a hello is being
 // prepared is delivered after the hello, once, and never lost; concurrent
 // refreshes never duplicate blocks or move the ring head backwards.
@@ -816,10 +899,12 @@ func TestHubReconcile(t *testing.T) {
 }
 
 type fakeListener struct {
-	ch chan db.Notification
+	ch     chan db.Notification
+	status db.ListenerStatus
 }
 
 func (f *fakeListener) Notifications() <-chan db.Notification { return f.ch }
+func (f *fakeListener) Status() db.ListenerStatus             { return f.status }
 func (f *fakeListener) Close() error                          { return nil }
 
 func TestHubRun(t *testing.T) {
@@ -828,11 +913,10 @@ func TestHubRun(t *testing.T) {
 	hub.live = func(context.Context, uint64) (*model.LiveSnapshot, error) { return nil, errors.New("x") }
 	l := &fakeListener{ch: make(chan db.Notification, 2)}
 	l.ch <- liveNotification(robinhood)
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		hub.Run(ctx, l)
-		close(done)
+		done <- hub.Run(ctx, l)
 	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -850,11 +934,16 @@ func TestHubRun(t *testing.T) {
 	}
 	hub.mu.Unlock()
 	cancel()
-	<-done
-	// Closing the listener channel also ends Run.
+	if err := <-done; err != nil {
+		t.Fatalf("canceled run: %v", err)
+	}
+	// Closing the listener channel without cancellation is a fatal error, so
+	// the API process cannot remain ready while the feed is dead.
 	l2 := &fakeListener{ch: make(chan db.Notification)}
 	close(l2.ch)
-	hub.Run(context.Background(), l2)
+	if err := hub.Run(context.Background(), l2); err == nil || err.Error() != "notification listener closed" {
+		t.Fatalf("closed listener: %v", err)
+	}
 	// The ring is capped.
 	ctx2 := context.Background()
 	var blocks []db.Block

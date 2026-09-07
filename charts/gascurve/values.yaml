@@ -76,6 +76,30 @@ api:
   service:
     type: ClusterIP
     port: 8080
+  # When this chart also creates an Ingress, isolate the API pods so only
+  # the ingress controller can reach their HTTP port. The default peer
+  # selects the standard ingress-nginx controller. Change it when your
+  # controller uses another namespace or labels. Any extra peer listed here
+  # can reach every API route at the network layer, including a Prometheus
+  # scraper because /metrics shares the HTTP port. Disable only when an
+  # equivalent policy is managed outside this chart.
+  networkPolicy:
+    enabled: true
+    allowedPeers:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: ingress-nginx
+            app.kubernetes.io/component: controller
+    # Peers allowed in for /metrics, which the api serves on the same port
+    # as REST and the WebSocket. Required whenever
+    # metrics.serviceMonitor.enabled is true and this policy is rendered,
+    # because a layer 4 policy cannot single out a path: without it the
+    # scrape fails and this chart's own apiDown alert fires. Keep these
+    # addresses out of config.server.trusted_proxies.
+    monitoringPeers: []
   resources:
     requests:
       cpu: 100m
@@ -106,7 +130,9 @@ web:
 
 # One host serves both: / goes to web, /api goes to the API. The web image is
 # built with NEXT_PUBLIC_API_URL=/api/v1 so it talks to the same origin and
-# derives the WebSocket URL from it.
+# derives the WebSocket URL from it. When the API is enabled, ingress also
+# requires config.server.trusted_proxies so per-client REST and WebSocket
+# limits can safely use the forwarding chain.
 ingress:
   enabled: false
   className: nginx
@@ -150,17 +176,31 @@ migrations:
 # nodes set calls_per_second: 0 and optionally ws_url and archive: true per
 # network; keep private URLs in a Secret via collector.extraEnv rather than
 # here (rpc_url may then be omitted for that network).
+# After giving a network an archive endpoint, raise its history_epoch by one
+# to rebuild the history it reconstructed without one. The collector records
+# the epoch it rebuilt at, so the rebuild runs once and a restarting pod on
+# the same value does not repeat it.
 config:
   server:
     port: 8080
     cors_origins:
       - https://gascurve.com
     dev_mode: false
+    # Addresses or CIDRs the API sees as its reverse-proxy peers. Forwarded
+    # client headers are ignored unless the direct peer is in this list.
+    # Keep this empty without a reverse proxy. An ingress deployment with the
+    # API enabled must set at least one entry, for example the ingress
+    # controller pod CIDR. The API NetworkPolicy above prevents other pods in
+    # that CIDR from bypassing the controller and spoofing a client address.
+    trusted_proxies: []
   database:
     max_open: 25
     max_idle: 10
     run_migrations: false
   collector:
+    # The collector's own HTTP server, serving metrics and health probes.
+    # 0 switches it and the chart-managed probes and scraping off.
+    metrics_port: 9090
     tick_interval: 3s
     slow_interval: 60s
     header_batch_size: 100
@@ -196,6 +236,105 @@ config:
       explorer_url: https://sepolia.arbiscan.io
       calls_per_second: 4
       enabled: true
+
+# Prometheus. Both binaries serve /metrics whatever is set here: the api on
+# config.server.port, the collector on config.collector.metrics_port from a
+# server of its own. What is optional is the operator's objects, which need
+# the ServiceMonitor and PrometheusRule CRDs, so both default to off and the
+# chart stays installable on a cluster without the Prometheus operator.
+metrics:
+  serviceMonitor:
+    enabled: false
+    # Labels the operator's serviceMonitorSelector looks for. Many installs
+    # need one (release: kube-prometheus-stack, say); check
+    # `kubectl get prometheus -o jsonpath='{..serviceMonitorSelector}'`.
+    labels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+  prometheusRule:
+    enabled: false
+    # Labels the operator's ruleSelector looks for, as above.
+    labels: {}
+    # Labels added to every alert, for Alertmanager routing.
+    alertLabels: {}
+    # A regular expression on the network label naming the networks that
+    # follow a dedicated endpoint. They sit at 0 to 2 seconds of lag, so
+    # they get the tight lag threshold; every other network is on a public
+    # RPC, normally sits at 20 to 60 seconds, and gets the loose one. One
+    # threshold for both would either page on a healthy public network or
+    # never fire on the dedicated one.
+    dedicatedNetworks: robinhood
+    # Each alert can be switched off on its own, and its window, threshold
+    # and severity changed. `for` is how long the condition must hold. Only
+    # the alerts whose expression compares against a number take a
+    # `threshold`, and they require one; putting one on any other alert is
+    # refused as the typo it is.
+    alerts:
+      # Lag on a dedicated endpoint: 30 s is fifteen times the 0 to 2 s it
+      # normally sits at, so only a real stall reaches it.
+      collectorLagDedicated:
+        enabled: true
+        threshold: 30
+        for: 5m
+        severity: warning
+      # Lag on a public RPC: 180 s is three times the top of the 20 to 60 s
+      # band, which a catch-up after a skipped gap stays under.
+      collectorLagPublic:
+        enabled: true
+        threshold: 180
+        for: 15m
+        severity: warning
+      # No state sample for five minutes, on a loop that samples every 0.5
+      # to 3 seconds: the follower is not running or cannot write.
+      collectorSampleStale:
+        enabled: true
+        threshold: 300
+        for: 2m
+        severity: critical
+      # Sustained throttling: 0.2 events per second is twelve a minute,
+      # each costing a 2 s to 60 s back-off, which starves history work.
+      collectorRateLimited:
+        enabled: true
+        threshold: 0.2
+        for: 15m
+        severity: warning
+      # Every endpoint of a network disabled: nothing can serve it.
+      collectorEndpointsExhausted:
+        enabled: true
+        for: 5m
+        severity: critical
+      # The collector is not being scraped at all, which no other collector
+      # alert can see: its series simply stop existing.
+      collectorDown:
+        enabled: true
+        for: 5m
+        severity: critical
+      apiDown:
+        enabled: true
+        for: 5m
+        severity: critical
+      # More than 5% of answered requests are 5xx.
+      apiErrorRate:
+        enabled: true
+        threshold: 0.05
+        for: 10m
+        severity: warning
+      # One or more api replicas have no PostgreSQL LISTEN connection. Their
+      # WebSocket clients go stale and readiness sheds them, but REST reads
+      # and the collector keep working, so this is not a database outage.
+      apiListenerDown:
+        enabled: true
+        for: 3m
+        severity: warning
+      # /ready answers 503 for two reasons, the database ping and the
+      # notification listener, and the readiness probe runs it every 10 s.
+      # The rule subtracts the listener case with `unless`, which leaves the
+      # database as the cause. An api too old to export
+      # gascurve_api_listener_ready subtracts nothing and alerts as before.
+      databaseUnreachable:
+        enabled: true
+        for: 3m
+        severity: critical
 
 # Deprecated: use collector.extraEnv, api.extraEnv and migrations.extraEnv.
 # Anything listed here is still applied to all three, and NOTES prints a

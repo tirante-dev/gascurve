@@ -223,8 +223,8 @@ func (e *Endpoint) observe(items int, limited bool) {
 // batch sends reqs in chunks of at most the current cap, itself bounded by
 // what the endpoint's token bucket can hold at once for the calling class
 // (a budgeted endpoint never sends a batch it has not paid for in full).
-// Every typed call goes through it, not only the header batches, so an
-// eight-call L1 sample on a four calls per second budget is split rather
+// Every typed call goes through it, not only the header batches, so a
+// ten-call L1 sample on a four calls per second budget is split rather
 // than eating the fast reserve. A throttled chunk is retried after the
 // back-off at whatever the cap has become, so an oversized batch shrinks
 // instead of being resent as is; the attempt budget is the client's.
@@ -252,22 +252,21 @@ func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) 
 	return out, nil
 }
 
-// HeadersByNumbers fetches headers in batches of at most the adaptive cap.
+// HeadersByNumbers fetches headers and receipt-backed poster gas in batches
+// of at most the adaptive cap.
 func (e *Endpoint) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
-	blocks, err := blocksByNumbers(ctx, numbers, false, e.batch)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Header, len(blocks))
-	for i := range blocks {
-		out[i] = blocks[i].Header
-	}
-	return out, nil
+	return headersByNumbers(ctx, numbers, e.batch)
 }
 
 // BlocksWithTxs fetches full blocks in batches of at most the adaptive cap.
 func (e *Endpoint) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, error) {
 	return blocksByNumbers(ctx, numbers, true, e.batch)
+}
+
+// TransactionReceipts fetches receipts in batches of at most the adaptive
+// cap.
+func (e *Endpoint) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
+	return transactionReceipts(ctx, hashes, e.batch)
 }
 
 // MaxLogRange is the widest block range one eth_getLogs asks for before an

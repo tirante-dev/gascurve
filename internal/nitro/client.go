@@ -160,9 +160,18 @@ type Result struct {
 // Stats is a point in time view of the client's request accounting.
 type Stats struct {
 	CallsLast10s    int
+	Calls           uint64
+	Requests        uint64
+	Errors          uint64
+	TotalLatency    time.Duration
 	RateLimitEvents uint64
 	Last429At       time.Time
 	Backoff         time.Duration
+	// FastCalls and BulkCalls count every JSON-RPC call sent since the
+	// client was built, by pacer class, one per item inside a batch. They
+	// only ever grow, so an observer can report them as counters.
+	FastCalls uint64
+	BulkCalls uint64
 }
 
 type rpcRequest struct {
@@ -209,9 +218,17 @@ type Client struct {
 
 	sendMu sync.Mutex // one in-flight HTTP request per network
 
-	mu              sync.Mutex
-	nextID          uint64
-	callTimes       []time.Time
+	mu        sync.Mutex
+	nextID    uint64
+	callTimes []time.Time
+	// fastCalls and bulkCalls are the cumulative call counts per pacer
+	// class, kept for observation only: nothing routes on them.
+	fastCalls       uint64
+	bulkCalls       uint64
+	calls           uint64
+	requests        uint64
+	errors          uint64
+	totalLatency    time.Duration
 	rateLimitEvents uint64
 	last429         time.Time
 	backoff         time.Duration
@@ -295,7 +312,11 @@ func (c *Client) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.trimCallsLocked(c.now())
-	return Stats{CallsLast10s: len(c.callTimes), RateLimitEvents: c.rateLimitEvents, Last429At: c.last429, Backoff: c.backoff}
+	return Stats{
+		CallsLast10s: len(c.callTimes), Calls: c.calls, Requests: c.requests, Errors: c.errors,
+		TotalLatency: c.totalLatency, RateLimitEvents: c.rateLimitEvents, Last429At: c.last429, Backoff: c.backoff,
+		FastCalls: c.fastCalls, BulkCalls: c.bulkCalls,
+	}
 }
 
 func (c *Client) trimCallsLocked(now time.Time) {
@@ -307,13 +328,29 @@ func (c *Client) trimCallsLocked(now time.Time) {
 	c.callTimes = c.callTimes[i:]
 }
 
-func (c *Client) recordCalls(n int) {
+func (c *Client) recordCalls(class Class, n int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
 	c.trimCallsLocked(now)
 	for i := 0; i < n; i++ {
 		c.callTimes = append(c.callTimes, now)
+	}
+	if class == Fast {
+		c.fastCalls += uint64(n)
+	} else {
+		c.bulkCalls += uint64(n)
+	}
+	c.calls += uint64(n)
+}
+
+func (c *Client) recordRequest(latency time.Duration, failed bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requests++
+	c.totalLatency += max(latency, 0)
+	if failed {
+		c.errors++
 	}
 }
 
@@ -360,12 +397,28 @@ func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 			return nil, err
 		}
 		if !limited {
+			c.recordResultErrors(results)
 			return results, nil
 		}
 		if attempt >= c.maxAttempts {
 			return nil, throttled(attempt)
 		}
 	}
+}
+
+func (c *Client) recordResultErrors(results []Result) {
+	var failures uint64
+	for _, result := range results {
+		if result.Err != nil {
+			failures++
+		}
+	}
+	if failures == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.errors += failures
+	c.mu.Unlock()
 }
 
 // throttled is the error for a request that stayed rate limited after
@@ -449,9 +502,10 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 			return nil, false, time.Time{}, err
 		}
 	}
-	c.recordCalls(calls)
+	c.recordCalls(ClassOf(ctx), calls)
 	sentAt = c.now()
 	responses, limited, err = c.post(ctx, payload)
+	c.recordRequest(c.now().Sub(sentAt), limited || err != nil)
 	if limited {
 		c.noteRateLimit()
 	}

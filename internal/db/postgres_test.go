@@ -27,17 +27,34 @@ func newMock(t *testing.T) (*Postgres, sqlmock.Sqlmock) {
 	return p, mock
 }
 
+func TestPostgresStats(t *testing.T) {
+	p, mock := newMock(t)
+	mock.ExpectPing()
+	if err := p.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectPing().WillReturnError(errBoom)
+	if err := p.Ping(context.Background()); !errors.Is(err, errBoom) {
+		t.Fatalf("Ping error = %v", err)
+	}
+	st := p.Stats()
+	if st.Operations != 2 || st.Errors != 1 || st.TotalLatency < 0 || st.LastLatency < 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
 var (
-	now       = time.Date(2026, 9, 6, 7, 20, 0, 0, time.UTC)
-	errBoom   = errors.New("boom")
-	blockCols = []string{"chain_id", "number", "hash", "parent_hash", "ts", "gas_used", "base_fee", "l1_block", "tx_count", "backlogs", "constraint_bips", "exponent_bips", "predicted_base_fee", "min_base_fee", "anchored", "pricing_version"}
-	netCols   = []string{"chain_id", "name", "display_name", "explorer_url", "enabled", "head_block", "head_at", "last_sample_at", "last_error", "updated_at"}
-	bucketCol = []string{"chain_id", "resolution", "bucket_start", "blocks", "gas_used", "fees_wei", "base_fee_min", "base_fee_avg", "base_fee_max", "base_fee_sum", "exponent_end_bips", "backlogs_end", "backlogs_max", "constraint_bips_end", "min_base_fee", "floor_fees_wei", "surplus_fees_wei", "constraint_set_id", "replay_error_bips", "last_block", "pricing_version"}
-	sampleCol = []string{"chain_id", "sampled_at", "block_number", "base_fee", "min_base_fee", "constraints", "legacy", "prices", "l1", "accounts"}
+	now        = time.Date(2026, 9, 6, 7, 20, 0, 0, time.UTC)
+	errBoom    = errors.New("boom")
+	blockCols  = []string{"chain_id", "number", "hash", "parent_hash", "ts", "gas_used", "poster_gas", "base_fee", "l1_block", "tx_count", "backlogs", "constraint_bips", "exponent_bips", "predicted_base_fee", "min_base_fee", "anchored", "pricing_version"}
+	netCols    = []string{"chain_id", "name", "display_name", "explorer_url", "enabled", "head_block", "head_at", "last_sample_at", "last_error", "updated_at"}
+	bucketCol  = []string{"chain_id", "resolution", "bucket_start", "blocks", "gas_used", "poster_gas", "fees_wei", "poster_fees_wei", "base_fee_min", "base_fee_avg", "base_fee_max", "base_fee_sum", "exponent_end_bips", "backlogs_end", "backlogs_max", "constraint_bips_end", "min_base_fee", "floor_fees_wei", "surplus_fees_wei", "constraint_set_id", "replay_error_bips", "last_block", "pricing_version"}
+	sampleCol  = []string{"chain_id", "sampled_at", "block_number", "base_fee", "min_base_fee", "constraints", "legacy", "prices", "l1", "accounts"}
+	missingCol = []string{"chain_id", "from_block", "to_block", "detected_at", "lifecycle", "reason", "cursor", "replay_state", "folded", "retry_count", "last_attempt_at", "next_retry_at", "last_error", "predecessor_at", "successor_at", "cursor_at", "created_at", "updated_at"}
 )
 
 func blockRow() *sqlmock.Rows {
-	return sqlmock.NewRows(blockCols).AddRow(4663, 100, "0xh", "0xp", now, 1000, "20000000", 5, 2, "{1,18446744073709551615}", "{3,31}", 34, "20000001", "20000000", true, 1)
+	return sqlmock.NewRows(blockCols).AddRow(4663, 100, "0xh", "0xp", now, 1000, 7, "20000000", 5, 2, "{1,18446744073709551615}", "{3,31}", 34, "20000001", "20000000", true, 1)
 }
 
 func TestPostgresQueries(t *testing.T) {
@@ -122,9 +139,9 @@ func TestPostgresQueries(t *testing.T) {
 	if bs, err := p.BlocksBetween(ctx, 4663, now, now); err != nil || len(bs) != 1 {
 		t.Fatalf("BlocksBetween: %+v %v", bs, err)
 	}
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(gas_used\\)").WillReturnRows(sqlmock.NewRows([]string{"sum"}).AddRow(12345))
-	if g, err := p.GasUsedBetween(ctx, 4663, now, now); err != nil || g != 12345 {
-		t.Fatalf("GasUsedBetween: %d %v", g, err)
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(gas_used\\), 0\\)").WillReturnRows(sqlmock.NewRows([]string{"total", "compute"}).AddRow(13000, 12345))
+	if total, compute, err := p.GasBetween(ctx, 4663, now, now); err != nil || total != 13000 || compute == nil || *compute != 12345 {
+		t.Fatalf("GasBetween: %d %v %v", total, compute, err)
 	}
 	mock.ExpectQuery("SELECT number FROM blocks WHERE chain_id = \\$1 AND tx_count = 2").WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(7).AddRow(9))
 	if nums, err := p.TwoTxBlocks(ctx, 4663, 0, 10); err != nil || len(nums) != 2 || nums[1] != 9 {
@@ -139,8 +156,7 @@ func TestPostgresQueries(t *testing.T) {
 	if err := p.FoldBuckets(ctx, []Bucket{{ChainID: 4663, Resolution: "1m", BucketStart: now, Blocks: 1, FeesWei: WeiFromUint64(1), BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1), BacklogsEnd: Uint64Array{1}, BacklogsMax: Uint64Array{1}}}); err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectExec("WITH w AS").WithArgs(4663, "1m", now, now.Add(time.Minute), "9223372036854775807").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("DELETE FROM buckets WHERE chain_id = \\$1 AND resolution = \\$2 AND bucket_start = \\$3").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("WITH requested AS").WithArgs(4663, "1m", int64(60), sqlmock.AnyArg(), "9223372036854775807").WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := p.RebuildBuckets(ctx, 4663, "1m", []time.Time{now}); err != nil {
 		t.Fatal(err)
 	}
@@ -151,17 +167,17 @@ func TestPostgresQueries(t *testing.T) {
 	if n, err := p.DeleteBucketsBefore(ctx, 4663, now); err != nil || n != 4 {
 		t.Fatalf("DeleteBucketsBefore: %d %v", n, err)
 	}
-	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, "5", "1", "2", "3", "20", 34, "{1,2}", "{3,4}", "{5,6}", "7", "8", "9", 1, 50, 100, 1))
+	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, 0, "5", "0", "1", "2", "3", "20", 34, "{1,2}", "{3,4}", "{5,6}", "7", "8", "9", 1, 50, 100, 1))
 	bk, err := p.Buckets(ctx, 4663, "1m", now, now)
 	if err != nil || len(bk) != 1 || bk[0].BacklogsMax[1] != 4 || bk[0].ConstraintSetID.Int64 != 1 || bk[0].LastBlock != 100 {
 		t.Fatalf("Buckets: %+v %v", bk, err)
 	}
-	if bk[0].BaseFeeSum.Wei.Int64() != 20 || bk[0].ConstraintBipsEnd[1] != 6 || bk[0].MinBaseFee.Wei.Int64() != 7 || bk[0].FloorFeesWei.Wei.Int64() != 8 || bk[0].SurplusFeesWei.Wei.Int64() != 9 {
+	if bk[0].BaseFeeSum.Wei.Int64() != 20 || !bk[0].PosterGas.Valid || bk[0].PosterFeesWei.Wei.Sign() != 0 || bk[0].ConstraintBipsEnd[1] != 6 || bk[0].MinBaseFee.Wei.Int64() != 7 || bk[0].FloorFeesWei.Wei.Int64() != 8 || bk[0].SurplusFeesWei.Wei.Int64() != 9 {
 		t.Fatalf("Buckets new fields: %+v", bk[0])
 	}
 	// A bucket written before the sum and fee split existed scans as
 	// unknown, not zero, and a NULL exponent array as nil.
-	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, "5", "1", "2", "3", nil, 34, "{1,2}", "{3,4}", nil, nil, nil, nil, 1, 50, 100, 0))
+	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, nil, "5", nil, "1", "2", "3", nil, 34, "{1,2}", "{3,4}", nil, nil, nil, nil, 1, 50, 100, 0))
 	bk, err = p.Buckets(ctx, 4663, "1m", now, now)
 	if err != nil || len(bk) != 1 || bk[0].BaseFeeSum.Valid || bk[0].FloorFeesWei.Valid || bk[0].SurplusFeesWei.Valid || bk[0].ConstraintBipsEnd != nil {
 		t.Fatalf("Buckets unknown fields: %+v %v", bk, err)
@@ -196,21 +212,51 @@ func TestPostgresQueries(t *testing.T) {
 		t.Fatalf("DeleteStateSamplesAfter: %d %v", n, err)
 	}
 
+	mock.ExpectQuery("SELECT .* FROM missing_ranges WHERE chain_id = \\$1 ORDER BY").WillReturnRows(sqlmock.NewRows(missingCol).AddRow(
+		4663, 100, 199, now.Add(-time.Hour), "retrying", "catch up limit", 150, []byte(`{"block":149}`), 150, 2,
+		now.Add(-time.Minute), now.Add(time.Minute), "rpc busy", now.Add(-2*time.Hour), now, now.Add(-time.Minute), now.Add(-time.Hour), now,
+	))
+	ranges, err := p.MissingRanges(ctx, 4663)
+	if err != nil || len(ranges) != 1 || ranges[0].Cursor != 150 || ranges[0].RetryCount != 2 || string(ranges[0].ReplayState) != `{"block":149}` || !ranges[0].SuccessorAt.Valid {
+		t.Fatalf("MissingRanges: %+v %v", ranges, err)
+	}
+	mock.ExpectExec("DELETE FROM missing_ranges WHERE chain_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO missing_ranges").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.ReplaceMissingRanges(ctx, 4663, ranges); err != nil {
+		t.Fatalf("ReplaceMissingRanges: %v", err)
+	}
+	// Every row of a replacement goes in one statement, so the chain lock is
+	// not held for a round trip per range.
+	second := ranges[0]
+	second.From, second.To = 300, 399
+	mock.ExpectExec("DELETE FROM missing_ranges WHERE chain_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO missing_ranges .* VALUES \(\$1, .*COALESCE\(\$17, now\(\)\), now\(\)\), \(\$18, .*COALESCE\(\$34, now\(\)\), now\(\)\)`).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	if err := p.ReplaceMissingRanges(ctx, 4663, append(ranges, second)); err != nil {
+		t.Fatalf("ReplaceMissingRanges batched: %v", err)
+	}
+	mock.ExpectExec("DELETE FROM missing_ranges WHERE chain_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO missing_ranges").WillReturnError(errBoom)
+	if err := p.ReplaceMissingRanges(ctx, 4663, ranges); err == nil {
+		t.Fatal("ReplaceMissingRanges insert error")
+	}
+
 	mock.ExpectExec("INSERT INTO owner_actions").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO owner_actions").WillReturnResult(sqlmock.NewResult(0, 0))
-	if n, err := p.InsertOwnerActions(ctx, []OwnerAction{{TxHash: "a", Args: JSONB(`{}`)}, {TxHash: "b", Args: JSONB(`{}`)}}); err != nil || n != 1 {
+	mock.ExpectExec("UPDATE owner_actions SET tx_index").WillReturnResult(sqlmock.NewResult(0, 1))
+	if n, err := p.InsertOwnerActions(ctx, []OwnerAction{{TxHash: "a", Args: JSONB(`{}`)}, {TxHash: "b", TxIndex: sql.NullInt64{Int64: 2, Valid: true}, Args: JSONB(`{}`)}}); err != nil || n != 1 {
 		t.Fatalf("InsertOwnerActions: %d %v", n, err)
 	}
-	oaCols := []string{"chain_id", "block_number", "tx_hash", "log_index", "ts", "method", "selector", "args"}
-	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 AND ts >= \\$2 AND ts < \\$3 ORDER BY .* LIMIT \\$4").WillReturnRows(sqlmock.NewRows(oaCols).AddRow(4663, 1, "0x", 0, now, "m", "0x1", []byte(`{}`)))
-	if as, err := p.OwnerActions(ctx, 4663, now, now, 5); err != nil || len(as) != 1 {
+	oaCols := []string{"chain_id", "block_number", "tx_hash", "tx_index", "log_index", "ts", "method", "selector", "args"}
+	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 AND ts >= \\$2 AND ts < \\$3 ORDER BY .* LIMIT \\$4").WillReturnRows(sqlmock.NewRows(oaCols).AddRow(4663, 1, "0x", 2, 0, now, "m", "0x1", []byte(`{}`)))
+	if as, err := p.OwnerActions(ctx, 4663, now, now, 5); err != nil || len(as) != 1 || as[0].TxIndex.Int64 != 2 {
 		t.Fatalf("OwnerActions: %+v %v", as, err)
 	}
 	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 ORDER BY").WillReturnRows(sqlmock.NewRows(oaCols))
 	if as, err := p.OwnerActions(ctx, 4663, time.Time{}, time.Time{}, 0); err != nil || len(as) != 0 {
 		t.Fatalf("OwnerActions unbounded: %+v %v", as, err)
 	}
-	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 AND block_number >= \\$2 ORDER BY block_number ASC").WithArgs(4663, 5).WillReturnRows(sqlmock.NewRows(oaCols).AddRow(4663, 6, "0x", 0, now, "m", "0x1", []byte(`{}`)))
+	mock.ExpectQuery("SELECT .* FROM owner_actions WHERE chain_id = \\$1 AND block_number >= \\$2 ORDER BY block_number ASC").WithArgs(4663, 5).WillReturnRows(sqlmock.NewRows(oaCols).AddRow(4663, 6, "0x", nil, 0, now, "m", "0x1", []byte(`{}`)))
 	if as, err := p.OwnerActionsSince(ctx, 4663, 5); err != nil || len(as) != 1 || as[0].BlockNumber != 6 {
 		t.Fatalf("OwnerActionsSince: %+v %v", as, err)
 	}
@@ -238,9 +284,11 @@ func TestPostgresQueries(t *testing.T) {
 	if err := p.UpsertBatchReports(ctx, []BatchReport{{ChainID: 4663, BlockNumber: 1, BatchTS: now, L1BaseFee: WeiFromUint64(1), WeiSpent: WeiFromUint64(1)}}); err != nil {
 		t.Fatal(err)
 	}
-	brCols := []string{"chain_id", "block_number", "batch_number", "batch_ts", "poster", "calldata_len", "calldata_nonzero", "extra_gas", "l1_base_fee", "gas_spent", "wei_spent"}
-	mock.ExpectQuery("SELECT .* FROM batch_reports WHERE chain_id = \\$1 AND batch_ts >= \\$2 AND batch_ts < \\$3 ORDER BY batch_ts ASC, block_number ASC").WillReturnRows(sqlmock.NewRows(brCols).AddRow(4663, 1, 2, now, "0xp", 3, 4, 5, "6", 7, "8"))
-	if rs, err := p.BatchReports(ctx, 4663, now, now); err != nil || len(rs) != 1 || rs[0].WeiSpent.Int64() != 8 {
+	brCols := []string{"chain_id", "block_number", "batch_number", "batch_ts", "poster", "calldata_len", "calldata_nonzero", "extra_gas", "l1_base_fee",
+		"attributed_gas_spent", "attributed_wei_spent", "report_version", "arbos_version", "per_batch_gas_charge", "parent_gas_floor_per_token", "cost_calculation_version"}
+	mock.ExpectQuery("SELECT .* FROM batch_reports WHERE chain_id = \\$1 AND batch_ts >= \\$2 AND batch_ts < \\$3 AND cost_calculation_version = 1 ORDER BY batch_ts ASC, block_number ASC").
+		WillReturnRows(sqlmock.NewRows(brCols).AddRow(4663, 1, 2, now, "0xp", 3, 4, 5, "6", 7, "8", 2, 61, 210_000, 10, 1))
+	if rs, err := p.BatchReports(ctx, 4663, now, now); err != nil || len(rs) != 1 || rs[0].WeiSpent.Int64() != 8 || rs[0].ReportVersion != 2 || rs[0].ArbOSVersion != 61 || rs[0].PerBatchGasCharge != 210_000 || rs[0].ParentGasFloorPerToken != 10 || rs[0].CostCalculationVersion != 1 {
 		t.Fatalf("BatchReports: %+v %v", rs, err)
 	}
 	mock.ExpectQuery("SELECT to_timestamp").WithArgs(4663, now, now, int64(900)).WillReturnRows(sqlmock.NewRows([]string{"t", "batches", "gas_spent", "wei_spent", "l1_base_fee_avg", "calldata_bytes"}).AddRow(now, 3, 100, "200", "50", 400))
@@ -299,7 +347,7 @@ func TestPostgresErrors(t *testing.T) {
 		{"RecentBlocks", true, func() error { _, err := p.RecentBlocks(ctx, 1, 1); return err }},
 		{"BlocksAfter", true, func() error { _, err := p.BlocksAfter(ctx, 1, 1, 1); return err }},
 		{"BlocksBetween", true, func() error { _, err := p.BlocksBetween(ctx, 1, now, now); return err }},
-		{"GasUsedBetween", true, func() error { _, err := p.GasUsedBetween(ctx, 1, now, now); return err }},
+		{"GasBetween", true, func() error { _, _, err := p.GasBetween(ctx, 1, now, now); return err }},
 		{"TwoTxBlocks", true, func() error { _, err := p.TwoTxBlocks(ctx, 1, 1, 1); return err }},
 		{"PruneBlocks", false, func() error { _, err := p.PruneBlocks(ctx, 1, now); return err }},
 		{"FoldBuckets", false, func() error { return p.FoldBuckets(ctx, []Bucket{{}}) }},
@@ -311,6 +359,8 @@ func TestPostgresErrors(t *testing.T) {
 		{"L1Samples", true, func() error { _, err := p.L1Samples(ctx, 1, now, now, 0); return err }},
 		{"PruneStateSamples", false, func() error { _, err := p.PruneStateSamples(ctx, 1, now); return err }},
 		{"DeleteStateSamplesAfter", false, func() error { _, err := p.DeleteStateSamplesAfter(ctx, 1, 1); return err }},
+		{"MissingRanges", true, func() error { _, err := p.MissingRanges(ctx, 1); return err }},
+		{"ReplaceMissingRanges", false, func() error { return p.ReplaceMissingRanges(ctx, 1, nil) }},
 		{"InsertOwnerActions", false, func() error { _, err := p.InsertOwnerActions(ctx, []OwnerAction{{}}); return err }},
 		{"OwnerActions", true, func() error { _, err := p.OwnerActions(ctx, 1, now, now, 1); return err }},
 		{"OwnerActionsSince", true, func() error { _, err := p.OwnerActionsSince(ctx, 1, 1); return err }},
@@ -341,11 +391,77 @@ func TestPostgresErrors(t *testing.T) {
 	if err := p.Ping(ctx); !errors.Is(err, errBoom) {
 		t.Errorf("Ping: %v", err)
 	}
-	// The rebuild's empty-bucket delete can fail on its own.
-	mock.ExpectExec("WITH w AS").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("DELETE FROM buckets").WillReturnError(errBoom)
-	if err := p.RebuildBuckets(ctx, 1, "1m", []time.Time{now}); !errors.Is(err, errBoom) {
-		t.Errorf("RebuildBuckets delete: %v", err)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPostgresSetBasedRoundTrips pins the measured statement and transaction
+// count for a normal 100-row collector batch. The three write methods use one
+// statement each inside the caller's single transaction. The previous loops
+// used 100 block statements, 100 fold statements and 200 rebuild statements.
+func TestPostgresSetBasedRoundTrips(t *testing.T) {
+	p, mock := newMock(t)
+	ctx := context.Background()
+	const rows = 100
+	blocks := make([]Block, rows)
+	buckets := make([]Bucket, rows)
+	starts := make([]time.Time, rows)
+	for i := range rows {
+		start := now.Add(time.Duration(i) * time.Minute)
+		starts[i] = start
+		blocks[i] = Block{ChainID: 4663, Number: uint64(i + 1), TS: start, BaseFee: WeiFromUint64(1), PredictedBaseFee: WeiFromUint64(1)}
+		buckets[i] = Bucket{ChainID: 4663, Resolution: Resolution1m, BucketStart: start, Blocks: 1,
+			FeesWei: WeiFromUint64(1), BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1)}
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO blocks .*\\$1700").WillReturnResult(sqlmock.NewResult(0, rows))
+	mock.ExpectExec("INSERT INTO buckets .*\\$2300").WillReturnResult(sqlmock.NewResult(0, rows))
+	mock.ExpectExec("WITH requested AS .*unnest\\(\\$4::TIMESTAMPTZ\\[\\]\\)").WillReturnResult(sqlmock.NewResult(0, rows))
+	mock.ExpectCommit()
+	if err := p.WithChainTx(ctx, 4663, func(s Store) error {
+		if err := s.UpsertBlocks(ctx, blocks); err != nil {
+			return err
+		}
+		if err := s.FoldBuckets(ctx, buckets); err != nil {
+			return err
+		}
+		return s.RebuildBuckets(ctx, 4663, Resolution1m, starts)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPostgresDuplicateConflictKeys(t *testing.T) {
+	p, mock := newMock(t)
+	ctx := context.Background()
+	block := Block{ChainID: 4663, Number: 1, TS: now, BaseFee: WeiFromUint64(1), PredictedBaseFee: WeiFromUint64(1)}
+	mock.ExpectExec("INSERT INTO blocks").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO blocks").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.UpsertBlocks(ctx, []Block{block, block}); err != nil {
+		t.Fatal(err)
+	}
+
+	bucket := Bucket{ChainID: 4663, Resolution: Resolution1m, BucketStart: now, Blocks: 1,
+		FeesWei: WeiFromUint64(1), BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1)}
+	mock.ExpectExec("INSERT INTO buckets").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO buckets").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.FoldBuckets(ctx, []Bucket{bucket, bucket}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.UpsertBlocks(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.FoldBuckets(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RebuildBuckets(ctx, 4663, Resolution1m, nil); err != nil {
+		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

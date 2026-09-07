@@ -27,7 +27,7 @@ import {
 } from "./smoothing";
 
 function block(number: number, ts: number, backlogs: number[]): BlockPoint {
-  return { number, ts, gasUsed: 4_000_000, baseFee: "399726000", predictedBaseFee: "399726000", backlogs, constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: false };
+  return { number, ts, gasUsed: 4_000_000, posterGas: 0, baseFee: "399726000", predictedBaseFee: "399726000", backlogs, constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: false };
 }
 
 const snapshot: LiveSnapshot = {
@@ -45,6 +45,7 @@ const snapshot: LiveSnapshot = {
   ],
   prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "379726000", perArbGasTotal: "399726000" },
   gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
+  computeGasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
   replayErrorBips: 2,
   ethUsd: null,
 };
@@ -125,7 +126,7 @@ describe("averageBacklog and sawtoothSamples", () => {
     expect(sawtoothSamples(blocks, 5, 1000)).toEqual([]);
   });
 
-  it("places the sawtooth on a clock-anchored axis and carries the trailing average with it", () => {
+  it("places the sawtooth on a clock-anchored axis", () => {
     const samples = sawtoothSamples(blocks, 0, 1000);
     // The wall clock at the start of the second after the newest block.
     const chart = sawtoothChart(samples, 1_001_000);
@@ -137,12 +138,8 @@ describe("averageBacklog and sawtoothSamples", () => {
     expect(chart[chart.length - 1].x).toBeCloseTo(-0.1);
     expect(chart.every((p, i) => i === 0 || p.x > chart[i - 1].x)).toBe(true);
     expect(chart[chart.length - 1]).toMatchObject({ number: 200, gasUsed: 4_000_000, backlog: 40_000_000 });
-    // The average is the same 2 s per-block mean the card's figure shows.
-    expect(chart[chart.length - 1].average).toBe(averageBacklog(blocks, 0, 1000));
-    // The first sample has only its own second to average over.
-    expect(chart[0].average).toBe(4_000_000);
-    // A single block sits at the start of its second, and its average is itself.
-    expect(sawtoothChart([{ number: 1, ts: 1000, gasUsed: 5, backlog: 7 }], 1_001_000)).toEqual([{ x: -1, number: 1, ts: 1000, gasUsed: 5, backlog: 7, average: 7 }]);
+    // A single block sits at the start of its second.
+    expect(sawtoothChart([{ number: 1, ts: 1000, gasUsed: 5, backlog: 7 }], 1_001_000)).toEqual([{ x: -1, number: 1, ts: 1000, gasUsed: 5, backlog: 7 }]);
     expect(sawtoothChart([], 1000)).toEqual([]);
   });
 
@@ -227,7 +224,7 @@ describe("tweenValues", () => {
   const target = targetValues(snapshot, blocks, 0);
 
   it("eases every field toward the target and returns the same object when nothing moves", () => {
-    const start = targetValues({ ...snapshot, baseFee: "200000000", multiplierBips: 100_000, exponentBips: 20_000, gasPerSecond: { s10: 1, s60: 2 } }, [], 0);
+    const start = targetValues({ ...snapshot, baseFee: "200000000", multiplierBips: 100_000, exponentBips: 20_000, gasPerSecond: { s10: 1, s60: 2 }, computeGasPerSecond: { s10: 1, s60: 2 } }, [], 0);
     const mid = tweenValues(start, target, 300);
     const k = 1 - Math.exp(-1);
     expect(mid.baseFeeGwei).toBeCloseTo(0.2 + (0.399726 - 0.2) * k);

@@ -45,6 +45,7 @@ type Block struct {
 	ParentHash       string        `db:"parent_hash"`
 	TS               time.Time     `db:"ts"`
 	GasUsed          uint64        `db:"gas_used"`
+	PosterGas        sql.NullInt64 `db:"poster_gas"`
 	BaseFee          Wei           `db:"base_fee"`
 	L1Block          uint64        `db:"l1_block"`
 	TxCount          int           `db:"tx_count"`
@@ -60,6 +61,12 @@ type Block struct {
 // Known reports whether the block carries the full pricing breakdown, so
 // its floor and fee split are exact rather than unknown history.
 func (b Block) Known() bool { return b.PricingVersion >= PricingFull && b.MinBaseFee.Valid }
+
+// DestinationsKnown reports whether the block has both the pricing floor
+// and authoritative receipt poster gas needed for an exact fee allocation.
+func (b Block) DestinationsKnown() bool {
+	return b.Known() && b.PosterGas.Valid && b.PosterGas.Int64 >= 0 && uint64(b.PosterGas.Int64) <= b.GasUsed
+}
 
 // Bucket resolutions.
 const (
@@ -79,17 +86,18 @@ var Resolutions = map[string]time.Duration{
 // the stored row: counters and sums add, min/max combine, the average is
 // derived from the exact sum, and the *_end fields are replaced.
 // RebuildBuckets instead recomputes a row from the block rows in its
-// window. BaseFeeSum, ConstraintBipsEnd, MinBaseFee, FloorFeesWei and
-// SurplusFeesWei are unknown (NULL, nil) for rows written before they were
-// recorded and for any window holding one such block; a fold into such a
-// row keeps them unknown.
+// window. Pricing fields are unknown for rows written before they were
+// recorded. PosterGas and all three destination sums are independently
+// unknown for any window whose source blocks lack authoritative receipts.
 type Bucket struct {
 	ChainID           uint64        `db:"chain_id"`
 	Resolution        string        `db:"resolution"`
 	BucketStart       time.Time     `db:"bucket_start"`
 	Blocks            int64         `db:"blocks"`
 	GasUsed           uint64        `db:"gas_used"`
+	PosterGas         sql.NullInt64 `db:"poster_gas"`
 	FeesWei           Wei           `db:"fees_wei"`
+	PosterFeesWei     NullWei       `db:"poster_fees_wei"`
 	BaseFeeMin        Wei           `db:"base_fee_min"`
 	BaseFeeAvg        Wei           `db:"base_fee_avg"`
 	BaseFeeMax        Wei           `db:"base_fee_max"`
@@ -107,8 +115,7 @@ type Bucket struct {
 	// and the constraint set are only replaced by folds with a higher one.
 	LastBlock uint64 `db:"last_block"`
 	// PricingVersion is the lowest version of the blocks folded in:
-	// PricingUnknown as soon as one of them lacks the breakdown, which is
-	// what makes the fee split unknown for the whole bucket.
+	// PricingUnknown as soon as one of them lacks the pricing breakdown.
 	PricingVersion int16 `db:"pricing_version"`
 }
 
@@ -126,16 +133,46 @@ type StateSample struct {
 	Accounts    JSONB     `db:"accounts"`
 }
 
+// MissingRange is a durable interval the collector has not indexed yet.
+// Lifecycle is pending, retrying or blocked. Cursor is the first block still
+// missing, or zero before recovery starts. ReplayState describes Cursor-1 and
+// CursorAt is its timestamp, so recovery can resume after block retention and
+// the API can map the remaining suffix to time buckets without decoding the
+// replay state. PredecessorAt and SuccessorAt bound the original interval when
+// those neighboring blocks were observed. DetectedAt is the range's age
+// anchor. Retry fields survive restarts and make delayed work visible.
+type MissingRange struct {
+	ChainID       uint64         `db:"chain_id"`
+	From          uint64         `db:"from_block"`
+	To            uint64         `db:"to_block"`
+	DetectedAt    time.Time      `db:"detected_at"`
+	Lifecycle     string         `db:"lifecycle"`
+	Reason        string         `db:"reason"`
+	Cursor        uint64         `db:"cursor"`
+	ReplayState   JSONB          `db:"replay_state"`
+	Folded        uint64         `db:"folded"`
+	RetryCount    uint64         `db:"retry_count"`
+	LastAttemptAt sql.NullTime   `db:"last_attempt_at"`
+	NextRetryAt   sql.NullTime   `db:"next_retry_at"`
+	LastError     sql.NullString `db:"last_error"`
+	PredecessorAt sql.NullTime   `db:"predecessor_at"`
+	SuccessorAt   sql.NullTime   `db:"successor_at"`
+	CursorAt      sql.NullTime   `db:"cursor_at"`
+	CreatedAt     time.Time      `db:"created_at"`
+	UpdatedAt     time.Time      `db:"updated_at"`
+}
+
 // OwnerAction is a row of the owner_actions table.
 type OwnerAction struct {
-	ChainID     uint64    `db:"chain_id"`
-	BlockNumber uint64    `db:"block_number"`
-	TxHash      string    `db:"tx_hash"`
-	LogIndex    int64     `db:"log_index"`
-	TS          time.Time `db:"ts"`
-	Method      string    `db:"method"`
-	Selector    string    `db:"selector"`
-	Args        JSONB     `db:"args"`
+	ChainID     uint64        `db:"chain_id"`
+	BlockNumber uint64        `db:"block_number"`
+	TxHash      string        `db:"tx_hash"`
+	TxIndex     sql.NullInt64 `db:"tx_index"`
+	LogIndex    int64         `db:"log_index"`
+	TS          time.Time     `db:"ts"`
+	Method      string        `db:"method"`
+	Selector    string        `db:"selector"`
+	Args        JSONB         `db:"args"`
 }
 
 // ConstraintSet is a row of the constraint_sets table.
@@ -150,17 +187,22 @@ type ConstraintSet struct {
 
 // BatchReport is a row of the batch_reports table.
 type BatchReport struct {
-	ChainID         uint64    `db:"chain_id"`
-	BlockNumber     uint64    `db:"block_number"`
-	BatchNumber     uint64    `db:"batch_number"`
-	BatchTS         time.Time `db:"batch_ts"`
-	Poster          string    `db:"poster"`
-	CalldataLen     uint64    `db:"calldata_len"`
-	CalldataNonzero uint64    `db:"calldata_nonzero"`
-	ExtraGas        uint64    `db:"extra_gas"`
-	L1BaseFee       Wei       `db:"l1_base_fee"`
-	GasSpent        uint64    `db:"gas_spent"`
-	WeiSpent        Wei       `db:"wei_spent"`
+	ChainID                uint64    `db:"chain_id"`
+	BlockNumber            uint64    `db:"block_number"`
+	BatchNumber            uint64    `db:"batch_number"`
+	BatchTS                time.Time `db:"batch_ts"`
+	Poster                 string    `db:"poster"`
+	CalldataLen            uint64    `db:"calldata_len"`
+	CalldataNonzero        uint64    `db:"calldata_nonzero"`
+	ExtraGas               uint64    `db:"extra_gas"`
+	L1BaseFee              Wei       `db:"l1_base_fee"`
+	GasSpent               uint64    `db:"attributed_gas_spent"`
+	WeiSpent               Wei       `db:"attributed_wei_spent"`
+	ReportVersion          int       `db:"report_version"`
+	ArbOSVersion           uint64    `db:"arbos_version"`
+	PerBatchGasCharge      int64     `db:"per_batch_gas_charge"`
+	ParentGasFloorPerToken uint64    `db:"parent_gas_floor_per_token"`
+	CostCalculationVersion int       `db:"cost_calculation_version"`
 }
 
 // BatchBucket is an aggregate of batch reports over a time step.
@@ -218,8 +260,9 @@ type Store interface {
 	BlocksAfter(ctx context.Context, chainID, after uint64, limit int) ([]Block, error)
 	// BlocksBetween returns blocks with from <= ts < to, ascending.
 	BlocksBetween(ctx context.Context, chainID uint64, from, to time.Time) ([]Block, error)
-	// GasUsedBetween sums gas_used over from < ts <= to.
-	GasUsedBetween(ctx context.Context, chainID uint64, from, to time.Time) (uint64, error)
+	// GasBetween sums total gas over from < ts <= to and returns the compute
+	// gas sum only when every source block has authoritative poster gas.
+	GasBetween(ctx context.Context, chainID uint64, from, to time.Time) (uint64, *uint64, error)
 	// TwoTxBlocks lists block numbers > after with exactly two transactions.
 	TwoTxBlocks(ctx context.Context, chainID, after uint64, limit int) ([]uint64, error)
 	PruneBlocks(ctx context.Context, chainID uint64, before time.Time) (int64, error)
@@ -252,6 +295,13 @@ type Store interface {
 	// DeleteStateSamplesAfter removes samples taken at blocks above block
 	// (a reorg rewind) and returns how many.
 	DeleteStateSamplesAfter(ctx context.Context, chainID, block uint64) (int64, error)
+
+	// MissingRanges lists every durable missing interval ordered by block.
+	MissingRanges(ctx context.Context, chainID uint64) ([]MissingRange, error)
+	// ReplaceMissingRanges replaces one chain's normalized set. Collector
+	// callers use the chain transaction so the delete and inserts are atomic
+	// and concurrent loops cannot erase a range another loop just recorded.
+	ReplaceMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error
 
 	// InsertOwnerActions inserts new actions, ignoring duplicates, and
 	// returns how many were new.

@@ -37,7 +37,7 @@ function ring(seconds: number, perSecond: number, lastTs = LAST_TS, gasUsed = 4_
   let n = 1;
   for (let ts = lastTs - seconds + 1; ts <= lastTs; ts++) {
     for (let k = 0; k < perSecond; k++) {
-      out.push({ number: n++, ts, gasUsed, baseFee: "399726000", predictedBaseFee: "399726000", backlogs: [], constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: k === 0 });
+      out.push({ number: n++, ts, gasUsed, posterGas: 0, baseFee: "399726000", predictedBaseFee: "399726000", backlogs: [], constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: k === 0 });
     }
   }
   return out;
@@ -306,6 +306,13 @@ describe("the live throughput series", () => {
     expect(points[0].x).toBeCloseTo(-2 - 2 / 3, 5);
   });
 
+  it("subtracts receipt poster gas and breaks on explicitly unknown history", () => {
+    const blocks = ring(5, 1).map((b) => ({ ...b, posterGas: 767 }));
+    expect(throughput(blocks, NOW_MS).map((p) => p.gas)).toEqual([3_999_233, 3_999_233, 3_999_233]);
+    const unknown = blocks.map((b, i): BlockPoint => ({ ...b, posterGas: i === 2 ? null : b.posterGas }));
+    expect(throughput(unknown, NOW_MS).map((p) => p.gas)).toEqual([3_999_233, null, 3_999_233]);
+  });
+
   it("leaves out the second that is still being delivered, however far behind the clock is", () => {
     // The newest second has three of its ten blocks so far, and the clock has
     // already moved past it: without the rule it would read as a chain that
@@ -342,6 +349,15 @@ describe("the live throughput series", () => {
     expect(points.map((p) => p.ts)).toEqual([LAST_TS - 3, LAST_TS - 2, LAST_TS - 1]);
     expect(points.map((p) => p.gas)).toEqual([8_000_000, null, 8_000_000]);
     expect(points.map((p) => p.blocks)).toEqual([2, null, 2]);
+  });
+
+  it("keeps known block counts when receipt poster gas is unavailable", () => {
+    const unknown = ring(5, 2).map((b) => (b.ts === LAST_TS - 2 ? { ...b, posterGas: null } : b));
+    const points = throughput(unknown, NOW_MS);
+    expect(points.map((p) => p.gas)).toEqual([8_000_000, null, 8_000_000]);
+    expect(points.map((p) => p.blocks)).toEqual([2, 2, 2]);
+    const oldApi = ring(5, 2).map((b) => ({ ...b, posterGas: undefined }));
+    expect(throughput(oldApi, NOW_MS).every((p) => p.gas === null)).toBe(true);
   });
 
   it("reaches back over the window and no further, and has nothing to say about an empty ring", () => {

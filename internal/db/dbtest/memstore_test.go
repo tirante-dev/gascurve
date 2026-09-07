@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -45,6 +46,21 @@ func TestMemStore(t *testing.T) {
 	if err := m.SetNetworkError(ctx, 1, "x"); err != nil {
 		t.Fatal(err)
 	}
+	ranges := []db.MissingRange{{ChainID: 99, From: 10, To: 20, DetectedAt: base, ReplayState: db.JSONB(`{"block":9}`)}}
+	if err := m.ReplaceMissingRanges(ctx, 1, ranges); err != nil {
+		t.Fatal(err)
+	}
+	ranges[0].ReplayState[0] = '['
+	gotRanges, err := m.MissingRanges(ctx, 1)
+	if err != nil || len(gotRanges) != 1 || gotRanges[0].ChainID != 1 || string(gotRanges[0].ReplayState) != `{"block":9}` {
+		t.Fatalf("missing ranges: %+v %v", gotRanges, err)
+	}
+	if err := m.ReplaceMissingRanges(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotRanges, _ := m.MissingRanges(ctx, 1); len(gotRanges) != 0 {
+		t.Fatalf("missing ranges were not cleared: %+v", gotRanges)
+	}
 	if n, _ := m.NetworkByRef(ctx, "a"); !n.LastError.Valid {
 		t.Fatal("error not set")
 	}
@@ -54,7 +70,11 @@ func TestMemStore(t *testing.T) {
 		if i == 3 {
 			txc = 2
 		}
-		if err := m.UpsertBlocks(ctx, []db.Block{{ChainID: 1, Number: i, TS: base.Add(time.Duration(i) * time.Second), GasUsed: i, TxCount: txc}}); err != nil {
+		posterGas := int64(0)
+		if i == 3 {
+			posterGas = 1
+		}
+		if err := m.UpsertBlocks(ctx, []db.Block{{ChainID: 1, Number: i, TS: base.Add(time.Duration(i) * time.Second), GasUsed: i, PosterGas: sql.NullInt64{Int64: posterGas, Valid: true}, TxCount: txc}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -79,8 +99,8 @@ func TestMemStore(t *testing.T) {
 	if bs, _ := m.BlocksBetween(ctx, 1, base.Add(2*time.Second), base.Add(4*time.Second)); len(bs) != 2 {
 		t.Fatal("between")
 	}
-	if g, _ := m.GasUsedBetween(ctx, 1, base.Add(time.Second), base.Add(3*time.Second)); g != 5 {
-		t.Fatalf("gas = %d", g)
+	if total, compute, _ := m.GasBetween(ctx, 1, base.Add(time.Second), base.Add(3*time.Second)); total != 5 || compute == nil || *compute != 4 {
+		t.Fatalf("gas = %d, compute = %v", total, compute)
 	}
 	if nums, _ := m.TwoTxBlocks(ctx, 1, 0, 10); len(nums) != 1 || nums[0] != 3 {
 		t.Fatal("two tx")
@@ -183,6 +203,11 @@ func TestMemStore(t *testing.T) {
 	if n, _ := m.InsertOwnerActions(ctx, acts); n != 0 {
 		t.Fatal("duplicate actions")
 	}
+	enriched := acts[0]
+	enriched.TxIndex = sql.NullInt64{Int64: 7, Valid: true}
+	if n, _ := m.InsertOwnerActions(ctx, []db.OwnerAction{enriched}); n != 0 || !m.ActionRows["1/a/0"].TxIndex.Valid || m.ActionRows["1/a/0"].TxIndex.Int64 != 7 {
+		t.Fatal("duplicate action transaction index enrichment")
+	}
 	if as, _ := m.OwnerActions(ctx, 1, time.Time{}, time.Time{}, 0); len(as) != 2 || as[0].LogIndex != 1 {
 		t.Fatal("actions order")
 	}
@@ -217,8 +242,9 @@ func TestMemStore(t *testing.T) {
 	}
 
 	reps := []db.BatchReport{
-		{ChainID: 1, BlockNumber: 1, BatchTS: base, GasSpent: 10, WeiSpent: db.WeiFromUint64(100), L1BaseFee: db.WeiFromUint64(10), CalldataLen: 5},
-		{ChainID: 1, BlockNumber: 2, BatchTS: base.Add(10 * time.Second), GasSpent: 20, WeiSpent: db.WeiFromUint64(200), L1BaseFee: db.WeiFromUint64(30), CalldataLen: 5},
+		{ChainID: 1, BlockNumber: 1, BatchTS: base, GasSpent: 10, WeiSpent: db.WeiFromUint64(100), L1BaseFee: db.WeiFromUint64(10), CalldataLen: 5, CostCalculationVersion: 1},
+		{ChainID: 1, BlockNumber: 2, BatchTS: base.Add(10 * time.Second), GasSpent: 20, WeiSpent: db.WeiFromUint64(200), L1BaseFee: db.WeiFromUint64(30), CalldataLen: 5, CostCalculationVersion: 1},
+		{ChainID: 1, BlockNumber: 3, BatchTS: base.Add(20 * time.Second), GasSpent: 999, WeiSpent: db.WeiFromUint64(999), L1BaseFee: db.WeiFromUint64(1), CalldataLen: 5},
 	}
 	_ = m.UpsertBatchReports(ctx, reps)
 	bb, _ := m.BatchBuckets(ctx, 1, base.Add(-time.Hour), base.Add(time.Hour), time.Minute)
@@ -332,7 +358,7 @@ func TestMemStoreFailures(t *testing.T) {
 	if err := m.Ping(ctx); !errors.Is(err, ErrInjected) {
 		t.Fatal("ping")
 	}
-	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasUsedBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
+	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
 	for _, n := range names {
 		m.FailOn[n] = true
 	}
@@ -346,16 +372,21 @@ func TestMemStoreFailures(t *testing.T) {
 			_, err := m.DeleteStateSamplesAfter(ctx, 1, 1)
 			return err
 		},
-		"UpdateConstraintSet": func() error { return m.UpdateConstraintSet(ctx, db.ConstraintSet{}) },
-		"UpsertNetwork":       func() error { return m.UpsertNetwork(ctx, db.Network{}) },
-		"Networks":            func() error { _, err := m.Networks(ctx); return err },
-		"NetworkByRef":        func() error { _, err := m.NetworkByRef(ctx, ""); return err },
-		"UpdateNetworkHead":   func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
-		"SetNetworkError":     func() error { return m.SetNetworkError(ctx, 1, "") },
-		"UpsertBlocks":        func() error { return m.UpsertBlocks(ctx, nil) },
-		"BlockByNumber":       func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
-		"DeleteBlocksAfter":   func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
-		"RebuildBuckets":      func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
+		"MissingRanges": func() error {
+			_, err := m.MissingRanges(ctx, 1)
+			return err
+		},
+		"ReplaceMissingRanges": func() error { return m.ReplaceMissingRanges(ctx, 1, nil) },
+		"UpdateConstraintSet":  func() error { return m.UpdateConstraintSet(ctx, db.ConstraintSet{}) },
+		"UpsertNetwork":        func() error { return m.UpsertNetwork(ctx, db.Network{}) },
+		"Networks":             func() error { _, err := m.Networks(ctx); return err },
+		"NetworkByRef":         func() error { _, err := m.NetworkByRef(ctx, ""); return err },
+		"UpdateNetworkHead":    func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
+		"SetNetworkError":      func() error { return m.SetNetworkError(ctx, 1, "") },
+		"UpsertBlocks":         func() error { return m.UpsertBlocks(ctx, nil) },
+		"BlockByNumber":        func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
+		"DeleteBlocksAfter":    func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
+		"RebuildBuckets":       func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
 		"DeleteBucketsBefore": func() error {
 			_, err := m.DeleteBucketsBefore(ctx, 1, now)
 			return err
@@ -368,7 +399,7 @@ func TestMemStoreFailures(t *testing.T) {
 		"RecentBlocks":       func() error { _, err := m.RecentBlocks(ctx, 1, 1); return err },
 		"BlocksAfter":        func() error { _, err := m.BlocksAfter(ctx, 1, 1, 1); return err },
 		"BlocksBetween":      func() error { _, err := m.BlocksBetween(ctx, 1, now, now); return err },
-		"GasUsedBetween":     func() error { _, err := m.GasUsedBetween(ctx, 1, now, now); return err },
+		"GasBetween":         func() error { _, _, err := m.GasBetween(ctx, 1, now, now); return err },
 		"TwoTxBlocks":        func() error { _, err := m.TwoTxBlocks(ctx, 1, 1, 1); return err },
 		"PruneBlocks":        func() error { _, err := m.PruneBlocks(ctx, 1, now); return err },
 		"FoldBuckets":        func() error { return m.FoldBuckets(ctx, nil) },

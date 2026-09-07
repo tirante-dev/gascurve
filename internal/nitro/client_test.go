@@ -56,6 +56,9 @@ func TestBatchOrderingAndUserAgent(t *testing.T) {
 	if c.Pacer() == nil {
 		t.Fatal("pacer")
 	}
+	if st := c.Stats(); st.Calls != 5 || st.Requests != 3 || st.Errors != 2 || st.TotalLatency < 0 {
+		t.Fatalf("request stats = %+v", st)
+	}
 }
 
 func TestRateLimitBackoff(t *testing.T) {
@@ -76,7 +79,7 @@ func TestRateLimitBackoff(t *testing.T) {
 		t.Fatalf("backoff sleeps = %v", sleeps)
 	}
 	st := c.Stats()
-	if st.RateLimitEvents != 3 || st.Last429At.IsZero() || st.Backoff != minBackoff || st.CallsLast10s != 2 {
+	if st.RateLimitEvents != 3 || st.Last429At.IsZero() || st.Backoff != minBackoff || st.CallsLast10s != 2 || st.Calls != 4 || st.Requests != 4 || st.Errors != 3 {
 		t.Fatalf("stats = %+v", st)
 	}
 	// Exhausting attempts returns ErrRateLimited; the back-off is capped.
@@ -452,3 +455,27 @@ func TestReservationRefundedOnCooldown(t *testing.T) {
 			p.Available(), before, f.requestCount(), requests)
 	}
 }
+
+// TestCallCountsByClass: every call is counted against the pacer class it
+// carried, so the collector can report the fast and bulk lanes apart.
+func TestCallCountsByClass(t *testing.T) {
+	f := newFakeRPC(t)
+	f.handlers["echo"] = echoHandler
+	c, _ := newTestClient(t, f, 100)
+	ctx := context.Background()
+	if _, err := c.Call(nitroFast(ctx), "echo", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(ctx, "echo", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Batch(ctx, []Request{{Method: "echo", Params: []any{"c"}}, {Method: "echo", Params: []any{"d"}}}); err != nil {
+		t.Fatal(err)
+	}
+	st := c.Stats()
+	if st.FastCalls != 1 || st.BulkCalls != 3 {
+		t.Fatalf("class counters = fast %d bulk %d, want 1 and 3", st.FastCalls, st.BulkCalls)
+	}
+}
+
+func nitroFast(ctx context.Context) context.Context { return WithClass(ctx, Fast) }

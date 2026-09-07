@@ -402,6 +402,9 @@ func TestPoolArchiveFailover(t *testing.T) {
 	if s, err := ar.FastSampleAt(ctx, 200); err != nil || s.Header.Number != 200 {
 		t.Fatalf("archive sample: %+v %v", s, err)
 	}
+	if l1, err := ar.L1SampleAt(ctx, 200); err != nil || l1.PerBatchGasCharge != 210_000 || l1.ParentGasFloorPerToken != 10 {
+		t.Fatalf("archive L1 sample: %+v %v", l1, err)
+	}
 	// Ordinary calls stay on the primary while the archive path uses its
 	// own endpoint: a capability is routed by capability.
 	if p.ActiveEndpoint() != 0 {
@@ -410,8 +413,11 @@ func TestPoolArchiveFailover(t *testing.T) {
 	// The archive endpoint goes down: the path moves to the next one and
 	// rebinds there.
 	first.server.Close()
+	if l1, err := ar.L1SampleAt(ctx, 201); err != nil || l1.ArbOSVersion != 61 {
+		t.Fatalf("archive L1 failover: %+v %v", l1, err)
+	}
 	if s, err := ar.FastSampleAt(ctx, 201); err != nil || s.Header.Number != 201 {
-		t.Fatalf("archive failover: %+v %v", s, err)
+		t.Fatalf("archive sample after failover: %+v %v", s, err)
 	}
 	if ar.Endpoint().Index() != 3 || p.Failovers() != 0 {
 		t.Fatalf("rebinding: endpoint=%d failovers=%d", ar.Endpoint().Index(), p.Failovers())
@@ -535,9 +541,9 @@ func TestEndpointBatchCap(t *testing.T) {
 	if err != nil || len(hs) != 100 || hs[99].Number != 199 {
 		t.Fatalf("headers: %d %v", len(hs), err)
 	}
-	// After eth_chainId: 100 items rejected, then two batches of 50 after
-	// the 2 s back-off.
-	if e.BatchCap() != 50 || f.requestCount() != 4 || fmt.Sprint(clock.Sleeps()) != "[2s]" {
+	// After eth_chainId: 100 items rejected, then four batches of 50 after
+	// the 2 s back-off (one header and one receipt call per block).
+	if e.BatchCap() != 50 || f.requestCount() != 6 || fmt.Sprint(clock.Sleeps()) != "[2s]" {
 		t.Fatalf("after 429: cap=%d requests=%d sleeps=%v", e.BatchCap(), f.requestCount(), clock.Sleeps())
 	}
 	// No recovery before a successful minute has passed.
@@ -618,11 +624,17 @@ func TestPoolTypedCalls(t *testing.T) {
 	if logs, err := p.OwnerActsLogs(ctx, 0, 100); err != nil || len(logs) != 1 {
 		t.Fatalf("OwnerActsLogs: %v %v", logs, err)
 	}
+	if receipts, err := p.TransactionReceipts(ctx, []string{"0x01"}); err != nil || len(receipts) != 1 || receipts[0].GasUsed != 3 {
+		t.Fatalf("TransactionReceipts: %v %v", receipts, err)
+	}
 	if bal, err := p.Balance(ctx, "0x1"); err != nil || bal.Int64() != 100 {
 		t.Fatalf("Balance: %s %v", bal, err)
 	}
 	if l1, err := p.L1Sample(ctx); err != nil || l1.RewardRate != 10 {
 		t.Fatalf("L1Sample: %+v %v", l1, err)
+	}
+	if l1, err := p.L1SampleAt(ctx, 100); err != nil || l1.ArbOSVersion != 61 {
+		t.Fatalf("L1SampleAt: %+v %v", l1, err)
 	}
 	if acc, err := p.FeeAccounts(ctx); err != nil || acc.Network.Balance.Int64() != 100 {
 		t.Fatalf("FeeAccounts: %+v %v", acc, err)
@@ -701,9 +713,9 @@ func TestEndpointBatchCapJSONRPC(t *testing.T) {
 	if err != nil || len(hs) != 100 || hs[99].Number != 199 {
 		t.Fatalf("headers: %d %v", len(hs), err)
 	}
-	// After eth_chainId: 100 items rejected by one item's error, then two
-	// batches of 50 after the 2 s back-off.
-	if e.BatchCap() != 50 || f.requestCount() != 4 || fmt.Sprint(clock.Sleeps()) != "[2s]" || p.Stats().RateLimitEvents != 1 {
+	// After eth_chainId: 200 header and receipt items rejected in two
+	// batches, then four batches of 50 after the 2 s back-off.
+	if e.BatchCap() != 50 || f.requestCount() != 6 || fmt.Sprint(clock.Sleeps()) != "[2s]" || p.Stats().RateLimitEvents != 1 {
 		t.Fatalf("after a JSON-RPC limit: cap=%d requests=%d sleeps=%v stats=%+v", e.BatchCap(), f.requestCount(), clock.Sleeps(), p.Stats())
 	}
 	// A persistent limit at the floor is an endpoint failure.
@@ -849,4 +861,35 @@ func TestPoolWSHealthRebinds(t *testing.T) {
 	var none *WSLease
 	none.Connected()
 	none.Failed(true, errors.New("x"))
+}
+
+// TestPoolStatusCarriesObservableCounters: the routing state reports each
+// endpoint's own throttling count and the pool's aggregate call counts per
+// pacer class, and never a URL.
+func TestPoolStatusCarriesObservableCounters(t *testing.T) {
+	ctx := context.Background()
+	a, b := chainFake(t, testChainIDHex), chainFake(t, testChainIDHex)
+	clock := newFakeClock()
+	p := newTestPool(t, clock, 30*time.Second, endpointOf(a, 100), endpointOf(b, 100))
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a.fail(http.StatusTooManyRequests)
+	echoVia(t, p, "one")
+	if _, err := p.Call(WithClass(ctx, Fast), "echo", "two"); err != nil {
+		t.Fatal(err)
+	}
+	st := p.Status()
+	if st.Endpoints[0].RateLimitEvents != 1 || st.Endpoints[1].RateLimitEvents != 0 {
+		t.Fatalf("per-endpoint rate limit events = %d and %d", st.Endpoints[0].RateLimitEvents, st.Endpoints[1].RateLimitEvents)
+	}
+	stats := p.Stats()
+	if stats.FastCalls != 1 || stats.BulkCalls == 0 {
+		t.Fatalf("pool class counters = fast %d bulk %d", stats.FastCalls, stats.BulkCalls)
+	}
+	for _, e := range st.Endpoints {
+		if strings.Contains(e.Error, "http") || strings.Contains(e.WSError, "http") {
+			t.Fatalf("an endpoint URL reached the status: %+v", e)
+		}
+	}
 }

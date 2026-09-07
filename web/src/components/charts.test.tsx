@@ -18,7 +18,7 @@ import { HATCH_SPACING, HATCH_STROKE, HatchPattern } from "./primitives";
 import { targetValues } from "@/lib/smoothing";
 import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
-import { FeeFlows, feeFlowRows, feeTotals, unsplitNote } from "./FeeFlows";
+import { FeeFlows, feeFlowRows, feeTotals, incompleteTotalsNote, unsplitNote } from "./FeeFlows";
 import { L1Section } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
 import { describeSplit, SeriesCharts } from "./SeriesCharts";
@@ -28,8 +28,11 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     t: 0,
     blocks: 1,
     gasUsed: 0,
+    posterGas: 0,
     gasPerSecond: 0,
+    computeGasPerSecond: 0,
     coverage: 1,
+    completeness: "complete",
     feesWei: "0",
     baseFeeMin: "1",
     baseFeeAvg: "1",
@@ -41,6 +44,7 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     minBaseFee: "1",
     floorFeesWei: "0",
     surplusFeesWei: "0",
+    posterFeesWei: "0",
     constraintSetId: 0,
     replayErrorBips: 0,
     ...overrides,
@@ -79,6 +83,7 @@ const snapshot: LiveSnapshot = {
   ],
   prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "379726000", perArbGasTotal: "399726000" },
   gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
+  computeGasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
   replayErrorBips: 2,
   ethUsd: null,
 };
@@ -201,7 +206,7 @@ describe("SeriesCharts", () => {
     // The backlogs are still listed under the set; the fee parts are not known, the total is.
     expect(cells.slice(7, 9)).toEqual(["1 gas", "2 gas"]);
     expect(cells.slice(9, 12)).toEqual(["2", "n/a", "n/a"]);
-    expect(within(table).getAllByText("n/a")).toHaveLength(2);
+    expect(within(table).getAllByText("n/a")).toHaveLength(3);
     // The inspector reads the whole x out under the unrecorded split for that bucket, and under the set for a recorded one.
     const slider = screen.getByRole("slider", { name: /Select a bucket/ });
     fireEvent.change(slider, { target: { value: "0" } });
@@ -292,6 +297,9 @@ describe("FeeFlows", () => {
     expect(totals.total).toBeCloseTo(5);
     expect(totals.floorEth).toBeCloseTo(2.2);
     expect(totals.surplusEth).toBeCloseTo(2.8);
+    expect(totals.completeness).toBe("complete");
+    expect(totals.perDay).not.toBeNull();
+    expect(incompleteTotalsNote(totals)).toBeNull();
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText("2.2")).toBeInTheDocument();
     expect(screen.getByText("2.8")).toBeInTheDocument();
@@ -308,6 +316,8 @@ describe("FeeFlows", () => {
     const { rerender } = render(<FeeFlows network="robinhood" range="24h" snapshot={priced} series={series} model="constraints" nowMs={now} />);
     // 5 ETH of fees, 2.2 to the infra account and 2.8 to the network account, at 4,200 dollars.
     expect(screen.getByText("$21,000.0")).toBeInTheDocument();
+    // Each dollar line hovers to the multiplication that produced it, quoting the ETH total drawn above it.
+    expect(screen.getByText("$21,000.0").closest("[title]")).toHaveAttribute("title", "5 ETH × $4,200.0/ETH = $21,000.0\ncoingecko, 5 min ago");
     expect(screen.getByText("$9,240.0")).toBeInTheDocument();
     expect(screen.getByText("$11,760.0")).toBeInTheDocument();
     // Eleven minutes old: the same rule as the live tiles, so the totals go back to ETH alone.
@@ -326,7 +336,7 @@ describe("FeeFlows", () => {
   });
   it("treats buckets that predate the fee split as unknown: hatched rather than zero, left out of the totals, footnoted", () => {
     const early = [
-      point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }),
+      point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, posterFeesWei: "500000000000000000", minBaseFee: "100000000" }),
       point({ t: 1788679140, feesWei: "2000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }),
     ];
     const mixed: Series = { ...series, points: [...early, ...series.points] };
@@ -334,28 +344,29 @@ describe("FeeFlows", () => {
     expect(totals.total).toBeCloseTo(11);
     expect(totals.floorEth).toBeCloseTo(2.2);
     expect(totals.surplusEth).toBeCloseTo(2.8);
+    expect(totals.posterEth).toBe(0);
     expect(totals.unsplit).toBe(2);
     expect(feeTotals(series).unsplit).toBe(0);
-    expect(unsplitNote(1)).toBe("1 bucket predates the fee split");
-    expect(unsplitNote(1200)).toBe("1,200 buckets predate the fee split");
+    expect(unsplitNote(1)).toBe("1 bucket has no recorded destination split");
+    expect(unsplitNote(1200)).toBe("1,200 buckets have no recorded destination split");
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
-    expect(screen.getByText(/^2 buckets predate the fee split/)).toBeInTheDocument();
-    expect(screen.getByText("unknown split (predates the fee split)")).toBeInTheDocument();
-    expect(screen.getByRole("figure", { name: /hatched where the split predates the record/ })).toBeInTheDocument();
+    expect(screen.getByText(/^2 buckets have no recorded destination split/)).toBeInTheDocument();
+    expect(screen.getByText("destination split unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /hatched where the split is unavailable/ })).toBeInTheDocument();
     const details = screen.getByText(/Data table \(5 buckets\)/).closest("details") as HTMLDetailsElement;
     details.open = true;
     fireEvent(details, new Event("toggle"));
     const rows = within(details).getAllByRole("row");
     expect(rows).toHaveLength(6);
-    expect(within(rows[1]).getAllByText("n/a")).toHaveLength(2);
+    expect(within(rows[1]).getAllByText("n/a")).toHaveLength(3);
     expect(within(rows[1]).getByText("4")).toBeInTheDocument();
     expect(within(rows[3]).queryByText("n/a")).toBeNull();
-    expect(within(details).getAllByText("n/a")).toHaveLength(4);
+    expect(within(details).getAllByText("n/a")).toHaveLength(6);
   });
   it("draws the unknown series as a hatch in the chart and the same hatch in its legend", () => {
     const mixed: Series = { ...series, points: [point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }), ...series.points] };
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
-    const item = screen.getByText("unknown split (predates the fee split)", { selector: "li span" }).closest("li") as HTMLLIElement;
+    const item = screen.getByText("destination split unavailable", { selector: "li span" }).closest("li") as HTMLLIElement;
     const swatch = item.querySelector("span[aria-hidden]") as HTMLElement;
     // The legend carries the pattern, not a solid square: the association with
     // the hatched area does not depend on colour alone.
@@ -376,10 +387,13 @@ describe("FeeFlows", () => {
   });
 
   it("hatches the bucket the collector is still filling rather than stacking a total it has not finished collecting", () => {
-    const filling: Series = { ...series, points: [...series.points.slice(0, 2), { ...series.points[2], coverage: 0.4 }] };
+    const filling: Series = { ...series, to: series.points[2].t + 25, points: [...series.points.slice(0, 2), { ...series.points[2], coverage: 0.4, completeness: "partial" }] };
+    const totals = feeTotals(filling);
+    expect(totals.completeness).toBe("partial");
+    expect(totals.perDay).toBeNull();
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={filling} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText("Hatched and left out: bucket in progress, 40% elapsed")).toBeInTheDocument();
-    expect(screen.getByRole("figure", { name: /or the bucket is still filling/ })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /or the bucket is incomplete/ })).toBeInTheDocument();
     // Only the stack leaves it out: the bucket keeps every figure it has.
     const details = screen.getByText(/Data table \(3 buckets\)/).closest("details") as HTMLDetailsElement;
     details.open = true;
@@ -388,18 +402,40 @@ describe("FeeFlows", () => {
     expect(within(within(details).getAllByRole("row")[3]).queryByText("n/a")).toBeNull();
   });
 
+  it("treats a populated bucket with a bounded block hole as incomplete", () => {
+    const holed: Series = { ...series, points: [series.points[0], { ...series.points[1], gasPerSecond: 25, computeGasPerSecond: 25, coverage: 0.8, completeness: "partial" }, series.points[2]] };
+    const rows = buildChartPoints(holed, "constraints");
+    expect(rows[1].gps).toBe(25);
+    const totals = feeTotals(holed);
+    expect(totals).toMatchObject({ total: 5, completeness: "partial", partialBuckets: 1, unknownBuckets: 0, emptyIntervals: 0, perDay: null });
+    expect(incompleteTotalsNote(totals)).toBe("Indexed-block sums are lower bounds: 1 partially indexed bucket. The per-day estimate waits for complete coverage.");
+
+    render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={holed} model="constraints" nowMs={NOW_MS} />);
+    expect(screen.getByText("Hatched and left out: partially indexed, 80% of the bucket")).toBeInTheDocument();
+    expect(screen.getByText("Indexed fees in last 24h")).toBeInTheDocument();
+    expect(screen.getByText("n/a")).toBeInTheDocument();
+    expect(screen.getByText(/Indexed-block sums are lower bounds/)).toBeInTheDocument();
+  });
+
+  it("keeps unknown bucket completeness distinct in the totals", () => {
+    const unknown: Series = { ...series, points: [series.points[0], { ...series.points[1], coverage: null, completeness: "unknown" }, series.points[2]] };
+    const totals = feeTotals(unknown);
+    expect(totals).toMatchObject({ completeness: "unknown", partialBuckets: 0, unknownBuckets: 1, perDay: null });
+    expect(incompleteTotalsNote(totals)).toContain("1 bucket has unknown completeness");
+  });
+
   it("reads a bucket in progress out as what it has collected so far, not as what the bucket holds", () => {
     const rows = feeFlowRows(false);
-    expect(rows.map((r) => r.label)).toEqual(["fees in bucket", "fees so far", "floor to infra", "congestion to network", "floor in force"]);
-    const whole = { feesEth: 1, floorFeesEth: 1, surplusFeesEth: 0, unsplitFeesEth: null, floor: 0.02, partial: null, coverage: 1 };
-    expect(applicableRows(rows, whole).map((r) => r.label)).toEqual(["fees in bucket", "floor to infra", "congestion to network", "floor in force"]);
-    expect(applicableRows(rows, { ...whole, partial: "in-progress", coverage: 0.4 }).map((r) => r.label)).toEqual(["fees so far", "floor to infra", "congestion to network", "floor in force"]);
+    expect(rows.map((r) => r.label)).toEqual(["fees in bucket", "fees so far", "floor to infra", "congestion to network", "poster fee to L1 pricer", "floor in force"]);
+    const whole = { feesEth: 1, floorFeesEth: 1, surplusFeesEth: 0, posterFeesEth: 0, unsplitFeesEth: null, floor: 0.02, partial: null, coverage: 1 };
+    expect(applicableRows(rows, whole).map((r) => r.label)).toEqual(["fees in bucket", "floor to infra", "congestion to network", "poster fee to L1 pricer", "floor in force"]);
+    expect(applicableRows(rows, { ...whole, partial: "in-progress", coverage: 0.4 }).map((r) => r.label)).toEqual(["fees so far", "floor to infra", "congestion to network", "poster fee to L1 pricer", "floor in force"]);
   });
 
   it("shows no unknown-split legend or footnote when every bucket carries the split", () => {
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
     expect(screen.queryByText(/predate the fee split/)).toBeNull();
-    expect(screen.queryByText("unknown split (predates the fee split)")).toBeNull();
+    expect(screen.queryByText("destination split unavailable")).toBeNull();
     expect(screen.getByText("congestion to network", { selector: "li span" })).toBeInTheDocument();
   });
 });
@@ -490,7 +526,53 @@ describe("DataFooter", () => {
         series={series}
         networkInfo={{ name: "robinhood", displayName: "Robinhood Chain", chainId: 4663, explorerUrl: "", model: "constraints", headBlock: 0, headAt: null, lagSeconds: null, enabled: true }}
         status="open"
-        apiStatus={{ version: "1", networks: [{ name: "robinhood", chainId: 4663, headBlock: 0, headAt: null, lagSeconds: null, lastSampleAt: null, lastError: null, rateLimitEvents: 0 }] }}
+        apiStatus={{
+          version: "1",
+          status: "degraded",
+          networks: [
+            {
+              name: "robinhood",
+              chainId: 4663,
+              enabled: true,
+              headBlock: 0,
+              headAt: null,
+              lagSeconds: null,
+              lastSampleAt: null,
+              lastError: null,
+              rateLimitEvents: 0,
+              last429At: null,
+              backfillCursor: null,
+              arbosVersion: null,
+              degraded: false,
+              capacity: {
+                configuredCallsPerSecond: 0,
+                requiredCallsPerSecond: 0,
+                observedCallsPerSecond: 0,
+                headroomCallsPerSecond: null,
+                saturated: false,
+                at: null,
+                checkpointError: false,
+              },
+              holes: {
+                pending: 0,
+                blocks: 0,
+                unfillable: 0,
+                retrying: 0,
+                oldestAgeSeconds: 0,
+                checkpointError: false,
+                pendingBlocks: 0,
+                oldestPendingAt: null,
+                oldestPendingAgeSeconds: null,
+              },
+              status: "degraded",
+              degradedReasons: ["collector heartbeat missing"],
+              collector: null,
+              activeEndpoint: 0,
+              failovers: 0,
+              endpoints: [],
+            },
+          ],
+        }}
         now={Date.parse("2026-09-06T07:20:03Z")}
       />,
     );
@@ -526,12 +608,12 @@ describe("L1Section", () => {
     getBatchesMock.mockResolvedValue(batches);
     getL1Mock.mockResolvedValue(l1);
     render(<L1Section network="robinhood" range="1h" snapshot={l1Snapshot} series={costSeries} />);
-    const details = screen.getByText(/L1 pricer and posting costs/).closest("details") as HTMLDetailsElement;
+    const details = screen.getByText(/L1 pricer and attributed batch costs/).closest("details") as HTMLDetailsElement;
     details.open = true;
     fireEvent(details, new Event("toggle"));
     // Two reports share the first 15 s bucket: 0.25 ETH of L2 fees is counted once, not twice.
     expect(await screen.findByText(/L2 fees 0.25 ETH/)).toBeInTheDocument();
-    expect(screen.getByText(/L1 posting 0.0000105 ETH/)).toBeInTheDocument();
+    expect(screen.getByText(/ArbOS batch cost 0.0000105 ETH/)).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
     const summary = screen.getByText(/Data table \(2 buckets\)/);
     const table = summary.closest("details") as HTMLDetailsElement;

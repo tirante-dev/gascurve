@@ -1,9 +1,10 @@
 apiVersion: v2
 name: gascurve
-description: Live and historical gas pricing for Arbitrum Nitro chains. Collector, API, and web frontend.
+description: Live and historical gas pricing for Arbitrum Nitro chains.
+  Collector, API, and web frontend.
 type: application
-version: 0.1.0
-appVersion: "0.0.0"
+version: 0.2.1
+appVersion: "1.0.1"
 home: https://gascurve.com
 sources:
   - https://github.com/tirante-dev/gascurve

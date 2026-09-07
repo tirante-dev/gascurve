@@ -38,6 +38,23 @@ Migrations run as an init container (gascurve-migrate up) on the
   kubectl logs {{ . }} -c migrate
 {{- end }}
 {{- end }}
+{{- if $deployments }}
+
+Metrics: /metrics on
+{{- if .Values.api.enabled }} the api's port {{ .Values.api.service.port }}{{ end }}
+{{- if and .Values.api.enabled .Values.collector.enabled (gt (int .Values.config.collector.metrics_port) 0) }} and{{ end }}
+{{- if and .Values.collector.enabled (gt (int .Values.config.collector.metrics_port) 0) }} the collector's port {{ .Values.config.collector.metrics_port }}{{ end }}.
+{{- if and .Values.collector.enabled (not (gt (int .Values.config.collector.metrics_port) 0)) }}
+The collector's metrics server is off (config.collector.metrics_port is 0).
+{{- end }}
+{{- if not (and .Values.metrics.serviceMonitor.enabled .Values.metrics.prometheusRule.enabled) }}
+Prometheus operator objects still to enable:
+{{- if not .Values.metrics.serviceMonitor.enabled }} metrics.serviceMonitor.enabled{{ end }}
+{{- if and (not .Values.metrics.serviceMonitor.enabled) (not .Values.metrics.prometheusRule.enabled) }},{{ end }}
+{{- if not .Values.metrics.prometheusRule.enabled }} metrics.prometheusRule.enabled{{ end }}.
+Both need the operator's CRDs; see Metrics and alerts in charts/gascurve/README.md.
+{{- end }}
+{{- end }}
 {{- if and .Values.database.existingSecret $deployments }}
 
 Database credentials come from Secret {{ .Values.database.existingSecret }}.
@@ -47,6 +64,17 @@ Pods do not restart on their own when that Secret changes; after rotating it run
 {{- if and (not .Values.database.url) (not .Values.database.existingSecret) (or .Values.collector.enabled .Values.api.enabled) }}
 
 WARNING: no database configured. Set database.url or database.existingSecret.
+{{- end }}
+{{- if and .Values.api.enabled (not .Values.ingress.enabled) (empty .Values.config.server.trusted_proxies) }}
+
+WARNING: config.server.trusted_proxies is empty and this release has no
+chart-managed Ingress, so the chart cannot tell whether anything fronts the
+api. If one does (a Cloudflare Tunnel, a Gateway, an Ingress outside this
+chart), the api sees that proxy as the client of every request and all
+visitors share one REST rate limit bucket and one WebSocket per-IP cap. Set
+config.server.trusted_proxies to the addresses the api pods see for that
+proxy; see Ingress client addresses in charts/gascurve/README.md. Leave it
+empty only when clients reach the api directly.
 {{- end }}
 {{- if .Values.extraEnv }}
 

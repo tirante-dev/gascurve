@@ -15,9 +15,14 @@ function recorded<T>(value: T | null): T {
   return value;
 }
 
-/** Σ gasUsed × minBaseFee over blocks: what the infra account is credited for them. */
+/** The exact infrastructure destination over blocks. */
 function floorWei(blocks: readonly BlockPoint[]): bigint {
-  return blocks.reduce((sum, b) => sum + BigInt(b.gasUsed) * BigInt(recorded(b.minBaseFee)), 0n);
+  return blocks.reduce((sum, b) => {
+    const fee = BigInt(b.baseFee);
+    const minFee = BigInt(recorded(b.minBaseFee));
+    const floor = fee < minFee ? fee : minFee;
+    return sum + BigInt(b.gasUsed - recorded(b.posterGas ?? null)) * floor;
+  }, 0n);
 }
 
 describe("mock world", () => {
@@ -56,6 +61,7 @@ describe("mock world", () => {
     expect(BigInt(sa.prices.perArbGasBase) + BigInt(sa.prices.perArbGasCongestion)).toBe(BigInt(sa.baseFee));
     expect(sa.gasPerSecond.s10).toBeGreaterThan(20_000_000);
     expect(sa.gasPerSecond.s60).toBeGreaterThan(20_000_000);
+    expect(sa.computeGasPerSecond?.s10).toBeLessThan(sa.gasPerSecond.s10);
     expect(sa.accounts?.network.address).toBe(ROBINHOOD.accounts.network);
     expect(sa.l1?.equilibrationUnits).toBe(160_000_000);
     expect(sa.sampledAt).toBe("2026-09-06T07:20:00.000Z");
@@ -174,9 +180,10 @@ describe("mock world", () => {
     expect(last.minBaseFee).toBe("20000000");
     for (const p of hour.points) {
       expect(recorded(p.constraintBips).reduce((sum, x) => sum + x, 0)).toBe(p.exponentBips);
-      expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei))).toBe(BigInt(p.feesWei));
-      expect(BigInt(recorded(p.floorFeesWei))).toBe(BigInt(p.gasUsed) * BigInt(recorded(p.minBaseFee)));
+      expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei)) + BigInt(recorded(p.posterFeesWei ?? null))).toBe(BigInt(p.feesWei));
+      expect(BigInt(recorded(p.floorFeesWei))).toBe(BigInt(p.gasUsed - recorded(p.posterGas ?? null)) * BigInt(recorded(p.minBaseFee)));
       expect(BigInt(recorded(p.surplusFeesWei))).toBeGreaterThanOrEqual(0n);
+      expect(recorded(p.posterGas ?? null)).toBeGreaterThan(0);
     }
 
     const day = world.series("24h", now);
@@ -207,7 +214,7 @@ describe("mock world", () => {
     // in progress at the right edge and the one the range's start cuts into
     // carry the share that was indexed, and every sum in them is a sum over
     // that share alone.
-    expect(hour.points.every((p) => p.coverage > 0 && p.coverage <= 1)).toBe(true);
+    expect(hour.points.every((p) => p.coverage !== null && p.coverage > 0 && p.coverage <= 1)).toBe(true);
     expect(month.points[0].coverage).toBeCloseTo(2 / 3, 6);
     expect(month.points[month.points.length - 1].coverage).toBeCloseTo(1 / 3, 6);
     expect(month.points.slice(1, -1).every((p) => p.coverage === 1)).toBe(true);
@@ -258,7 +265,12 @@ describe("mock world", () => {
     expect(Number(l1.points[0].baseFeeEstimate)).toBeGreaterThan(2_000_000);
     expect(world.network(now).headBlock).toBe(world.headBlock);
     expect(world.network(now + 5).lagSeconds).toBe(6);
-    expect(world.status(now).lastError).toBeNull();
+    expect(world.status(now)).toMatchObject({
+      lastError: null,
+      degraded: false,
+      capacity: { saturated: false, at: null },
+      holes: { pending: 0, blocks: 0 },
+    });
   });
 
   it("models the six-constraint Arbitrum One set", () => {
@@ -329,9 +341,9 @@ describe("mock world", () => {
     const after = all.points.find((p) => p.t >= change);
     expect(before?.minBaseFee).toBe("100000000");
     expect(after?.minBaseFee).toBe("10000000");
-    if (before) expect(BigInt(recorded(before.floorFeesWei))).toBe(BigInt(before.gasUsed) * 100_000_000n);
-    if (after) expect(BigInt(recorded(after.floorFeesWei))).toBe(BigInt(after.gasUsed) * 10_000_000n);
-    for (const p of all.points) expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei))).toBe(BigInt(p.feesWei));
+    if (before) expect(BigInt(recorded(before.floorFeesWei))).toBe(BigInt(before.gasUsed - recorded(before.posterGas ?? null)) * 100_000_000n);
+    if (after) expect(BigInt(recorded(after.floorFeesWei))).toBe(BigInt(after.gasUsed - recorded(after.posterGas ?? null)) * 10_000_000n);
+    for (const p of all.points) expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei)) + BigInt(recorded(p.posterFeesWei ?? null))).toBe(BigInt(p.feesWei));
     // Bursts push the backlog over tolerance and the fee off the floor at least once a day.
     expect(series.points.some((p) => BigInt(p.baseFeeMax) > 10_000_000n)).toBe(true);
     expect(series.points.some((p) => BigInt(p.baseFeeMin) === 10_000_000n)).toBe(true);
@@ -356,6 +368,9 @@ describe("mock world", () => {
       expect(p.minBaseFee).toBeNull();
       expect(p.floorFeesWei).toBeNull();
       expect(p.surplusFeesWei).toBeNull();
+      expect(recorded(p.posterGas ?? null)).toBeGreaterThan(0);
+      expect(BigInt(recorded(p.posterFeesWei ?? null))).toBeGreaterThan(0n);
+      expect(recorded(p.computeGasPerSecond ?? null)).toBeLessThan(p.gasPerSecond);
       // Everything else about the bucket is known.
       expect(p.backlogs).toHaveLength(6);
       expect(p.constraintSetId).toBe(1);
@@ -364,7 +379,7 @@ describe("mock world", () => {
     }
     for (const p of all.points.filter((p) => p.t >= cutoff)) {
       expect(p.constraintBips).not.toBeNull();
-      expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei))).toBe(BigInt(p.feesWei));
+      expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei)) + BigInt(recorded(p.posterFeesWei ?? null))).toBe(BigInt(p.feesWei));
     }
     // The shorter ranges never reach back that far, and the other networks record everything.
     for (const range of ["1h", "24h", "30d"] as const) {

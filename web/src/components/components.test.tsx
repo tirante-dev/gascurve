@@ -8,7 +8,7 @@ import { applyReorg } from "@/hooks/useLive";
 import { BACKLOG_TITLE, backlogAxis, ConstraintCards, ConstraintCardsView, drainLabel, Sawtooth, sawtoothTooltipRows, secondsAgoLabel } from "./ConstraintCards";
 import { ChartTooltip } from "./ChartTooltip";
 import { DataFooter } from "./DataFooter";
-import { COLLECTOR_LAG_S, CostTile, FeeSplitBar, HeroChart, heroTooltipRows, LiveHero, LiveHeroView, sampleAge } from "./LiveHero";
+import { COLLECTOR_LAG_S, CostTile, FeeSplitBar, HeroChart, HeroChartPanel, heroTooltipRows, LiveHero, LiveHeroView, sampleAge } from "./LiveHero";
 import { HERO_RANGE_KEY, setHeroRange } from "@/lib/hero";
 import { HistoryTabs } from "./HistoryTabs";
 import { NetworkSwitcher } from "./NetworkSwitcher";
@@ -57,6 +57,7 @@ const snapshot: LiveSnapshot = {
   ],
   prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "379726000", perArbGasTotal: "399726000" },
   gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
+  computeGasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
   // The shared fixture carries no quote, so the cost tiles read in ETH; the USD cases below supply their own.
   replayErrorBips: 2,
   ethUsd: null,
@@ -68,7 +69,7 @@ function sawtoothBlocks(seconds: number, lastTs: number): BlockPoint[] {
   let n = 1;
   for (let ts = lastTs - seconds + 1; ts <= lastTs; ts++) {
     for (let k = 0; k < 10; k++) {
-      out.push({ number: n++, ts, gasUsed: 4_000_000, baseFee: "399726000", predictedBaseFee: "399726000", backlogs: [(k + 1) * 4_000_000, 11_194_391_810_886], constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: k === 0 });
+      out.push({ number: n++, ts, gasUsed: 4_000_000, posterGas: 0, baseFee: "399726000", predictedBaseFee: "399726000", backlogs: [(k + 1) * 4_000_000, 11_194_391_810_886], constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: k === 0 });
     }
   }
   return out;
@@ -83,10 +84,21 @@ const history: Series = {
   constraintSets: [],
   ownerActions: [{ block: 20, at: "2026-09-06T07:21:00Z", txHash: "0x" + "ab".repeat(32), method: "setMinimumL2BaseFee", selector: "0xa0188cdb", args: { priceInWei: "20000000" } }],
   points: [
-    { t: 1788679200, blocks: 12, gasUsed: 100, gasPerSecond: 1, coverage: 1, feesWei: "0", baseFeeMin: "100000000", baseFeeAvg: "300000000", baseFeeMax: "400000000", exponentBips: 10_000, constraintBips: [10_000, 0], backlogs: [1, 2], backlogsMax: [1, 2], minBaseFee: "100000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
-    { t: 1788679260, blocks: 30, gasUsed: 100, gasPerSecond: 1, coverage: 1, feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "395726000", baseFeeMax: "400000000", exponentBips: 32_425, constraintBips: [32_425, 0], backlogs: [3, 4], backlogsMax: [3, 4], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
+    { t: 1788679200, blocks: 12, gasUsed: 100, posterGas: 0, gasPerSecond: 1, computeGasPerSecond: 1, coverage: 1, completeness: "complete", feesWei: "0", baseFeeMin: "100000000", baseFeeAvg: "300000000", baseFeeMax: "400000000", exponentBips: 10_000, constraintBips: [10_000, 0], backlogs: [1, 2], backlogsMax: [1, 2], minBaseFee: "100000000", floorFeesWei: "0", surplusFeesWei: "0", posterFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
+    { t: 1788679260, blocks: 30, gasUsed: 100, posterGas: 0, gasPerSecond: 1, computeGasPerSecond: 1, coverage: 1, completeness: "complete", feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "395726000", baseFeeMax: "400000000", exponentBips: 32_425, constraintBips: [32_425, 0], backlogs: [3, 4], backlogsMax: [3, 4], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", posterFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
   ],
 };
+
+
+/**
+ * The width a fixed figure reserves, read off the inline style rather than
+ * through toHaveStyle: jsdom resolves ch units in computed style (6ch reads
+ * back as 48px), so comparing the inline value is what keeps the assertion
+ * about the unit the layout actually depends on.
+ */
+function reservedWidth(el: HTMLElement): string {
+  return el.style.minWidth;
+}
 
 describe("LiveHero", () => {
   it("lays the figures out in the left four columns and the chart in the right eight", () => {
@@ -100,22 +112,27 @@ describe("LiveHero", () => {
     render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     const hero = screen.getByText("0.3997");
     expect(hero).toHaveClass("tabular-nums");
-    expect(hero).toHaveStyle({ minWidth: "6ch" });
+    expect(reservedWidth(hero)).toBe("6ch");
     expect(hero.nextSibling).toHaveTextContent("gwei");
     // The hero figure steps down a size from the old strip, so the chart beside it is the taller mark.
     expect(hero.parentElement).toHaveClass("text-4xl");
     expect(hero.parentElement).toHaveClass("sm:text-5xl");
-    expect(screen.getByText("19.99")).toHaveStyle({ minWidth: "5ch" });
+    expect(reservedWidth(screen.getByText("19.99"))).toBe("5ch");
     expect(screen.getByText(/floor 0.02 gwei/)).toBeInTheDocument();
     expect(screen.getByText("55,812,345")).toBeInTheDocument();
     expect(screen.getByText("38.0")).toBeInTheDocument();
     expect(screen.getByText("40.5")).toBeInTheDocument();
     expect(screen.getByText("3.2425")).toBeInTheDocument();
-    expect(screen.getByText("0.00000839")).toHaveStyle({ minWidth: "10ch" });
+    expect(reservedWidth(screen.getByText("0.00000839"))).toBe("10ch");
     expect(screen.getByText("0.0000600")).toBeInTheDocument();
     expect(screen.getByText(/4.02 Mgas in block 55,812,345/)).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("live");
     expect(screen.getByRole("img", { name: /Floor 5.0% to the infra account/ })).toBeInTheDocument();
+  });
+  it("does not relabel total throughput as compute throughput against an old api", () => {
+    render(<LiveHeroView network="robinhood" snapshot={{ ...snapshot, computeGasPerSecond: undefined }} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(screen.getByText("Compute gas/s (10 s)").parentElement).toHaveTextContent("n/a");
+    expect(screen.getByText("Compute gas/s (60 s)").parentElement).toHaveTextContent("n/a");
   });
   it("renders the eased figures rather than the sample when a frame has them", () => {
     const values = { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.5, multiplier: 25, gasPerSecond10: 41_000_000, transferEth: 1.05e-5, exponent: 3.3 };
@@ -175,17 +192,17 @@ describe("LiveHero", () => {
     const blocks = sawtoothBlocks(6, snapshot.block.ts);
     const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="live" />);
     // Live: whole seconds of blocks from the ring, in one unit named beside the chart.
-    const throughput = screen.getByRole("figure", { name: /^Gas carried per second over the last 120 seconds/ });
+    const throughput = screen.getByRole("figure", { name: /^Compute gas carried per second over the last 120 seconds/ });
     expect(throughput.firstElementChild).toHaveClass("h-[120px]");
     expect(throughput.firstElementChild).toHaveClass("lg:h-[140px]");
-    expect(screen.getByText(/^Gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
+    expect(screen.getByText(/^Compute gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
     // Its own enlarge control, at the range on screen.
     expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=live");
 
     // A history range: the bucketed rate against every target in force.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" series={history} model="constraints" />);
-    expect(screen.getByRole("figure", { name: /^Gas used per second in .* with each constraint target/ })).toBeInTheDocument();
-    expect(screen.getByText(/^Gas per second per bucket against each target in force ·/)).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /^Compute gas used per second in .* with each constraint target/ })).toBeInTheDocument();
+    expect(screen.getByText(/^Compute gas per second per bucket against each target in force ·/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=24h");
   });
   it("draws the canonical blocks after a reorg, not the orphaned ones", () => {
@@ -199,8 +216,8 @@ describe("LiveHero", () => {
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByRole("figure", { name: /0.3997 to 0.8000 gwei/ })).toBeInTheDocument();
   });
-  it("reads every block out without a pointer, in an inspector and a data table", async () => {
-    render(
+  it("keeps the hero clear of inspectors and tables, at every range", async () => {
+    const { rerender } = render(
       <LiveHeroView
         network="robinhood"
         snapshot={snapshot}
@@ -211,23 +228,16 @@ describe("LiveHero", () => {
         range="live"
       />,
     );
-    // A slider picks a block, which gives arrow keys, Home and End for free,
-    // and the values are read out in a live region.
-    const slider = screen.getByRole("slider", { name: "Select a block to read its values" });
-    expect(screen.getByText("Block inspector")).toBeInTheDocument();
-    expect(screen.getAllByText("base fee").length).toBeGreaterThan(0);
-    // And the same seconds are read out for the throughput chart under it.
-    expect(screen.getByRole("slider", { name: "Select a second to read its values" })).toBeInTheDocument();
-    // The whole series is available as a table for a reader who wants all of it.
-    const table = screen.getByText(/Base fee per block, as a table/);
-    await userEvent.click(table);
-    expect(screen.getByRole("table", { name: /Every block of the live base fee chart/ })).toBeInTheDocument();
-    fireEvent.change(slider, { target: { value: "0" } });
-    expect(slider).toHaveValue("0");
-  });
-
-  it("reads a bucketed range out without a pointer too, on the page and enlarged", async () => {
-    render(
+    // The top box is the figures and the two charts, nothing else: the
+    // inspector and the table belong to the enlarged view, which has room.
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.queryByText("Block inspector")).toBeNull();
+    expect(screen.queryByText("Second inspector")).toBeNull();
+    expect(screen.queryByText(/as a table/)).toBeNull();
+    // Still the charts themselves, and the enlarge link that leads to them.
+    expect(screen.getByRole("figure", { name: /^Base fee per block/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Open Base fee enlarged/ })).toBeInTheDocument();
+    rerender(
       <LiveHeroView
         network="robinhood"
         snapshot={snapshot}
@@ -240,7 +250,36 @@ describe("LiveHero", () => {
         model="constraints"
       />,
     );
-    expect(screen.getAllByRole("slider", { name: "Select a bucket to read its values" }).length).toBeGreaterThan(1);
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.queryByText(/as a table/)).toBeNull();
+  });
+
+  it("reads every block out without a pointer once the chart is enlarged", async () => {
+    render(
+      <HeroChartPanel
+        readout
+        snapshot={snapshot}
+        blocks={sawtoothBlocks(5, snapshot.block.ts)}
+        nowMs={Date.parse(snapshot.sampledAt)}
+        range="live"
+        series={null}
+      />,
+    );
+    // A slider picks a block, which gives arrow keys, Home and End for free,
+    // and the values are read out in a live region.
+    const slider = screen.getByRole("slider", { name: "Select a block to read its values" });
+    expect(screen.getByText("Block inspector")).toBeInTheDocument();
+    expect(screen.getAllByText("base fee").length).toBeGreaterThan(0);
+    // The whole series is available as a table for a reader who wants all of it.
+    await userEvent.click(screen.getByText(/Base fee per block, as a table/));
+    expect(screen.getByRole("table", { name: /Every block of the live base fee chart/ })).toBeInTheDocument();
+    fireEvent.change(slider, { target: { value: "0" } });
+    expect(slider).toHaveValue("0");
+  });
+
+  it("reads a bucketed range out without a pointer once enlarged", async () => {
+    render(<HeroChartPanel readout snapshot={snapshot} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} range="24h" series={history} model="constraints" />);
+    expect(screen.getByRole("slider", { name: "Select a bucket to read its values" })).toBeInTheDocument();
     await userEvent.click(screen.getByText(/Base fee over 24h, as a table/));
     expect(screen.getByRole("table", { name: /Every bucket of the base fee chart over 24h/ })).toBeInTheDocument();
   });
@@ -351,35 +390,39 @@ describe("LiveHero", () => {
     expect(screen.getByText("Since last block")).toBeInTheDocument();
     expect(screen.queryByText("13.4")).toBeNull();
   });
-  it("prices the transfer and swap tiles in dollars when the quote is fresh, keeping the ETH amount on hover and in the description", () => {
+  it("prices the transfer and swap tiles in dollars when the quote is fresh, keeping the working on hover and in the description", () => {
     const priced = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:15:00Z", source: "coingecko" } };
     render(<LiveHeroView network="robinhood" snapshot={priced} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     // 21,000 gas at 0.3997 gwei is 0.0000084 ETH: about four cents.
-    expect(screen.getByText("0.04")).toHaveStyle({ minWidth: "6ch" });
+    expect(reservedWidth(screen.getByText("0.04"))).toBe("6ch");
     expect(screen.getByText("0.25")).toBeInTheDocument();
     // The dollar sign is outside the reserved box, so a changing digit cannot move it.
     expect(screen.getByText("0.04").previousSibling).toHaveTextContent("$");
-    // The ETH figure is never lost: hover and the accessible description both carry it.
-    expect(screen.getByTitle("0.00000839 ETH")).toBeInTheDocument();
-    expect(screen.getByText("0.04 US dollars, 0.00000839 ETH, at 4,200.0 dollars per ETH")).toBeInTheDocument();
+    // The ETH figure is never lost, and the quote that priced it is named: hover and the accessible description both carry the working.
+    expect(screen.getByText("0.04").closest("[title]")).toHaveAttribute("title", "0.00000839 ETH × $4,200.0/ETH = $0.04\ncoingecko, 5 min ago");
+    expect(screen.getByText("0.04 US dollars, 0.00000839 ETH at 4,200.0 dollars per ETH, quoted by coingecko 5 min ago")).toBeInTheDocument();
     expect(screen.queryByText("0.00000839")).toBeNull();
   });
   it("falls back to ETH when there is no quote at all and when the one there is has gone stale", () => {
     // Eleven minutes old: past the ten minute cutoff, so the fee has moved on and the price has not.
     const stale = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:09:00Z", source: "coingecko" } };
     const { rerender } = render(<LiveHeroView network="robinhood" snapshot={stale} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(screen.getByText("0.00000839")).toHaveStyle({ minWidth: "10ch" });
+    expect(reservedWidth(screen.getByText("0.00000839"))).toBe("10ch");
     expect(screen.queryByText("0.04")).toBeNull();
     // And with no quote the tiles are exactly what they were before there was one.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByText("0.00000839")).toBeInTheDocument();
     expect(screen.getByText("0.0000600")).toBeInTheDocument();
   });
-  it("shows a cost tile in ETH without a price and in dollars with one", () => {
-    const { rerender } = render(<CostTile label="21k transfer" eth={0.0000084} usdPerEth={null} />);
+  it("shows a cost tile in ETH without a price and in dollars with one, hovering to the arithmetic", () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    const { rerender } = render(<CostTile label="21k transfer" eth={0.0000084} ethUsd={null} nowMs={now} />);
     expect(screen.getByText("0.00000840")).toBeInTheDocument();
-    rerender(<CostTile label="21k transfer" eth={0.0000084} usdPerEth={4200} />);
-    expect(screen.getByText("0.04")).toBeInTheDocument();
+    rerender(<CostTile label="21k transfer" eth={0.0000084} ethUsd={{ price: "4200.00", at: "2026-09-06T07:19:26Z", source: "coinbase" }} nowMs={now} />);
+    // The dollars are what is drawn; the multiplication and the quote behind it are a hover away and in the description.
+    const usd = screen.getByText("0.04");
+    expect(usd.closest("[title]")).toHaveAttribute("title", "0.00000840 ETH × $4,200.0/ETH = $0.04\ncoinbase, 34 s ago");
+    expect(screen.getByText("0.04 US dollars, 0.00000840 ETH at 4,200.0 dollars per ETH, quoted by coinbase 34 s ago")).toBeInTheDocument();
   });
   it("measures the sample age from the wall clock", () => {
     expect(COLLECTOR_LAG_S).toBe(5);
@@ -421,10 +464,10 @@ describe("ConstraintCards", () => {
     // readable without seeing it: the peak is 40M, the threshold 60M, and the
     // axis tops out at the larger of the two.
     const chart = screen.getByRole("figure", {
-      name: "Constraint 1 backlog per block over the last 15 s, 150 blocks, 0 to 80 Mgas, with the 2 s average and a dashed threshold at 60 Mgas: it drains 60 Mgas/s at each second boundary",
+      name: "Constraint 1 backlog per block over the last 15 s, 150 blocks, 0 to 80 Mgas, with a dashed threshold at 60 Mgas: it drains 60 Mgas/s at each second boundary",
     });
-    // Two thin lines: the per-block backlog and the 2 s average.
-    expect(chart.querySelectorAll("path.recharts-curve.recharts-line-curve")).toHaveLength(2);
+    // One thin line: the per-block backlog.
+    expect(chart.querySelectorAll("path.recharts-curve.recharts-line-curve")).toHaveLength(1);
     // The y axis reads in gas with the SI prefix on the unit, the x axis in seconds before now.
     expect(within(chart).getByText("40 Mgas")).toBeInTheDocument();
     expect(within(chart).getByText("80 Mgas")).toBeInTheDocument();
@@ -484,7 +527,7 @@ describe("ConstraintCards", () => {
     expect(drainLabel(60_000_000)).toBe("drains 60 Mgas/s at each second");
   });
   it("reads a hovered block out as its number, its gas and the backlog it left", () => {
-    const row = { number: 55_812_345, gasUsed: 4_021_130, backlog: 22_000_000, average: 21_000_000 };
+    const row = { number: 55_812_345, gasUsed: 4_021_130, backlog: 22_000_000 };
     render(
       <ChartTooltip
         active
@@ -498,14 +541,22 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("55,812,345")).toBeInTheDocument();
     expect(screen.getByText("4.02 Mgas")).toBeInTheDocument();
     expect(screen.getByText("22 Mgas")).toBeInTheDocument();
-    expect(screen.getByText("21 Mgas")).toBeInTheDocument();
     expect(secondsAgoLabel(0)).toBe("now");
   });
 });
 
 describe("DataFooter", () => {
+  it("describes the fast and slow collection cadences", () => {
+    render(<DataFooter snapshot={null} series={null} networkInfo={null} status="open" apiStatus={null} now={0} />);
+    const live = screen.getByText(/update on new heads when a WebSocket head feed is configured/);
+    expect(live).toHaveTextContent("every 3 s by default on public RPC networks");
+    expect(live).toHaveTextContent("separate slow sample every 60 s");
+    expect(live).toHaveTextContent("pushed over a WebSocket (live)");
+    expect(live).not.toHaveTextContent("one-second sample");
+  });
+
   it("credits tirante.dev with an external link after the version line", () => {
-    render(<DataFooter snapshot={null} series={null} networkInfo={null} status="open" apiStatus={{ version: "1.2.3", networks: [] }} now={0} />);
+    render(<DataFooter snapshot={null} series={null} networkInfo={null} status="open" apiStatus={{ version: "1.2.3", status: "healthy", networks: [] }} now={0} />);
     const link = screen.getByRole("link", { name: "powered by tirante.dev" });
     expect(link).toHaveAttribute("href", "https://tirante.dev");
     expect(link).toHaveAttribute("target", "_blank");
