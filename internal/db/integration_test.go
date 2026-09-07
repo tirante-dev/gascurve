@@ -36,11 +36,34 @@ func openIntegration(t *testing.T) *Postgres {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
+	p := NewPostgres(d)
+	resetIntegrationSchema(t, p)
+	return p
+}
+
+// resetIntegrationSchema drops the schema and migrates it to head.
+func resetIntegrationSchema(t *testing.T, p *Postgres) {
+	t.Helper()
+	retryIntegrationReset(t, func() error { return ResetSchema(context.Background(), p.DB()) })
+}
+
+// emptyIntegrationSchema drops the schema and leaves it unmigrated, so a test
+// can install an older version itself.
+func emptyIntegrationSchema(t *testing.T, p *Postgres) {
+	t.Helper()
+	retryIntegrationReset(t, func() error {
+		_, err := p.DB().ExecContext(context.Background(), "DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+		return err
+	})
+}
+
+func retryIntegrationReset(t *testing.T, reset func() error) {
+	t.Helper()
 	// A collector running against the database holds locks the reset has
 	// to wait for and can deadlock with; retry a few times.
 	var rerr error
 	for attempt := 0; attempt < 5; attempt++ {
-		if rerr = ResetSchema(context.Background(), d); rerr == nil {
+		if rerr = reset(); rerr == nil {
 			break
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -48,7 +71,6 @@ func openIntegration(t *testing.T) *Postgres {
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	return NewPostgres(d)
 }
 
 // testNetworks keeps the rows of the test's chains, in chain id order.
@@ -62,16 +84,17 @@ func testNetworks(nets []Network) []Network {
 	return out
 }
 
-func TestIntegrationMigrator(t *testing.T) {
+func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	p := openIntegration(t)
 	m, err := NewMigrator(p.DB().DB)
 	if err != nil {
 		t.Fatal(err)
 	}
 	v, dirty, err := m.Version()
-	if err != nil || dirty || v != 2 {
+	if err != nil || dirty || v < productionSchemaVersion {
 		t.Fatalf("version = %d dirty=%v err=%v", v, dirty, err)
 	}
+	headVersion := v
 	// A nullable column means unknown, and pricing_version says which rows
 	// carry the full pricing breakdown.
 	ctx := context.Background()
@@ -135,7 +158,7 @@ func TestIntegrationMigrator(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != 1 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-1 {
 		t.Fatalf("after down: %d %v", v, err)
 	}
 	var indexes int
@@ -149,7 +172,7 @@ func TestIntegrationMigrator(t *testing.T) {
 	if err := m.Up(); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != 2 {
+	if v, _, err := m.Version(); err != nil || v != headVersion {
 		t.Fatalf("after up: %d %v", v, err)
 	}
 	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM state_samples WHERE chain_id = 1`).Scan(&samples); err != nil || samples != 1 {
@@ -161,7 +184,7 @@ func TestIntegrationMigrator(t *testing.T) {
 
 	// Rolling all migrations back drops the schema, and applying them
 	// recreates it.
-	if err := m.Down(2); err != nil {
+	if err := m.Down(int(headVersion)); err != nil {
 		t.Fatal(err)
 	}
 	if v, _, err := m.Version(); err != nil || v != 0 {
@@ -174,7 +197,7 @@ func TestIntegrationMigrator(t *testing.T) {
 	if err := m.Up(); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != 2 {
+	if v, _, err := m.Version(); err != nil || v != headVersion {
 		t.Fatalf("after up: %d %v", v, err)
 	}
 }

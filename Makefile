@@ -1,4 +1,4 @@
-.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify tools tools-check tool-goimports tool-golangci-lint tool-staticcheck tool-govulncheck check-goimports check-golangci-lint check-staticcheck check-govulncheck test-tooling ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
+.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration migration-check lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify tools tools-check tool-goimports tool-golangci-lint tool-staticcheck tool-govulncheck check-goimports check-golangci-lint check-staticcheck check-govulncheck test-tooling ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
 
 GOCMD=go
 GOBUILD=$(GOCMD) build
@@ -78,6 +78,9 @@ test-race:
 # `integration` build tag so they never run by accident.
 test-integration:
 	$(GOTEST) -tags integration -count=1 -v ./internal/db/... ./internal/collector/... ./internal/api/...
+
+migration-check:
+	$(GOTEST) -count=1 -run '^TestReleasedMigrationsImmutable$$' ./internal/db
 
 # Install all non-standard Go commands at the exact versions used by hosted CI.
 # They stay inside the repository so unrelated global tools cannot affect checks.
@@ -251,7 +254,7 @@ web-ci: web-lint web-typecheck web-test-coverage web-build
 # The recursive invocation makes the preflight a strict phase boundary, even
 # under parallel make. No check starts until every required command is present.
 ci: tools-check
-	@$(MAKE) fmt-check vet lint staticcheck govulncheck test-tooling test-coverage test-race build-matrix mod-verify web-install web-ci
+	@$(MAKE) migration-check fmt-check vet lint staticcheck govulncheck test-tooling test-coverage test-race build-matrix mod-verify web-install web-ci
 	@echo "All CI checks passed."
 
 ci-integration: test-integration
