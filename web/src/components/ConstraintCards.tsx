@@ -54,8 +54,7 @@ export function backlogAxis(max: number): { top: number; ticks: number[] } {
   return { top, ticks: [0, top / 2, top] };
 }
 
-/** The average and the threshold are drawn in ink, never in a constraint colour: a short window can sit at any index in the set. */
-const AVERAGE_COLOR = "var(--ink-2)";
+/** The threshold is drawn in ink, never in a constraint colour: a short window can sit at any index in the set. */
 const THRESHOLD_COLOR = "var(--ink-3)";
 
 /** A point's place on the axis, read out: "3.4 s ago", or "now" for the newest block. */
@@ -63,13 +62,12 @@ export function secondsAgoLabel(x: number): string {
   return x >= 0 ? "now" : `${Math.abs(x).toFixed(1)} s ago`;
 }
 
-/** What a hovered block says: which block it was, what it carried, the backlog it left and the average that includes it. */
+/** What a hovered block says: which block it was, what it carried and the backlog it left. */
 export function sawtoothTooltipRows(color: string): TooltipRow[] {
   return [
     { label: "block", value: (r) => formatInteger(Number(r.number)) },
     { label: "gas used", value: (r) => formatGas(Number(r.gasUsed)) },
     { label: "backlog", color, value: (r) => formatGas(Number(r.backlog)) },
-    { label: `${AVERAGE_WINDOW_S} s average`, color: AVERAGE_COLOR, value: (r) => formatGas(Number(r.average)) },
   ];
 }
 
@@ -81,14 +79,14 @@ const SAWTOOTH_TICKS = [-SAWTOOTH_WINDOW_S, -10, -5, 0];
 
 /**
  * The short-window backlog over the last fifteen seconds: the raw per-block
- * sawtooth, the 2 s average the card's figure shows, and a dashed line at one
- * second of target, the gas the constraint sheds at every second boundary.
+ * sawtooth and a dashed line at one second of target, the gas the constraint
+ * sheds at every second boundary.
  * Memoised on the samples: they change when blocks arrive, the card
  * re-renders every frame.
  */
 export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, places, nowMs = 0, height = SAWTOOTH_HEIGHT }: { samples: SawtoothSample[]; color: string; target: number; index: number; places?: BlockPlaces; nowMs?: number; height?: ChartHeight }) {
   // Without the ring's placement (a caller that has none) the samples are placed on their own.
-  const data = useMemo(() => sawtoothChart(samples, nowMs, undefined, places), [samples, nowMs, places]);
+  const data = useMemo(() => sawtoothChart(samples, nowMs, places), [samples, nowMs, places]);
   const sized = typeof height === "string";
   if (data.length < 2) return <div className={`w-full rounded-sm bg-chart ${sized ? height : ""}`} style={{ height: sized ? undefined : height }} aria-hidden="true" />;
   const peak = Math.max(...data.map((d) => d.backlog));
@@ -98,7 +96,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
     <ChartFrame
       height={height}
       minWidth={260}
-      label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(axis.top)}, with the ${AVERAGE_WINDOW_S} s average and a dashed threshold at ${formatGas(target)}: it ${drainLabel(target)} boundary`}
+      label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(axis.top)}, with a dashed threshold at ${formatGas(target)}: it ${drainLabel(target)} boundary`}
     >
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data} margin={{ top: 12, right: 8, bottom: 2, left: 0 }}>
@@ -118,7 +116,6 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
           <ReferenceLine y={target} stroke={THRESHOLD_COLOR} strokeDasharray="4 3" strokeWidth={1} label={{ value: drainLabel(target), position: "insideTopRight" }} />
           <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={secondsAgoLabel} rows={sawtoothTooltipRows(color)} />} />
           <Line type="linear" dataKey="backlog" stroke={color} strokeWidth={1.25} dot={false} isAnimationActive={false} activeDot={{ r: 2.5 }} />
-          <Line type="monotone" dataKey="average" stroke={AVERAGE_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} activeDot={false} />
         </LineChart>
       </ResponsiveContainer>
     </ChartFrame>
@@ -182,7 +179,7 @@ function ConstraintCard({ network, c, index, backlog, bips, share, samples, plac
       {samples ? (
         <div className="mt-4">
           <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} places={places} nowMs={nowMs} />
-          <p className="mt-1 text-[11px] text-ink-3">{drainLabel(c.target)} boundary; bursts show as sawteeth. The thin line is the {AVERAGE_WINDOW_S} s average.</p>
+          <p className="mt-1 text-[11px] text-ink-3">{drainLabel(c.target)} boundary; bursts show as sawteeth.</p>
         </div>
       ) : null}
       <div className="mt-4">
@@ -308,8 +305,8 @@ export function shortWindowIndices(snapshot: LiveSnapshot | null): number[] {
 
 /**
  * One short window's backlog, enlarged: the figures the card quotes beside
- * the chart it draws, so the target, the threshold and the 2 s average are
- * readable next to the sawtooth rather than only in its tooltip.
+ * the chart it draws, so the target and the threshold are readable next to
+ * the sawtooth rather than only in its tooltip.
  */
 export function SawtoothPanel({
   snapshot,
@@ -346,7 +343,7 @@ export function SawtoothPanel({
       </div>
       <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} places={places} nowMs={nowMs} height={height} />
       <p className="mt-2 text-xs text-ink-3">
-        {drainLabel(c.target)} boundary; bursts show as sawteeth. The thin line is the {AVERAGE_WINDOW_S} s average. {SAWTOOTH_NOTE}
+        {drainLabel(c.target)} boundary; bursts show as sawteeth. {SAWTOOTH_NOTE}
       </p>
     </div>
   );

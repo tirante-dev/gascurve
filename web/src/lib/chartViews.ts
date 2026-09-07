@@ -71,7 +71,7 @@ export const CHART_VIEWS: readonly ChartView[] = [
     id: "backlog-sawtooth",
     title: "Short-window backlog per block",
     shortTitle: "Backlog sawtooth",
-    description: "A short window's backlog after each of the last fifteen seconds of blocks, with the 2 s average the card quotes and the gas the constraint sheds at every second boundary. Nitro pays a backlog down only when the block timestamp advances, so bursts show as sawteeth.",
+    description: "A short window's backlog after each of the last fifteen seconds of blocks, with the gas the constraint sheds at every second boundary. Nitro pays a backlog down only when the block timestamp advances, so bursts show as sawteeth.",
     section: "pricer",
     range: "none",
     live: true,

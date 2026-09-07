@@ -454,10 +454,10 @@ describe("ConstraintCards", () => {
     // readable without seeing it: the peak is 40M, the threshold 60M, and the
     // axis tops out at the larger of the two.
     const chart = screen.getByRole("figure", {
-      name: "Constraint 1 backlog per block over the last 15 s, 150 blocks, 0 to 80 Mgas, with the 2 s average and a dashed threshold at 60 Mgas: it drains 60 Mgas/s at each second boundary",
+      name: "Constraint 1 backlog per block over the last 15 s, 150 blocks, 0 to 80 Mgas, with a dashed threshold at 60 Mgas: it drains 60 Mgas/s at each second boundary",
     });
-    // Two thin lines: the per-block backlog and the 2 s average.
-    expect(chart.querySelectorAll("path.recharts-curve.recharts-line-curve")).toHaveLength(2);
+    // One thin line: the per-block backlog.
+    expect(chart.querySelectorAll("path.recharts-curve.recharts-line-curve")).toHaveLength(1);
     // The y axis reads in gas with the SI prefix on the unit, the x axis in seconds before now.
     expect(within(chart).getByText("40 Mgas")).toBeInTheDocument();
     expect(within(chart).getByText("80 Mgas")).toBeInTheDocument();
@@ -517,7 +517,7 @@ describe("ConstraintCards", () => {
     expect(drainLabel(60_000_000)).toBe("drains 60 Mgas/s at each second");
   });
   it("reads a hovered block out as its number, its gas and the backlog it left", () => {
-    const row = { number: 55_812_345, gasUsed: 4_021_130, backlog: 22_000_000, average: 21_000_000 };
+    const row = { number: 55_812_345, gasUsed: 4_021_130, backlog: 22_000_000 };
     render(
       <ChartTooltip
         active
@@ -531,7 +531,6 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("55,812,345")).toBeInTheDocument();
     expect(screen.getByText("4.02 Mgas")).toBeInTheDocument();
     expect(screen.getByText("22 Mgas")).toBeInTheDocument();
-    expect(screen.getByText("21 Mgas")).toBeInTheDocument();
     expect(secondsAgoLabel(0)).toBe("now");
   });
 });

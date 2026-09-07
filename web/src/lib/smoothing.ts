@@ -197,24 +197,9 @@ export function sawtoothSamples(blocks: readonly BlockPoint[], index: number, la
 
 /**
  * A sample placed on a time axis, in seconds before now: 0 is the right edge
- * and the span reaches back to minus the window. `average` is the same
- * trailing mean the card's backlog figure shows, so the chart carries both
- * the raw sawtooth and the number beside it.
+ * and the span reaches back to minus the window.
  */
-export type SawtoothPoint = { x: number; number: number; ts: number; gasUsed: number; backlog: number; average: number };
-
-/** Mean backlog over the samples of the `seconds` timestamp seconds ending with sample `i`, per block, as averageBacklog computes it. */
-function trailingMean(samples: readonly SawtoothSample[], i: number, seconds: number): number {
-  const from = samples[i].ts - seconds + 1;
-  let sum = 0;
-  let n = 0;
-  for (let j = i; j >= 0; j--) {
-    if (samples[j].ts < from) break;
-    sum += samples[j].backlog;
-    n++;
-  }
-  return sum / n;
-}
+export type SawtoothPoint = { x: number; number: number; ts: number; gasUsed: number; backlog: number };
 
 /**
  * Where each block of a standalone list sits on a time axis, in seconds of
@@ -320,10 +305,10 @@ export function liveNow(nowMs: number, newestPlace: number | undefined): number 
  * where the caller has one, so this chart puts a block exactly where the hero
  * above it does; without one the samples are placed on their own.
  */
-export function sawtoothChart(samples: readonly SawtoothSample[], nowMs: number, averageSeconds = AVERAGE_WINDOW_S, places?: BlockPlaces): SawtoothPoint[] {
+export function sawtoothChart(samples: readonly SawtoothSample[], nowMs: number, places?: BlockPlaces): SawtoothPoint[] {
   const own = places === undefined ? placeBlocks(samples) : samples.map((s) => placeOf(places, s));
   const now = liveNow(nowMs, own[own.length - 1]);
-  return samples.map((s, i) => ({ x: own[i] - now, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog, average: trailingMean(samples, i, averageSeconds) }));
+  return samples.map((s, i) => ({ x: own[i] - now, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog }));
 }
 
 /** A backlog paid down at `rate` gas per second for `seconds`, floored at zero. */
