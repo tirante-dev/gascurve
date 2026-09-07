@@ -55,7 +55,7 @@ import { ChartReadout, type ReadoutGroup } from "./ChartReadout";
 import { EnlargeLink } from "./ChartActions";
 import { gapBands, GapNote } from "./ChartGaps";
 import { buildSeriesModel, bucketRowTitle, GasPerSecondChart } from "./SeriesCharts";
-import { Figure, Label, Stat, StatusPill, TIME_AXIS_RIGHT } from "./primitives";
+import { Figure, HoverNote, Label, type NoteAlign, Stat, StatusPill, TIME_AXIS_RIGHT } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
 
 export { SWAP_GAS, TRANSFER_GAS };
@@ -462,8 +462,11 @@ export function GasRateTile({ label, gasPerSecond }: { label: string; gasPerSeco
  * behind it, the quote it used and that quote's age stay a hover away and are
  * always in the accessible description, so nothing is only available to a
  * pointer.
+ *
+ * `align` is which way the note opens: the tiles sit two to a row, and the
+ * right-hand one has to open leftwards to stay inside the card.
  */
-export function CostTile({ label, eth, ethUsd, nowMs }: { label: string; eth: number; ethUsd: EthUsd | null; nowMs: number }) {
+export function CostTile({ label, eth, ethUsd, nowMs, align }: { label: string; eth: number; ethUsd: EthUsd | null; nowMs: number; align?: NoteAlign }) {
   const math = usdMath(eth, ethUsd, nowMs);
   if (math === null) {
     return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.eth}>{formatEthFixed(eth)}</Figure>} unit="ETH" size="sm" />;
@@ -473,14 +476,11 @@ export function CostTile({ label, eth, ethUsd, nowMs }: { label: string; eth: nu
       label={label}
       size="sm"
       value={
-        <span title={math.title}>
+        <HoverNote lines={[math.line, math.provenance]} description={math.description} align={align}>
           {/* The dollar sign sits outside the reserved box, so a changing digit never shifts it. */}
-          <span aria-hidden="true">
-            <span className="text-ink-2">$</span>
-            <Figure ch={FIXED_WIDTH_CH.usd}>{math.usd}</Figure>
-          </span>
-          <span className="sr-only">{math.description}</span>
-        </span>
+          <span className="text-ink-2">$</span>
+          <Figure ch={FIXED_WIDTH_CH.usd}>{math.usd}</Figure>
+        </HoverNote>
       }
     />
   );
@@ -715,7 +715,7 @@ export function LiveHeroView({
             <GasRateTile label="Compute gas/s (60 s)" gasPerSecond={v.gasPerSecond60} />
             {/* No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all. */}
             <CostTile label="21k transfer" eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
-            <CostTile label="150k swap" eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
+            <CostTile label="150k swap" eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} align="end" />
           </div>
 
           <FeeSplitBar snapshot={snapshot} />
