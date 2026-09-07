@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/big"
+	"sort"
 	"time"
 
 	"github.com/tirante-dev/gascurve/internal/db"
@@ -98,6 +99,11 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 	if err != nil {
 		return nil, err
 	}
+	missing, err := store.MissingRanges(ctx, chainID)
+	if err != nil {
+		return nil, err
+	}
+	timeline := newMissingTimeline(missing)
 	out := &model.Series{
 		Range: rng.name, Resolution: rng.resolution,
 		ConstraintSets: []model.ConstraintSet{}, OwnerActions: []model.OwnerAction{}, Points: []model.SeriesPoint{},
@@ -121,9 +127,11 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 		if len(blocks) > maxBlockPoints {
 			out.Resolution = "5s"
 			out.Points = stepDown(blocks, sets, stepDownWidth, now)
+			timeline.apply(out.Points, stepDownWidth)
 		} else {
 			out.Resolution = "block"
 			out.Points = blockPoints(blocks, sets)
+			timeline.apply(out.Points, time.Second)
 		}
 		out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 		return out, nil
@@ -142,8 +150,159 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 			out.Points = append(out.Points, p)
 		}
 	}
+	timeline.apply(out.Points, width)
 	out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 	return out, nil
+}
+
+// missingInterval is the time envelope between the indexed blocks on either
+// side of a durable missing block range. The interval can have zero duration
+// when multiple blocks share a timestamp, but it still makes that bucket
+// partial.
+type missingInterval struct {
+	from time.Time
+	to   time.Time
+}
+
+// missingTimeline is the durable gap ledger reduced to time. Bounded ranges
+// can reduce numeric coverage. A range with only a lower or upper bound makes
+// the corresponding suffix or prefix unknown, and a range with no usable
+// bounds makes every point unknown unless a bounded range already proves it
+// partial.
+type missingTimeline struct {
+	bounded       []missingInterval
+	unknownAfter  *time.Time
+	unknownBefore *time.Time
+	unknownAll    bool
+}
+
+func newMissingTimeline(ranges []db.MissingRange) missingTimeline {
+	var out missingTimeline
+	for _, r := range ranges {
+		lower, lowerOK, upper, upperOK, active := remainingMissingBounds(r)
+		if !active {
+			continue
+		}
+		switch {
+		case lowerOK && upperOK && !upper.Before(lower):
+			out.bounded = append(out.bounded, missingInterval{from: lower, to: upper})
+		case lowerOK && upperOK:
+			// Inverted timestamps cannot safely locate the range.
+			out.unknownAll = true
+		case lowerOK:
+			if out.unknownAfter == nil || lower.Before(*out.unknownAfter) {
+				v := lower
+				out.unknownAfter = &v
+			}
+		case upperOK:
+			if out.unknownBefore == nil || upper.After(*out.unknownBefore) {
+				v := upper
+				out.unknownBefore = &v
+			}
+		default:
+			out.unknownAll = true
+		}
+	}
+	out.bounded = mergeMissingIntervals(out.bounded)
+	return out
+}
+
+// remainingMissingBounds chooses the lower time bound for the still-missing
+// suffix. Once Cursor advances, CursorAt describes Cursor-1 and supersedes the
+// original predecessor. A cursor beyond To means the range is already filled.
+func remainingMissingBounds(r db.MissingRange) (lower time.Time, lowerOK bool, upper time.Time, upperOK, active bool) {
+	start := r.From
+	lowerBound := r.PredecessorAt
+	if r.Cursor > r.From {
+		start = r.Cursor
+		lowerBound = r.CursorAt
+	}
+	if start > r.To {
+		return time.Time{}, false, time.Time{}, false, false
+	}
+	return lowerBound.Time, lowerBound.Valid, r.SuccessorAt.Time, r.SuccessorAt.Valid, true
+}
+
+func mergeMissingIntervals(intervals []missingInterval) []missingInterval {
+	sort.Slice(intervals, func(i, j int) bool {
+		if intervals[i].from.Equal(intervals[j].from) {
+			return intervals[i].to.Before(intervals[j].to)
+		}
+		return intervals[i].from.Before(intervals[j].from)
+	})
+	merged := make([]missingInterval, 0, len(intervals))
+	for _, interval := range intervals {
+		if len(merged) == 0 || interval.from.After(merged[len(merged)-1].to) {
+			merged = append(merged, interval)
+			continue
+		}
+		if interval.to.After(merged[len(merged)-1].to) {
+			merged[len(merged)-1].to = interval.to
+		}
+	}
+	return merged
+}
+
+// apply qualifies every emitted point. Numeric coverage can be adjusted only
+// when its original boundary span was whole and all overlapping gap envelopes
+// are bounded. Otherwise coverage becomes null rather than combining spans
+// whose overlap is not measurable from the response point alone.
+func (m missingTimeline) apply(points []model.SeriesPoint, width time.Duration) {
+	for i := range points {
+		point := &points[i]
+		start := time.Unix(point.T, 0).UTC()
+		end := start.Add(width)
+		first := sort.Search(len(m.bounded), func(j int) bool { return !m.bounded[j].to.Before(start) })
+		known := false
+		missing := time.Duration(0)
+		for _, interval := range m.bounded[first:] {
+			if !interval.from.Before(end) {
+				break
+			}
+			known = true
+			from := maxTime(start, interval.from)
+			to := minTime(end, interval.to)
+			if to.After(from) {
+				missing += to.Sub(from)
+			}
+		}
+		uncertain := m.unknownAll || (m.unknownAfter != nil && m.unknownAfter.Before(end)) || (m.unknownBefore != nil && !m.unknownBefore.Before(start))
+		if !known && !uncertain {
+			continue
+		}
+		if known {
+			point.Completeness = model.SeriesPartial
+		} else if point.Completeness == model.SeriesComplete {
+			point.Completeness = model.SeriesUnknown
+		}
+		if uncertain || point.Coverage == nil || *point.Coverage < 1 {
+			point.Coverage = nil
+			continue
+		}
+		covered := max(width-missing, 0)
+		share := float64(covered) / float64(width)
+		point.Coverage = &share
+		if covered <= 0 {
+			point.GasPerSecond = 0
+			continue
+		}
+		seconds := max(uint64(covered/time.Second), 1)
+		point.GasPerSecond = point.GasUsed / seconds
+	}
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 func firstPoint(points []model.SeriesPoint) int64 {
@@ -259,7 +418,7 @@ func coverage(covered, width time.Duration) (secs uint64, share float64) {
 // measuredCoverage pairs a known time share with the aggregate state clients
 // use. A share below one is partial even when every block observed so far is
 // present, because the bucket itself is not finished.
-func measuredCoverage(share float64) (*float64, string) {
+func measuredCoverage(share float64) (coverage *float64, completeness string) {
 	state := model.SeriesComplete
 	if share < 1 {
 		state = model.SeriesPartial

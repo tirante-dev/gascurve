@@ -733,7 +733,7 @@ func TestStoreFailures(t *testing.T) {
 		"/api/v1/networks/robinhood/series", "/api/v1/networks/robinhood/series?range=24h", "/api/v1/networks/robinhood/constraints",
 		"/api/v1/networks/robinhood/owner-actions", "/api/v1/networks/robinhood/batches", "/api/v1/networks/robinhood/l1", "/api/v1/status",
 	}
-	methods := []string{"Networks", "NetworkByRef", "LatestStateSample", "RecentBlocks", "BlocksBetween", "Buckets", "ConstraintSets", "OwnerActions", "BatchBuckets", "BatchReports", "L1Samples", "States", "BlockByNumber", "GasUsedBetween"}
+	methods := []string{"Networks", "NetworkByRef", "LatestStateSample", "RecentBlocks", "BlocksBetween", "Buckets", "ConstraintSets", "OwnerActions", "MissingRanges", "BatchBuckets", "BatchReports", "L1Samples", "States", "BlockByNumber", "GasUsedBetween"}
 	for _, m := range methods {
 		store := seed(t)
 		store.SetFailure(m, true)
@@ -1227,6 +1227,96 @@ func TestSeriesCoverage(t *testing.T) {
 	// Per-block points are whole by definition.
 	if p := blockPoints([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull}}, nil); p[0].Coverage == nil || *p[0].Coverage != 1 || p[0].Completeness != model.SeriesComplete {
 		t.Fatalf("block coverage: %v", p[0].Coverage)
+	}
+}
+
+// TestSeriesCoverageIncludesHoleInsidePopulatedBucket is the regression for a
+// durable block gap hidden inside a bucket that still has aggregate rows. Its
+// time envelope reduces coverage and the rate divisor, while the neighboring
+// populated bucket remains complete.
+func TestSeriesCoverageIncludesHoleInsidePopulatedBucket(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+		t.Fatal(err)
+	}
+	start := now.Add(-2 * time.Minute)
+	bucket := func(at time.Time) db.Bucket {
+		return db.Bucket{
+			ChainID: robinhood, Resolution: db.Resolution1m, BucketStart: at, Blocks: 3, GasUsed: 300,
+			FeesWei: db.WeiFromUint64(90), BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1),
+			BacklogsEnd: db.Uint64Array{}, BacklogsMax: db.Uint64Array{}, PricingVersion: db.PricingFull,
+		}
+	}
+	if err := store.FoldBuckets(ctx, []db.Bucket{bucket(start), bucket(start.Add(time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceMissingRanges(ctx, robinhood, []db.MissingRange{{
+		ChainID: robinhood, From: 100, To: 109, Lifecycle: model.MissingRangePending,
+		PredecessorAt: sql.NullTime{Time: start.Add(20 * time.Second), Valid: true},
+		SuccessorAt:   sql.NullTime{Time: start.Add(30 * time.Second), Valid: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(store, config.ServerConfig{RateLimitPerSecond: 1000, RateLimitBurst: 1000}, nil, logger.Nop(), WithClock(func() time.Time { return now }))
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	resp, body := get(t, ts, "/api/v1/networks/robinhood/series?range=24h")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	var out model.Series
+	decode(t, body, &out)
+	if len(out.Points) != 2 {
+		t.Fatalf("points: %+v", out.Points)
+	}
+	holed := out.Points[0]
+	if holed.Completeness != model.SeriesPartial || holed.Coverage == nil || *holed.Coverage < 0.833 || *holed.Coverage > 0.834 || holed.GasPerSecond != 6 {
+		t.Fatalf("populated bucket with internal hole: %+v", holed)
+	}
+	whole := out.Points[1]
+	if whole.Completeness != model.SeriesComplete || whole.Coverage == nil || *whole.Coverage != 1 || whole.GasPerSecond != 5 {
+		t.Fatalf("neighboring whole bucket: %+v", whole)
+	}
+}
+
+func TestMissingTimelineUnknownAndCursorBounds(t *testing.T) {
+	start := now.Add(-time.Minute)
+	point := func(at time.Time) model.SeriesPoint {
+		coverage := 1.0
+		return model.SeriesPoint{T: at.Unix(), GasUsed: 60, GasPerSecond: 1, Coverage: &coverage, Completeness: model.SeriesComplete}
+	}
+
+	unknown := []model.SeriesPoint{point(start)}
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 2}}).apply(unknown, time.Minute)
+	if unknown[0].Completeness != model.SeriesUnknown || unknown[0].Coverage != nil {
+		t.Fatalf("unbounded range: %+v", unknown[0])
+	}
+
+	// Equal timestamps consume no wall-clock coverage but still prove blocks
+	// are absent, which is why completeness is separate from coverage.
+	equal := []model.SeriesPoint{point(start)}
+	at := sql.NullTime{Time: start.Add(20 * time.Second), Valid: true}
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 2, PredecessorAt: at, SuccessorAt: at}}).apply(equal, time.Minute)
+	if equal[0].Completeness != model.SeriesPartial || equal[0].Coverage == nil || *equal[0].Coverage != 1 {
+		t.Fatalf("equal-time range: %+v", equal[0])
+	}
+
+	points := []model.SeriesPoint{point(start), point(start.Add(time.Minute))}
+	newMissingTimeline([]db.MissingRange{{
+		From: 1, To: 10, Cursor: 6,
+		PredecessorAt: sql.NullTime{Time: start.Add(10 * time.Second), Valid: true},
+		CursorAt:      sql.NullTime{Time: start.Add(70 * time.Second), Valid: true},
+		SuccessorAt:   sql.NullTime{Time: start.Add(90 * time.Second), Valid: true},
+	}}).apply(points, time.Minute)
+	if points[0].Completeness != model.SeriesComplete || points[1].Completeness != model.SeriesPartial || points[1].Coverage == nil || *points[1].Coverage < 0.666 || *points[1].Coverage > 0.667 {
+		t.Fatalf("advanced cursor must qualify only the remaining suffix: %+v", points)
+	}
+
+	done := []model.SeriesPoint{point(start)}
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 2, Cursor: 3}}).apply(done, time.Minute)
+	if done[0].Completeness != model.SeriesComplete || done[0].Coverage == nil || *done[0].Coverage != 1 {
+		t.Fatalf("completed range: %+v", done[0])
 	}
 }
 
