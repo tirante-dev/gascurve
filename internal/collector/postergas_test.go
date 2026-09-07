@@ -46,6 +46,13 @@ func repairFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore) *Followe
 	if err := f.saveLiveStart(context.Background(), store, ls); err != nil {
 		t.Fatal(err)
 	}
+	// An explicit frontier well before the seeded rows. Without a record the
+	// repair stands in the oldest stored row, which in these stores is the
+	// start of history rather than a deletion boundary, and every test would
+	// then be measuring that stand-in instead of what it means to.
+	if err := store.SetState(context.Background(), 4663, db.StatePruneFrontier, baseTime.Add(-24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
 	return f
 }
 
@@ -457,6 +464,9 @@ func TestRepairStepRebuildsTheResolutionsThatAreStillWhole(t *testing.T) {
 	if err := f.saveLiveStart(ctx, store, &liveStart{Block: 28_500, TS: int64(tsFor(28_500))}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, baseTime.Add(-24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
 	// Puts the horizon on the quarter-hour bucket's start: that one and the
 	// minute bucket are whole, the hour started well before it.
 	horizon := ts.Truncate(15 * time.Minute)
@@ -692,6 +702,51 @@ func TestPruneRecordsAFrontierThatOnlyMovesForward(t *testing.T) {
 	}
 	if !second.Equal(first) {
 		t.Fatalf("frontier moved back from %v to %v", first, second)
+	}
+}
+
+// A database pruned by a collector older than the frontier checkpoint has a
+// deletion boundary it never recorded. Reading an absent key as "nothing was
+// deleted" would let the first rollout that also raises block_retention
+// rebuild straight across it.
+func TestPruneFrontierStandsInTheOldestRowWhenNothingWasRecorded(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	f := newTestFollower(t, rpc, store)
+
+	got, err := f.pruneFrontier(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Unix(int64(tsFor(900)), 0).UTC()
+	if !got.Equal(want) {
+		t.Fatalf("frontier %v, want the oldest stored row at %v", got, want)
+	}
+	// A store with nothing in it constrains nothing.
+	empty := newTestFollower(t, rpc, dbtest.New())
+	if got, err := empty.pruneFrontier(ctx); err != nil || !got.IsZero() {
+		t.Fatalf("frontier on an empty store: %v %v", got, err)
+	}
+}
+
+// The cutoff is handed to PruneBlocks whole, so recording it to the second
+// would understate what was deleted by up to a second.
+func TestPruneFrontierKeepsSubSecondPrecision(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	f := newTestFollower(t, newFakeRPC(1000), store)
+	cutoff := baseTime.Add(1500 * time.Millisecond)
+	if err := f.recordPruneFrontier(ctx, store, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.pruneFrontier(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(cutoff.UTC()) {
+		t.Fatalf("frontier %v, want the cutoff it was given, %v", got, cutoff.UTC())
 	}
 }
 

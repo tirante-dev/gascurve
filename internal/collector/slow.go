@@ -771,7 +771,7 @@ func (f *Follower) recordPruneFrontier(ctx context.Context, s db.Store, before t
 		return err
 	}
 	if ok {
-		prev, perr := time.Parse(time.RFC3339, raw)
+		prev, perr := time.Parse(time.RFC3339Nano, raw)
 		switch {
 		case perr != nil:
 			f.log.Warn("unreadable prune frontier, recording this cutoff over it", "value", raw, "err", perr.Error())
@@ -779,24 +779,40 @@ func (f *Follower) recordPruneFrontier(ctx context.Context, s db.Store, before t
 			return nil
 		}
 	}
-	return s.SetState(ctx, f.chainID, db.StatePruneFrontier, before.UTC().Format(time.RFC3339))
+	// Nanoseconds, not seconds. PruneBlocks is given the cutoff whole, so a
+	// cutoff of 10:00:00.5 deletes a block stamped 10:00:00; recording only
+	// 10:00:00 would later let a bucket starting there pass as complete and
+	// be rebuilt from what survived.
+	return s.SetState(ctx, f.chainID, db.StatePruneFrontier, before.UTC().Format(time.RFC3339Nano))
 }
 
-// pruneFrontier is the highest cutoff a prune has committed, or the zero time
-// when none has: nothing has been deleted, so nothing constrains a rebuild.
+// pruneFrontier is the highest cutoff a prune has committed.
+//
+// No record is not proof that nothing was deleted: a database pruned by a
+// collector older than this checkpoint has a deletion boundary it never wrote
+// down, and the first rollout that also raises block_retention would otherwise
+// read the lowered cutoff as permission to rebuild across it. The oldest
+// surviving row stands in, since everything deleted is below it. On a
+// database that has never pruned that row is just the start of history and
+// the stand-in costs at most the one bucket it sits in, which is the right
+// way to be wrong here.
 func (f *Follower) pruneFrontier(ctx context.Context) (time.Time, error) {
 	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StatePruneFrontier)
-	if err != nil || !ok {
+	if err != nil {
 		return time.Time{}, err
 	}
-	t, perr := time.Parse(time.RFC3339, raw)
-	if perr != nil {
-		// The current cutoff still applies, so this is a lost guard rather
-		// than a wrong one: the reader falls back to it.
-		f.log.Warn("unreadable prune frontier, going by the current cutoff", "value", raw, "err", perr.Error())
-		return time.Time{}, nil
+	if ok {
+		t, perr := time.Parse(time.RFC3339Nano, raw)
+		if perr == nil {
+			return t.UTC(), nil
+		}
+		f.log.Warn("unreadable prune frontier, standing in the oldest stored block", "value", raw, "err", perr.Error())
 	}
-	return t.UTC(), nil
+	oldest, err := f.store.OldestBlock(ctx, f.chainID)
+	if err != nil || oldest == nil {
+		return time.Time{}, err
+	}
+	return oldest.TS.UTC(), nil
 }
 
 // running: its last segment rebuilds those buckets from rows.
