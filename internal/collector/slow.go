@@ -738,24 +738,20 @@ func batchReportOf(chainID uint64, b nitro.Block, resolver *batchCostResolver) (
 // the boundary hour and everything above it are kept whatever retention says,
 // because the backfill's last segment rebuilds those buckets from them.
 //
-// The poster-gas repair reads it too, so the two cannot drift: the repair
-// decides a bucket is beyond saving when its rows are about to go, and
-// answering that from the nominal retention window while the backfill is
-// still holding those rows would step its cursor past buckets it could have
-// repaired, permanently.
-// pinned is true when the answer is the boundary rather than the retention
-// window: a fixed point that does not walk forward with the clock, which is
-// what tells the repair it needs no slack against prune advancing under it.
-func (f *Follower) pruneCutoff(ctx context.Context, boundary time.Time, hasBoundary bool) (cutoff time.Time, pinned bool, err error) {
+// Nothing else predicts from this. What a rebuild needs to know is what has
+// been deleted, not what would be, and that is the recorded frontier: prune
+// writes it in the same transaction as the delete, and RebuildBuckets reads
+// it under the same chain lock.
+func (f *Follower) pruneCutoff(ctx context.Context, boundary time.Time, hasBoundary bool) (time.Time, error) {
 	before := f.now().Add(-f.cfg.BlockRetention)
 	c, err := f.loadCursor(ctx)
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, err
 	}
 	if !c.Done && hasBoundary && boundary.Before(before) {
-		return boundary, true, nil
+		return boundary, nil
 	}
-	return before, false, nil
+	return before, nil
 }
 
 // recordPruneFrontier remembers the highest cutoff a prune has committed. It
@@ -821,7 +817,7 @@ func (f *Follower) prune(ctx context.Context) error {
 	f.mu.Lock()
 	boundary, hasBoundary := f.boundaryLocked()
 	f.mu.Unlock()
-	before, _, err := f.pruneCutoff(ctx, boundary, hasBoundary)
+	before, err := f.pruneCutoff(ctx, boundary, hasBoundary)
 	if err != nil {
 		return err
 	}

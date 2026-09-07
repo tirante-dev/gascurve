@@ -615,9 +615,54 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 	return nil
 }
 
+// rebuildable drops the starts a rebuild must not touch: those below the
+// prune frontier, where block rows have been deleted. Recomputing such a
+// window sums only what survived, so a correct aggregate is replaced by a
+// short one, which is worse than leaving it alone. The guard lives here, in
+// the operation that does the damage, rather than in each of its callers.
+//
+// An unrecorded frontier constrains nothing, and neither does one that will
+// not parse: the alternative is refusing every rebuild on a database with one
+// bad row of state, which trades a narrow risk for a total outage of the
+// thing. The collector logs an unreadable frontier where it reads one.
+func (p *Postgres) rebuildable(ctx context.Context, chainID uint64, starts []time.Time) ([]time.Time, error) {
+	if len(starts) == 0 {
+		return starts, nil
+	}
+	raw, ok, err := p.GetState(ctx, chainID, StatePruneFrontier)
+	if err != nil {
+		return nil, err
+	}
+	frontier, ok := parseFrontier(raw, ok)
+	if !ok {
+		return starts, nil
+	}
+	out := make([]time.Time, 0, len(starts))
+	for _, s := range starts {
+		if !s.Before(frontier) {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// parseFrontier reads a recorded prune frontier. False when there is none or
+// it will not parse: both mean no floor, by design (see rebuildable).
+func parseFrontier(raw string, recorded bool) (time.Time, bool) {
+	if !recorded {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t.UTC(), true
+}
+
 // RebuildBuckets recomputes buckets from the block rows in their windows,
-// mirroring BucketBuilder in SQL. A window that has no rows loses its
-// bucket. The constraint set is the one in force at the window's last
+// mirroring BucketBuilder in SQL. A window whose rows retention has deleted
+// is left alone (see rebuildable); one that has no rows for any other reason
+// loses its bucket. The constraint set is the one in force at the window's last
 // block, and only when its constraint count matches the block's backlogs
 // (the live model); a block is never tagged with a set of another shape.
 // The bucket's pricing version is the lowest of its blocks': one block of
@@ -627,6 +672,10 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 	width, ok := Resolutions[resolution]
 	if !ok {
 		return fmt.Errorf("rebuild buckets: unknown resolution %q", resolution)
+	}
+	starts, err := p.rebuildable(ctx, chainID, starts)
+	if err != nil {
+		return err
 	}
 	if len(starts) == 0 {
 		return nil

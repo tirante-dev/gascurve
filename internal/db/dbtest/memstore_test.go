@@ -479,3 +479,53 @@ func TestMemStoreNesting(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The store refuses to rebuild a window starting below the recorded prune
+// frontier, the same floor Postgres applies: rows there have been deleted,
+// and recomputing the window would sum only what survived. A window at or
+// above the frontier rebuilds as before, and an absent or unreadable frontier
+// constrains nothing.
+func TestMemStoreRebuildBucketsHonoursThePruneFrontier(t *testing.T) {
+	ctx := context.Background()
+	m := New()
+	base := time.Date(2026, 9, 6, 7, 0, 0, 0, time.UTC)
+	rows := []db.Block{
+		{ChainID: 1, Number: 1, TS: base, GasUsed: 10, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)},
+		{ChainID: 1, Number: 2, TS: base.Add(time.Minute), GasUsed: 20, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)},
+	}
+	if err := m.UpsertBlocks(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	starts := []time.Time{base, base.Add(time.Minute)}
+	// The frontier sits on the second window: the first has lost rows.
+	if err := m.SetState(ctx, 1, db.StatePruneFrontier, base.Add(time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RebuildBuckets(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	bk, _ := m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour))
+	if len(bk) != 1 || !bk[0].BucketStart.Equal(base.Add(time.Minute)) {
+		t.Fatalf("rebuilt below the frontier: %+v", bk)
+	}
+	// Remove the frontier and both windows rebuild.
+	if err := m.DeleteState(ctx, 1, db.StatePruneFrontier); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RebuildBuckets(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	if bk, _ = m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour)); len(bk) != 2 {
+		t.Fatalf("without a frontier: %d buckets, want 2", len(bk))
+	}
+	// One that will not parse is no frontier at all.
+	if err := m.SetState(ctx, 1, db.StatePruneFrontier, "not a time"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RebuildBuckets(ctx, 1, "1m", starts); err != nil {
+		t.Fatal(err)
+	}
+	if bk, _ = m.Buckets(ctx, 1, "1m", base, base.Add(time.Hour)); len(bk) != 2 {
+		t.Fatalf("with an unreadable frontier: %d buckets, want 2", len(bk))
+	}
+}

@@ -156,7 +156,25 @@ func TestPostgresQueries(t *testing.T) {
 	if err := p.FoldBuckets(ctx, []Bucket{{ChainID: 4663, Resolution: "1m", BucketStart: now, Blocks: 1, FeesWei: WeiFromUint64(1), BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1), BacklogsEnd: Uint64Array{1}, BacklogsMax: Uint64Array{1}}}); err != nil {
 		t.Fatal(err)
 	}
+	// A rebuild reads the prune frontier first: a window below it has lost
+	// rows and must not be recomputed from what survived.
+	mock.ExpectQuery("SELECT value FROM collector_state").WithArgs(4663, StatePruneFrontier).WillReturnRows(sqlmock.NewRows([]string{"value"}))
 	mock.ExpectExec("WITH requested AS").WithArgs(4663, "1m", int64(60), sqlmock.AnyArg(), "9223372036854775807").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.RebuildBuckets(ctx, 4663, "1m", []time.Time{now}); err != nil {
+		t.Fatal(err)
+	}
+	// A recorded frontier above the requested start leaves the bucket alone,
+	// and with nothing left to rebuild there is no statement at all.
+	mock.ExpectQuery("SELECT value FROM collector_state").WithArgs(4663, StatePruneFrontier).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(now.Add(time.Hour).Format(time.RFC3339Nano)))
+	if err := p.RebuildBuckets(ctx, 4663, "1m", []time.Time{now}); err != nil {
+		t.Fatal(err)
+	}
+	// One that will not parse constrains nothing, rather than refusing every
+	// rebuild on a database with one bad row of state.
+	mock.ExpectQuery("SELECT value FROM collector_state").WithArgs(4663, StatePruneFrontier).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("not a time"))
+	mock.ExpectExec("WITH requested AS").WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := p.RebuildBuckets(ctx, 4663, "1m", []time.Time{now}); err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +369,7 @@ func TestPostgresErrors(t *testing.T) {
 		{"TwoTxBlocks", true, func() error { _, err := p.TwoTxBlocks(ctx, 1, 1, 1); return err }},
 		{"PruneBlocks", false, func() error { _, err := p.PruneBlocks(ctx, 1, now); return err }},
 		{"FoldBuckets", false, func() error { return p.FoldBuckets(ctx, []Bucket{{}}) }},
-		{"RebuildBuckets", false, func() error { return p.RebuildBuckets(ctx, 1, "1m", []time.Time{now}) }},
+		{"RebuildBuckets", true, func() error { return p.RebuildBuckets(ctx, 1, "1m", []time.Time{now}) }},
 		{"DeleteBucketsBefore", false, func() error { _, err := p.DeleteBucketsBefore(ctx, 1, now); return err }},
 		{"Buckets", true, func() error { _, err := p.Buckets(ctx, 1, "1m", now, now); return err }},
 		{"InsertStateSample", false, func() error { return p.InsertStateSample(ctx, StateSample{}) }},
@@ -419,6 +437,8 @@ func TestPostgresSetBasedRoundTrips(t *testing.T) {
 	mock.ExpectExec("SELECT pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO blocks .*\\$1700").WillReturnResult(sqlmock.NewResult(0, rows))
 	mock.ExpectExec("INSERT INTO buckets .*\\$2300").WillReturnResult(sqlmock.NewResult(0, rows))
+	// The rebuild reads the prune frontier once, then writes once.
+	mock.ExpectQuery("SELECT value FROM collector_state").WithArgs(4663, StatePruneFrontier).WillReturnRows(sqlmock.NewRows([]string{"value"}))
 	mock.ExpectExec("WITH requested AS .*unnest\\(\\$4::TIMESTAMPTZ\\[\\]\\)").WillReturnResult(sqlmock.NewResult(0, rows))
 	mock.ExpectCommit()
 	if err := p.WithChainTx(ctx, 4663, func(s Store) error {

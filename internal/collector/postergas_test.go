@@ -284,33 +284,6 @@ func TestRepairStepYieldsToACatchingUpFastLoop(t *testing.T) {
 	}
 }
 
-func TestRepairStepPassesOverBlocksRetentionIsAboutToDrop(t *testing.T) {
-	ctx := context.Background()
-	rpc := newFakeRPC(1000)
-	store := dbtest.New()
-	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
-	f := repairFollower(t, rpc, store)
-	// Retention so short that every seeded block is already past the margin
-	// a rebuild needs, so reading their receipts would buy nothing. The
-	// backfill has to be finished for retention to be what prune goes by;
-	// while it runs prune holds these rows and they are still repairable.
-	f.cfg.BlockRetention = time.Second
-	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
-		t.Fatal(err)
-	}
-
-	status, err := f.RepairStep(ctx)
-	if err != nil || status != RepairProgressed {
-		t.Fatalf("repair: %v %v", status, err)
-	}
-	if len(rpc.posterGasCalls) != 0 {
-		t.Fatalf("read receipts for blocks whose buckets cannot be rebuilt: %v", rpc.posterGasCalls)
-	}
-	if c := repairCursor(t, f); c.Next != 906 {
-		t.Fatalf("cursor %+v, want it stepped past the batch", c)
-	}
-}
-
 func TestRepairStepNarrowsThenStepsOverABlockThatWillNotVerify(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
@@ -464,19 +437,15 @@ func TestRepairStepRebuildsTheResolutionsThatAreStillWhole(t *testing.T) {
 	if err := f.saveLiveStart(ctx, store, &liveStart{Block: 28_500, TS: int64(tsFor(28_500))}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, baseTime.Add(-24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+	// A frontier on the quarter-hour bucket's start: that one and the minute
+	// bucket begin at or after it and are whole, the hour began well before
+	// it and has lost rows.
+	frontier := ts.Truncate(15 * time.Minute)
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, frontier.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	// Puts the horizon on the quarter-hour bucket's start: that one and the
-	// minute bucket are whole, the hour started well before it.
-	horizon := ts.Truncate(15 * time.Minute)
-	f.cfg.BlockRetention = now.Sub(horizon) + repairPruneSlack
-	// Retention is what prune goes by only once the backfill is finished.
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
 		t.Fatal(err)
-	}
-	if got := wholeResolutions(ts, horizon); len(got) != 2 {
-		t.Fatalf("resolutions still whole: %v, want the minute and quarter-hour ones", got)
 	}
 
 	if status, err := f.RepairStep(ctx); err != nil || status != RepairProgressed {
@@ -496,7 +465,8 @@ func TestRepairStepRebuildsTheResolutionsThatAreStillWhole(t *testing.T) {
 			}
 		}
 	}
-	// The hour is not rebuilt, because its window has lost rows to retention.
+	// The hour is not rebuilt: RebuildBuckets drops that window itself,
+	// without this pass having to ask the question.
 	hours, err := store.Buckets(ctx, 4663, db.Resolution1h, ts.Add(-time.Hour), ts.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -508,45 +478,42 @@ func TestRepairStepRebuildsTheResolutionsThatAreStillWhole(t *testing.T) {
 	}
 }
 
-// prune keeps every row from the boundary hour up while the backfill is
-// unfinished, whatever retention says. Reading the nominal retention window
-// instead of prune's own cutoff would step the cursor past buckets whose
-// rows are all still there, and they would never be repaired.
-func TestRepairStepFollowsPrunesCutoffWhileTheBackfillRuns(t *testing.T) {
+// While the backfill is unfinished prune pins its cutoff to the boundary and
+// keeps every row above it however old, so the frontier it records is that
+// boundary and not the retention window. Anything reading the frontier then
+// sees those buckets as rebuildable, which they are.
+func TestPruneFrontierPinsToTheBoundaryWhileTheBackfillRuns(t *testing.T) {
 	ctx := context.Background()
-	rpc := newFakeRPC(1000)
 	store := dbtest.New()
-	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
-	f := repairFollower(t, rpc, store)
-	// Older than retention, so the nominal window would call every row
-	// stale, but the backfill has not finished and prune is holding them.
+	f := repairFollower(t, newFakeRPC(1000), store)
+	if err := store.DeleteState(ctx, 4663, db.StatePruneFrontier); err != nil {
+		t.Fatal(err)
+	}
 	f.cfg.BlockRetention = time.Minute
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: false, Active: true}); err != nil {
 		t.Fatal(err)
 	}
-
-	if status, err := f.RepairStep(ctx); err != nil || status != RepairProgressed {
-		t.Fatalf("repair: %v %v", status, err)
-	}
-	if got := posterGasOf(t, store, 900); !got.Valid {
-		t.Fatal("a row prune is still holding was passed over as stale")
-	}
-
-	// Once the backfill is done prune drops to the retention window and
-	// those rows really are going, so the pass stops spending calls on them.
-	rpc.posterGasCalls = nil
-	store2 := dbtest.New()
-	seedBlocksWithoutPosterGas(t, rpc, store2, 900, 905)
-	g := repairFollower(t, rpc, store2)
-	g.cfg.BlockRetention = time.Minute
-	if err := g.saveCursor(ctx, store2, &backfillCursor{Done: true}); err != nil {
+	// prune reads the boundary the follower has loaded, which the loops do
+	// through ensureInit before any step.
+	if err := f.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if status, err := g.RepairStep(ctx); err != nil || status != RepairProgressed {
-		t.Fatalf("repair after the backfill: %v %v", status, err)
+	if err := f.prune(ctx); err != nil {
+		t.Fatal(err)
 	}
-	if len(rpc.posterGasCalls) != 0 {
-		t.Fatalf("read receipts for rows retention is dropping: %v", rpc.posterGasCalls)
+
+	f.mu.Lock()
+	boundary, has := f.boundaryLocked()
+	f.mu.Unlock()
+	if !has {
+		t.Fatal("no boundary loaded, so the test proves nothing")
+	}
+	got, err := f.pruneFrontier(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(boundary) {
+		t.Fatalf("frontier %v, want the boundary %v rather than the retention window", got, boundary)
 	}
 }
 
@@ -747,27 +714,6 @@ func TestPruneFrontierKeepsSubSecondPrecision(t *testing.T) {
 	}
 	if !got.Equal(cutoff.UTC()) {
 		t.Fatalf("frontier %v, want the cutoff it was given, %v", got, cutoff.UTC())
-	}
-}
-
-func TestWholeResolutions(t *testing.T) {
-	// 10:47:30 truncates to three different starts: 10:47, 10:45 and 10:00.
-	ts := time.Date(2026, 9, 7, 10, 47, 30, 0, time.UTC)
-	for _, tc := range []struct {
-		name    string
-		horizon time.Time
-		want    int
-	}{
-		{"every window whole", ts.Add(-2 * time.Hour), 3},
-		{"the hour has gone short", time.Date(2026, 9, 7, 10, 30, 0, 0, time.UTC), 2},
-		{"only the minute is left", time.Date(2026, 9, 7, 10, 46, 0, 0, time.UTC), 1},
-		{"nothing is rebuildable", ts.Add(time.Hour), 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := wholeResolutions(ts, tc.horizon); len(got) != tc.want {
-				t.Fatalf("resolutions %v, want %d of them", got, tc.want)
-			}
-		})
 	}
 }
 

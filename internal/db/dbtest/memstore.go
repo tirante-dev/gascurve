@@ -597,6 +597,21 @@ func (m *MemStore) setIDAtLocked(chainID, number uint64, backlogs int) sql.NullI
 }
 
 // RebuildBuckets recomputes buckets from the rows in their windows.
+// pruneFrontierLocked mirrors the Postgres store's floor for rebuilds: the
+// recorded prune frontier, or the zero time when none is recorded or it does
+// not parse.
+func (m *MemStore) pruneFrontierLocked(chainID uint64) time.Time {
+	raw, ok := m.StateRows[stateKey(chainID, db.StatePruneFrontier)]
+	if !ok {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
 func (m *MemStore) RebuildBuckets(_ context.Context, chainID uint64, resolution string, starts []time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -607,7 +622,13 @@ func (m *MemStore) RebuildBuckets(_ context.Context, chainID uint64, resolution 
 	if !ok {
 		return fmt.Errorf("rebuild buckets: unknown resolution %q", resolution)
 	}
+	// The same floor Postgres applies: a window below the prune frontier has
+	// lost rows, so recomputing it would sum only what survived.
+	frontier := m.pruneFrontierLocked(chainID)
 	for _, start := range starts {
+		if !frontier.IsZero() && start.UTC().Before(frontier) {
+			continue
+		}
 		start = start.UTC()
 		end := start.Add(width)
 		acc := db.NewBucketBuilder(chainID, resolution, start)

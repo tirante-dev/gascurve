@@ -14,15 +14,16 @@
 // recomputes poster gas, the compute-gas rate and the floor, surplus and
 // poster fee columns from the rows underneath it.
 //
-// It is bounded on both ends, and both bounds are read off the bucket a row
-// falls in rather than off the row, because the bucket is what gets rebuilt.
-// Below, buckets starting before the live-start boundary belong to the
-// backfill, which owns them additively and rebuilds them through
-// history_epoch instead. Above, it stops where prune is about to remove the
-// rows a rebuild would read, since repairing a block whose bucket can no
-// longer be rebuilt would spend a call for nothing. That upper bound is
-// prune's own cutoff and not the nominal retention window, because the two
-// differ while the backfill is unfinished.
+// Rebuilding a window whose rows retention has deleted would sum only what
+// survived, replacing a correct aggregate with a short one. That is not
+// guarded here: RebuildBuckets refuses such a window itself, for every caller,
+// which is the only place the judgement is made and the only place it can be
+// made against the committed state. This pass reads the same recorded prune
+// frontier only to avoid spending calls on rows that could rebuild nothing.
+//
+// The one bound that is this pass's own is the live-start boundary. Buckets
+// starting below it belong to the backfill, which owns them additively and
+// rebuilds them through history_epoch instead.
 
 package collector
 
@@ -32,7 +33,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/nitro"
@@ -101,23 +101,6 @@ func (f *Follower) savePosterGasCursor(ctx context.Context, s db.Store, c *poste
 	return s.SetState(ctx, f.chainID, db.StatePosterGasRepair, string(b))
 }
 
-// repairPruneSlack keeps the pass off buckets the next prune is about to cut
-// into. A bucket is rebuilt from the rows inside its window, so a window that
-// has lost part of its rows rebuilds short: fewer blocks, less gas, a bucket
-// that reads as a quiet stretch that never happened. That is worse than
-// leaving it unrepaired.
-//
-// The condition is on the bucket's own start, not the block's timestamp: a
-// window is whole exactly while its start is at or above the retention
-// horizon. Measuring it that way rather than through a fixed margin on the
-// block keeps the pass working at any configured block_retention, including
-// one shorter than a bucket, where a margin wide enough to be safe at 48h
-// would put the cutoff past the present and quietly repair nothing.
-//
-// The slack is for the prune that runs on the slow loop while a step is
-// reading: minutes, where a step is seconds.
-const repairPruneSlack = 5 * time.Minute
-
 // maxRepairAttempts is how often a single block is read before the pass gives
 // up on it and moves past. A batch that fails narrows to one block, and the
 // error there can be either kind: receipts that do not describe the block
@@ -162,22 +145,6 @@ func (f *Follower) repairBatchFor(narrowed int) int {
 		n = narrowed
 	}
 	return max(n, 1)
-}
-
-// wholeResolutions names the stored resolutions whose bucket over ts still
-// has every one of its rows, which is the condition for rebuilding it from
-// them. A bucket is whole while its own start is at or above the retention
-// horizon; the finer the resolution, the later its bucket starts, so a row
-// near the horizon can repair its minute and quarter-hour buckets after its
-// hour has already gone short.
-func wholeResolutions(ts, horizon time.Time) []string {
-	out := make([]string, 0, len(db.ResolutionOrder))
-	for _, res := range db.ResolutionOrder {
-		if !ts.UTC().Truncate(db.Resolutions[res]).Before(horizon) {
-			out = append(out, res)
-		}
-	}
-	return out
 }
 
 // RepairStep fills in poster gas for one batch of the blocks stored without
@@ -229,77 +196,43 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 	}
 	next := rows[len(rows)-1].Number + 1
 
-	// Which rows are worth a call, and which resolutions each one can still
-	// repair. Both questions are asked of the buckets the row falls in
-	// rather than of the row, because the bucket is what gets rebuilt.
+	// Which rows are worth a call. Correctness is no longer decided here:
+	// RebuildBuckets refuses a window below the prune frontier itself, so a
+	// bucket whose rows are partly gone cannot be recomputed short however
+	// this pass asks. What is left is a cost question, answered off the same
+	// recorded frontier the store uses, so the two cannot disagree: a row
+	// whose finest bucket is already below it can rebuild nothing, and
+	// reading its receipts would spend a call for no effect.
 	//
-	// Below the boundary the buckets are the backfill's, which owns them
-	// additively (history_epoch rebuilds those). The test is the row's own
-	// timestamp, the same split commitFill makes, so the rows of the
-	// boundary hour that sit below the first live block stay in scope.
-	//
-	// Past the horizon a window is losing the rows a rebuild would read, and
-	// that falls per resolution rather than all at once: a horizon inside an
-	// hour leaves that hour's bucket short while the minute and quarter-hour
-	// buckets after it are whole. Taking the hour as the answer for all
-	// three would step the cursor past those rows and leave the finer
-	// buckets blank for good, so a row is read when any resolution can still
-	// use it and only those resolutions are rebuilt.
-	//
-	// The horizon is prune's own cutoff, not the nominal retention window.
-	// While the backfill is unfinished prune keeps every row from the
-	// boundary hour up, however old, and reading retention literally would
-	// abandon buckets whose rows are all still there.
-	cutoff, pinned, err := f.pruneCutoff(ctx, boundary, true)
-	if err != nil {
-		return RepairIdle, err
-	}
-	// The slack is for a cutoff that walks forward with the clock while the
-	// step reads. A cutoff pinned to the boundary does not move at all, so
-	// it takes none: adding any there would abandon the rows just above it.
-	horizon := cutoff
-	if !pinned {
-		horizon = cutoff.Add(repairPruneSlack)
-	}
-	// What prune would delete now is a prediction; what it has already
-	// deleted is a fact, and the two disagree after block_retention is
-	// raised, because the cutoff moves back over rows the shorter setting
-	// removed while those rows stay gone. Rebuilding the bucket that
-	// straddles that frontier would sum only its surviving suffix and
-	// replace a correct aggregate with a short one, which is the one way
-	// this pass could leave history worse than it found it.
+	// The boundary is still this pass's own business. Buckets starting below
+	// it belong to the backfill, which owns them additively and rebuilds
+	// them through history_epoch. The test is the row's own timestamp, the
+	// same split commitFill makes, so the rows of the boundary hour that sit
+	// below the first live block stay in scope.
 	frontier, err := f.pruneFrontier(ctx)
 	if err != nil {
 		return RepairIdle, err
 	}
-	if frontier.After(horizon) {
-		horizon = frontier
-	}
+	finest := db.Resolutions[db.ResolutionOrder[0]]
 	targets := make([]nitro.ReceiptTarget, 0, len(rows))
 	repairable := make([]db.Block, 0, len(rows))
-	byResolution := make(map[string][]db.Block, len(db.ResolutionOrder))
 	var backfilled, stale int
 	for _, b := range rows {
-		if b.TS.Before(boundary) {
+		switch {
+		case b.TS.Before(boundary):
 			backfilled++
-			continue
-		}
-		whole := wholeResolutions(b.TS, horizon)
-		if len(whole) == 0 {
+		case b.TS.UTC().Truncate(finest).Before(frontier):
 			stale++
-			continue
-		}
-		targets = append(targets, nitro.ReceiptTarget{Number: b.Number, Hash: b.Hash, TxCount: b.TxCount, GasUsed: b.GasUsed})
-		repairable = append(repairable, b)
-		for _, res := range whole {
-			byResolution[res] = append(byResolution[res], b)
+		default:
+			targets = append(targets, nitro.ReceiptTarget{Number: b.Number, Hash: b.Hash, TxCount: b.TxCount, GasUsed: b.GasUsed})
+			repairable = append(repairable, b)
 		}
 	}
 	if backfilled > 0 {
 		f.log.Debug("passing over blocks whose buckets the backfill owns", "blocks", backfilled, "boundary", boundary)
 	}
 	if stale > 0 {
-		f.log.Info("passing over blocks no resolution can still rebuild whole", "blocks", stale, "horizon", horizon)
+		f.log.Info("passing over blocks whose buckets prune has already cut into", "blocks", stale, "frontier", frontier)
 	}
 	if len(targets) == 0 {
 		c.Next = next
@@ -317,11 +250,9 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 			return err
 		}
 		for _, res := range db.ResolutionOrder {
-			rebuild := byResolution[res]
-			if len(rebuild) == 0 {
-				continue
-			}
-			if err := s.RebuildBuckets(ctx, f.chainID, res, db.BucketStarts(rebuild, res)); err != nil {
+			// Every resolution is asked for; the store drops the windows it
+			// must not touch, which is the only place that judgement is made.
+			if err := s.RebuildBuckets(ctx, f.chainID, res, db.BucketStarts(repairable, res)); err != nil {
 				return fmt.Errorf("poster gas %s buckets: %w", res, err)
 			}
 		}
