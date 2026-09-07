@@ -258,7 +258,12 @@ describe("mock world", () => {
     expect(Number(l1.points[0].baseFeeEstimate)).toBeGreaterThan(2_000_000);
     expect(world.network(now).headBlock).toBe(world.headBlock);
     expect(world.network(now + 5).lagSeconds).toBe(6);
-    expect(world.status(now).lastError).toBeNull();
+    expect(world.status(now)).toMatchObject({
+      lastError: null,
+      degraded: false,
+      capacity: { saturated: false, at: null },
+      holes: { pending: 0, blocks: 0 },
+    });
   });
 
   it("models the six-constraint Arbitrum One set", () => {

@@ -126,6 +126,35 @@ type StateSample struct {
 	Accounts    JSONB     `db:"accounts"`
 }
 
+// MissingRange is a durable interval the collector has not indexed yet.
+// Lifecycle is pending, retrying or blocked. Cursor is the first block still
+// missing, or zero before recovery starts. ReplayState describes Cursor-1 and
+// CursorAt is its timestamp, so recovery can resume after block retention and
+// the API can map the remaining suffix to time buckets without decoding the
+// replay state. PredecessorAt and SuccessorAt bound the original interval when
+// those neighboring blocks were observed. DetectedAt is the range's age
+// anchor. Retry fields survive restarts and make delayed work visible.
+type MissingRange struct {
+	ChainID       uint64         `db:"chain_id"`
+	From          uint64         `db:"from_block"`
+	To            uint64         `db:"to_block"`
+	DetectedAt    time.Time      `db:"detected_at"`
+	Lifecycle     string         `db:"lifecycle"`
+	Reason        string         `db:"reason"`
+	Cursor        uint64         `db:"cursor"`
+	ReplayState   JSONB          `db:"replay_state"`
+	Folded        uint64         `db:"folded"`
+	RetryCount    uint64         `db:"retry_count"`
+	LastAttemptAt sql.NullTime   `db:"last_attempt_at"`
+	NextRetryAt   sql.NullTime   `db:"next_retry_at"`
+	LastError     sql.NullString `db:"last_error"`
+	PredecessorAt sql.NullTime   `db:"predecessor_at"`
+	SuccessorAt   sql.NullTime   `db:"successor_at"`
+	CursorAt      sql.NullTime   `db:"cursor_at"`
+	CreatedAt     time.Time      `db:"created_at"`
+	UpdatedAt     time.Time      `db:"updated_at"`
+}
+
 // OwnerAction is a row of the owner_actions table.
 type OwnerAction struct {
 	ChainID     uint64    `db:"chain_id"`
@@ -252,6 +281,13 @@ type Store interface {
 	// DeleteStateSamplesAfter removes samples taken at blocks above block
 	// (a reorg rewind) and returns how many.
 	DeleteStateSamplesAfter(ctx context.Context, chainID, block uint64) (int64, error)
+
+	// MissingRanges lists every durable missing interval ordered by block.
+	MissingRanges(ctx context.Context, chainID uint64) ([]MissingRange, error)
+	// ReplaceMissingRanges replaces one chain's normalized set. Collector
+	// callers use the chain transaction so the delete and inserts are atomic
+	// and concurrent loops cannot erase a range another loop just recorded.
+	ReplaceMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error
 
 	// InsertOwnerActions inserts new actions, ignoring duplicates, and
 	// returns how many were new.

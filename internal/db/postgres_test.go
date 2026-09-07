@@ -28,12 +28,13 @@ func newMock(t *testing.T) (*Postgres, sqlmock.Sqlmock) {
 }
 
 var (
-	now       = time.Date(2026, 9, 6, 7, 20, 0, 0, time.UTC)
-	errBoom   = errors.New("boom")
-	blockCols = []string{"chain_id", "number", "hash", "parent_hash", "ts", "gas_used", "base_fee", "l1_block", "tx_count", "backlogs", "constraint_bips", "exponent_bips", "predicted_base_fee", "min_base_fee", "anchored", "pricing_version"}
-	netCols   = []string{"chain_id", "name", "display_name", "explorer_url", "enabled", "head_block", "head_at", "last_sample_at", "last_error", "updated_at"}
-	bucketCol = []string{"chain_id", "resolution", "bucket_start", "blocks", "gas_used", "fees_wei", "base_fee_min", "base_fee_avg", "base_fee_max", "base_fee_sum", "exponent_end_bips", "backlogs_end", "backlogs_max", "constraint_bips_end", "min_base_fee", "floor_fees_wei", "surplus_fees_wei", "constraint_set_id", "replay_error_bips", "last_block", "pricing_version"}
-	sampleCol = []string{"chain_id", "sampled_at", "block_number", "base_fee", "min_base_fee", "constraints", "legacy", "prices", "l1", "accounts"}
+	now        = time.Date(2026, 9, 6, 7, 20, 0, 0, time.UTC)
+	errBoom    = errors.New("boom")
+	blockCols  = []string{"chain_id", "number", "hash", "parent_hash", "ts", "gas_used", "base_fee", "l1_block", "tx_count", "backlogs", "constraint_bips", "exponent_bips", "predicted_base_fee", "min_base_fee", "anchored", "pricing_version"}
+	netCols    = []string{"chain_id", "name", "display_name", "explorer_url", "enabled", "head_block", "head_at", "last_sample_at", "last_error", "updated_at"}
+	bucketCol  = []string{"chain_id", "resolution", "bucket_start", "blocks", "gas_used", "fees_wei", "base_fee_min", "base_fee_avg", "base_fee_max", "base_fee_sum", "exponent_end_bips", "backlogs_end", "backlogs_max", "constraint_bips_end", "min_base_fee", "floor_fees_wei", "surplus_fees_wei", "constraint_set_id", "replay_error_bips", "last_block", "pricing_version"}
+	sampleCol  = []string{"chain_id", "sampled_at", "block_number", "base_fee", "min_base_fee", "constraints", "legacy", "prices", "l1", "accounts"}
+	missingCol = []string{"chain_id", "from_block", "to_block", "detected_at", "lifecycle", "reason", "cursor", "replay_state", "folded", "retry_count", "last_attempt_at", "next_retry_at", "last_error", "predecessor_at", "successor_at", "cursor_at", "created_at", "updated_at"}
 )
 
 func blockRow() *sqlmock.Rows {
@@ -196,6 +197,20 @@ func TestPostgresQueries(t *testing.T) {
 		t.Fatalf("DeleteStateSamplesAfter: %d %v", n, err)
 	}
 
+	mock.ExpectQuery("SELECT .* FROM missing_ranges WHERE chain_id = \\$1 ORDER BY").WillReturnRows(sqlmock.NewRows(missingCol).AddRow(
+		4663, 100, 199, now.Add(-time.Hour), "retrying", "catch up limit", 150, []byte(`{"block":149}`), 150, 2,
+		now.Add(-time.Minute), now.Add(time.Minute), "rpc busy", now.Add(-2*time.Hour), now, now.Add(-time.Minute), now.Add(-time.Hour), now,
+	))
+	ranges, err := p.MissingRanges(ctx, 4663)
+	if err != nil || len(ranges) != 1 || ranges[0].Cursor != 150 || ranges[0].RetryCount != 2 || string(ranges[0].ReplayState) != `{"block":149}` || !ranges[0].SuccessorAt.Valid {
+		t.Fatalf("MissingRanges: %+v %v", ranges, err)
+	}
+	mock.ExpectExec("DELETE FROM missing_ranges WHERE chain_id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO missing_ranges").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.ReplaceMissingRanges(ctx, 4663, ranges); err != nil {
+		t.Fatalf("ReplaceMissingRanges: %v", err)
+	}
+
 	mock.ExpectExec("INSERT INTO owner_actions").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO owner_actions").WillReturnResult(sqlmock.NewResult(0, 0))
 	if n, err := p.InsertOwnerActions(ctx, []OwnerAction{{TxHash: "a", Args: JSONB(`{}`)}, {TxHash: "b", Args: JSONB(`{}`)}}); err != nil || n != 1 {
@@ -311,6 +326,8 @@ func TestPostgresErrors(t *testing.T) {
 		{"L1Samples", true, func() error { _, err := p.L1Samples(ctx, 1, now, now, 0); return err }},
 		{"PruneStateSamples", false, func() error { _, err := p.PruneStateSamples(ctx, 1, now); return err }},
 		{"DeleteStateSamplesAfter", false, func() error { _, err := p.DeleteStateSamplesAfter(ctx, 1, 1); return err }},
+		{"MissingRanges", true, func() error { _, err := p.MissingRanges(ctx, 1); return err }},
+		{"ReplaceMissingRanges", false, func() error { return p.ReplaceMissingRanges(ctx, 1, nil) }},
 		{"InsertOwnerActions", false, func() error { _, err := p.InsertOwnerActions(ctx, []OwnerAction{{}}); return err }},
 		{"OwnerActions", true, func() error { _, err := p.OwnerActions(ctx, 1, now, now, 1); return err }},
 		{"OwnerActionsSince", true, func() error { _, err := p.OwnerActionsSince(ctx, 1, 1); return err }},

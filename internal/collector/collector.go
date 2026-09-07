@@ -125,6 +125,11 @@ const (
 	// boundaryWidth is the widest bucket: buckets from the hour of the
 	// first live block on are rebuilt from block rows.
 	boundaryWidth = time.Hour
+	// maxRecoveryDeferrals preserves the live path's priority while bounding
+	// how many history-loop turns sustained lag may take away from a missing
+	// range. The fast pacer reserve still protects head sampling on the turn
+	// recovery is allowed to use the bulk lane.
+	maxRecoveryDeferrals = 30
 )
 
 // Owner methods that change the pricer.
@@ -192,6 +197,9 @@ type Follower struct {
 	// while it exceeds a header batch: on a small budget their batches
 	// queue ahead of the catch-up's and turn a lag into a skipped gap.
 	behind atomic.Uint64
+	// recoveryDeferrals counts consecutive missing-range turns yielded to a
+	// persistently lagging fast loop. It is reset after one recovery turn.
+	recoveryDeferrals atomic.Uint64
 
 	mu          sync.Mutex
 	initialized bool
@@ -260,19 +268,22 @@ type liveStart struct {
 	TS    int64  `json:"ts"`
 }
 
-// hole is a block range the collector did not index (collector_state
-// holes). A hole without a reason is queued work: the gap filler replays
-// it forward from the state at the block before it, tracking its progress
-// in Next and carrying the replay state in State. A hole with
-// reasonNoState has nothing to replay from and is only re-examined when a
-// stored state appears before it; one with reasonExpired left the queue
-// because it was full.
+// hole is a block range the collector did not index. It is stored as one
+// durable missing_ranges row with its lifecycle, cursor, replay state, retry
+// information and time bounds. The model shape is also the legacy JSON shape
+// imported during the forward migration rollout.
 type hole = model.Hole
 
-// Reasons a hole is not queued work.
+// Missing-range lifecycle states and reasons.
 const (
-	reasonNoState = model.HoleReasonNoState
-	reasonExpired = model.HoleReasonExpired
+	rangePending  = model.MissingRangePending
+	rangeRetrying = model.MissingRangeRetrying
+	rangeBlocked  = model.MissingRangeBlocked
+
+	reasonCatchUpLimit        = model.HoleReasonCatchUpLimit
+	reasonReplayDiscontinuity = model.HoleReasonReplayDiscontinuity
+	reasonNoState             = model.HoleReasonNoState
+	reasonExpired             = model.HoleReasonExpired
 )
 
 // scanOrigin is where a deliberately truncated owner scan began
@@ -541,6 +552,9 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("register network: %w", err)
 	}
+	if err := f.importLegacyHoles(ctx); err != nil {
+		return fmt.Errorf("import missing ranges: %w", err)
+	}
 	if err := f.reloadHeadLocked(ctx); err != nil {
 		return err
 	}
@@ -698,17 +712,17 @@ func (f *Follower) boundaryLocked() (time.Time, bool) {
 	return time.Unix(f.liveStart.TS, 0).UTC().Truncate(boundaryWidth), true
 }
 
-// recordHole appends an un-indexed range to collector_state holes, where
-// saveHoles merges it into any queued range it overlaps or touches rather
-// than duplicating it. A hole without a reason is queued for the gap
-// filler; one recorded with reasonNoState is only work if a state ever
-// appears before it.
+// recordHole appends a durable un-indexed range. saveHoles merges it into
+// compatible work it overlaps or touches rather than duplicating it. A range
+// without an explicit lifecycle is pending, except reasonNoState, which is
+// blocked until a replay state appears before it.
 func (f *Follower) recordHole(ctx context.Context, s db.Store, h hole) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil {
 		return err
 	}
 	h.At = f.now().UTC().Format(time.RFC3339)
+	h.Lifecycle = effectiveLifecycle(h)
 	return f.saveHoles(ctx, s, append(holes, h))
 }
 
@@ -1135,4 +1149,23 @@ func (f *Follower) withGeneration(ctx context.Context, gen uint64, fn func(db.St
 // spare call belongs to the live path until it has caught up.
 func (f *Follower) historyMustWait() bool {
 	return f.catchingUp.Load() || f.behind.Load() > uint64(f.cfg.HeaderBatchSize)
+}
+
+// recoveryMustWait gives the active catch-up absolute priority, and gives a
+// lagging fast loop all but one of every maxRecoveryDeferrals history turns.
+// This keeps the live reserve and dominant share while guaranteeing that a
+// durable missing range is retried eventually under sustained ingress load.
+func (f *Follower) recoveryMustWait() bool {
+	if f.catchingUp.Load() {
+		return true
+	}
+	if f.behind.Load() <= uint64(f.cfg.HeaderBatchSize) {
+		f.recoveryDeferrals.Store(0)
+		return false
+	}
+	if f.recoveryDeferrals.Add(1) < maxRecoveryDeferrals {
+		return true
+	}
+	f.recoveryDeferrals.Store(0)
+	return false
 }

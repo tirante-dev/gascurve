@@ -531,6 +531,37 @@ func (p *Postgres) DeleteStateSamplesAfter(ctx context.Context, chainID, block u
 	return res.RowsAffected()
 }
 
+const missingRangeColumns = `chain_id, from_block, to_block, detected_at, lifecycle, reason, cursor, replay_state, folded, retry_count, last_attempt_at, next_retry_at, last_error, predecessor_at, successor_at, cursor_at, created_at, updated_at`
+
+// MissingRanges lists every durable missing interval in block order.
+func (p *Postgres) MissingRanges(ctx context.Context, chainID uint64) ([]MissingRange, error) {
+	return selectAll[MissingRange](ctx, p, `SELECT `+missingRangeColumns+` FROM missing_ranges WHERE chain_id = $1 ORDER BY from_block`, chainID)
+}
+
+// ReplaceMissingRanges replaces one chain's normalized intervals. Collector
+// callers hold the chain transaction, so the delete and inserts commit as one
+// durable lifecycle update.
+func (p *Postgres) ReplaceMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error {
+	if _, err := p.exec(ctx, `DELETE FROM missing_ranges WHERE chain_id = $1`, chainID); err != nil {
+		return err
+	}
+	for _, r := range ranges {
+		if _, err := p.exec(ctx, `
+			INSERT INTO missing_ranges (`+missingRangeColumns+`)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, COALESCE($17, now()), now())`,
+			chainID, r.From, r.To, r.DetectedAt, r.Lifecycle, r.Reason, r.Cursor, r.ReplayState, r.Folded,
+			r.RetryCount, r.LastAttemptAt, r.NextRetryAt, r.LastError, r.PredecessorAt, r.SuccessorAt, r.CursorAt,
+			nullTime(r.CreatedAt)); err != nil {
+			return fmt.Errorf("missing range %d..%d: %w", r.From, r.To, err)
+		}
+	}
+	return nil
+}
+
+func nullTime(t time.Time) sql.NullTime {
+	return sql.NullTime{Time: t, Valid: !t.IsZero()}
+}
+
 const ownerActionColumns = `chain_id, block_number, tx_hash, log_index, ts, method, selector, args`
 
 // InsertOwnerActions inserts new actions and returns the number added.

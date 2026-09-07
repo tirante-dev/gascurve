@@ -32,13 +32,19 @@ func lastSnapshot(t *testing.T, store *dbtest.MemStore) model.LiveSnapshot {
 
 func holesOf(t *testing.T, store *dbtest.MemStore) []hole {
 	t.Helper()
-	raw, ok, _ := store.GetState(context.Background(), 4663, db.StateHoles)
-	if !ok {
+	rows, err := store.MissingRanges(context.Background(), 4663)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
 		return nil
 	}
-	var out []hole
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		t.Fatal(err)
+	out := make([]hole, len(rows))
+	for i, row := range rows {
+		out[i], err = holeFromRow(row)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	return out
 }
@@ -174,6 +180,37 @@ func TestTickFreshStartAndCatchUp(t *testing.T) {
 	}
 	if f.Head() != 1025 {
 		t.Fatal("head must not move backwards")
+	}
+}
+
+// TestTickPersistsRPCCapacity records the live call rate the observed block
+// interval required. A skipped gap is an explicit saturated-capacity signal,
+// not just a warning hidden in collector logs.
+func TestTickPersistsRPCCapacity(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.setHead(gapHead)
+	rpc.mu.Lock()
+	rpc.sampledAt = baseTime.Add(time.Second)
+	rpc.mu.Unlock()
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok, err := store.GetState(ctx, 4663, db.StateRPCCapacity)
+	if err != nil || !ok {
+		t.Fatalf("capacity checkpoint: %q %v %v", raw, ok, err)
+	}
+	var capacity model.RPCCapacity
+	if err := json.Unmarshal([]byte(raw), &capacity); err != nil {
+		t.Fatal(err)
+	}
+	if !capacity.Saturated || capacity.ConfiguredCallsPerSecond != 4 || capacity.RequiredCallsPerSecond != 154 || capacity.HeadroomCallsPerSecond == nil || *capacity.HeadroomCallsPerSecond != -150 {
+		t.Fatalf("rpc capacity: %+v", capacity)
 	}
 }
 
@@ -1189,19 +1226,12 @@ func TestHelpers(t *testing.T) {
 	if f.stateAtLocked(1, &nitro.Sample{}) != nil || f.stateAtLocked(1, leg).Legacy.SpeedLimit != 1 {
 		t.Fatal("legacy stateAt")
 	}
-	// Holes: an unreadable checkpoint starts over, a GetState failure surfaces.
+	// Missing-range read failures surface instead of overwriting durable rows.
 	store := dbtest.New()
-	_ = store.SetState(context.Background(), 4663, db.StateHoles, "{bad")
 	f.store = store
-	if err := f.recordHole(context.Background(), store, hole{From: 1, To: 2}); err != nil {
-		t.Fatal(err)
-	}
-	if h := holesOf(t, store); len(h) != 1 || h[0].From != 1 {
-		t.Fatalf("holes after a bad checkpoint: %+v", h)
-	}
-	store.FailOn["GetState"] = true
-	if err := f.recordHole(context.Background(), store, hole{}); !errors.Is(err, dbtest.ErrInjected) {
-		t.Fatal("hole GetState failure")
+	store.FailOn["MissingRanges"] = true
+	if err := f.recordHole(context.Background(), store, hole{From: 1, To: 2}); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatal("missing-range read failure")
 	}
 }
 

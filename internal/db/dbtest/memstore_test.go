@@ -45,6 +45,21 @@ func TestMemStore(t *testing.T) {
 	if err := m.SetNetworkError(ctx, 1, "x"); err != nil {
 		t.Fatal(err)
 	}
+	ranges := []db.MissingRange{{ChainID: 99, From: 10, To: 20, DetectedAt: base, ReplayState: db.JSONB(`{"block":9}`)}}
+	if err := m.ReplaceMissingRanges(ctx, 1, ranges); err != nil {
+		t.Fatal(err)
+	}
+	ranges[0].ReplayState[0] = '['
+	gotRanges, err := m.MissingRanges(ctx, 1)
+	if err != nil || len(gotRanges) != 1 || gotRanges[0].ChainID != 1 || string(gotRanges[0].ReplayState) != `{"block":9}` {
+		t.Fatalf("missing ranges: %+v %v", gotRanges, err)
+	}
+	if err := m.ReplaceMissingRanges(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotRanges, _ := m.MissingRanges(ctx, 1); len(gotRanges) != 0 {
+		t.Fatalf("missing ranges were not cleared: %+v", gotRanges)
+	}
 	if n, _ := m.NetworkByRef(ctx, "a"); !n.LastError.Valid {
 		t.Fatal("error not set")
 	}
@@ -332,7 +347,7 @@ func TestMemStoreFailures(t *testing.T) {
 	if err := m.Ping(ctx); !errors.Is(err, ErrInjected) {
 		t.Fatal("ping")
 	}
-	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasUsedBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
+	names := []string{"WithTx", "WithChainTx", "WithSnapshotTx", "DeleteStateSamplesAfter", "MissingRanges", "ReplaceMissingRanges", "UpdateConstraintSet", "DeleteState", "UpsertNetwork", "Networks", "NetworkByRef", "UpdateNetworkHead", "SetNetworkError", "UpsertBlocks", "BlockByNumber", "DeleteBlocksAfter", "LatestBlock", "OldestBlock", "RecentBlocks", "BlocksAfter", "BlocksBetween", "GasUsedBetween", "TwoTxBlocks", "PruneBlocks", "FoldBuckets", "RebuildBuckets", "DeleteBucketsBefore", "Buckets", "InsertStateSample", "LatestStateSample", "L1Samples", "PruneStateSamples", "InsertOwnerActions", "OwnerActions", "OwnerActionsSince", "RewindAfter", "InsertConstraintSet", "ConstraintSets", "UpsertBatchReports", "BatchReports", "BatchBuckets", "GetState", "SetState", "States", "Notify"}
 	for _, n := range names {
 		m.FailOn[n] = true
 	}
@@ -346,16 +361,21 @@ func TestMemStoreFailures(t *testing.T) {
 			_, err := m.DeleteStateSamplesAfter(ctx, 1, 1)
 			return err
 		},
-		"UpdateConstraintSet": func() error { return m.UpdateConstraintSet(ctx, db.ConstraintSet{}) },
-		"UpsertNetwork":       func() error { return m.UpsertNetwork(ctx, db.Network{}) },
-		"Networks":            func() error { _, err := m.Networks(ctx); return err },
-		"NetworkByRef":        func() error { _, err := m.NetworkByRef(ctx, ""); return err },
-		"UpdateNetworkHead":   func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
-		"SetNetworkError":     func() error { return m.SetNetworkError(ctx, 1, "") },
-		"UpsertBlocks":        func() error { return m.UpsertBlocks(ctx, nil) },
-		"BlockByNumber":       func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
-		"DeleteBlocksAfter":   func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
-		"RebuildBuckets":      func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
+		"MissingRanges": func() error {
+			_, err := m.MissingRanges(ctx, 1)
+			return err
+		},
+		"ReplaceMissingRanges": func() error { return m.ReplaceMissingRanges(ctx, 1, nil) },
+		"UpdateConstraintSet":  func() error { return m.UpdateConstraintSet(ctx, db.ConstraintSet{}) },
+		"UpsertNetwork":        func() error { return m.UpsertNetwork(ctx, db.Network{}) },
+		"Networks":             func() error { _, err := m.Networks(ctx); return err },
+		"NetworkByRef":         func() error { _, err := m.NetworkByRef(ctx, ""); return err },
+		"UpdateNetworkHead":    func() error { return m.UpdateNetworkHead(ctx, 1, 1, now, now) },
+		"SetNetworkError":      func() error { return m.SetNetworkError(ctx, 1, "") },
+		"UpsertBlocks":         func() error { return m.UpsertBlocks(ctx, nil) },
+		"BlockByNumber":        func() error { _, err := m.BlockByNumber(ctx, 1, 1); return err },
+		"DeleteBlocksAfter":    func() error { _, err := m.DeleteBlocksAfter(ctx, 1, 1); return err },
+		"RebuildBuckets":       func() error { return m.RebuildBuckets(ctx, 1, "1m", nil) },
 		"DeleteBucketsBefore": func() error {
 			_, err := m.DeleteBucketsBefore(ctx, 1, now)
 			return err
