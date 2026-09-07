@@ -5,6 +5,31 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+describe("a relative api base", () => {
+  // The published image bakes NEXT_PUBLIC_API_URL=/api/v1, because the api
+  // and the app share a hostname behind the tunnel. new URL() cannot parse
+  // a path on its own, which took every request down with "Failed to
+  // construct 'URL': Invalid URL".
+  it("builds a path the document resolves, rather than throwing", async () => {
+    vi.resetModules();
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "/api/v1");
+    const core = await import("./core");
+    expect(core.API_BASE_URL).toBe("/api/v1");
+    expect(core.isRelativeBase()).toBe(true);
+    expect(core.buildUrl("/networks")).toBe("/api/v1/networks");
+    expect(core.buildUrl("networks/robinhood/series", { range: "24h" })).toBe("/api/v1/networks/robinhood/series?range=24h");
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+  it("knows an absolute base from a relative one", async () => {
+    const { isRelativeBase } = await import("./core");
+    expect(isRelativeBase("http://localhost:8080/api/v1")).toBe(false);
+    expect(isRelativeBase("https://gascurve.com/api/v1")).toBe(false);
+    expect(isRelativeBase("/api/v1")).toBe(true);
+    expect(isRelativeBase("")).toBe(true);
+  });
+});
+
 describe("buildUrl", () => {
   it("joins the base and drops undefined query values", () => {
     expect(API_BASE_URL).toBe("http://localhost:8080/api/v1");

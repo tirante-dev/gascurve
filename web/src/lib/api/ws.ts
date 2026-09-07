@@ -17,7 +17,7 @@
 // cannot satisfy closes a socket whose hello never comes.
 
 import type { BlockPoint, ClientMessage, HelloData, LiveSnapshot, LiveStatus, OwnerAction, ReorgData, ServerMessage } from "@/types";
-import { API_BASE_URL } from "./core";
+import { API_BASE_URL, isRelativeBase } from "./core";
 
 /** The subset of the WebSocket interface the client uses, so tests and the mock can stand in. */
 export interface SocketLike {
@@ -40,10 +40,20 @@ export const WATCHDOG_MS = 75_000;
 /** A connect or subscribe that is not answered by a hello within this long is abandoned; pings do not count. */
 export const ACK_WATCHDOG_MS = 10_000;
 
-/** WebSocket endpoint: NEXT_PUBLIC_WS_URL, or the api URL with http swapped for ws and /ws appended. */
-export function resolveWsUrl(apiBaseUrl: string = API_BASE_URL, explicit: string | undefined = process.env.NEXT_PUBLIC_WS_URL): string {
+/**
+ * WebSocket endpoint: NEXT_PUBLIC_WS_URL, or the api URL with http swapped
+ * for ws and /ws appended. A relative api base (the published image bakes
+ * /api/v1, served from the same hostname as the app) is resolved against
+ * the page's own origin first, since WebSocket has no relative form.
+ */
+export function resolveWsUrl(
+  apiBaseUrl: string = API_BASE_URL,
+  explicit: string | undefined = process.env.NEXT_PUBLIC_WS_URL,
+  origin: string = typeof window === "undefined" ? "" : window.location.origin,
+): string {
   if (explicit && explicit.trim() !== "") return explicit.replace(/\/+$/, "");
-  return apiBaseUrl.replace(/^http/i, "ws") + "/ws";
+  const base = isRelativeBase(apiBaseUrl) ? origin.replace(/\/+$/, "") + apiBaseUrl : apiBaseUrl;
+  return base.replace(/^http/i, "ws") + "/ws";
 }
 
 /** Picks the real WebSocket, or the mock one when the app runs on mock data. */

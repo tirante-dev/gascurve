@@ -67,6 +67,14 @@ describe("resolveWsUrl", () => {
     expect(resolveWsUrl("http://x/api/v1", "wss://ws.example/api/v1/ws/")).toBe("wss://ws.example/api/v1/ws");
     expect(resolveWsUrl()).toBe("ws://localhost:8080/api/v1/ws");
   });
+
+  it("resolves a relative api base against the page origin, since a socket has no relative form", () => {
+    expect(resolveWsUrl("/api/v1", undefined, "https://gascurve.com")).toBe("wss://gascurve.com/api/v1/ws");
+    expect(resolveWsUrl("/api/v1", undefined, "http://localhost:3000")).toBe("ws://localhost:3000/api/v1/ws");
+    expect(resolveWsUrl("/api/v1", undefined, "https://gascurve.com/")).toBe("wss://gascurve.com/api/v1/ws");
+    // An explicit setting still wins over anything derived.
+    expect(resolveWsUrl("/api/v1", "wss://elsewhere/ws", "https://gascurve.com")).toBe("wss://elsewhere/ws");
+  });
 });
 
 describe("resolveSocketFactory", () => {
