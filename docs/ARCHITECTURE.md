@@ -14,11 +14,11 @@ collector (cmd/collector)  ──writes──▶  PostgreSQL  ◀──reads─�
                                                            web (Next.js, web/)
 ```
 
-- The **collector** is the only process that talks to an RPC. One follower goroutine per enabled network.
+- The **collector** is the only process that talks to an RPC. One follower goroutine per enabled network. Its private observability server listens on `collector.metrics_port` (default 9090) and serves `/startup`, `/health`, `/ready` and `/metrics`.
 - The **api** never calls an RPC. It reads Postgres and fans live updates out to WebSocket clients using Postgres `LISTEN gascurve_live`.
 - The **web** app never calls an RPC. It uses the REST API for history and the WebSocket for live updates, with polling of `/live` as a fallback.
 - **migrate** (`cmd/migrate`) applies schema migrations. Runtime binaries only run migrations when `database.run_migrations: true`.
-- Both runtime binaries expose Prometheus metrics at `/metrics` (§9). The api serves them on `server.port` next to the REST API; the collector, which otherwise runs no HTTP server, serves them on `collector.metrics_port` from a server that shares nothing with the followers.
+- Both runtime binaries expose Prometheus metrics at `/metrics` (§9). The api serves them on `server.port` next to the REST API; the collector serves them on `collector.metrics_port` next to its health routes.
 
 ## 2. Networks
 
@@ -125,7 +125,7 @@ batch_reports       (chain_id, block_number, batch_number, batch_ts, poster, cal
 missing_ranges      (chain_id, from_block, to_block, detected_at, lifecycle /* pending|retrying|blocked */, reason,
                      cursor, replay_state JSONB, folded, retry_count, last_attempt_at, next_retry_at, last_error,
                      predecessor_at, successor_at, cursor_at, created_at, updated_at, PK(chain_id, from_block))
-collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor_v2, endpoints, generation (bumped by every rewind and by a history rebuild; writers that fetched outside the lock re-check it before committing), rpc_capacity, eth_usd, history_epoch. A legacy holes key is deleted only after its JSON has been imported into missing_ranges successfully
+collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor_v2, endpoints, generation (bumped by every rewind and by a history rebuild; writers that fetched outside the lock re-check it before committing), rpc_capacity, eth_usd, history_epoch, telemetry (collector heartbeat, loop outcomes, head progress and cumulative RPC/database accounting). A legacy holes key is deleted only after its JSON has been imported into missing_ranges successfully
 ```
 
 `NOTIFY gascurve_live, '<json>'` is issued by the collector after each tick with the `LiveSnapshot` below (payloads stay under 8 kB; `recentBlocks` is not included in the notify payload, the API keeps its own ring buffer from `blocks` rows).
@@ -179,7 +179,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 
 | Method and path | Purpose |
 |---|---|
-| `GET /health`, `GET /ready` | liveness; readiness checks DB and the PostgreSQL notification listener |
+| `GET /health`, `GET /ready` | shallow process liveness; readiness checks DB and the PostgreSQL notification listener |
 | `GET /networks` | `Network[]` |
 | `GET /networks/{network}` | `Network` |
 | `GET /networks/{network}/live` | `LiveSnapshot` (same as WS `tick`), `Cache-Control: no-store` |
@@ -189,7 +189,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 | `GET /networks/{network}/owner-actions` | `OwnerAction[]` newest first |
 | `GET /networks/{network}/batches?range=…` | `BatchSeries` (ArbOS-attributed batch-posting cost per bucket, not Ethereum receipt totals, plus batch cadence) |
 | `GET /networks/{network}/l1?range=…` | `L1Series` (pricer getters over time, from state samples) |
-| `GET /status` | `{ version, listener: { ready, reconnects, lastError }, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion, degraded, capacity: { configuredCallsPerSecond, requiredCallsPerSecond, observedCallsPerSecond, headroomCallsPerSecond, saturated, at, checkpointError }, holes: { pending, blocks, unfillable, retrying, oldestAgeSeconds, checkpointError }, activeEndpoint, failovers, endpoints: [{ index, ws, archive, disabled, error: string | null, wsCooling, wsError: string | null }] }] }` (`listener.lastError` is null while its PostgreSQL LISTEN connection is ready. `listener.reconnects` counts successful recoveries after startup. `headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion`, `capacity.at` and unlimited capacity headroom are nullable; `endpoints` is `[]` when unknown; endpoint URLs are never exposed, in `error` and `wsError` either. `wsCooling` reports an endpoint whose WebSocket is cooled down after a dial, subscribe or repeated disconnect failure: its JSON-RPC keeps serving ordinary calls while the head subscription moves to another endpoint. `holes.pending` counts pending and retrying rows, `holes.unfillable` counts blocked rows, `holes.blocks` is the remaining block count, and `holes.oldestAgeSeconds` exposes the age of the oldest range. A checkpoint decode failure sets the related `checkpointError` instead of reporting no gaps.) |
+| `GET /status` | `{ version, status, listener: { ready, reconnects, lastError }, networks: [{ ..., degraded, capacity: { configuredCallsPerSecond, requiredCallsPerSecond, observedCallsPerSecond, headroomCallsPerSecond, saturated, at, checkpointError }, holes: { pending, blocks, unfillable, retrying, oldestAgeSeconds, checkpointError, pendingBlocks, oldestPendingAt, oldestPendingAgeSeconds }, status, degradedReasons, collector: { heartbeatAt, heartbeatAgeSeconds, heartbeatStaleAfterSeconds, observedHead, indexedHead, headLagBlocks, loops: { fast, slow, history }, rpc, database } }] }`. Top-level `status` is `healthy` or `degraded`; it degrades when the notification listener or any enabled network is degraded. A network is `healthy`, `degraded` or `disabled`. The API degrades an enabled network when the heartbeat or a loop is missing or stale, a loop's newest outcome is an error, the collector trails its last observed head, queued gaps outlive the history-loop freshness window, or anything the per-network `degraded` flag covers (missing blocks, saturated RPC capacity, an unreadable checkpoint). `listener.lastError` is null while its PostgreSQL LISTEN connection is ready, and `listener.reconnects` counts successful recoveries after startup. Existing head, rate-limit, backfill, ArbOS and endpoint fields remain for compatibility; endpoint URLs are never exposed, in `error` and `wsError` either. `collector` is null until a compatible collector writes its first telemetry checkpoint. Loop entries retain both last success and last error timestamps plus the last duration. RPC accounting includes calls, HTTP requests, errors, rate limits and average HTTP latency. Database accounting includes operations, errors, average latency and last latency. `holes.pending` counts pending and retrying rows, `holes.unfillable` counts blocked rows, `holes.blocks` is the remaining block count including unfillable history, `holes.oldestAgeSeconds` is the age of the oldest range, while `pendingBlocks` and the `oldestPending*` fields cover queued work only. A checkpoint decode failure sets the related `checkpointError` instead of reporting no gaps. |
 | `GET /ws?network=…` | WebSocket, see §7 |
 
 Points in `Series`, `BatchSeries` and `L1Series` are always ascending by `t`. Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applied server-side if more than 2000 points), `24h` → `1m` buckets, `30d` → `15m`, `all` → `1h`. `/live` returns 404 until the collector has produced a sample. Arrays are never `null` in responses. `L1Series` reaches back at most `collector.sample_retention`.
@@ -323,21 +323,34 @@ Coverage gate (90% lines) applies to `src/lib/**`, `src/hooks/**`, `src/utils/**
 
 ## 9. Metrics (`internal/metrics`, Prometheus)
 
-Both binaries serve the exposition format at `/metrics`, from `internal/metrics` and the `prometheus/client_golang` registry: the api on `server.port` (alongside the REST API and the WebSocket, outside the request timeout and not counted by its own request instruments), the collector on `collector.metrics_port` (default 9090, `METRICS_PORT`; `0` disables it) from a small server that serves `/metrics` and answers 404 to everything else. Both registries also carry the standard Go runtime and process collectors (`go_*`, `process_*`).
+Both binaries serve the exposition format at `/metrics`, from `internal/metrics` and the `prometheus/client_golang` registry: the api on `server.port` (alongside the REST API and the WebSocket, outside the request timeout and not counted by its own request instruments), the collector on `collector.metrics_port` (default 9090, `METRICS_PORT`; `0` disables it) next to `/startup`, `/health` and `/ready`. Both registries also carry the standard Go runtime and process collectors (`go_*`, `process_*`).
 
-Instruments are written from points the code already reaches and are never read back by the application, so a scrape reads the registry alone: a follower stuck on an RPC call or on the database still answers one. Nothing in the collector writes a metric before its transaction commits, so a gauge never claims progress that was rolled back.
+Instruments are written from points the code already reaches and are never read back by the application, so a scrape reads the registry alone: a follower stuck on an RPC call or on the database still answers one. Committed-head gauges move only after their transaction commits. Separate observed-head and loop-outcome gauges expose work in progress and failures without claiming it was committed.
 
 **No endpoint URL is ever a label value.** Endpoints are identified by their index in the network's endpoint list, exactly as `/status` reports them; `internal/nitro` scrubs URLs from every error it returns for the same reason.
 
-Every collector series carries `network` (the configured name) and `chain_id` (decimal), and the per-endpoint ones add `endpoint` (the index).
+Every per-network collector series carries `network` (the configured name) and `chain_id` (decimal), and the per-endpoint ones add `endpoint` (the index). Heartbeat and database series describe the process and carry no network label.
 
 | Series | Type | Extra labels | Meaning |
 |---|---|---|---|
+| `gascurve_collector_heartbeat_timestamp_seconds` | gauge | none | unix time of the latest process heartbeat |
+| `gascurve_collector_database_operations_total` | counter | none | PostgreSQL driver operations |
+| `gascurve_collector_database_errors_total` | counter | none | failed PostgreSQL driver operations |
+| `gascurve_collector_database_latency_seconds` | gauge | none | average PostgreSQL operation latency since process start |
+| `gascurve_collector_database_last_latency_seconds` | gauge | none | latency of the latest PostgreSQL operation |
 | `gascurve_collector_head_block` | gauge | | number of the newest committed block |
 | `gascurve_collector_head_lag_seconds` | gauge | | age of that block, the figure `/status` reports as `lagSeconds` |
+| `gascurve_collector_observed_head_block` | gauge | | number of the newest head observed by the fast loop |
+| `gascurve_collector_head_lag_blocks` | gauge | | blocks between the observed and committed heads |
 | `gascurve_collector_last_sample_timestamp_seconds` | gauge | | unix time of the last successful state sample |
 | `gascurve_collector_tick_duration_seconds` | histogram | | wall time of one fast tick, failed ticks included |
+| `gascurve_collector_loop_last_success_timestamp_seconds` | gauge | `loop` (`fast`, `slow`, `history`) | unix time of the loop's last success |
+| `gascurve_collector_loop_last_error_timestamp_seconds` | gauge | `loop` (`fast`, `slow`, `history`) | unix time of the loop's last error |
+| `gascurve_collector_loop_duration_seconds` | histogram | `loop` (`fast`, `slow`, `history`) | wall time of each loop iteration, failures included |
 | `gascurve_collector_rpc_calls_total` | counter | `class` (`fast`, `bulk`) | JSON-RPC calls sent, one per item inside a batch, by pacer lane |
+| `gascurve_collector_rpc_requests_total` | counter | | HTTP requests sent to JSON-RPC endpoints, retries included |
+| `gascurve_collector_rpc_errors_total` | counter | | failed HTTP attempts and item-level JSON-RPC errors |
+| `gascurve_collector_rpc_latency_seconds` | gauge | | average HTTP round-trip latency since process start, excluding pacer waits |
 | `gascurve_collector_rate_limit_events_total` | counter | | times any endpoint of this network reported throttling |
 | `gascurve_collector_endpoint_rate_limit_events_total` | counter | `endpoint` | the same, per endpoint |
 | `gascurve_collector_active_endpoint` | gauge | | index of the endpoint ordinary calls go to |
@@ -351,10 +364,12 @@ Every collector series carries `network` (the configured name) and `chain_id` (d
 | `gascurve_collector_holes_pending` | gauge | | ranges queued for the gap filler |
 | `gascurve_collector_holes_blocks` | gauge | | blocks not indexed, queued and unfillable together |
 | `gascurve_collector_holes_unfillable` | gauge | | ranges nothing can be replayed into |
+| `gascurve_collector_holes_pending_blocks` | gauge | | blocks missing across queued, fillable ranges |
+| `gascurve_collector_holes_oldest_age_seconds` | gauge | | age of the oldest queued range, zero when none is queued |
 | `gascurve_collector_holes_filled_total` | counter | | ranges the gap filler has completed |
 | `gascurve_collector_catch_up_gaps_skipped_total` | counter | | catch-up gaps skipped for exceeding the call budget |
 
-The three `holes_*` gauges match the pending, blocks and unfillable fields `/status` serves as `holes`; status also reports retrying ranges, age and checkpoint decode failures. The endpoint gauges match the state it serves as `endpoints`.
+The `holes_*` gauges match the pending, blocks and unfillable fields `/status` serves as `holes`; status also reports retrying ranges, age, queued-work totals and checkpoint decode failures. The endpoint gauges match the state it serves as `endpoints`.
 
 The api's series carry no network label: it serves every network from one process.
 

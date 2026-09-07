@@ -718,6 +718,10 @@ func (p *Pool) Stats() Stats {
 	for i, e := range p.endpoints {
 		s := e.Stats()
 		out.CallsLast10s += s.CallsLast10s
+		out.Calls += s.Calls
+		out.Requests += s.Requests
+		out.Errors += s.Errors
+		out.TotalLatency += s.TotalLatency
 		out.RateLimitEvents += s.RateLimitEvents
 		out.FastCalls += s.FastCalls
 		out.BulkCalls += s.BulkCalls

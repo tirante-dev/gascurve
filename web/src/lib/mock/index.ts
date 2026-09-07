@@ -44,6 +44,7 @@ export async function mockRequest<T>(path: string, query?: Record<string, QueryV
   if (clean === "status") {
     const response: StatusResponse = {
       version: MOCK_VERSION,
+      status: "healthy",
       networks: MOCK_NETWORKS.map((def) => {
         const world = findMockWorld(def.name);
         if (!world) return notFound(def.name);

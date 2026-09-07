@@ -27,6 +27,22 @@ func newMock(t *testing.T) (*Postgres, sqlmock.Sqlmock) {
 	return p, mock
 }
 
+func TestPostgresStats(t *testing.T) {
+	p, mock := newMock(t)
+	mock.ExpectPing()
+	if err := p.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectPing().WillReturnError(errBoom)
+	if err := p.Ping(context.Background()); !errors.Is(err, errBoom) {
+		t.Fatalf("Ping error = %v", err)
+	}
+	st := p.Stats()
+	if st.Operations != 2 || st.Errors != 1 || st.TotalLatency < 0 || st.LastLatency < 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
 var (
 	now        = time.Date(2026, 9, 6, 7, 20, 0, 0, time.UTC)
 	errBoom    = errors.New("boom")

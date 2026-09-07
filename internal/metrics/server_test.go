@@ -73,6 +73,31 @@ func TestServerRefusesAPortItCannotBind(t *testing.T) {
 	}
 }
 
+func TestServerMountsHealthRoutesBesideMetrics(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	srv, err := NewServer(context.Background(), "127.0.0.1:0", NewRegistry(), nil, mux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	if status, _ := get(t, srv.ListenAddr(), "/health"); status != http.StatusNoContent {
+		t.Fatalf("health status = %d", status)
+	}
+	if status, _ := get(t, srv.ListenAddr(), Path); status != http.StatusOK {
+		t.Fatalf("metrics status = %d", status)
+	}
+	if status, _ := get(t, srv.ListenAddr(), "/missing"); status != http.StatusNotFound {
+		t.Fatalf("missing status = %d", status)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 func TestAddrCoversEveryInterface(t *testing.T) {
 	if got := Addr(9090); got != ":9090" {
 		t.Fatalf("Addr(9090) = %q", got)

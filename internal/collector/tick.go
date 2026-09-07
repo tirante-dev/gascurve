@@ -67,6 +67,9 @@ func (f *Follower) tickWith(ctx context.Context, pinned bool, sampleFn func(cont
 	f.mu.Lock()
 	stored, storedHash := f.head, f.headHash
 	f.mu.Unlock()
+	if f.monitor != nil {
+		f.monitor.observeHead(f.chainID, head, stored)
+	}
 	capacity := f.rpcCapacity(sample, stored, pinned)
 	if head >= stored {
 		f.behind.Store(head - stored)

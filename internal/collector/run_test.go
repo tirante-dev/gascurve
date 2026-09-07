@@ -161,6 +161,30 @@ func TestRunManager(t *testing.T) {
 	}
 }
 
+func TestRunManagerStartsMonitorWithoutNetworks(t *testing.T) {
+	store := dbtest.New()
+	monitor := NewMonitor(store, nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var rpcConstructions atomic.Int64
+	go func() {
+		Run(ctx, &config.Config{}, store, func(config.NetworkConfig) RPC {
+			rpcConstructions.Add(1)
+			return newFakeRPC(1)
+		}, logger.Nop(), func(o *Options) { o.Monitor = monitor })
+		close(done)
+	}()
+	waitFor(t, "collector monitor startup", monitor.started.Load)
+	if rpcConstructions.Load() != 0 {
+		t.Fatal("RPC constructed without an enabled network")
+	}
+	if status, _ := monitorRequest(t, monitor.Handler("test"), "/startup"); status != http.StatusOK {
+		t.Fatalf("startup = %d", status)
+	}
+	cancel()
+	<-done
+}
+
 // TestFollowerTickInterval: a network's tick_interval overrides the
 // collector-wide one for the polling timer and for the safety timer of a
 // head-following follower; without one the collector-wide value applies.

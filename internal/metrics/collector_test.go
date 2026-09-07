@@ -25,17 +25,25 @@ func TestCollectorNetworkIsStable(t *testing.T) {
 
 func TestCollectorReportsEveryNetworkSeries(t *testing.T) {
 	reg := NewRegistry()
-	n := NewCollector(reg).Network("robinhood", 4663)
+	c := NewCollector(reg)
+	n := c.Network("robinhood", 4663)
 
+	c.ObserveHeartbeat(sampledAt)
+	c.ObserveDatabase(DatabaseState{Operations: 10, Errors: 2, AverageTime: 5 * time.Millisecond, LastTime: 7 * time.Millisecond})
 	n.ObserveHead(1000, headAt, sampledAt, sampledAt)
+	n.ObserveProgress(1002, 1000)
 	n.ObserveTick(250 * time.Millisecond)
+	n.ObserveLoop("fast", sampledAt, 250*time.Millisecond, false)
+	n.ObserveLoop("slow", sampledAt, 500*time.Millisecond, true)
 	n.GapSkipped()
 	n.GapSkipped()
 	n.HoleFilled()
 	n.ObserveHoles(HolesState{Pending: 2, Blocks: 512, Unfillable: 1})
+	n.ObserveHoleFreshness(400, 2*time.Minute)
 	n.ObserveBackfill(BackfillState{Cursor: 900, Floor: 100, Remaining: 400})
 	n.ObservePool(PoolState{
 		Active: 1, Failovers: 3, RateLimitEvents: 7, FastCalls: 12, BulkCalls: 40,
+		Requests: 10, Errors: 2, TotalLatency: 500 * time.Millisecond,
 		Endpoints: []EndpointState{
 			{Index: 0, Disabled: true, RateLimitEvents: 5},
 			{Index: 1, WSCooling: true, RateLimitEvents: 2},
@@ -45,15 +53,27 @@ func TestCollectorReportsEveryNetworkSeries(t *testing.T) {
 	body := scrape(t, reg)
 	const labels = `{chain_id="4663",network="robinhood"}`
 	for _, want := range []string{
+		"gascurve_collector_heartbeat_timestamp_seconds 1.788678e+09",
+		"gascurve_collector_database_operations_total 10",
+		"gascurve_collector_database_errors_total 2",
+		"gascurve_collector_database_latency_seconds 0.005",
+		"gascurve_collector_database_last_latency_seconds 0.007",
 		"gascurve_collector_head_block" + labels + " 1000",
 		"gascurve_collector_head_lag_seconds" + labels + " 4",
+		"gascurve_collector_observed_head_block" + labels + " 1002",
+		"gascurve_collector_head_lag_blocks" + labels + " 2",
 		"gascurve_collector_last_sample_timestamp_seconds" + labels + " 1.788678e+09",
 		"gascurve_collector_tick_duration_seconds_count" + labels + " 1",
+		`gascurve_collector_loop_last_success_timestamp_seconds{chain_id="4663",loop="fast",network="robinhood"} 1.788678e+09`,
+		`gascurve_collector_loop_last_error_timestamp_seconds{chain_id="4663",loop="slow",network="robinhood"} 1.788678e+09`,
+		`gascurve_collector_loop_duration_seconds_count{chain_id="4663",loop="fast",network="robinhood"} 1`,
 		"gascurve_collector_catch_up_gaps_skipped_total" + labels + " 2",
 		"gascurve_collector_holes_filled_total" + labels + " 1",
 		"gascurve_collector_holes_pending" + labels + " 2",
 		"gascurve_collector_holes_blocks" + labels + " 512",
 		"gascurve_collector_holes_unfillable" + labels + " 1",
+		"gascurve_collector_holes_pending_blocks" + labels + " 400",
+		"gascurve_collector_holes_oldest_age_seconds" + labels + " 120",
 		"gascurve_collector_backfill_cursor_block" + labels + " 900",
 		"gascurve_collector_backfill_floor_block" + labels + " 100",
 		"gascurve_collector_backfill_blocks_remaining" + labels + " 400",
@@ -63,6 +83,9 @@ func TestCollectorReportsEveryNetworkSeries(t *testing.T) {
 		"gascurve_collector_rate_limit_events_total" + labels + " 7",
 		`gascurve_collector_rpc_calls_total{chain_id="4663",class="fast",network="robinhood"} 12`,
 		`gascurve_collector_rpc_calls_total{chain_id="4663",class="bulk",network="robinhood"} 40`,
+		"gascurve_collector_rpc_requests_total" + labels + " 10",
+		"gascurve_collector_rpc_errors_total" + labels + " 2",
+		"gascurve_collector_rpc_latency_seconds" + labels + " 0.05",
 		`gascurve_collector_endpoint_disabled{chain_id="4663",endpoint="0",network="robinhood"} 1`,
 		`gascurve_collector_endpoint_disabled{chain_id="4663",endpoint="1",network="robinhood"} 0`,
 		`gascurve_collector_endpoint_ws_cooling{chain_id="4663",endpoint="0",network="robinhood"} 0`,

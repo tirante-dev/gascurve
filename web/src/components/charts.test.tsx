@@ -523,16 +523,21 @@ describe("DataFooter", () => {
         status="open"
         apiStatus={{
           version: "1",
+          status: "degraded",
           networks: [
             {
               name: "robinhood",
               chainId: 4663,
+              enabled: true,
               headBlock: 0,
               headAt: null,
               lagSeconds: null,
               lastSampleAt: null,
               lastError: null,
               rateLimitEvents: 0,
+              last429At: null,
+              backfillCursor: null,
+              arbosVersion: null,
               degraded: false,
               capacity: {
                 configuredCallsPerSecond: 0,
@@ -543,7 +548,23 @@ describe("DataFooter", () => {
                 at: null,
                 checkpointError: false,
               },
-              holes: { pending: 0, blocks: 0, unfillable: 0, retrying: 0, oldestAgeSeconds: 0, checkpointError: false },
+              holes: {
+                pending: 0,
+                blocks: 0,
+                unfillable: 0,
+                retrying: 0,
+                oldestAgeSeconds: 0,
+                checkpointError: false,
+                pendingBlocks: 0,
+                oldestPendingAt: null,
+                oldestPendingAgeSeconds: null,
+              },
+              status: "degraded",
+              degradedReasons: ["collector heartbeat missing"],
+              collector: null,
+              activeEndpoint: 0,
+              failovers: 0,
+              endpoints: [],
             },
           ],
         }}

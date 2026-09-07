@@ -550,7 +550,7 @@ describe("DataFooter", () => {
   });
 
   it("credits tirante.dev with an external link after the version line", () => {
-    render(<DataFooter snapshot={null} series={null} networkInfo={null} status="open" apiStatus={{ version: "1.2.3", networks: [] }} now={0} />);
+    render(<DataFooter snapshot={null} series={null} networkInfo={null} status="open" apiStatus={{ version: "1.2.3", status: "healthy", networks: [] }} now={0} />);
     const link = screen.getByRole("link", { name: "powered by tirante.dev" });
     expect(link).toHaveAttribute("href", "https://tirante.dev");
     expect(link).toHaveAttribute("target", "_blank");

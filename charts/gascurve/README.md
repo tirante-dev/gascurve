@@ -36,7 +36,7 @@ helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
 | `config` | Rendered to `config.yaml` (networks, collector pacing, CORS) | see values.yaml |
 | `collector.extraEnv`, `api.extraEnv`, `migrations.extraEnv` | Extra env for that container only. Private RPC URLs belong in `collector.extraEnv` | `[]` |
 | `extraEnv` | Deprecated alias applied to all three. Kept so existing installs keep working; move entries to the component lists | `[]` |
-| `config.collector.metrics_port` | Port for the collector's own `/metrics` server. `0` disables it, and its Service and ServiceMonitor go with it | `9090` |
+| `config.collector.metrics_port` | Port for the collector's `/metrics` and health server. `0` disables it, its probes, Service and ServiceMonitor | `9090` |
 | `metrics.serviceMonitor.enabled`, `metrics.prometheusRule.enabled` | Prometheus operator objects. See Metrics and alerts | `false`, `false` |
 
 The web image is built with `NEXT_PUBLIC_API_URL=/api/v1`, so it talks to the API through the same host. Put the API on another host only if you rebuild the image with a different value.
@@ -94,6 +94,19 @@ Those peers are appended to the policy's `from` list and can reach every API rou
 
 Upgrades of an existing release with both ingress and API enabled must add `config.server.trusted_proxies` before this chart version will render. Confirm the controller peer range and labels first, then apply the Helm upgrade. A wrong CIDR leaves forwarded headers ignored, and wrong NetworkPolicy selectors block ingress traffic. No database migration or data recomputation is involved.
 
+## Health and collector metrics
+
+The collector listens on `config.collector.metrics_port` (9090 by default) inside its pod. Kubernetes uses `/startup` until the database setup is complete and the follower loops launch, `/health` for shallow process liveness, and `/ready` for database connectivity plus a fresh successful fast loop for every enabled network. RPC or database outages therefore remove readiness but do not cause the singleton collector to restart forever. Setting the port to `0` explicitly disables the server and the chart-managed probes.
+
+`/metrics` exposes Prometheus text for the heartbeat, per-loop success, error and duration, observed and indexed heads, block lag, queued gap count, age and blocks, RPC calls, errors, rate limits and latency, and database latency and errors. The chart's headless collector Service supports Prometheus discovery without exposing the endpoint publicly. It can also be inspected directly:
+
+```bash
+kubectl port-forward pod/<collector-pod> 9090:9090
+curl http://127.0.0.1:9090/metrics
+```
+
+The public API keeps `/health` as shallow process liveness and `/ready` as its database check. `/api/v1/status` reads the collector's durable heartbeat and loop telemetry from PostgreSQL and reports `degraded` with reasons when collection is stale or failing. This upgrade needs no schema migration and no data recomputation.
+
 ## RPC URLs and Secrets
 
 The collector is the only component that talks to an RPC, so RPC credentials must reach the collector and nothing else. `collector.extraEnv` is the place for them:
@@ -137,11 +150,11 @@ collector:
 
 ## Metrics and alerts
 
-Both binaries serve Prometheus metrics at `/metrics` whatever this chart is told: the api on `config.server.port`, next to the REST API and the WebSocket, and the collector on `config.collector.metrics_port` (9090) from a small server of its own, since it otherwise runs no HTTP server at all. That server reads the registry alone, so a follower stuck on an RPC call or on the database still answers a scrape. `docs/ARCHITECTURE.md` §9 lists every series and its labels; no endpoint URL is ever a label value, because endpoint URLs carry keys.
+Both binaries serve Prometheus metrics at `/metrics` whatever this chart is told: the api on `config.server.port`, next to the REST API and the WebSocket, and the collector on `config.collector.metrics_port` (9090) next to its health routes. Metrics read the registry alone, so a follower stuck on an RPC call or on the database still gets scraped. `docs/ARCHITECTURE.md` §9 lists every series and its labels; no endpoint URL is ever a label value, because endpoint URLs carry keys.
 
 The Ingress does not expose either endpoint: it routes `/api` to the api and everything else to web, so `/metrics` is reachable from inside the cluster only.
 
-Whenever the collector is enabled and `config.collector.metrics_port` is not `0`, the chart renders a headless Service for it (`<release>-collector`, port `metrics`), whether or not the operator objects are on, so a plain `scrape_config` can find it without the Prometheus operator. Setting `metrics_port: 0` takes the collector's server, that Service and its ServiceMonitor away together. What is opt in is the operator's own objects, which need the `ServiceMonitor` and `PrometheusRule` CRDs:
+Whenever the collector is enabled and `config.collector.metrics_port` is not `0`, the chart renders a headless Service for it (`<release>-collector`, port `metrics`), whether or not the operator objects are on, so a plain `scrape_config` can find it without the Prometheus operator. That Service sets `publishNotReadyAddresses`, so the readiness drop an RPC or database outage causes does not also take the pod out of the scrape: the metrics that explain the outage keep flowing. Setting `metrics_port: 0` takes the collector's server, probes, Service and ServiceMonitor away together. What is opt in is the operator's own objects, which need the `ServiceMonitor` and `PrometheusRule` CRDs:
 
 ```bash
 helm upgrade gascurve … \

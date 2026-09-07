@@ -254,6 +254,7 @@ if render "metrics-port-zero" "${work}/metrics-zero.yaml" --values "${ci}/existi
   --set config.collector.metrics_port=0 --set metrics.serviceMonitor.enabled=true; then
   lacks "${work}/metrics-zero.yaml" 'containerPort: 9090' "metrics-port-zero: the collector still declares a metrics port"
   lacks "${work}/metrics-zero.yaml" 'port: metrics' "metrics-port-zero: something still scrapes the collector"
+  lacks "${work}/metrics-zero.yaml" 'startupProbe:' "metrics-port-zero: the collector still declares probes without an HTTP server"
   has "${work}/metrics-zero.yaml" 'port: http' "metrics-port-zero: the api ServiceMonitor went away with the collector's"
   ok "collector server, Service and ServiceMonitor all gone, api untouched"
 fi
@@ -417,7 +418,16 @@ if render "secret-rpc" "${work}/rpc-collector.yaml" --values "${ci}/secret-rpc-v
   has "${work}/rpc-collector.yaml" 'NETWORK_ROBINHOOD_RPC_URL' "secret-rpc: the collector did not get NETWORK_ROBINHOOD_RPC_URL"
   has "${work}/rpc-collector.yaml" 'MIGRATE_ONLY_EXAMPLE' "secret-rpc: the collector's migrate init container did not get migrations.extraEnv"
   lacks "${work}/rpc-collector.yaml" 'API_ONLY_EXAMPLE' "secret-rpc: api.extraEnv leaked into the collector pod"
+  has "${work}/rpc-collector.yaml" 'path: /startup' "collector: startup probe is missing"
+  has "${work}/rpc-collector.yaml" 'path: /health' "collector: shallow liveness probe is missing"
+  has "${work}/rpc-collector.yaml" 'path: /ready' "collector: readiness probe is missing"
+  has "${work}/rpc-collector.yaml" 'containerPort: 9090' "collector: observability port is not exposed"
   ok "collector has the RPC Secret"
+fi
+if render "secret-rpc" "${work}/rpc-collector-svc.yaml" --values "${ci}/secret-rpc-values.yaml" \
+  --show-only templates/collector-service.yaml; then
+  has "${work}/rpc-collector-svc.yaml" 'publishNotReadyAddresses: true' "collector: a NotReady collector must stay scrapable"
+  ok "collector Service keeps the scrape through a readiness drop"
 fi
 if render "secret-rpc" "${work}/rpc-api.yaml" --values "${ci}/secret-rpc-values.yaml" \
   --show-only templates/api-deployment.yaml; then

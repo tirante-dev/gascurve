@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestLiveSnapshotJSONShape(t *testing.T) {
@@ -110,8 +111,17 @@ func TestHoles(t *testing.T) {
 		{From: 0, To: 9, Reason: HoleReasonNoState},
 		{From: 500, To: 509},
 	})
-	if got != (HolesStatus{Pending: 2, Blocks: 50 + 10 + 10, Unfillable: 1}) {
+	if got != (HolesStatus{Pending: 2, Blocks: 50 + 10 + 10, Unfillable: 1, PendingBlocks: 60}) {
 		t.Fatalf("summary: %+v", got)
+	}
+	at := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	aged := SummarizeHolesAt([]Hole{
+		{From: 1, To: 4, At: at.Add(-time.Minute).Format(time.RFC3339)},
+		{From: 5, To: 8, At: at.Add(-2 * time.Minute).Format(time.RFC3339), Reason: HoleReasonNoState},
+		{From: 9, To: 10, At: "unreadable"},
+	}, at)
+	if aged.Pending != 2 || aged.PendingBlocks != 6 || aged.OldestPendingAt == nil || *aged.OldestPendingAt != at.Add(-time.Minute).Format(time.RFC3339) || aged.OldestPendingAgeSeconds == nil || *aged.OldestPendingAgeSeconds != 60 {
+		t.Fatalf("aged summary: %+v", aged)
 	}
 	if got := SummarizeHoles(nil); got != (HolesStatus{}) {
 		t.Fatalf("no holes: %+v", got)

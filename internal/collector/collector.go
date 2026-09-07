@@ -167,6 +167,9 @@ type Options struct {
 	// a registry of its own, so the instrument calls are always live and
 	// never have to be guarded at the call site.
 	Metrics *metrics.Collector
+	// Monitor records loop freshness, head progress and RPC accounting for
+	// health endpoints and the durable API status checkpoint.
+	Monitor *Monitor
 }
 
 // Follower drives one network.
@@ -181,6 +184,7 @@ type Follower struct {
 	now     func() time.Time
 	sleep   func(context.Context, time.Duration) error
 	heads   HeadSource
+	monitor *Monitor
 	chainID uint64
 	// ethUsd is the process-wide ETH/USD cache, nil when the source is
 	// disabled or unusable.
@@ -370,6 +374,7 @@ func NewFollower(o Options) *Follower {
 		now:     o.Now,
 		sleep:   o.Sleep,
 		heads:   o.Heads,
+		monitor: o.Monitor,
 		chainID: o.Network.ChainID,
 	}
 	if f.log == nil {
@@ -413,6 +418,9 @@ func NewFollower(o Options) *Follower {
 		o.Metrics = metrics.NewCollector(prometheus.NewRegistry())
 	}
 	f.metrics = o.Metrics.Network(o.Network.Name, o.Network.ChainID)
+	if f.monitor != nil {
+		f.monitor.register(o.Network, f.cfg, f.rpc, f.metrics)
+	}
 	return f
 }
 
@@ -470,7 +478,10 @@ func endpointsStatus(st nitro.PoolStatus) model.EndpointsStatus {
 // URL: a URL is a credential, which is why internal/nitro scrubs one from
 // every error it returns.
 func poolMetrics(st nitro.Stats, status *nitro.PoolStatus) metrics.PoolState {
-	out := metrics.PoolState{RateLimitEvents: st.RateLimitEvents, FastCalls: st.FastCalls, BulkCalls: st.BulkCalls}
+	out := metrics.PoolState{
+		RateLimitEvents: st.RateLimitEvents, FastCalls: st.FastCalls, BulkCalls: st.BulkCalls,
+		Requests: st.Requests, Errors: st.Errors, TotalLatency: st.TotalLatency,
+	}
 	if status == nil {
 		return out
 	}

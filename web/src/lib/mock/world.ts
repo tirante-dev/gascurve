@@ -577,15 +577,21 @@ export class MockWorld {
   }
 
   status(now: number): NetworkStatus {
+    const at = unixToIso(this.time - 1);
+    const loop = { lastSuccessAt: at, lastErrorAt: null, lastError: null, lastDurationMs: 1, staleAfterSeconds: 30 };
     return {
       name: this.def.name,
       chainId: this.def.chainId,
+      enabled: true,
       headBlock: this.headBlock,
-      headAt: unixToIso(this.time - 1),
+      headAt: at,
       lagSeconds: Math.max(0, now - (this.time - 1)),
-      lastSampleAt: unixToIso(this.time - 1),
+      lastSampleAt: at,
       lastError: null,
       rateLimitEvents: 0,
+      last429At: null,
+      backfillCursor: null,
+      arbosVersion: "61",
       degraded: false,
       capacity: {
         configuredCallsPerSecond: 0,
@@ -596,7 +602,33 @@ export class MockWorld {
         at: null,
         checkpointError: false,
       },
-      holes: { pending: 0, blocks: 0, unfillable: 0, retrying: 0, oldestAgeSeconds: 0, checkpointError: false },
+      holes: {
+        pending: 0,
+        blocks: 0,
+        unfillable: 0,
+        retrying: 0,
+        oldestAgeSeconds: 0,
+        checkpointError: false,
+        pendingBlocks: 0,
+        oldestPendingAt: null,
+        oldestPendingAgeSeconds: null,
+      },
+      status: "healthy",
+      degradedReasons: [],
+      collector: {
+        heartbeatAt: at,
+        heartbeatAgeSeconds: Math.max(0, now - (this.time - 1)),
+        heartbeatStaleAfterSeconds: 30,
+        observedHead: this.headBlock,
+        indexedHead: this.headBlock,
+        headLagBlocks: 0,
+        loops: { fast: loop, slow: { ...loop, staleAfterSeconds: 180 }, history: { ...loop, staleAfterSeconds: 180 } },
+        rpc: { calls: 0, requests: 0, errors: 0, callsLast10Seconds: 0, rateLimitEvents: 0, last429At: null, averageLatencyMs: 0 },
+        database: { operations: 0, errors: 0, averageLatencyMs: 0, lastLatencyMs: 0 },
+      },
+      activeEndpoint: 0,
+      failovers: 0,
+      endpoints: [],
     };
   }
 
