@@ -63,6 +63,12 @@ const (
 	// ({"price":"…","at":"RFC3339","source":"…"}), recorded per chain so the
 	// API can serve it in /live without an outbound call of its own.
 	StateEthUsd = "eth_usd"
+	// StateHistoryEpoch is the network's history_epoch the collector last
+	// rebuilt the reconstructed history at, as a decimal string. A
+	// configured epoch above it drops the backfill's buckets and
+	// checkpoints once and records the new value, so the rebuild runs on
+	// a raised setting rather than on every restart.
+	StateHistoryEpoch = "history_epoch"
 )
 
 // Open connects to Postgres and applies pool limits.

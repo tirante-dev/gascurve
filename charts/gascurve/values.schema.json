@@ -371,6 +371,11 @@
         "explorer_url": { "$ref": "#/definitions/httpURL" },
         "calls_per_second": { "$ref": "#/definitions/callsPerSecond" },
         "archive": { "type": "boolean" },
+        "history_epoch": {
+          "description": "Raise it by one to rebuild this network's reconstructed history once, for example after giving the network an archive endpoint. The collector records the epoch it last rebuilt at, so a restarting pod on the same value rebuilds nothing.",
+          "type": "integer",
+          "minimum": 0
+        },
         "tick_interval": { "$ref": "#/definitions/duration" },
         "enabled": { "type": "boolean" },
         "fallbacks": { "type": "array", "items": { "$ref": "#/definitions/endpoint" } }

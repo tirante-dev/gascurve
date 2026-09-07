@@ -544,13 +544,20 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	if err := f.reloadHeadLocked(ctx); err != nil {
 		return err
 	}
+	if err := f.loadLiveStartLocked(ctx); err != nil {
+		return err
+	}
+	// Before the checkpoints it clears are read, so an unreadable
+	// owner-scan checkpoint cannot block the rebuild that would replace
+	// it, and the loads below then see what the rebuild left. It needs the
+	// live start above it for the bucket boundary and nothing else.
+	if err := f.applyHistoryEpochLocked(ctx); err != nil {
+		return err
+	}
 	if err := f.loadScanStateLocked(ctx); err != nil {
 		return err
 	}
 	if err := f.reloadSetsLocked(ctx); err != nil {
-		return err
-	}
-	if err := f.loadLiveStartLocked(ctx); err != nil {
 		return err
 	}
 	if err := f.loadEthUsdLocked(ctx); err != nil {
