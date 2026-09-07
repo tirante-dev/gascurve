@@ -78,6 +78,12 @@ const (
 	// StateTelemetry is the collector's heartbeat, per-loop outcomes and
 	// cumulative RPC and database accounting for /status.
 	StateTelemetry = "telemetry"
+	// StatePruneFrontier is the highest cutoff a prune has committed
+	// (RFC3339): rows older than it are gone. It only moves forward, because
+	// raising block_retention lowers the cutoff without bringing deleted rows
+	// back, and a rebuild has to know what was actually deleted rather than
+	// what the current setting would delete.
+	StatePruneFrontier = "prune_frontier"
 	// StatePosterGasRepair is the poster-gas repair's cursor
 	// ({"next":n,"done":bool}): the next block it will examine among the rows
 	// stored before receipts were read, and whether it has run out of work.

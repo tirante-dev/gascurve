@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -536,6 +537,161 @@ func TestRepairStepFollowsPrunesCutoffWhileTheBackfillRuns(t *testing.T) {
 	}
 	if len(rpc.posterGasCalls) != 0 {
 		t.Fatalf("read receipts for rows retention is dropping: %v", rpc.posterGasCalls)
+	}
+}
+
+// A block the pass gives up on is behind the cursor, which only moves
+// forward, so it needs a sweep of its own to be seen again. Without one a
+// block that failed while an endpoint was briefly unavailable would never be
+// read, and a restart would resume past it rather than retry it.
+func TestRepairSweepsTheBlocksItPassedOver(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 902)
+	f := repairFollower(t, rpc, store)
+	f.mu.Lock()
+	f.repairNarrow = 1
+	f.mu.Unlock()
+	rpc.errs["PosterGasByNumbers"] = errors.New("endpoint unreachable")
+
+	// Give up on block 900 after its attempts, and record it.
+	for range maxRepairAttempts {
+		if _, err := f.RepairStep(ctx); err != nil && !strings.Contains(err.Error(), "unreachable") {
+			t.Fatal(err)
+		}
+	}
+	c := repairCursor(t, f)
+	if len(c.Skipped) != 1 || c.Skipped[0] != 900 || c.Done {
+		t.Fatalf("cursor %+v, want block 900 recorded and not done", c)
+	}
+
+	// The endpoint comes back. Reaching the end of the range starts a sweep
+	// of what was passed over rather than calling the pass finished.
+	delete(rpc.errs, "PosterGasByNumbers")
+	for range 8 {
+		status, err := f.RepairStep(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status == RepairNone {
+			break
+		}
+	}
+	if got := posterGasOf(t, store, 900); !got.Valid {
+		t.Fatal("a block the pass swept again was still not repaired")
+	}
+	if c := repairCursor(t, f); !c.Done || len(c.Skipped) != 0 {
+		t.Fatalf("cursor %+v, want done with nothing left over", c)
+	}
+}
+
+// A block that fails every sweep has to end the pass rather than circle in it.
+func TestRepairStopsSweepingAfterMaxSweeps(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 901)
+	f := repairFollower(t, rpc, store)
+	f.mu.Lock()
+	f.repairNarrow = 1
+	f.mu.Unlock()
+	rpc.errs["PosterGasByNumbers"] = errors.New("receipts will never verify")
+
+	for range 200 {
+		status, err := f.RepairStep(ctx)
+		if status == RepairNone && err == nil {
+			break
+		}
+	}
+	c := repairCursor(t, f)
+	if !c.Done {
+		t.Fatalf("cursor %+v, want the pass to have ended", c)
+	}
+	// Sweeps counts the re-sweeps, so the pass made maxRepairSweeps in all.
+	if c.Sweeps+1 != maxRepairSweeps {
+		t.Fatalf("made %d passes, want %d", c.Sweeps+1, maxRepairSweeps)
+	}
+}
+
+// Raising block_retention moves prune's cutoff back over rows the shorter
+// setting already deleted. Rebuilding the bucket straddling that frontier
+// would sum only its surviving rows and replace a correct aggregate with a
+// short one, so the recorded frontier outranks the current cutoff.
+func TestRepairStepWillNotRebuildBelowThePruneFrontier(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	f := repairFollower(t, rpc, store)
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	// A prune already ran with a short retention and deleted everything
+	// below the seeded rows' own hour.
+	frontier := time.Unix(int64(tsFor(905)), 0).UTC().Add(time.Minute)
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, frontier.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	// Retention is now generous, so the current cutoff sits well before it.
+	f.cfg.BlockRetention = 48 * time.Hour
+
+	status, err := f.RepairStep(ctx)
+	if err != nil || status != RepairProgressed {
+		t.Fatalf("repair: %v %v", status, err)
+	}
+	if len(rpc.posterGasCalls) != 0 {
+		t.Fatalf("read receipts for buckets below the prune frontier: %v", rpc.posterGasCalls)
+	}
+	// Without the frontier the generous retention would have called these
+	// rows repairable, so the guard is what stopped it. Same setup, same
+	// clock, its own store because the run above stepped its cursor past
+	// the rows it passed over.
+	control := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, control, 900, 905)
+	g := repairFollower(t, rpc, control)
+	if err := g.saveCursor(ctx, control, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	g.cfg.BlockRetention = 48 * time.Hour
+	if status, err := g.RepairStep(ctx); err != nil || status != RepairProgressed {
+		t.Fatalf("repair without a frontier: %v %v", status, err)
+	}
+	if len(rpc.posterGasCalls) == 0 {
+		t.Fatal("nothing was read even with no frontier recorded, so the test proves nothing")
+	}
+}
+
+func TestPruneRecordsAFrontierThatOnlyMovesForward(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	f := repairFollower(t, rpc, store)
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	f.cfg.BlockRetention = time.Minute
+	if err := f.prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first, err := f.pruneFrontier(ctx)
+	if err != nil || first.IsZero() {
+		t.Fatalf("frontier after a prune: %v %v", first, err)
+	}
+
+	// Retention is raised, so this prune's cutoff is earlier. The record
+	// stays where it was: those rows are gone either way.
+	f.cfg.BlockRetention = 48 * time.Hour
+	if err := f.prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.pruneFrontier(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Equal(first) {
+		t.Fatalf("frontier moved back from %v to %v", first, second)
 	}
 }
 

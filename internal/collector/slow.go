@@ -758,6 +758,47 @@ func (f *Follower) pruneCutoff(ctx context.Context, boundary time.Time, hasBound
 	return before, false, nil
 }
 
+// recordPruneFrontier remembers the highest cutoff a prune has committed. It
+// only ever moves forward: a cutoff is a statement that rows below it are
+// gone, and lowering block_retention's opposite, raising it, does not bring
+// deleted rows back. Anything that reasons about whether a bucket's window is
+// still whole has to go by what was deleted rather than by what the current
+// setting would delete, and those two disagree for as long as it takes the
+// raised window to pass.
+func (f *Follower) recordPruneFrontier(ctx context.Context, s db.Store, before time.Time) error {
+	raw, ok, err := s.GetState(ctx, f.chainID, db.StatePruneFrontier)
+	if err != nil {
+		return err
+	}
+	if ok {
+		prev, perr := time.Parse(time.RFC3339, raw)
+		switch {
+		case perr != nil:
+			f.log.Warn("unreadable prune frontier, recording this cutoff over it", "value", raw, "err", perr.Error())
+		case !before.After(prev):
+			return nil
+		}
+	}
+	return s.SetState(ctx, f.chainID, db.StatePruneFrontier, before.UTC().Format(time.RFC3339))
+}
+
+// pruneFrontier is the highest cutoff a prune has committed, or the zero time
+// when none has: nothing has been deleted, so nothing constrains a rebuild.
+func (f *Follower) pruneFrontier(ctx context.Context) (time.Time, error) {
+	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StatePruneFrontier)
+	if err != nil || !ok {
+		return time.Time{}, err
+	}
+	t, perr := time.Parse(time.RFC3339, raw)
+	if perr != nil {
+		// The current cutoff still applies, so this is a lost guard rather
+		// than a wrong one: the reader falls back to it.
+		f.log.Warn("unreadable prune frontier, going by the current cutoff", "value", raw, "err", perr.Error())
+		return time.Time{}, nil
+	}
+	return t.UTC(), nil
+}
+
 // running: its last segment rebuilds those buckets from rows.
 func (f *Follower) prune(ctx context.Context) error {
 	now := f.now()
@@ -773,8 +814,12 @@ func (f *Follower) prune(ctx context.Context) error {
 		if n, err = s.PruneBlocks(ctx, f.chainID, before); err != nil {
 			return err
 		}
-		m, err = s.PruneStateSamples(ctx, f.chainID, now.Add(-f.cfg.SampleRetention))
-		return err
+		if m, err = s.PruneStateSamples(ctx, f.chainID, now.Add(-f.cfg.SampleRetention)); err != nil {
+			return err
+		}
+		// In the same transaction as the delete it describes, so the record
+		// can never claim rows are gone that are still there.
+		return f.recordPruneFrontier(ctx, s, before)
 	})
 	if err != nil {
 		return err

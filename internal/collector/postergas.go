@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/tirante-dev/gascurve/internal/db"
@@ -62,6 +63,15 @@ const (
 type posterGasCursor struct {
 	Next uint64 `json:"next"`
 	Done bool   `json:"done"`
+	// Skipped are blocks a sweep gave up on after maxRepairAttempts. The
+	// cursor only moves forward, so without recording them a block that
+	// failed while an endpoint was briefly unavailable would be behind the
+	// cursor for good, and a restart would resume past it rather than retry
+	// it. They are swept again before the pass calls itself done.
+	Skipped []uint64 `json:"skipped,omitempty"`
+	// Sweeps counts the re-sweeps already made, so a block that fails every
+	// time ends the pass instead of circling in it.
+	Sweeps int `json:"sweeps,omitempty"`
 }
 
 // loadPosterGasCursor reads the checkpoint. An unreadable one starts the pass
@@ -118,8 +128,20 @@ const repairPruneSlack = 5 * time.Minute
 // answers for a block it does not have with a null receipt set, exactly like
 // a block that cannot be verified. Skipping on the first error would let one
 // outage walk the cursor through a whole range and leave it unrepairable.
-// The count is in memory, so a restart gives every skipped block another go.
+// The count is in memory: it measures one endpoint's bad few minutes, not the
+// block, so it starts over per process and per sweep.
 const maxRepairAttempts = 3
+
+// maxRepairSweeps bounds how often the pass goes back for the blocks it gave
+// up on. The cursor only moves forward, so a block passed over is behind it
+// and needs a sweep of its own to be seen again; without a bound a block that
+// can never be read would keep the pass going for the life of the process.
+const maxRepairSweeps = 3
+
+// maxRepairSkipped bounds the block numbers a cursor carries, so a long
+// outage cannot grow the checkpoint without limit. Past it the pass stops
+// recording them and the log is the record.
+const maxRepairSkipped = 10_000
 
 // repairBatchFor sizes the next batch the way the backfill sizes its own: the
 // configured header batch, capped by what the token bucket holds spare so the
@@ -203,9 +225,7 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 		return RepairIdle, fmt.Errorf("blocks missing poster gas from %d: %w", c.Next, err)
 	}
 	if len(rows) == 0 {
-		c.Done = true
-		f.log.Info("poster gas repair finished", "through", c.Next)
-		return RepairNone, f.savePosterGasCursor(ctx, f.store, c)
+		return f.repairSwept(ctx, c)
 	}
 	next := rows[len(rows)-1].Number + 1
 
@@ -240,6 +260,20 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 	horizon := cutoff
 	if !pinned {
 		horizon = cutoff.Add(repairPruneSlack)
+	}
+	// What prune would delete now is a prediction; what it has already
+	// deleted is a fact, and the two disagree after block_retention is
+	// raised, because the cutoff moves back over rows the shorter setting
+	// removed while those rows stay gone. Rebuilding the bucket that
+	// straddles that frontier would sum only its surviving suffix and
+	// replace a correct aggregate with a short one, which is the one way
+	// this pass could leave history worse than it found it.
+	frontier, err := f.pruneFrontier(ctx)
+	if err != nil {
+		return RepairIdle, err
+	}
+	if frontier.After(horizon) {
+		horizon = frontier
 	}
 	targets := make([]nitro.ReceiptTarget, 0, len(rows))
 	repairable := make([]db.Block, 0, len(rows))
@@ -324,8 +358,35 @@ func (f *Follower) repairFailed(ctx context.Context, c *posterGasCursor, targets
 	if attempts < maxRepairAttempts {
 		return RepairIdle, fmt.Errorf("poster gas receipts for block %d, attempt %d of %d: %w", first, attempts, maxRepairAttempts, cause)
 	}
-	f.log.Warn("leaving a block without poster gas after repeated failures", "block", first, "attempts", attempts, "err", cause.Error())
+	f.log.Warn("passing over a block after repeated failures, it is swept again before the pass ends", "block", first, "attempts", attempts, "err", cause.Error())
 	c.Next = first + 1
+	if len(c.Skipped) < maxRepairSkipped {
+		c.Skipped = append(c.Skipped, first)
+	}
+	return RepairProgressed, f.savePosterGasCursor(ctx, f.store, c)
+}
+
+// repairSwept answers a sweep that found nothing left to read. Blocks the
+// sweep gave up on are taken from the top again, since the reason was as
+// likely to have been an endpoint having a bad few minutes as anything about
+// the block. Only when a sweep skips nothing, or the pass has swept
+// maxRepairSweeps times, does it call itself done: a block that fails on
+// every sweep must end the pass rather than circle in it.
+func (f *Follower) repairSwept(ctx context.Context, c *posterGasCursor) (RepairStatus, error) {
+	if len(c.Skipped) == 0 {
+		c.Done = true
+		f.log.Info("poster gas repair finished", "through", c.Next, "sweeps", c.Sweeps+1)
+		return RepairNone, f.savePosterGasCursor(ctx, f.store, c)
+	}
+	if c.Sweeps+1 >= maxRepairSweeps {
+		c.Done = true
+		f.log.Warn("poster gas repair finished with blocks it could not read", "blocks", len(c.Skipped), "first", c.Skipped[0], "sweeps", c.Sweeps+1)
+		return RepairNone, f.savePosterGasCursor(ctx, f.store, c)
+	}
+	from := slices.Min(c.Skipped)
+	f.log.Info("sweeping the blocks the poster gas repair passed over", "blocks", len(c.Skipped), "from", from, "sweep", c.Sweeps+2)
+	c.Next, c.Skipped, c.Sweeps = from, nil, c.Sweeps+1
+	f.widenRepair()
 	return RepairProgressed, f.savePosterGasCursor(ctx, f.store, c)
 }
 
