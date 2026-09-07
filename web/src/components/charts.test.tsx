@@ -21,7 +21,7 @@ import { DataFooter } from "./DataFooter";
 import { FeeFlows, feeFlowRows, feeTotals, incompleteTotalsNote, unsplitNote } from "./FeeFlows";
 import { L1Section } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
-import { describeSplit, SeriesCharts } from "./SeriesCharts";
+import { buildSeriesModel, describeSplit, GasPerSecondChart, SeriesCharts } from "./SeriesCharts";
 
 function point(overrides: Partial<SeriesPoint>): SeriesPoint {
   return {
@@ -116,6 +116,40 @@ describe("SeriesCharts", () => {
     const holed = { ...series, from: a.t, to: c.t + 3600, points: [a, b, { ...c, t: c.t + 3600 }] };
     render(<SeriesCharts network="robinhood" range="24h" series={holed} loading={false} model="constraints" />);
     expect(screen.getAllByText("Shaded: 1 gap with no buckets").length).toBeGreaterThan(0);
+  });
+
+  it("dots the buckets with no receipts behind them, which are whole buckets the gap and partial marks say nothing about", () => {
+    // The exact shape the api serves for repaired history it cannot repair:
+    // full coverage, complete, and a null compute gas rate because a source
+    // block was stored without receipts.
+    const [a, b, c] = series.points;
+    const holed = { ...series, points: [a, { ...b, computeGasPerSecond: null }, { ...c, computeGasPerSecond: null }] };
+    const m = buildSeriesModel(holed, "constraints");
+    expect(m.gasMissing).toEqual([{ from: b.t, to: c.t + 60, kind: "receipts", buckets: 2 }]);
+    render(<GasPerSecondChart m={m} />);
+    expect(screen.getByText("Dotted: no receipt data for 2 buckets")).toBeInTheDocument();
+    // The three marks stay apart: nothing was never indexed, and no bucket is partial.
+    expect(screen.queryByText(/^Shaded:/)).toBeNull();
+    expect(screen.queryByText(/^Hatched/)).toBeNull();
+    // The tooltip says the cause rather than leaving the reader with a break in the line.
+    expect(m.gasNote(m.points[2])).toBe("no receipt data for this bucket, so compute gas per second is not drawn");
+    expect(m.gasNote(m.points[0])).toBeNull();
+  });
+
+  it("says nothing about a slot a constraint set never defined, which is not a hole in the record", () => {
+    // One set with a single constraint, drawn beside a set with two: the
+    // second panel is empty over the first set's buckets because that
+    // constraint did not exist then.
+    const sets = [series.constraintSets[0], { ...series.constraintSets[1], constraints: [series.constraintSets[1].constraints[0]] }];
+    const [a, b] = series.points;
+    const short = {
+      ...series,
+      constraintSets: sets,
+      to: b.t + 60,
+      points: [a, { ...b, constraintBips: [32_425], backlogs: [3_111_506], backlogsMax: [3_111_506] }],
+    };
+    render(<SeriesCharts network="robinhood" range="24h" series={short} loading={false} model="constraints" />);
+    expect(screen.queryByText(/no backlog data/)).toBeNull();
   });
 
   it("exposes every bucket in a table and lets the keyboard inspect any point", () => {
