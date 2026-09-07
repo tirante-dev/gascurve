@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"sort"
@@ -441,7 +442,8 @@ func (m *MemStore) BlocksMissingPosterGas(_ context.Context, chainID, from uint6
 }
 
 // SetPosterGas records poster gas on stored rows, skipping a number no longer stored, already set, or
-// carrying more gas than the row used.
+// carrying more gas than the row used. A number or value past the BIGINT range is refused, as the
+// Postgres store refuses it, so a test cannot pass on a value production would reject.
 func (m *MemStore) SetPosterGas(_ context.Context, chainID uint64, gas map[uint64]uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -449,6 +451,9 @@ func (m *MemStore) SetPosterGas(_ context.Context, chainID uint64, gas map[uint6
 		return err
 	}
 	for number, g := range gas {
+		if number > math.MaxInt64 || g > math.MaxInt64 {
+			return fmt.Errorf("set poster gas: block %d gas %d is outside the range the column holds", number, g)
+		}
 		b, ok := m.BlockRows[chainID][number]
 		if !ok || b.PosterGas.Valid || g > b.GasUsed {
 			continue

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -563,5 +564,30 @@ func TestMemStoreDiscardBucketsBelowFrontier(t *testing.T) {
 	}
 	if err := m.DiscardBucketsBelowFrontier(ctx, 1, "2m", starts); err == nil {
 		t.Fatal("unknown resolution")
+	}
+}
+
+// SetPosterGas refuses a number or value past the BIGINT range, as the Postgres store does, rather
+// than wrapping it negative: a test store that accepted it could pass on a value production rejects.
+func TestMemStoreSetPosterGasRefusesValuesTheColumnCannotHold(t *testing.T) {
+	ctx := context.Background()
+	m := New()
+	if err := m.UpsertBlocks(ctx, []db.Block{{ChainID: 1, Number: 7, GasUsed: 100}}); err != nil {
+		t.Fatal(err)
+	}
+	for name, gas := range map[string]map[uint64]uint64{
+		"a block number past the column": {math.MaxInt64 + 1: 10},
+		"a gas value past the column":    {7: math.MaxInt64 + 1},
+	} {
+		if err := m.SetPosterGas(ctx, 1, gas); err == nil {
+			t.Fatalf("%s: accepted a value the column cannot hold", name)
+		}
+	}
+	// And within range it records, subject to the row's own gas total.
+	if err := m.SetPosterGas(ctx, 1, map[uint64]uint64{7: 40}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := m.BlockByNumber(ctx, 1, 7); b == nil || !b.PosterGas.Valid || b.PosterGas.Int64 != 40 {
+		t.Fatalf("in-range poster gas not recorded: %+v", b)
 	}
 }
