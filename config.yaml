@@ -71,6 +71,17 @@ collector:
 #   archive: true when the node serves historical state; the backfill then
 #            anchors the replay to real backlogs every backfill_anchor_interval
 #            blocks instead of relying on replay alone.
+#   history_epoch: raise it to rebuild this network's reconstructed history
+#            once. The collector stores the epoch it last rebuilt at and
+#            compares it at start, so a raised number rebuilds and a pod
+#            that restarts on the same number does not. Raise it after
+#            giving the network an archive endpoint: enabling archive on
+#            its own changes nothing already stored, since the backfill has
+#            finished and its buckets are never revisited. The rebuild
+#            drops the backfill's buckets and checkpoints and replays them
+#            again, anchored this time; block rows, owner actions and
+#            constraint sets are kept. Environment:
+#            NETWORK_<NAME>_HISTORY_EPOCH.
 #   fallbacks: further endpoints for the same chain, each with the same four
 #            fields (rpc_url, ws_url, archive, calls_per_second) and its own
 #            token bucket and adaptive batch cap. Ordinary calls go to the

@@ -150,6 +150,10 @@ migrations:
 # nodes set calls_per_second: 0 and optionally ws_url and archive: true per
 # network; keep private URLs in a Secret via collector.extraEnv rather than
 # here (rpc_url may then be omitted for that network).
+# After giving a network an archive endpoint, raise its history_epoch by one
+# to rebuild the history it reconstructed without one. The collector records
+# the epoch it rebuilt at, so the rebuild runs once and a restarting pod on
+# the same value does not repeat it.
 config:
   server:
     port: 8080

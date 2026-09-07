@@ -3,7 +3,8 @@
 // DEV_MODE, ETH_USD_SOURCE, ETH_USD_MAX_AGE and per-network
 // NETWORK_<NAME>_RPC_URL, NETWORK_<NAME>_WS_URL,
 // NETWORK_<NAME>_ENABLED, NETWORK_<NAME>_CALLS_PER_SECOND,
-// NETWORK_<NAME>_ARCHIVE and NETWORK_<NAME>_TICK_INTERVAL, where NAME is
+// NETWORK_<NAME>_ARCHIVE, NETWORK_<NAME>_TICK_INTERVAL and
+// NETWORK_<NAME>_HISTORY_EPOCH, where NAME is
 // the network name upper-cased with dashes replaced by underscores.
 // Fallback endpoints come from the positional, comma-separated
 // NETWORK_<NAME>_FALLBACK_RPC_URLS,
@@ -182,6 +183,17 @@ type NetworkConfig struct {
 	// calls against its budget.
 	TickInterval time.Duration `mapstructure:"tick_interval"`
 	Enabled      bool          `mapstructure:"enabled"`
+	// HistoryEpoch requests a rebuild of this network's reconstructed
+	// history. The collector stores the epoch it last rebuilt at and
+	// compares it at start: a value above the stored one drops the
+	// backfill's buckets and checkpoints once and lets the history loop
+	// replay them again, a value equal to it does nothing. It is a
+	// counter rather than a flag so a restarted pod carrying the same
+	// configuration does not rebuild again; raise it (0 to 1, 1 to 2)
+	// after giving the network an archive endpoint, so the replay is
+	// anchored to real state instead of running blind. Lowering it is
+	// ignored. Zero (the default) never rebuilds.
+	HistoryEpoch int `mapstructure:"history_epoch"`
 	// Fallbacks are further endpoints for the same chain, tried in order
 	// when the active endpoint fails (see collector.failover_cooldown).
 	// Capabilities are routed independently of the order: the first
@@ -224,6 +236,19 @@ func (n NetworkConfig) Endpoints() []EndpointConfig {
 	out := make([]EndpointConfig, 0, 1+len(n.Fallbacks))
 	out = append(out, n.Primary())
 	return append(out, n.Fallbacks...)
+}
+
+// HasArchive reports whether any of the network's endpoints serves
+// historical state. It reads the configuration rather than the endpoint
+// the follower ends up bound to, so it answers before the pool has been
+// verified.
+func (n NetworkConfig) HasArchive() bool {
+	for _, e := range n.Endpoints() {
+		if e.Archive {
+			return true
+		}
+	}
+	return false
 }
 
 // fallback returns the i-th fallback, growing the list with zero-valued
@@ -388,6 +413,13 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 			}
 			n.TickInterval = d
 		}
+		if s, ok := getenv(key + "_HISTORY_EPOCH"); ok && s != "" {
+			e, err := strconv.Atoi(s)
+			if err != nil {
+				return fmt.Errorf("%s_HISTORY_EPOCH: %w", key, err)
+			}
+			n.HistoryEpoch = e
+		}
 		if err := applyFallbackEnv(n, getenv); err != nil {
 			return err
 		}
@@ -516,6 +548,9 @@ func (c *Config) Validate(requireRPC bool) error {
 		errs = append(errs, validateEndpoint("network "+n.Name, n.Primary())...)
 		if n.TickInterval < 0 {
 			errs = append(errs, fmt.Errorf("network %s: tick_interval %v must be positive (omit it for collector.tick_interval)", n.Name, n.TickInterval))
+		}
+		if n.HistoryEpoch < 0 {
+			errs = append(errs, fmt.Errorf("network %s: history_epoch %d must not be negative", n.Name, n.HistoryEpoch))
 		}
 		if requireRPC && n.Enabled && n.RPCURL == "" {
 			errs = append(errs, fmt.Errorf("network %s: rpc_url is required (set %s_RPC_URL)", n.Name, n.EnvKey()))

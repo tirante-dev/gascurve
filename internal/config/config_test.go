@@ -176,6 +176,7 @@ func TestEnvOverrides(t *testing.T) {
 		"NETWORK_ARBITRUM_ONE_WS_URL":           "wss://arb.example/ws",
 		"NETWORK_ARBITRUM_ONE_ARCHIVE":          "true",
 		"NETWORK_ARBITRUM_ONE_TICK_INTERVAL":    "500ms",
+		"NETWORK_ARBITRUM_ONE_HISTORY_EPOCH":    "3",
 		"NETWORK_DEDICATED_ARCHIVE":             "false",
 		"NETWORK_DEDICATED_TICK_INTERVAL":       "1s",
 	})
@@ -189,6 +190,15 @@ func TestEnvOverrides(t *testing.T) {
 	arb := cfg.Networks[1]
 	if arb.RPCURL != "https://arb.example" || !arb.Enabled || arb.CallsPerSecond != 7.5 || arb.WSURL != "wss://arb.example/ws" || !arb.Archive || arb.TickInterval != 500*time.Millisecond {
 		t.Fatalf("network overrides not applied: %+v", arb)
+	}
+	// The history epoch is an operator's request to rebuild the
+	// reconstructed history once, so it has to be settable per network
+	// without editing the mounted config.
+	if arb.HistoryEpoch != 3 || cfg.Networks[0].HistoryEpoch != 0 {
+		t.Fatalf("history epoch overrides: %d %d", arb.HistoryEpoch, cfg.Networks[0].HistoryEpoch)
+	}
+	if !arb.HasArchive() || cfg.Networks[2].HasArchive() {
+		t.Fatalf("HasArchive follows the configured endpoints: %+v %+v", arb, cfg.Networks[2])
 	}
 	if cfg.Networks[2].Archive || cfg.Networks[2].TickInterval != time.Second {
 		t.Fatalf("NETWORK_DEDICATED_ARCHIVE=false and NETWORK_DEDICATED_TICK_INTERVAL=1s not applied: %+v", cfg.Networks[2])
@@ -247,6 +257,8 @@ func TestEnvErrors(t *testing.T) {
 		{"NETWORK_ROBINHOOD_CALLS_PER_SECOND": "10001"},
 		{"NETWORK_ROBINHOOD_TICK_INTERVAL": "soon"},
 		{"NETWORK_ROBINHOOD_TICK_INTERVAL": "-1s"},
+		{"NETWORK_ROBINHOOD_HISTORY_EPOCH": "once"},
+		{"NETWORK_ROBINHOOD_HISTORY_EPOCH": "-1"},
 	} {
 		if _, err := LoadWith(Options{Path: p, Getenv: envOf(m)}); err == nil {
 			t.Fatalf("expected error for %v", m)

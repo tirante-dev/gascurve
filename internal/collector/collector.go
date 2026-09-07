@@ -523,6 +523,11 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	if err := f.loadEthUsdLocked(ctx); err != nil {
 		return err
 	}
+	// Last, so a raised history_epoch resets checkpoints that are already
+	// loaded rather than being overwritten by the load that follows it.
+	if err := f.applyHistoryEpochLocked(ctx); err != nil {
+		return err
+	}
 	f.initialized = true
 	return nil
 }
