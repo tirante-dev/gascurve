@@ -77,6 +77,100 @@ reject "enabled network without an RPC URL" "no collector.extraEnv entry named N
   --set 'config.networks[0].chain_id=99' \
   --set 'config.networks[0].enabled=true'
 
+echo "== the application configuration is modelled, not waved through"
+
+# A network worth reusing across the malformed-value cases below.
+net=(--set database.existingSecret=my-db
+  --set 'config.networks[0].name=robinhood'
+  --set 'config.networks[0].chain_id=4663'
+  --set 'config.networks[0].rpc_url=https://rpc.example'
+  --set 'config.networks[0].enabled=true')
+
+# Intervals are Go durations, and a zero interval is as wrong as a word:
+# internal/config requires every one of them to be positive.
+reject "collector.tick_interval that is not a duration" "tick_interval" \
+  --set database.existingSecret=my-db --set config.collector.tick_interval=bananas
+reject "collector.tick_interval of zero" "tick_interval" \
+  --set database.existingSecret=my-db --set config.collector.tick_interval=0s
+reject "collector.eth_usd_max_age that is not a duration" "eth_usd_max_age" \
+  --set database.existingSecret=my-db --set config.collector.eth_usd_max_age=forever
+reject "network tick_interval that is not a duration" "tick_interval" \
+  "${net[@]}" --set 'config.networks[0].tick_interval=soon'
+
+# eth_usd_source is "", coinbase, coingecko or an https URL, and nothing else.
+reject "collector.eth_usd_source that is not a string" "eth_usd_source" \
+  --set database.existingSecret=my-db --set config.collector.eth_usd_source=17
+reject "collector.eth_usd_source with an unsupported scheme" "eth_usd_source" \
+  --set database.existingSecret=my-db --set-string config.collector.eth_usd_source=ftp://prices.example
+
+# calls_per_second is 0 (unlimited) or a real budget between 0.1 and 10000.
+reject "negative calls_per_second" "calls_per_second" \
+  "${net[@]}" --set 'config.networks[0].calls_per_second=-5'
+reject "calls_per_second above the maximum" "calls_per_second" \
+  "${net[@]}" --set 'config.networks[0].calls_per_second=100000'
+# helm --set never produces a float, so the below-minimum case needs a file.
+cat > "${work}/tiny-cps.yaml" <<'YAML'
+database:
+  existingSecret: my-db
+config:
+  networks:
+    - name: robinhood
+      chain_id: 4663
+      rpc_url: https://rpc.example
+      enabled: true
+      calls_per_second: 0.01
+YAML
+reject "calls_per_second below the minimum" "calls_per_second" --values "${work}/tiny-cps.yaml"
+
+# A WebSocket URL is ws:// or wss://; an RPC URL is http:// or https://.
+reject "ws_url with an http scheme" "ws_url" \
+  "${net[@]}" --set 'config.networks[0].ws_url=https://nope.example'
+reject "fallback rpc_url with an unsupported scheme" "rpc_url" \
+  "${net[@]}" --set 'config.networks[0].fallbacks[0].rpc_url=ftp://nope.example'
+
+reject "archive that is not a boolean" "archive" \
+  "${net[@]}" --set-string 'config.networks[0].archive=notabool'
+
+# Chart-owned objects reject unknown keys, so a typo or a field put at the
+# wrong level fails the install instead of being mounted and ignored.
+reject "unknown field on a network" "not_a_field" \
+  "${net[@]}" --set 'config.networks[0].not_a_field=x'
+reject "unknown field under config.collector" "not_a_field" \
+  --set database.existingSecret=my-db --set config.collector.not_a_field=x
+reject "application config placed under the collector component" "tick_interval" \
+  --set database.existingSecret=my-db --set collector.tick_interval=3s
+
+# An empty literal NETWORK_<NAME>_RPC_URL supplies nothing: internal/config
+# ignores an empty override, so the network would start with no RPC URL.
+reject "empty literal NETWORK_<NAME>_RPC_URL" "extraEnv" \
+  --set database.existingSecret=my-db \
+  --set 'config.networks[0].name=solo' \
+  --set 'config.networks[0].chain_id=99' \
+  --set 'config.networks[0].enabled=true' \
+  --set 'collector.extraEnv[0].name=NETWORK_SOLO_RPC_URL' \
+  --set-string 'collector.extraEnv[0].value='
+
+# A fallback endpoint needs an RPC URL too, from the values or from the
+# positional NETWORK_<NAME>_FALLBACK_RPC_URLS list.
+reject "fallback with no rpc_url and no environment list" "NETWORK_ROBINHOOD_FALLBACK_RPC_URLS" \
+  "${net[@]}" --set 'config.networks[0].fallbacks[0].calls_per_second=4'
+reject "fallback list too short for the fallbacks configured" "position 1" \
+  "${net[@]}" \
+  --set 'config.networks[0].fallbacks[0].calls_per_second=4' \
+  --set 'config.networks[0].fallbacks[1].calls_per_second=4' \
+  --set 'collector.extraEnv[0].name=NETWORK_ROBINHOOD_FALLBACK_RPC_URLS' \
+  --set-string 'collector.extraEnv[0].value=https://one.example'
+
+echo "== an ingress with no backend is refused"
+reject "ingress enabled with api and web disabled" "/ingress/enabled" \
+  --set database.existingSecret=my-db --set api.enabled=false --set web.enabled=false \
+  --set ingress.enabled=true --set ingress.host=gascurve.com
+# The template refuses it as well, for anyone who skips schema validation.
+reject "ingress with no backend, schema validation skipped" "no HTTP paths" \
+  --skip-schema-validation \
+  --set database.existingSecret=my-db --set api.enabled=false --set web.enabled=false \
+  --set ingress.enabled=true --set ingress.host=gascurve.com
+
 echo "== database.url renders the chart-managed Secret"
 if render "database-url" "${work}/url.yaml" --values "${ci}/database-url-values.yaml"; then
   has "${work}/url.yaml" 'kind: Secret' "database-url: no chart-managed Secret rendered"
@@ -144,6 +238,36 @@ if render "deprecated-extra-env" "${work}/dep-api.yaml" --values "${ci}/deprecat
   has "${work}/dep-api.yaml" 'LEGACY_EXAMPLE' "deprecated-extra-env: the api did not get the top-level extraEnv"
   ok "api and migrate init container"
 fi
+echo "== the homelab configuration still renders"
+if render "homelab" "${work}/homelab-collector.yaml" --values "${ci}/homelab-values.yaml" \
+  --show-only templates/collector-deployment.yaml; then
+  has "${work}/homelab-collector.yaml" 'NETWORK_ROBINHOOD_RPC_URL' "homelab: the collector did not get the Secret-backed primary RPC URL"
+  has "${work}/homelab-collector.yaml" 'NETWORK_ROBINHOOD_WS_URL' "homelab: the collector did not get the Secret-backed WebSocket URL"
+  has "${work}/homelab-collector.yaml" 'ETH_USD_SOURCE' "homelab: the collector did not get the empty ETH_USD_SOURCE that disables the price fetch"
+  ok "collector environment"
+fi
+if render "homelab" "${work}/homelab-config.yaml" --values "${ci}/homelab-values.yaml" \
+  --show-only templates/configmap.yaml; then
+  has "${work}/homelab-config.yaml" 'tick_interval: 500ms' "homelab: tick_interval 500ms did not reach config.yaml"
+  has "${work}/homelab-config.yaml" 'calls_per_second: 25' "homelab: the 25 calls per second budget did not reach config.yaml"
+  has "${work}/homelab-config.yaml" 'backfill_depth: 720h' "homelab: backfill_depth 720h did not reach config.yaml"
+  has "${work}/homelab-config.yaml" 'archive: true' "homelab: the archive primary did not reach config.yaml"
+  has "${work}/homelab-config.yaml" 'ws://nitro-rpc' "homelab: the in-cluster ws:// fallback did not reach config.yaml"
+  has "${work}/homelab-config.yaml" 'calls_per_second: 0$' "homelab: the unlimited in-cluster fallback did not reach config.yaml"
+  has "${work}/homelab-config.yaml" 'calls_per_second: 4$' "homelab: the public fallback at 4 calls per second did not reach config.yaml"
+  # The public endpoint is the second fallback, so it belongs in the
+  # ConfigMap. The keyed primary does not, and it has no rpc_url at all here:
+  # it arrives as NETWORK_ROBINHOOD_RPC_URL from the Secret, asserted above.
+  has "${work}/homelab-config.yaml" 'rpc.mainnet.chain.robinhood.com' "homelab: the public fallback URL did not reach config.yaml"
+  ok "config.yaml"
+fi
+if render "homelab" "${work}/homelab-api.yaml" --values "${ci}/homelab-values.yaml" \
+  --show-only templates/api-deployment.yaml; then
+  lacks "${work}/homelab-api.yaml" 'NETWORK_ROBINHOOD_RPC_URL' "homelab: the RPC Secret leaked into the api pod"
+  lacks "${work}/homelab-api.yaml" 'NETWORK_ROBINHOOD_WS_URL' "homelab: the WebSocket Secret leaked into the api pod"
+  ok "api pod has no RPC credentials"
+fi
+
 # NOTES.txt is not a manifest, so helm template cannot show it. A client-side
 # dry-run renders it, but Helm 3 still probes the cluster for its version
 # first, so these two checks are skipped where no cluster is reachable (CI).

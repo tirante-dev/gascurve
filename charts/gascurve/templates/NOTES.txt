@@ -1,3 +1,6 @@
+{{- $deployments := list -}}
+{{- if .Values.collector.enabled }}{{ $deployments = append $deployments (printf "deploy/%s-collector" (include "gascurve.fullname" .)) }}{{ end -}}
+{{- if .Values.api.enabled }}{{ $deployments = append $deployments (printf "deploy/%s-api" (include "gascurve.fullname" .)) }}{{ end -}}
 gascurve {{ .Chart.AppVersion }} installed as release {{ .Release.Name }}.
 
 Components:
@@ -10,28 +13,38 @@ Components:
 {{- if .Values.web.enabled }}
   web        {{ include "gascurve.fullname" . }}-web:{{ .Values.web.service.port }}
 {{- end }}
+{{- if not (or .Values.collector.enabled .Values.api.enabled .Values.web.enabled) }}
+  none: collector, api and web are all disabled, so this release only holds the ConfigMap and the ServiceAccount.
+{{- end }}
 {{- if .Values.ingress.enabled }}
 
-Ingress: https://{{ .Values.ingress.host }}  (/ to web, /api to api)
-{{- else }}
+Ingress: https://{{ .Values.ingress.host }}
+{{- if and .Values.web.enabled .Values.api.enabled }}  (/ to web, /api to api){{ else if .Values.web.enabled }}  (/ to web){{ else }}  (/api to api){{ end }}
+{{- else if or .Values.web.enabled .Values.api.enabled }}
 
 Ingress is disabled. Port-forward to try it:
+{{- if .Values.web.enabled }}
   kubectl port-forward svc/{{ include "gascurve.fullname" . }}-web 3000:{{ .Values.web.service.port }}
+{{- end }}
+{{- if .Values.api.enabled }}
   kubectl port-forward svc/{{ include "gascurve.fullname" . }}-api 8080:{{ .Values.api.service.port }}
 {{- end }}
-{{- if .Values.migrations.enabled }}
-
-Migrations run as an init container (gascurve-migrate up) on the collector
-and api pods before the main container starts. Watch them with:
-  kubectl logs deploy/{{ include "gascurve.fullname" . }}-api -c migrate
 {{- end }}
-{{- if .Values.database.existingSecret }}
+{{- if and .Values.migrations.enabled $deployments }}
+
+Migrations run as an init container (gascurve-migrate up) on the
+{{- if and .Values.collector.enabled .Values.api.enabled }} collector and api pods{{ else if .Values.collector.enabled }} collector pod{{ else }} api pod{{ end }} before the main container starts. Watch them with:
+{{- range $deployments }}
+  kubectl logs {{ . }} -c migrate
+{{- end }}
+{{- end }}
+{{- if and .Values.database.existingSecret $deployments }}
 
 Database credentials come from Secret {{ .Values.database.existingSecret }}.
 Pods do not restart on their own when that Secret changes; after rotating it run:
-  kubectl rollout restart deploy/{{ include "gascurve.fullname" . }}-collector deploy/{{ include "gascurve.fullname" . }}-api
+  kubectl rollout restart {{ join " " $deployments }}
 {{- end }}
-{{- if and (not .Values.database.url) (not .Values.database.existingSecret) }}
+{{- if and (not .Values.database.url) (not .Values.database.existingSecret) (or .Values.collector.enabled .Values.api.enabled) }}
 
 WARNING: no database configured. Set database.url or database.existingSecret.
 {{- end }}

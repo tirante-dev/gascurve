@@ -133,35 +133,70 @@ Every network the collector will actually run needs a primary RPC URL from
 somewhere: config.networks[].rpc_url in the ConfigMap, or a
 NETWORK_<NAME>_RPC_URL entry in the collector's environment (collector.extraEnv
 or the deprecated top-level extraEnv), which is how a private URL is kept in a
-Secret. values.schema.json cannot express that cross-reference, so it is
-checked here: the render fails with a message instead of the collector
-crash-looping on "rpc_url is required (set NETWORK_<NAME>_RPC_URL)". A literal
-NETWORK_<NAME>_ENABLED value in the same environment overrides the network's
-enabled flag, matching applyEnv in internal/config; a name supplied through
-valueFrom cannot be read here, so such a network is checked as configured.
-Only the collector talks to an RPC, so web-only and api-only installs never
-reach this check.
+Secret. Fallback endpoints work the same way through the positional,
+comma-separated NETWORK_<NAME>_FALLBACK_RPC_URLS. values.schema.json cannot
+express those cross-references, so they are checked here: the render fails with
+a message instead of the collector crash-looping on "rpc_url is required (set
+NETWORK_<NAME>_RPC_URL)".
+
+An override only counts when it actually carries a value. internal/config
+ignores an empty NETWORK_<NAME>_RPC_URL (applyEnv takes the environment value
+only when it is non-empty), so an entry with value: "" supplies nothing; the
+schema rejects that shape outright, and this check agrees with it rather than
+treating the name alone as evidence. A value that arrives through valueFrom
+cannot be read at render time and is taken on trust.
+
+A literal NETWORK_<NAME>_ENABLED value in the same environment overrides the
+network's enabled flag, matching applyEnv; a name supplied through valueFrom
+cannot be read here, so such a network is checked as configured. Only the
+collector talks to an RPC, so web-only and api-only installs never reach this
+check.
 */}}
 {{- define "gascurve.validateNetworkRPC" -}}
-{{- $names := list -}}
+{{- $supplied := list -}}
 {{- $literals := dict -}}
 {{- range concat (default (list) .Values.extraEnv) (default (list) .Values.collector.extraEnv) -}}
-{{- $names = append $names (toString .name) -}}
+{{- $name := toString .name -}}
 {{- if hasKey . "value" -}}
-{{- $_ := set $literals (toString .name) (toString .value) -}}
+{{- $_ := set $literals $name (toString .value) -}}
+{{- if ne (toString .value) "" -}}
+{{- $supplied = append $supplied $name -}}
+{{- end -}}
+{{- else -}}
+{{- $supplied = append $supplied $name -}}
 {{- end -}}
 {{- end -}}
 {{- range .Values.config.networks -}}
-{{- $key := printf "NETWORK_%s" (.name | toString | replace "-" "_" | upper) -}}
-{{- $enabled := .enabled -}}
+{{- $network := . -}}
+{{- $key := printf "NETWORK_%s" ($network.name | toString | replace "-" "_" | upper) -}}
+{{- $enabled := $network.enabled -}}
 {{- $override := get $literals (printf "%s_ENABLED" $key) -}}
 {{- if has $override (list "1" "t" "T" "true" "TRUE" "True") -}}
 {{- $enabled = true -}}
 {{- else if has $override (list "0" "f" "F" "false" "FALSE" "False") -}}
 {{- $enabled = false -}}
 {{- end -}}
-{{- if and $enabled (not .rpc_url) (not (has (printf "%s_RPC_URL" $key) $names)) -}}
-{{- fail (printf "network %s is enabled but has no rpc_url and no collector.extraEnv entry named %s_RPC_URL. Set config.networks[].rpc_url, or add %s_RPC_URL to collector.extraEnv (valueFrom.secretKeyRef to a Secret holding the private URL), or set enabled: false on that network." .name $key $key) -}}
+{{- if $enabled -}}
+{{- if and (not $network.rpc_url) (not (has (printf "%s_RPC_URL" $key) $supplied)) -}}
+{{- fail (printf "network %s is enabled but has no rpc_url and no collector.extraEnv entry named %s_RPC_URL with a value. Set config.networks[].rpc_url, or add %s_RPC_URL to collector.extraEnv (valueFrom.secretKeyRef to a Secret holding the private URL), or set enabled: false on that network." $network.name $key $key) -}}
+{{- end -}}
+{{- $listName := printf "%s_FALLBACK_RPC_URLS" $key -}}
+{{- $listLiteral := get $literals $listName -}}
+{{- $items := list -}}
+{{- if $listLiteral -}}
+{{- $items = splitList "," $listLiteral -}}
+{{- end -}}
+{{- range $i, $fallback := default (list) $network.fallbacks -}}
+{{- if not $fallback.rpc_url -}}
+{{- if not (has $listName $supplied) -}}
+{{- fail (printf "network %s: fallbacks[%d] has no rpc_url and there is no collector.extraEnv entry named %s with a value. Every fallback endpoint of an enabled network needs an RPC URL: set fallbacks[%d].rpc_url, or supply the whole list through %s (comma separated, one item per fallback, position %d for this one), or remove the fallback." $network.name $i $listName $i $listName $i) -}}
+{{- else if $listLiteral -}}
+{{- if or (le (len $items) $i) (eq (trim (index $items $i)) "") -}}
+{{- fail (printf "network %s: fallbacks[%d] has no rpc_url and %s supplies nothing at position %d (it is a comma separated list, one item per fallback, and it currently has %d). Set fallbacks[%d].rpc_url or extend %s." $network.name $i $listName $i (len $items) $i $listName) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

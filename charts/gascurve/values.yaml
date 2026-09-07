@@ -33,6 +33,26 @@ collector:
   #     secretKeyRef:
   #       name: gascurve-rpc
   #       key: robinhood
+  # Portable defaults, sized for one or two networks at the default 3s tick
+  # and a backfill that has already caught up. They are deliberately small so
+  # the chart installs on a laptop cluster.
+  #
+  # A production collector is not that workload: it follows every enabled
+  # network at once, and on first install each one replays
+  # collector.backfill_depth (720h by default) as fast as its budget allows,
+  # which is the busiest the process ever gets. Raise the requests, not just
+  # the limits: requests are what the scheduler reserves and what decides the
+  # CPU share on a contended node, so a collector left at 100m gets the share
+  # of a sidecar while it is doing the most work. See the sizing section of
+  # charts/gascurve/README.md for what to watch before settling on numbers.
+  #
+  #   resources:
+  #     requests:
+  #       cpu: 500m        # 1 for four networks with an unmetered endpoint
+  #       memory: 512Mi
+  #     limits:
+  #       cpu: "2"
+  #       memory: 1Gi
   resources:
     requests:
       cpu: 100m

@@ -268,8 +268,22 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-  # Runs on every pull request and push so a broken Dockerfile or a vulnerable
-  # image is caught before merge. Not a required status check.
+  # The pre-merge half of the image vulnerability gate. It builds the three
+  # images from the pull request and fails on a fixable HIGH or CRITICAL, at
+  # exactly the severity and exit code Docker Publish uses, so a change that
+  # would be unpublishable is rejected before it is merged rather than after
+  # a release tag has already been cut.
+  #
+  # It is not a duplicate of the publish-time scan, and neither can stand in
+  # for the other: this one scans a single-architecture image built here, on
+  # the merge result, and can only ever be as current as the day it ran;
+  # Docker Publish scans the actual linux/amd64 and linux/arm64 digests it is
+  # about to tag, against the vulnerability database of the day the release is
+  # published. Nothing reaches an immutable version tag without passing there.
+  #
+  # This job blocks the workflow. Making it block the merge as well is a
+  # repository setting: add "Docker Build" to the required status checks for
+  # main.
   docker:
     name: Docker Build
     runs-on: ubuntu-latest

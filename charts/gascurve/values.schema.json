@@ -1,9 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "gascurve values",
-  "description": "Validated by helm install, upgrade, template and lint. A database is mandatory whenever the collector or the api is enabled: set exactly one of database.url (rendered into a Secret) and database.existingSecret. Every network the collector runs also needs a primary RPC URL, from config.networks[].rpc_url or a collector.extraEnv entry named NETWORK_<NAME>_RPC_URL; that cross-reference is checked by the templates, not here.",
+  "description": "Validated by helm install, upgrade, template and lint. A database is mandatory whenever the collector or the api is enabled: set exactly one of database.url (rendered into a Secret) and database.existingSecret. Ingress needs at least one backend, so it cannot be enabled with both api.enabled and web.enabled false. The config object is the application's own configuration and is modelled here field by field, because a value the chart accepts and the binary then rejects only shows up as a crash-looping pod: durations are Go durations, budgets are 0 (unlimited) or 0.1 to 10000 calls per second, ws_url values are ws:// or wss://, and chart-owned objects reject unknown keys so a misplaced field cannot be silently ignored. What cannot be expressed here is the cross-reference between a network without an rpc_url and a NETWORK_<NAME>_RPC_URL entry in the collector's environment; the templates check that.",
   "type": "object",
   "properties": {
+    "global": {
+      "description": "Reserved by Helm for values shared with subcharts. This chart has none and reads nothing from it.",
+      "type": "object"
+    },
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" },
     "image": {
@@ -17,11 +21,13 @@
           "items": {
             "type": "object",
             "properties": { "name": { "type": "string", "minLength": 1 } },
-            "required": ["name"]
+            "required": ["name"],
+            "additionalProperties": false
           }
         }
       },
-      "required": ["registry", "pullPolicy"]
+      "required": ["registry", "pullPolicy"],
+      "additionalProperties": false
     },
     "collector": {
       "type": "object",
@@ -29,10 +35,11 @@
         "enabled": { "type": "boolean" },
         "image": { "$ref": "#/definitions/componentImage" },
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
-        "resources": { "type": "object" },
+        "resources": { "$ref": "#/definitions/resources" },
         "extraEnv": { "$ref": "#/definitions/envVarList" }
       },
-      "required": ["enabled", "image"]
+      "required": ["enabled", "image"],
+      "additionalProperties": false
     },
     "api": {
       "type": "object",
@@ -42,10 +49,11 @@
         "image": { "$ref": "#/definitions/componentImage" },
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
         "service": { "$ref": "#/definitions/service" },
-        "resources": { "type": "object" },
+        "resources": { "$ref": "#/definitions/resources" },
         "extraEnv": { "$ref": "#/definitions/envVarList" }
       },
-      "required": ["enabled", "image", "service"]
+      "required": ["enabled", "image", "service"],
+      "additionalProperties": false
     },
     "web": {
       "type": "object",
@@ -55,9 +63,10 @@
         "image": { "$ref": "#/definitions/componentImage" },
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
         "service": { "$ref": "#/definitions/service" },
-        "resources": { "type": "object" }
+        "resources": { "$ref": "#/definitions/resources" }
       },
-      "required": ["enabled", "image", "service"]
+      "required": ["enabled", "image", "service"],
+      "additionalProperties": false
     },
     "ingress": {
       "type": "object",
@@ -69,6 +78,7 @@
         "tls": { "type": "array" }
       },
       "required": ["enabled"],
+      "additionalProperties": false,
       "if": { "properties": { "enabled": { "const": true } } },
       "then": { "properties": { "host": { "type": "string", "minLength": 1 } }, "required": ["host"] }
     },
@@ -80,51 +90,84 @@
         "existingSecret": { "type": "string" },
         "existingSecretKey": { "type": "string", "minLength": 1 }
       },
-      "required": ["url", "existingSecret", "existingSecretKey"]
+      "required": ["url", "existingSecret", "existingSecretKey"],
+      "additionalProperties": false
     },
     "migrations": {
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
-        "resources": { "type": "object" },
+        "resources": { "$ref": "#/definitions/resources" },
         "extraEnv": { "$ref": "#/definitions/envVarList" }
       },
-      "required": ["enabled"]
+      "required": ["enabled"],
+      "additionalProperties": false
     },
     "config": {
+      "description": "Rendered verbatim into config.yaml and read by internal/config. Every field the binary understands is listed; unknown keys are rejected rather than mounted and ignored.",
       "type": "object",
       "properties": {
         "server": {
           "type": "object",
           "properties": {
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "cors_origins": { "type": "array", "items": { "type": "string" } },
-            "dev_mode": { "type": "boolean" }
+            "cors_origins": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "dev_mode": { "type": "boolean" },
+            "rate_limit_per_second": { "type": "number", "exclusiveMinimum": 0 },
+            "rate_limit_burst": { "type": "integer", "minimum": 1 },
+            "trusted_proxies": {
+              "description": "Addresses or CIDRs of reverse proxies whose X-Forwarded-For is believed.",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "ws_max_per_ip": { "type": "integer", "minimum": 1 },
+            "ws_max_total": { "type": "integer", "minimum": 1 }
           },
-          "required": ["port"]
+          "required": ["port"],
+          "additionalProperties": false
         },
-        "database": { "type": "object" },
-        "collector": { "type": "object" },
+        "database": {
+          "description": "Pool settings only. The connection string always arrives as DB_URL from database.url or database.existingSecret, so it is never written into the ConfigMap.",
+          "type": "object",
+          "properties": {
+            "max_open": { "type": "integer", "minimum": 1 },
+            "max_idle": { "type": "integer", "minimum": 0 },
+            "run_migrations": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "collector": {
+          "type": "object",
+          "properties": {
+            "tick_interval": { "$ref": "#/definitions/duration" },
+            "slow_interval": { "$ref": "#/definitions/duration" },
+            "header_batch_size": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "block_retention": { "$ref": "#/definitions/duration" },
+            "sample_retention": { "$ref": "#/definitions/duration" },
+            "backfill_depth": { "$ref": "#/definitions/duration" },
+            "backfill_anchor_interval": { "type": "integer", "minimum": 1 },
+            "max_catch_up_batches": { "type": "integer", "minimum": 1 },
+            "failover_cooldown": { "$ref": "#/definitions/duration" },
+            "eth_usd_source": {
+              "description": "\"\" disables the ETH/USD fetch (every snapshot then reports ethUsd: null), coinbase and coingecko are the built-in providers, and any other value must be an https URL answering JSON with a top-level price. Overridden by ETH_USD_SOURCE, where an empty value is meaningful too.",
+              "type": "string",
+              "anyOf": [
+                { "title": "disabled or a built-in provider", "enum": ["", "coinbase", "coingecko"] },
+                { "title": "https URL", "pattern": "^https://[^\\s]+$" }
+              ]
+            },
+            "eth_usd_max_age": { "$ref": "#/definitions/duration" }
+          },
+          "additionalProperties": false
+        },
         "networks": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "name": { "type": "string", "minLength": 1 },
-              "chain_id": { "type": "integer", "minimum": 1 },
-              "rpc_url": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Primary RPC URL. Omit it only when the collector's environment supplies NETWORK_<NAME>_RPC_URL, which the templates check."
-              },
-              "enabled": { "type": "boolean" }
-            },
-            "required": ["name", "chain_id"]
-          }
+          "items": { "$ref": "#/definitions/network" }
         }
       },
-      "required": ["server", "networks"]
+      "required": ["server", "networks"],
+      "additionalProperties": false
     },
     "extraEnv": {
       "description": "Deprecated alias applied to the collector, api and migration containers alike. Use collector.extraEnv, api.extraEnv and migrations.extraEnv instead.",
@@ -140,53 +183,152 @@
         "name": { "type": "string" },
         "automountServiceAccountToken": { "type": "boolean" }
       },
-      "required": ["create"]
+      "required": ["create"],
+      "additionalProperties": false
     },
     "nodeSelector": { "type": "object" },
     "tolerations": { "type": "array" },
     "affinity": { "type": "object" }
   },
   "required": ["image", "collector", "api", "web", "ingress", "database", "migrations", "config", "serviceAccount"],
-  "if": {
-    "anyOf": [
-      { "properties": { "collector": { "properties": { "enabled": { "const": true } } } } },
-      { "properties": { "api": { "properties": { "enabled": { "const": true } } } } }
-    ]
-  },
-  "then": {
-    "properties": {
-      "database": {
-        "oneOf": [
-          {
-            "title": "database.url set, database.existingSecret empty",
-            "properties": {
-              "url": { "type": "string", "minLength": 1 },
-              "existingSecret": { "type": "string", "maxLength": 0 }
-            }
-          },
-          {
-            "title": "database.existingSecret set, database.url empty",
-            "properties": {
-              "url": { "type": "string", "maxLength": 0 },
-              "existingSecret": { "type": "string", "minLength": 1 }
-            }
-          }
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "title": "a database is required when the collector or the api is enabled",
+      "if": {
+        "anyOf": [
+          { "properties": { "collector": { "properties": { "enabled": { "const": true } } } } },
+          { "properties": { "api": { "properties": { "enabled": { "const": true } } } } }
         ]
+      },
+      "then": {
+        "properties": {
+          "database": {
+            "oneOf": [
+              {
+                "title": "database.url set, database.existingSecret empty",
+                "properties": {
+                  "url": { "type": "string", "minLength": 1 },
+                  "existingSecret": { "type": "string", "maxLength": 0 }
+                }
+              },
+              {
+                "title": "database.existingSecret set, database.url empty",
+                "properties": {
+                  "url": { "type": "string", "maxLength": 0 },
+                  "existingSecret": { "type": "string", "minLength": 1 }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "ingress needs a backend: enable api or web, or disable ingress",
+      "if": {
+        "properties": {
+          "ingress": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "api": { "properties": { "enabled": { "const": false } }, "required": ["enabled"] },
+          "web": { "properties": { "enabled": { "const": false } }, "required": ["enabled"] }
+        },
+        "required": ["ingress", "api", "web"]
+      },
+      "then": {
+        "properties": {
+          "ingress": {
+            "title": "ingress.enabled must be false while both api.enabled and web.enabled are false, because the Ingress would have no HTTP paths",
+            "properties": { "enabled": { "const": false } }
+          }
+        }
       }
     }
-  },
+  ],
   "definitions": {
+    "duration": {
+      "title": "Go duration",
+      "description": "A positive Go duration: a magnitude and a unit (ns, us, ms, s, m, h), optionally repeated, for example 500ms, 3s, 60s, 720h or 1h30m. Zero is rejected: every interval the collector uses must be positive.",
+      "type": "string",
+      "pattern": "^([0-9]*[1-9][0-9]*(\\.[0-9]+)?|[0-9]+\\.[0-9]*[1-9][0-9]*)(ns|us|µs|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))*$"
+    },
+    "callsPerSecond": {
+      "title": "JSON-RPC budget",
+      "description": "0 means unlimited (a dedicated node). Anything else is a real budget between 0.1 and 10000 calls per second, counting every item inside a batch. A negative value, or one below 0.1, is a mistake rather than a budget: use 0.",
+      "type": "number",
+      "anyOf": [
+        { "title": "unlimited (dedicated node)", "minimum": 0, "maximum": 0 },
+        { "title": "0.1 to 10000 calls per second", "minimum": 0.1, "maximum": 10000 }
+      ]
+    },
+    "httpURL": { "type": "string", "pattern": "^https?://[^\\s]+$" },
+    "wsURL": {
+      "description": "A WebSocket endpoint, which must be ws:// or wss://. An http(s) URL here is rejected by the collector at startup.",
+      "type": "string",
+      "pattern": "^wss?://[^\\s]+$"
+    },
+    "endpoint": {
+      "title": "fallback endpoint",
+      "description": "A further endpoint for the same chain, tried when the active one fails. rpc_url may be omitted only when the collector's environment supplies NETWORK_<NAME>_FALLBACK_RPC_URLS at this position; the templates check that.",
+      "type": "object",
+      "properties": {
+        "rpc_url": { "$ref": "#/definitions/httpURL" },
+        "ws_url": { "$ref": "#/definitions/wsURL" },
+        "archive": { "type": "boolean" },
+        "calls_per_second": { "$ref": "#/definitions/callsPerSecond" }
+      },
+      "additionalProperties": false
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Lower-case identifier. It is upper-cased with dashes replaced by underscores to build the NETWORK_<NAME>_* environment overrides, so it may only hold letters, digits and dashes.",
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$"
+        },
+        "display_name": { "type": "string", "minLength": 1 },
+        "chain_id": { "type": "integer", "minimum": 1 },
+        "rpc_url": {
+          "description": "Primary RPC URL. Omit it only when the collector's environment supplies NETWORK_<NAME>_RPC_URL, which the templates check.",
+          "$ref": "#/definitions/httpURL"
+        },
+        "ws_url": { "$ref": "#/definitions/wsURL" },
+        "explorer_url": { "$ref": "#/definitions/httpURL" },
+        "calls_per_second": { "$ref": "#/definitions/callsPerSecond" },
+        "archive": { "type": "boolean" },
+        "tick_interval": { "$ref": "#/definitions/duration" },
+        "enabled": { "type": "boolean" },
+        "fallbacks": { "type": "array", "items": { "$ref": "#/definitions/endpoint" } }
+      },
+      "required": ["name", "chain_id"],
+      "additionalProperties": false
+    },
     "componentImage": {
       "type": "object",
       "properties": { "repository": { "type": "string", "minLength": 1 } },
-      "required": ["repository"]
+      "required": ["repository"],
+      "additionalProperties": false
     },
     "componentSecurityContext": {
       "type": "object",
       "properties": {
         "runAsUser": { "type": "integer", "minimum": 1 },
         "runAsGroup": { "type": "integer", "minimum": 1 }
-      }
+      },
+      "additionalProperties": false
+    },
+    "resourceList": {
+      "type": "object",
+      "additionalProperties": { "type": ["string", "integer", "number"] }
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": { "$ref": "#/definitions/resourceList" },
+        "limits": { "$ref": "#/definitions/resourceList" }
+      },
+      "additionalProperties": false
     },
     "service": {
       "type": "object",
@@ -194,7 +336,8 @@
         "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
       },
-      "required": ["type", "port"]
+      "required": ["type", "port"],
+      "additionalProperties": false
     },
     "keySelector": {
       "type": "object",
@@ -208,7 +351,7 @@
     },
     "envVar": {
       "title": "Kubernetes EnvVar",
-      "description": "A name plus exactly one of value and valueFrom. valueFrom holds exactly one of secretKeyRef, configMapKeyRef, fieldRef and resourceFieldRef.",
+      "description": "A name plus exactly one of value and valueFrom. valueFrom holds exactly one of secretKeyRef, configMapKeyRef, fieldRef and resourceFieldRef. A NETWORK_<NAME>_RPC_URL, _WS_URL or _FALLBACK_RPC_URLS override given as a literal must not be empty: internal/config ignores an empty override, so the network would fall back to config.yaml (or to nothing) rather than to the value that was meant.",
       "type": "object",
       "properties": {
         "name": { "type": "string", "minLength": 1, "pattern": "^[-._a-zA-Z][-._a-zA-Z0-9]*$" },
@@ -245,9 +388,21 @@
       },
       "required": ["name"],
       "additionalProperties": false,
-      "oneOf": [
-        { "title": "value", "required": ["value"], "not": { "required": ["valueFrom"] } },
-        { "title": "valueFrom", "required": ["valueFrom"], "not": { "required": ["value"] } }
+      "allOf": [
+        {
+          "oneOf": [
+            { "title": "value", "required": ["value"], "not": { "required": ["valueFrom"] } },
+            { "title": "valueFrom", "required": ["valueFrom"], "not": { "required": ["value"] } }
+          ]
+        },
+        {
+          "title": "an RPC or WebSocket URL override given as a literal must not be empty",
+          "if": {
+            "properties": { "name": { "pattern": "^NETWORK_[A-Za-z0-9_]+_(RPC_URL|WS_URL|FALLBACK_RPC_URLS|FALLBACK_WS_URLS)$" } },
+            "required": ["name", "value"]
+          },
+          "then": { "properties": { "value": { "type": "string", "minLength": 1 } } }
+        }
       ]
     },
     "envVarList": { "type": "array", "items": { "$ref": "#/definitions/envVar" } }

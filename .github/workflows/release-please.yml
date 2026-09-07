@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # release-please creates and applies its autorelease:* labels. Label
+  # management is an Issues permission, so without it the very first run in a
+  # repository that has no such labels yet fails while creating them.
+  issues: write
 
 jobs:
   release-please:
@@ -16,11 +20,18 @@ jobs:
     # PR gets CI runs and the published release triggers the publish
     # workflows. Preferred: an org-owned GitHub App (RELEASE_APP_ID +
     # RELEASE_APP_PRIVATE_KEY, Contents and Pull requests read/write, installed
-    # on this repo only); the token request below is narrowed to exactly those
-    # two permissions regardless of what the App installation grants.
+    # on this repo only, plus Issues read/write for its labels); the token
+    # request below is narrowed to exactly those three permissions regardless
+    # of what the App installation grants.
     # Fallback: RELEASE_PLEASE_TOKEN, which must be a fine-grained personal
-    # access token scoped to this repository only, with Contents: read/write
-    # and Pull requests: read/write and nothing else. Do not use a classic PAT.
+    # access token scoped to this repository only, with Contents: read/write,
+    # Pull requests: read/write and Issues: read/write and nothing else. Do
+    # not use a classic PAT.
+    #
+    # Issues write is what lets release-please create its autorelease:* labels
+    # on the first run. The App installation itself must be granted Issues
+    # read/write by the repository owner: permission-issues below can only
+    # narrow what the installation already has, never add to it.
     env:
       HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' }}
     # Root package outputs (path ".") are exposed without a path prefix.
@@ -36,6 +47,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
+          permission-issues: write
 
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
@@ -51,6 +63,10 @@ jobs:
   # auto-merge enabled; the merged fix commit under charts/gascurve makes
   # release-please open the next chart release PR. Uses the same token as
   # release-please so the PR gets CI runs and the merge triggers workflows.
+  #
+  # This job only pushes a branch and opens a PR, so its token stays at
+  # Contents and Pull requests write: it never touches labels and so needs no
+  # Issues permission.
   #
   # Prerequisite: "Allow auto-merge" must be enabled in the repository
   # settings, otherwise `gh pr merge --auto` fails and the PR just sits there.

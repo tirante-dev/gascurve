@@ -1,7 +1,7 @@
-# Extends the default ruleset. Nothing below turns a rule off wholesale: the
-# one known finding is suppressed by exact fingerprint in .gitleaksignore, and
-# the single allowlist here is scoped to one rule, one directory and one shape
-# of value at the same time.
+# Extends the default ruleset. Nothing below turns a rule off wholesale: each
+# allowlist is scoped to one rule and one path and one value at the same time,
+# so it can only ever skip the exact finding it documents. .gitleaksignore
+# carries no fingerprints, on purpose: see the comment in that file.
 [extend]
 useDefault = true
 
@@ -22,3 +22,24 @@ targetRules = ["generic-api-key"]
 condition = "AND"
 paths = ['''^internal/nitro/testdata/[^/]+\.json$''']
 regexes = ['''^0x[0-9a-fA-F]+$''']
+
+# internal/api/ws_test.go builds a WebSocket client handshake by hand. The
+# Sec-WebSocket-Key header value is the RFC 6455 sample nonce (base64 of 16
+# bytes), which the entropy-based generic-api-key rule reads as a credential.
+# A handshake nonce is public by construction: the client sends it in
+# plaintext on every connection.
+#
+# This was an exact .gitleaksignore fingerprint, which binds a finding to a
+# line number and so silently stops covering the nonce as soon as the test
+# file grows above it (it had already moved twice). Binding it to the file
+# and the exact nonce value instead cannot drift. As above, targetRules plus
+# condition = "AND" means only that one rule, in that one file, on that one
+# value is skipped. Verified by planting fakes in a scratch copy: an AWS access
+# key, a PEM private key and a different high-entropy api_key in the same file
+# are all still reported, and the same nonce in another file is still reported.
+[[allowlists]]
+description = "internal/api/ws_test.go: the RFC 6455 sample handshake nonce, not a credential"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^internal/api/ws_test\.go$''']
+regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
