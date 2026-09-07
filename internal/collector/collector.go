@@ -227,9 +227,13 @@ type Follower struct {
 	batchCostChanges []batchCostChange
 	liveStart        *liveStart
 	// repairNarrow is the batch the poster-gas repair has narrowed itself to
-	// after a failed read, 0 while it is running at full size. It is in
-	// memory only: a restart starts wide again and narrows if it must.
-	repairNarrow int
+	// after a failed read, 0 while it is running at full size. repairBlock
+	// and repairAttempts count consecutive failures against one block, so a
+	// block is retried before the pass moves past it. All three are in memory
+	// only: a restart starts wide again, and gives a skipped block another go.
+	repairNarrow   int
+	repairBlock    uint64
+	repairAttempts int
 	// ownerScanThrough is the owner_scan_through checkpoint: the block
 	// through which the recorded owner-action timeline is complete, 0 until
 	// a scan pass has reached its head.

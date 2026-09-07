@@ -231,18 +231,17 @@ func (f *Follower) runHistory(ctx context.Context) {
 			}
 			continue
 		}
-		switch status {
-		case FillProgressed:
-			f.observeLoop(loopHistory, start, nil)
-			continue
-		case FillIdle:
+		if status == FillIdle {
 			f.observeLoop(loopHistory, start, nil)
 			if err := f.sleep(ctx, backfillIdle); err != nil {
 				return
 			}
 			continue
-		case FillNone:
 		}
+		// A progressed fill does not take the iteration: the repair gets its
+		// batch in the same turn. A long gap fills over hours on a paced
+		// endpoint, and a repair that waited for it to finish would find its
+		// rows already past the retention horizon and skip them for good.
 		repair, err := f.RepairStep(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -255,17 +254,18 @@ func (f *Follower) runHistory(ctx context.Context) {
 			}
 			continue
 		}
-		switch repair {
-		case RepairProgressed:
-			f.observeLoop(loopHistory, start, nil)
-			continue
-		case RepairIdle:
+		if repair == RepairIdle {
 			f.observeLoop(loopHistory, start, nil)
 			if err := f.sleep(ctx, backfillIdle); err != nil {
 				return
 			}
 			continue
-		case RepairNone:
+		}
+		// Only an iteration in which neither had work falls through to the
+		// backfill, which is the one job with no deadline of its own.
+		if status == FillProgressed || repair == RepairProgressed {
+			f.observeLoop(loopHistory, start, nil)
+			continue
 		}
 		back, err := f.BackfillStep(ctx)
 		if err != nil {

@@ -130,23 +130,108 @@ func TestRepairStepFinishesAndStaysFinished(t *testing.T) {
 	}
 }
 
-func TestRepairStepSkipsBlocksBelowLiveStart(t *testing.T) {
+// The repair is scoped by the bucket, not by the live block. Rows in the
+// boundary hour that sit below live_start are still row-backed, so their
+// buckets are rebuilt from rows and they have to be repaired with the rest.
+func TestRepairStepRepairsTheBoundaryHourBelowLiveStart(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
 	seedBlocksWithoutPosterGas(t, rpc, store, 890, 905)
-	// Blocks under live start belong to the backfill, which owns their
-	// buckets additively; rebuilding those from rows would be wrong.
 	f := repairFollower(t, rpc, store)
+
+	for range 3 {
+		if status, err := f.RepairStep(ctx); err != nil || status == RepairIdle {
+			t.Fatalf("repair: %v %v", status, err)
+		}
+	}
+	for _, n := range []uint64{890, 899, 900} {
+		if got := posterGasOf(t, store, n); !got.Valid {
+			t.Fatalf("block %d in the boundary hour was not repaired", n)
+		}
+	}
+}
+
+// A bucket that starts before the boundary belongs to the backfill, which
+// owns it additively; rebuilding it from rows would be wrong.
+func TestRepairStepSkipsBucketsTheBackfillOwns(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 890, 905)
+	f := newTestFollower(t, rpc, store)
+	// Live start an hour on, so every seeded row sits in an earlier bucket.
+	ls := &liveStart{Block: 5_000, TS: int64(tsFor(repairLiveStart)) + 3_600}
+	if err := f.saveLiveStart(ctx, store, ls); err != nil {
+		t.Fatal(err)
+	}
 
 	if status, err := f.RepairStep(ctx); err != nil || status != RepairProgressed {
 		t.Fatalf("repair: %v %v", status, err)
 	}
-	if got := posterGasOf(t, store, 899); got.Valid {
-		t.Fatalf("block 899 under live start was repaired: %+v", got)
+	if len(rpc.posterGasCalls) != 0 {
+		t.Fatalf("read receipts for buckets the backfill owns: %v", rpc.posterGasCalls)
+	}
+	if got := posterGasOf(t, store, 905); got.Valid {
+		t.Fatalf("a backfill-owned row was repaired: %+v", got)
+	}
+}
+
+// A short block_retention must not put the cutoff past the present and leave
+// the pass reporting itself finished having repaired nothing: what has to be
+// whole is the bucket's window, so the check is on the bucket's own start.
+func TestRepairStepStillWorksOnAShortRetention(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
+	f := repairFollower(t, rpc, store)
+	f.cfg.BlockRetention = time.Hour
+
+	if status, err := f.RepairStep(ctx); err != nil || status != RepairProgressed {
+		t.Fatalf("repair: %v %v", status, err)
 	}
 	if got := posterGasOf(t, store, 900); !got.Valid {
-		t.Fatal("block 900 at live start was not repaired")
+		t.Fatal("an hour of retention repaired nothing, though its bucket is whole")
+	}
+}
+
+// A block is retried before the pass moves past it, so an endpoint that is
+// unreachable, rate limited or behind cannot walk the cursor through a range
+// one block per step and leave all of it unrepairable.
+func TestRepairStepRetriesOneBlockBeforeGivingUpOnIt(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, store, 900, 901)
+	f := repairFollower(t, rpc, store)
+	f.mu.Lock()
+	f.repairNarrow = 1
+	f.mu.Unlock()
+	rpc.errs["PosterGasByNumbers"] = errors.New("endpoint unreachable")
+
+	// Every attempt but the last leaves the cursor where it was.
+	for attempt := 1; attempt < maxRepairAttempts; attempt++ {
+		status, err := f.RepairStep(ctx)
+		if status != RepairIdle || err == nil {
+			t.Fatalf("attempt %d: %v %v", attempt, status, err)
+		}
+		if c := repairCursor(t, f); c.Next != 0 {
+			t.Fatalf("attempt %d moved the cursor to %d", attempt, c.Next)
+		}
+	}
+	if status, err := f.RepairStep(ctx); err != nil || status != RepairProgressed {
+		t.Fatalf("final attempt: %v %v", status, err)
+	}
+	if c := repairCursor(t, f); c.Next != 901 {
+		t.Fatalf("cursor %+v, want it past the block it gave up on", c)
+	}
+	// A block it gives up on does not carry its count into the next one.
+	f.mu.Lock()
+	attempts := f.repairAttempts
+	f.mu.Unlock()
+	if attempts != maxRepairAttempts {
+		t.Fatalf("attempts %d, want %d", attempts, maxRepairAttempts)
 	}
 }
 
@@ -221,10 +306,10 @@ func TestRepairStepNarrowsThenStepsOverABlockThatWillNotVerify(t *testing.T) {
 	f := repairFollower(t, rpc, store)
 	rpc.errs["PosterGasByNumbers"] = errors.New("receipts unavailable")
 
-	// Every read fails, so the batch halves on each attempt until one block
-	// is left, which is then left unrepaired rather than retried for good.
+	// Every read fails, so the batch halves each step until one block is
+	// left, which is then retried maxRepairAttempts times and stepped over.
 	var sizes []int
-	for range 6 {
+	for range 16 {
 		status, err := f.RepairStep(ctx)
 		if status == RepairProgressed && err == nil {
 			break
