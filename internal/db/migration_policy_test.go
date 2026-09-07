@@ -3,6 +3,7 @@ package db
 import (
 	"crypto/sha256"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -27,18 +28,47 @@ func TestReleasedMigrationsImmutable(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	directions := map[uint]map[string]bool{}
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".sql") {
 			continue
 		}
-		_, err := migrationVersion(name)
+		version, direction, err := migrationVersion(name)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			continue
 		}
+		if directions[version] == nil {
+			directions[version] = map[string]bool{}
+		}
+		if directions[version][direction] {
+			t.Errorf("migration %d has more than one %s file", version, direction)
+		}
+		directions[version][direction] = true
 		if _, ok := immutableMigrationSHA256[name]; !ok {
 			t.Errorf("migration %s is not protected by a checksum", name)
 		}
+	}
+
+	versions := make([]uint, 0, len(directions))
+	for version := range directions {
+		versions = append(versions, version)
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
+	for i, version := range versions {
+		if want := uint(i + 1); version != want {
+			t.Errorf("migration versions must be sequential from 1 with no gaps: found %d, want %d", version, want)
+		}
+		for _, direction := range []string{"up", "down"} {
+			if !directions[version][direction] {
+				t.Errorf("migration %d has no %s file", version, direction)
+			}
+		}
+	}
+	if len(versions) > 0 && versions[len(versions)-1] < productionSchemaVersion {
+		t.Errorf("head is version %d, below the deployed production version %d (%s)",
+			versions[len(versions)-1], productionSchemaVersion, productionRelease)
 	}
 
 	for name, want := range immutableMigrationSHA256 {
@@ -54,14 +84,27 @@ func TestReleasedMigrationsImmutable(t *testing.T) {
 	}
 }
 
-func migrationVersion(name string) (uint, error) {
-	prefix, _, ok := strings.Cut(name, "_")
+// migrationVersion parses a golang-migrate file name into its schema version
+// and direction.
+func migrationVersion(name string) (version uint, direction string, err error) {
+	prefix, rest, ok := strings.Cut(name, "_")
 	if !ok {
-		return 0, fmt.Errorf("migration %s has no numeric prefix", name)
+		return 0, "", fmt.Errorf("migration %s has no numeric prefix", name)
 	}
-	version, err := strconv.ParseUint(prefix, 10, 64)
+	if len(prefix) != 6 {
+		return 0, "", fmt.Errorf("migration %s must use a six-digit version prefix", name)
+	}
+	n, err := strconv.ParseUint(prefix, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("migration %s has an invalid version: %w", name, err)
+		return 0, "", fmt.Errorf("migration %s has an invalid version: %w", name, err)
 	}
-	return uint(version), nil
+	switch {
+	case strings.HasSuffix(rest, ".up.sql"):
+		direction = "up"
+	case strings.HasSuffix(rest, ".down.sql"):
+		direction = "down"
+	default:
+		return 0, "", fmt.Errorf("migration %s must end in .up.sql or .down.sql", name)
+	}
+	return uint(n), direction, nil
 }

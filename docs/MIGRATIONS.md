@@ -2,7 +2,7 @@
 
 Database migrations are a production API. Once a migration reaches `main`, do not edit, rename, reorder, or delete either its up or down file. Correct mistakes with a new, higher-numbered migration.
 
-The current production baseline is application release `v1.0.1` at schema version 1. The checksums in `internal/db/migration_policy_test.go` freeze the exact `000001_init` files that produced that schema. Migration files and the checksum policy require owner review through `CODEOWNERS`.
+The current production baseline is application release `v1.0.1` at schema version 1. Every migration on `main` is frozen by a checksum in `internal/db/migration_policy_test.go`, whether or not it has been released yet, and the same file records the version numbering and up/down pairing rules. Migration files and the checksum policy require owner review through `CODEOWNERS`.
 
 ## Creating a migration
 
@@ -20,7 +20,7 @@ Never repair a deployed schema by changing an older file, even when a fresh data
 
 CI has two migration-specific controls:
 
-- `Migration Immutability` runs `make migration-check` and fails when a migration file does not match its owner-reviewed checksum.
+- `Migration Immutability` runs `make migration-check` and fails when a migration file does not match its owner-reviewed checksum, is missing a checksum, is missing its opposite direction, or breaks the sequential numbering.
 - The PostgreSQL integration job installs all migrations into an empty schema, then separately installs the last production schema version and upgrades it to head. It compares columns, constraints, and indexes between both results and verifies representative production data survives.
 
 `productionRelease` and `productionSchemaVersion` in `internal/db/migration_policy_test.go` identify the upgrade baseline. After a release containing a schema migration is deployed successfully, update both constants in a focused follow-up pull request. Do not advance them before rollout, because the release candidate must continue testing the real production-to-head path.

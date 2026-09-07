@@ -37,22 +37,33 @@ func openIntegration(t *testing.T) *Postgres {
 	}
 	t.Cleanup(func() { d.Close() })
 	p := NewPostgres(d)
-	resetIntegrationSchema(t, p, true)
+	resetIntegrationSchema(t, p)
 	return p
 }
 
-func resetIntegrationSchema(t *testing.T, p *Postgres, migrate bool) {
+// resetIntegrationSchema drops the schema and migrates it to head.
+func resetIntegrationSchema(t *testing.T, p *Postgres) {
+	t.Helper()
+	retryIntegrationReset(t, func() error { return ResetSchema(context.Background(), p.DB()) })
+}
+
+// emptyIntegrationSchema drops the schema and leaves it unmigrated, so a test
+// can install an older version itself.
+func emptyIntegrationSchema(t *testing.T, p *Postgres) {
+	t.Helper()
+	retryIntegrationReset(t, func() error {
+		_, err := p.DB().ExecContext(context.Background(), "DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+		return err
+	})
+}
+
+func retryIntegrationReset(t *testing.T, reset func() error) {
 	t.Helper()
 	// A collector running against the database holds locks the reset has
 	// to wait for and can deadlock with; retry a few times.
 	var rerr error
 	for attempt := 0; attempt < 5; attempt++ {
-		if migrate {
-			rerr = ResetSchema(context.Background(), p.DB())
-		} else {
-			_, rerr = p.DB().ExecContext(context.Background(), "DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-		}
-		if rerr == nil {
+		if rerr = reset(); rerr == nil {
 			break
 		}
 		time.Sleep(300 * time.Millisecond)

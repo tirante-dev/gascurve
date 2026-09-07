@@ -13,7 +13,7 @@ func TestIntegrationUpgradeFromProductionSchema(t *testing.T) {
 	p := openIntegration(t)
 	freshVersion, freshShape := integrationSchemaState(t, p)
 
-	resetIntegrationSchema(t, p, false)
+	emptyIntegrationSchema(t, p)
 	m, err := NewMigrator(p.DB().DB)
 	if err != nil {
 		t.Fatal(err)
