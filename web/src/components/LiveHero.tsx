@@ -298,6 +298,7 @@ export function HeroThroughputPanel({
   model = "unknown",
   height = HERO_THROUGHPUT_HEIGHT,
   minWidth = 280,
+  readout = false,
   action,
 }: {
   blocks: BlockPoint[];
@@ -311,6 +312,12 @@ export function HeroThroughputPanel({
   model?: PricerModel;
   height?: string;
   minWidth?: number;
+  /**
+   * Whether to render the keyboard inspector and the data table under the
+   * chart. Off in the hero, which stays a chart and its figures; on where
+   * the chart is enlarged and there is room to read it point by point.
+   */
+  readout?: boolean;
   /** The control the caption row carries, the enlarge link on the network page and nothing on the chart's own page. */
   action?: ReactNode;
 }) {
@@ -347,7 +354,7 @@ export function HeroThroughputPanel({
         ) : (
           <GasPerSecondChart m={m} height={height} axisWidth={HERO_AXIS_WIDTH} minWidth={minWidth} />
         )}
-        {live ? (
+        {!readout ? null : live ? (
           <ChartReadout
             points={points}
             groups={THROUGHPUT_READOUT}
@@ -493,6 +500,7 @@ export function HeroChartPanel({
   seriesError = null,
   model = "unknown",
   height,
+  readout = false,
 }: {
   snapshot: LiveSnapshot;
   blocks: BlockPoint[];
@@ -505,6 +513,8 @@ export function HeroChartPanel({
   seriesError?: string | null;
   model?: PricerModel;
   height?: string;
+  /** See HeroThroughputPanel: the inspector belongs to the enlarged view. */
+  readout?: boolean;
 }) {
   const live = range === "live";
   // Against the frame's wall clock: the chart slides every frame, and a block
@@ -541,7 +551,7 @@ export function HeroChartPanel({
         )}
         {/* The same values without a pointer: one block or bucket at a time in
             the inspector, all of them in the table. */}
-        {live ? (
+        {!readout ? null : live ? (
           <ChartReadout
             points={points}
             groups={FEE_READOUT}
