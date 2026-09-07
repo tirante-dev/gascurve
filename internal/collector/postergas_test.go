@@ -672,29 +672,126 @@ func TestPruneRecordsAFrontierThatOnlyMovesForward(t *testing.T) {
 	}
 }
 
-// A database pruned by a collector older than the frontier checkpoint has a
-// deletion boundary it never recorded. Reading an absent key as "nothing was
-// deleted" would let the first rollout that also raises block_retention
-// rebuild straight across it.
-func TestPruneFrontierStandsInTheOldestRowWhenNothingWasRecorded(t *testing.T) {
+// A database pruned by a collector older than the frontier checkpoint has no
+// record until its first prune, and the store guards only below a frontier
+// it can read. Startup seeds one from prune's own cutoff through the
+// forward-only record, so that window is closed before any loop runs.
+func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
+
+	// Absent, backfill finished: seeded to the retention cutoff.
 	store := dbtest.New()
 	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
 	f := newTestFollower(t, rpc, store)
-
-	got, err := f.pruneFrontier(ctx)
-	if err != nil {
+	f.cfg.BlockRetention = time.Minute
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
 		t.Fatal(err)
 	}
-	want := time.Unix(int64(tsFor(900)), 0).UTC()
-	if !got.Equal(want) {
-		t.Fatalf("frontier %v, want the oldest stored row at %v", got, want)
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
 	}
-	// A store with nothing in it constrains nothing.
-	empty := newTestFollower(t, rpc, dbtest.New())
-	if got, err := empty.pruneFrontier(ctx); err != nil || !got.IsZero() {
-		t.Fatalf("frontier on an empty store: %v %v", got, err)
+	want := f.now().Add(-time.Minute)
+	if got, err := f.pruneFrontier(ctx); err != nil || !got.Equal(want) {
+		t.Fatalf("seeded frontier %v %v, want the cutoff %v", got, err, want)
+	}
+
+	// Present: the record only moves forward, so a second start with a
+	// higher one recorded leaves it alone.
+	f.mu.Lock()
+	f.initialized = false
+	f.mu.Unlock()
+	higher := want.Add(time.Hour)
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, higher.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(higher) {
+		t.Fatalf("a recorded frontier was lowered by the seed: %v", got)
+	}
+
+	// Unreadable: replaced by the same path.
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, "not a time"); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.initialized = false
+	f.mu.Unlock()
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(want) {
+		t.Fatalf("an unreadable frontier was not reseeded: %v", got)
+	}
+
+	// Backfill unfinished: the cutoff is pinned to the boundary, and so is
+	// the seed, which is what keeps it below every row a gap fill can write.
+	pinned := dbtest.New()
+	seedBlocksWithoutPosterGas(t, rpc, pinned, 900, 905)
+	g := newTestFollower(t, rpc, pinned)
+	g.cfg.BlockRetention = time.Minute
+	if err := g.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	boundary, _ := g.boundaryLocked()
+	g.mu.Unlock()
+	if got, _ := g.pruneFrontier(ctx); !got.Equal(boundary) {
+		t.Fatalf("seed with the backfill unfinished %v, want the boundary %v", got, boundary)
+	}
+}
+
+// The review scenario end to end: an upgraded database with no record, the
+// repair running before any prune. The seed has already put the frontier at
+// the retention cutoff, so the store refuses windows below it and rebuilds
+// the rest, without the repair reading receipts for rows it cannot use.
+func TestRepairOnAnUpgradedDatabaseIsFlooredByTheSeed(t *testing.T) {
+	ctx := context.Background()
+	// The fake chain has to reach past the rows the test seeds.
+	rpc := newFakeRPC(70_000)
+	store := dbtest.New()
+	// Two rows an hour apart: 07:47:30 and 08:47:30. Retention reaches back
+	// only to 08:00, so the first row's windows are all below the cutoff
+	// and the second's are all above it.
+	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_502)
+	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
+	first := time.Unix(int64(tsFor(28_500)), 0).UTC()
+	second := time.Unix(int64(tsFor(64_500)), 0).UTC()
+	now := second.Add(90 * time.Second)
+	f := newTestFollower(t, rpc, store, func(o *Options) { o.Now = func() time.Time { return now } })
+	f.cfg.BlockRetention = now.Sub(second.Truncate(time.Hour))
+	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 4 {
+		if _, err := f.RepairStep(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := f.pruneFrontier(ctx); !got.Equal(second.Truncate(time.Hour)) {
+		t.Fatalf("frontier %v, want the seed at %v", got, second.Truncate(time.Hour))
+	}
+	for _, res := range db.ResolutionOrder {
+		buckets, err := store.Buckets(ctx, 4663, res, first.Add(-time.Hour), second.Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, b := range buckets {
+			above := !b.BucketStart.Before(second.Truncate(time.Hour))
+			if b.PosterGas.Valid != above {
+				t.Fatalf("%s bucket %s: poster gas %v, want %v (above the seed: %v)", res, b.BucketStart, b.PosterGas.Valid, above, above)
+			}
+		}
+	}
+	for _, batch := range rpc.posterGasCalls {
+		for _, n := range batch {
+			if n < 64_500 {
+				t.Fatalf("read receipts for block %d, whose windows are all below the seed", n)
+			}
+		}
 	}
 }
 

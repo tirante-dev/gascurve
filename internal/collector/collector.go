@@ -617,6 +617,12 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	if err := f.applyHistoryEpochLocked(ctx); err != nil {
 		return err
 	}
+	// Before any loop can rebuild a bucket: the store refuses a window below
+	// the recorded frontier, and a database pruned before that record
+	// existed has to be given one it can refuse against.
+	if err := f.seedPruneFrontierLocked(ctx); err != nil {
+		return err
+	}
 	if err := f.loadScanStateLocked(ctx); err != nil {
 		return err
 	}

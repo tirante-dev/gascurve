@@ -782,33 +782,58 @@ func (f *Follower) recordPruneFrontier(ctx context.Context, s db.Store, before t
 	return s.SetState(ctx, f.chainID, db.StatePruneFrontier, before.UTC().Format(time.RFC3339Nano))
 }
 
-// pruneFrontier is the highest cutoff a prune has committed.
+// seedPruneFrontierLocked records a frontier before any loop can rebuild
+// against it. The store refuses a rebuild only below a frontier it can read,
+// and a database pruned by a collector older than the checkpoint has none
+// until its first prune writes one: up to a slow_interval in which a repair
+// or a gap fill could recompute a window prune has already cut into.
 //
-// No record is not proof that nothing was deleted: a database pruned by a
-// collector older than this checkpoint has a deletion boundary it never wrote
-// down, and the first rollout that also raises block_retention would otherwise
-// read the lowered cutoff as permission to rebuild across it. The oldest
-// surviving row stands in, since everything deleted is below it. On a
-// database that has never pruned that row is just the start of history and
-// the stand-in costs at most the one bucket it sits in, which is the right
-// way to be wrong here.
+// The seed is prune's own cutoff, recorded through the same forward-only
+// path prune uses. It is exact when block_retention was not raised, since a
+// cutoff only moves forward with the clock, and it never sits above a window
+// the gap filler may still legitimately rebuild, because the filler writes
+// rows only from the boundary hour up and the cutoff is pinned to that
+// boundary for as long as the backfill is unfinished.
+//
+// It is not the oldest surviving row. That row is a deletion boundary on a
+// database that was pruned and the start of history on one that was not, and
+// the two cannot be told apart at startup; taken as a frontier it would
+// refuse to bucket the rows a gap fill writes below it, so filled history
+// would never appear. The one case no seed can close is raising
+// block_retention in the same rollout that introduces the checkpoint: the
+// old boundary is then above the new cutoff and nothing recorded it. That is
+// an operational constraint, stated in the docs, not a fix pretended here.
+//
+// Runs once at start, under f.mu, in a chain transaction that re-checks the
+// record: another collector for the chain may have seeded first, and a
+// record that will not parse is replaced by the same path.
+func (f *Follower) seedPruneFrontierLocked(ctx context.Context) error {
+	boundary, hasBoundary := f.boundaryLocked()
+	cutoff, err := f.pruneCutoff(ctx, boundary, hasBoundary)
+	if err != nil {
+		return err
+	}
+	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		return f.recordPruneFrontier(ctx, s, cutoff)
+	})
+}
+
+// pruneFrontier is the highest cutoff a prune has committed, or the zero
+// time when none is recorded or it will not parse: no floor, the same
+// reading the store makes, so the repair's cost check and the store's guard
+// cannot disagree. Past startup neither case is reachable, since
+// seedPruneFrontierLocked records one before any loop runs.
 func (f *Follower) pruneFrontier(ctx context.Context) (time.Time, error) {
 	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StatePruneFrontier)
-	if err != nil {
+	if err != nil || !ok {
 		return time.Time{}, err
 	}
-	if ok {
-		t, perr := time.Parse(time.RFC3339Nano, raw)
-		if perr == nil {
-			return t.UTC(), nil
-		}
-		f.log.Warn("unreadable prune frontier, standing in the oldest stored block", "value", raw, "err", perr.Error())
+	t, perr := time.Parse(time.RFC3339Nano, raw)
+	if perr != nil {
+		f.log.Warn("unreadable prune frontier, going by no floor", "value", raw, "err", perr.Error())
+		return time.Time{}, nil
 	}
-	oldest, err := f.store.OldestBlock(ctx, f.chainID)
-	if err != nil || oldest == nil {
-		return time.Time{}, err
-	}
-	return oldest.TS.UTC(), nil
+	return t.UTC(), nil
 }
 
 // running: its last segment rebuilds those buckets from rows.
