@@ -12,7 +12,7 @@ import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { RESYNC_COPY, WAITING_COPY } from "./LiveHero";
 import { chartView } from "@/lib/chartViews";
 import { EnlargeLink } from "./ChartActions";
-import { Card, ChartFrame, Figure, Label, Stat, Swatch, type ChartHeight } from "./primitives";
+import { Bips, Card, ChartFrame, Figure, Label, Stat, Swatch, type ChartHeight } from "./primitives";
 
 /**
  * A meter whose fill carries magnitude on the sequential ramp; the track is an
@@ -173,7 +173,10 @@ function ConstraintCard({ network, c, index, backlog, bips, share, samples, plac
           <dd className="num mt-0.5 text-ink">
             <Figure ch={FIXED_WIDTH_CH.x}>{(bips / 10_000).toFixed(4)}</Figure>
           </dd>
-          <dd className="num text-xs text-ink-3">backlog / (target × window), {Math.round(bips).toLocaleString("en-US")} bips</dd>
+          {/* `relative` is what the note anchors to: against the word it would run off a phone's screen. */}
+          <dd className="num relative text-xs text-ink-3">
+            backlog / (target × window), <Bips value={bips} />
+          </dd>
         </div>
       </dl>
       {samples ? (

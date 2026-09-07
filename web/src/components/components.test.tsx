@@ -525,8 +525,47 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("22.0")).toBeInTheDocument();
     expect(screen.getByText("11.1")).toBeInTheDocument();
     expect(screen.getByText("0.0244")).toBeInTheDocument();
-    expect(screen.getByText(/244 bips/)).toBeInTheDocument();
-    expect(screen.getByText(/32,119 bips/)).toBeInTheDocument();
+    expect(screen.getByText("0.0244").closest("div")).toHaveTextContent("backlog / (target × window), 244 bips");
+    expect(screen.getByText("3.2119").closest("div")).toHaveTextContent("backlog / (target × window), 32,119 bips");
+    // The unit says what it means rather than leaving the reader to guess: the
+    // note gives the figure in ordinary decimal, and the same facts are in the
+    // description for a reader who never gets a hover.
+    expect(screen.getByText("244 bips = 0.0244")).toBeInTheDocument();
+    expect(screen.getByText("32,119 bips = 3.2119")).toBeInTheDocument();
+    expect(screen.getByText("244 bips is 0.0244. basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.")).toBeInTheDocument();
+    // Focus opens the note as hover does, and nothing is left on a `title` the reader cannot see.
+    const bips = screen.getByText("244 bips = 0.0244").closest(".group")?.querySelector(".cursor-help");
+    expect(bips).not.toBeNull();
+    expect(bips).toHaveAttribute("tabindex", "0");
+    expect(screen.getByText("0.0244").closest("[title]")).toBeNull();
+    // The x cell is the right-hand column, so its note opens leftwards to stay
+    // inside the card, and it anchors to the line rather than to the word:
+    // against the word a 42ch panel runs off the right of a 375px screen.
+    expect(screen.getByText("244 bips = 0.0244").closest(".right-0")).not.toBeNull();
+    expect(screen.getByText("244 bips = 0.0244").closest("dd")).toHaveClass("relative");
+  });
+  it("keeps the note reachable by pointer and dismissible by keyboard", async () => {
+    const blocks = sawtoothBlocks(20, snapshot.block.ts);
+    const values = { ...targetValues(snapshot, blocks, 0), backlogs: [22_000_000, 11_100_000_000_000], bips: [244.4, 32_118.5] };
+    render(<ConstraintCardsView network="robinhood" snapshot={snapshot} values={values} blocks={blocks} />);
+    const panel = screen.getByText("244 bips = 0.0244").closest(".absolute") as HTMLElement;
+    // The pointer has to be able to reach the note it opened: the gap between
+    // the figure and the panel is padding on a hoverable box, not a margin
+    // across which `:hover` would be lost.
+    expect(panel).not.toHaveClass("pointer-events-none");
+    expect(panel).toHaveClass("pb-2");
+    expect(panel).toHaveClass("group-hover:block");
+    // And a keyboard reader can put it away without moving focus, which is what
+    // WCAG 1.4.13 asks of content that opens on focus.
+    const trigger = screen.getByText("244 bips = 0.0244").closest(".group")?.querySelector(".cursor-help") as HTMLElement;
+    trigger.focus();
+    await userEvent.keyboard("{Escape}");
+    expect(panel).not.toHaveClass("group-hover:block");
+    expect(panel).toHaveClass("hidden");
+    // It is the note in the way that was dismissed, not the note as such: the
+    // next hover brings it back.
+    fireEvent.mouseEnter(screen.getByText("244 bips = 0.0244").closest(".group") as HTMLElement);
+    expect(panel).toHaveClass("group-hover:block");
   });
   it("subscribes to the frame store and says so when nothing contributes", () => {
     const frame = createFrameStore();

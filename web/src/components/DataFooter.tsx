@@ -2,7 +2,7 @@
 
 import type { LiveSnapshot, LiveStatus, Network, Series, StatusResponse } from "@/types";
 import { formatAgo, formatDateTime, formatInteger } from "@/utils/format";
-import { STATUS_COPY } from "./primitives";
+import { Bips, STATUS_COPY } from "./primitives";
 
 export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, now }: { snapshot: LiveSnapshot | null; series: Series | null; networkInfo: Network | null; status: LiveStatus; apiStatus: StatusResponse | null; now: number }) {
   const maxReplayError = series ? Math.max(0, ...series.points.map((p) => p.replayErrorBips)) : 0;
@@ -28,10 +28,11 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
           </p>
           <dl className="num mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-ink">
             <dt className="text-ink-3">latest block</dt>
-            <dd>{snapshot ? `${snapshot.replayErrorBips} bips` : "n/a"}</dd>
+            {/* `relative` is what the note anchors to, as it is on every line that carries one. */}
+            <dd className="relative">{snapshot ? <Bips value={snapshot.replayErrorBips} /> : "n/a"}</dd>
             <dt className="text-ink-3">max in range</dt>
-            <dd>
-              {series ? `${maxReplayError} bips` : "n/a"}
+            <dd className="relative">
+              {series ? <Bips value={maxReplayError} /> : "n/a"}
               {estimated > 0 ? ` (${formatInteger(estimated)} buckets above 2% are estimates)` : ""}
             </dd>
           </dl>
