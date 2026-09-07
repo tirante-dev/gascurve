@@ -173,7 +173,7 @@ type BlockPoint struct {
 // is the sum of gasUsed times the minimum base fee per block and
 // SurplusFeesWei is FeesWei minus that. ConstraintBips, MinBaseFee,
 // FloorFeesWei and SurplusFeesWei are null for history whose pricing
-// breakdown was never recorded (pricing version 0, see migration 000007),
+// breakdown was never recorded (pricing version 0),
 // including a bucket any of whose source blocks is such history; they are
 // never null otherwise.
 type SeriesPoint struct {
@@ -276,13 +276,19 @@ type L1Series struct {
 // Index 0 is the primary; URLs are never exposed because they can carry
 // keys. Error is why a disabled endpoint was disabled, sanitized the same
 // way (chain ids, never a URL or a credential), and null while the
-// endpoint is usable.
+// endpoint is usable. WSCooling and WSError report the endpoint's
+// WebSocket separately from its JSON-RPC: a socket that cannot be dialed,
+// cannot be subscribed to or will not stay up is cooled down and the head
+// subscription moves to another endpoint, while the endpoint keeps serving
+// ordinary calls.
 type EndpointStatus struct {
-	Index    int     `json:"index"`
-	WS       bool    `json:"ws"`
-	Archive  bool    `json:"archive"`
-	Disabled bool    `json:"disabled"`
-	Error    *string `json:"error"`
+	Index     int     `json:"index"`
+	WS        bool    `json:"ws"`
+	Archive   bool    `json:"archive"`
+	Disabled  bool    `json:"disabled"`
+	Error     *string `json:"error"`
+	WSCooling bool    `json:"wsCooling"`
+	WSError   *string `json:"wsError"`
 }
 
 // EndpointsStatus is the routing state of a network's endpoint pool: the
@@ -295,23 +301,60 @@ type EndpointsStatus struct {
 	Endpoints      []EndpointStatus `json:"endpoints"`
 }
 
-// HoleReasonNoState marks a hole no replay can ever fill: no block
-// before it is stored with a pricing state, so nothing can be replayed
-// forward into it. The gap filler skips these and /status counts them as
-// unfillable.
-const HoleReasonNoState = "no state"
+// Reasons a hole is not queued work. A hole with any reason is counted as
+// unfillable by /status; only HoleReasonNoState is re-examined and taken
+// up again when a state appears before the range.
+const (
+	// HoleReasonNoState marks a hole no replay can fill right now: no
+	// block before it is stored with a pricing state and the hole carries
+	// no replay state of its own, so nothing can be replayed forward into
+	// it. The gap filler skips these and only looks at them again once
+	// something before the range appears.
+	HoleReasonNoState = "no state"
+	// HoleReasonExpired marks a hole dropped from the work queue because
+	// the queue was full. Its blocks stay counted as not indexed, but no
+	// filler will ever fetch them again.
+	HoleReasonExpired = "expired"
+)
+
+// HoleState is the pricer state at the end of the last block a filler
+// committed for a hole, carried in the hole record itself so a
+// continuation never depends on a stored block at Next-1, which retention
+// may have pruned. Block is that last block and Hash its hash, so a
+// stored predecessor can be cross-checked against it; PrevTS is its
+// timestamp, the previous timestamp the next replay step needs.
+// Constraints carry the end-of-block backlogs of the constraints model and
+// Legacy the whole legacy state (parameters and backlog); exactly one of
+// them is set. SetID is the constraint set in force at Block, 0 when none
+// is recorded.
+type HoleState struct {
+	Block       uint64        `json:"block"`
+	Hash        string        `json:"hash,omitempty"`
+	PrevTS      uint64        `json:"prevTs"`
+	MinBaseFee  string        `json:"minBaseFee,omitempty"`
+	Constraints []Constraint  `json:"constraints,omitempty"`
+	Legacy      *LegacyParams `json:"legacy,omitempty"`
+	SetID       int64         `json:"setId,omitempty"`
+}
 
 // Hole is one block range the collector did not index, recorded in
 // collector_state under the holes key. Next is the gap filler's progress
-// cursor: blocks below it are filled, 0 means nothing yet. Reason is set
-// only when the range can never be replayed (HoleReasonNoState); an empty
-// Reason means the range is queued for filling.
+// cursor: blocks below it are filled, 0 means nothing yet. State is the
+// replay state at Next-1, written with every batch so the next one
+// continues from it. Folded is the first block of the range whose additive
+// bucket contribution has not been committed yet: it is not reset when a
+// rewind resets Next, so a refilled batch below it is replayed for its
+// state but folded only once. Reason is set only when the range is not
+// queued work (HoleReasonNoState, HoleReasonExpired); an empty Reason
+// means the range is queued for filling.
 type Hole struct {
-	From   uint64 `json:"from"`
-	To     uint64 `json:"to"`
-	At     string `json:"at"`
-	Next   uint64 `json:"next,omitempty"`
-	Reason string `json:"reason,omitempty"`
+	From   uint64     `json:"from"`
+	To     uint64     `json:"to"`
+	At     string     `json:"at"`
+	Next   uint64     `json:"next,omitempty"`
+	State  *HoleState `json:"state,omitempty"`
+	Folded uint64     `json:"folded,omitempty"`
+	Reason string     `json:"reason,omitempty"`
 }
 
 // Start is the first block still to fill: the cursor when it has moved

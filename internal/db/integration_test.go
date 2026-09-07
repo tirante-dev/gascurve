@@ -68,58 +68,39 @@ func TestIntegrationMigrator(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, dirty, err := m.Version()
-	if err != nil || dirty || v != 7 {
+	if err != nil || dirty || v != 1 {
 		t.Fatalf("version = %d dirty=%v err=%v", v, dirty, err)
 	}
-	// Every migration rolls back and re-applies; the unsigned backlog
-	// migration recovers values that an int64 cast wrapped, 000006 marks
-	// the placeholders 000004 and 000005 filled in as unknown, and 000007
-	// records which rows carry the full pricing breakdown.
+	// The schema is created in its final shape by one migration: nothing
+	// has been deployed from this repository, so there is no chain of
+	// upgrades to preserve and none of the rewrites an upgrade would have
+	// had to make. A nullable column means unknown, and pricing_version
+	// says which rows carry the full pricing breakdown.
 	ctx := context.Background()
-	if err := m.Down(6); err != nil {
+	if _, err := p.DB().ExecContext(ctx, `INSERT INTO blocks (chain_id, number, ts, gas_used, base_fee, backlogs, pricing_version) VALUES (1, 1, now(), 0, 0, '{18446744073709551615,5}', 0)`); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != 1 {
-		t.Fatalf("after down 5: %d %v", v, err)
-	}
-	if _, err := p.DB().ExecContext(ctx, `INSERT INTO blocks (chain_id, number, ts, gas_used, base_fee, backlogs) VALUES (1, 1, now(), 0, 0, '{-1,5}')`); err != nil {
+	if _, err := p.DB().ExecContext(ctx, `INSERT INTO buckets (chain_id, resolution, bucket_start, blocks, base_fee_avg, backlogs_end, backlogs_max, fees_wei, pricing_version, constraint_bips_end)
+		VALUES (1, '1m', now(), 3, 7, '{18446744073709551615}', '{18446744073709551614,1}', 900, 0, NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.DB().ExecContext(ctx, `INSERT INTO buckets (chain_id, resolution, bucket_start, blocks, base_fee_avg, backlogs_end, backlogs_max, fees_wei) VALUES (1, '1m', now(), 3, 7, '{-1}', '{-2,1}', 900)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := p.DB().ExecContext(ctx, `INSERT INTO buckets (chain_id, resolution, bucket_start, blocks, base_fee_avg) VALUES (1, '15m', now(), 1, 7)`); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Up(); err != nil {
-		t.Fatal(err)
-	}
+	// Backlogs are uint64 and saturate above the BIGINT range, so they are
+	// stored as NUMERIC(20,0) arrays and come back whole.
 	b, err := p.BlockByNumber(ctx, 1, 1)
-	if err != nil || b == nil || b.Backlogs[0] != math.MaxUint64 || b.Backlogs[1] != 5 || b.Hash != "" || b.ConstraintBips != nil {
-		t.Fatalf("migrated block: %+v %v", b, err)
+	if err != nil || b == nil || b.Backlogs[0] != math.MaxUint64 || b.Backlogs[1] != 5 || b.Hash != "" {
+		t.Fatalf("block: %+v %v", b, err)
+	}
+	// A block written without the breakdown carries no exponents and no
+	// floor, and its fee split is therefore unknown.
+	if b.ConstraintBips != nil || b.MinBaseFee.Valid || b.PricingVersion != PricingUnknown || b.Known() {
+		t.Fatalf("unknown block history: %+v", b)
 	}
 	bk, err := p.Buckets(ctx, 1, Resolution1m, time.Unix(0, 0), time.Now().Add(time.Hour))
 	if err != nil || len(bk) != 1 || bk[0].BacklogsEnd[0] != math.MaxUint64 || bk[0].BacklogsMax[0] != math.MaxUint64-1 || bk[0].BacklogsMax[1] != 1 {
-		t.Fatalf("migrated bucket: %+v %v", bk, err)
+		t.Fatalf("bucket: %+v %v", bk, err)
 	}
-	// The sum 000004 rebuilt from the rounded average (7 * 3 = 21) and the
-	// zero fee split and empty exponents of 000005 are unknown, not facts;
-	// the average survives. A one-block bucket's sum is exact and stays.
-	if bk[0].BaseFeeSum.Valid || bk[0].FloorFeesWei.Valid || bk[0].SurplusFeesWei.Valid || bk[0].ConstraintBipsEnd != nil || bk[0].BaseFeeAvg.Int64() != 7 {
-		t.Fatalf("placeholders must be unknown after 000006: %+v", bk[0])
-	}
-	// 000007 marks that history: no breakdown, and the zero floor 000005
-	// filled in becomes unknown rather than an authoritative floor of
-	// nothing. Rows written from now on carry version 1.
-	if bk[0].PricingVersion != PricingUnknown || bk[0].MinBaseFee.Valid {
-		t.Fatalf("unknown history must carry pricing version 0 and no floor: %+v", bk[0])
-	}
-	if b.PricingVersion != PricingUnknown || b.MinBaseFee.Valid || b.Known() {
-		t.Fatalf("unknown block history: %+v", b)
-	}
-	one, _ := p.Buckets(ctx, 1, Resolution15m, time.Unix(0, 0), time.Now().Add(time.Hour))
-	if len(one) != 1 || !one[0].BaseFeeSum.Valid || one[0].BaseFeeSum.Wei.Int64() != 7 {
-		t.Fatalf("a single-block sum is exact: %+v", one)
+	if bk[0].BaseFeeSum.Valid || bk[0].FloorFeesWei.Valid || bk[0].SurplusFeesWei.Valid || bk[0].MinBaseFee.Valid || bk[0].BaseFeeAvg.Int64() != 7 {
+		t.Fatalf("an unknown bucket carries no sum and no split: %+v", bk[0])
 	}
 	// Folding into a bucket with an unknown sum keeps it unknown and
 	// derives the average from the reconstruction: (7*3 + 13) / 4 = 8.
@@ -132,51 +113,30 @@ func TestIntegrationMigrator(t *testing.T) {
 	if bk[0].Blocks != 4 || bk[0].BaseFeeAvg.Int64() != 8 || bk[0].BaseFeeSum.Valid || bk[0].FloorFeesWei.Valid || bk[0].SurplusFeesWei.Valid || bk[0].FeesWei.Int64() != 913 {
 		t.Fatalf("fold into an unknown bucket: %+v", bk[0])
 	}
-	// Down restores the placeholders and clamps values above the BIGINT range.
-	if err := m.Down(5); err != nil {
-		t.Fatal(err)
+	// A row written with the breakdown is version 1 by default.
+	one, _ := p.Buckets(ctx, 1, Resolution1m, time.Unix(0, 0), time.Now().Add(time.Hour))
+	if len(one) != 1 || one[0].PricingVersion != PricingUnknown {
+		t.Fatalf("folding must not re-authorize unknown history: %+v", one)
 	}
-	var clamped string
-	if err := p.DB().QueryRowContext(ctx, `SELECT backlogs::TEXT FROM blocks WHERE chain_id = 1`).Scan(&clamped); err != nil || clamped != "{9223372036854775807,5}" {
-		t.Fatalf("clamped backlogs: %q %v", clamped, err)
-	}
-	if err := m.Up(); err != nil {
-		t.Fatal(err)
-	}
+	// Down drops the schema, up recreates it, and Down(0) is refused.
 	if err := m.Down(1); err != nil {
-		t.Fatal(err)
-	}
-	// Down 000007 restores the zero floor placeholder and drops the
-	// provenance column.
-	var floors string
-	if err := p.DB().QueryRowContext(ctx, `SELECT min_base_fee::TEXT FROM buckets WHERE chain_id = 1 AND resolution = '1m'`).Scan(&floors); err != nil || floors != "0" {
-		t.Fatalf("down 000007 restores the zero floor: %q %v", floors, err)
-	}
-	var cols int
-	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'buckets' AND column_name = 'pricing_version'`).Scan(&cols); err != nil || cols != 0 {
-		t.Fatalf("pricing_version must be dropped: %d %v", cols, err)
-	}
-	if err := m.Down(1); err != nil {
-		t.Fatal(err)
-	}
-	var restored string
-	if err := p.DB().QueryRowContext(ctx, `SELECT base_fee_sum::TEXT || '/' || floor_fees_wei::TEXT || '/' || constraint_bips_end::TEXT FROM buckets WHERE chain_id = 1 AND resolution = '1m'`).Scan(&restored); err != nil || restored != "32/0/{}" {
-		t.Fatalf("down 000006 restores placeholders: %q %v", restored, err)
-	}
-	if err := m.Up(); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Down(7); err != nil {
 		t.Fatal(err)
 	}
 	if v, _, err := m.Version(); err != nil || v != 0 {
 		t.Fatalf("after down: %d %v", v, err)
+	}
+	var tables int
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('blocks','buckets','networks')`).Scan(&tables); err != nil || tables != 0 {
+		t.Fatalf("down must drop the schema: %d %v", tables, err)
 	}
 	if err := m.Down(0); err == nil {
 		t.Fatal("Down(0) should fail")
 	}
 	if err := m.Up(); err != nil {
 		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != 1 {
+		t.Fatalf("after up: %d %v", v, err)
 	}
 	if err := m.Up(); err != nil {
 		t.Fatal("Up twice should be a no-op")

@@ -180,7 +180,11 @@ type rpcResponse struct {
 
 // Client is a paced JSON-RPC client for one network.
 type Client struct {
-	url         string
+	url string
+	// index names the endpoint in sanitized errors; scrub rewrites every
+	// error that could quote the URL, which is a credential.
+	index       int
+	scrub       *scrubber
 	httpClient  *http.Client
 	pacer       *Pacer
 	userAgent   string
@@ -242,6 +246,9 @@ func withBatcher(fn batcher) Option {
 	return func(c *Client) { c.chunk = fn }
 }
 
+// withEndpointIndex names the endpoint in sanitized errors.
+func withEndpointIndex(i int) Option { return func(c *Client) { c.index = i } }
+
 // withClock replaces the clock and sleeper, for tests.
 func withClock(now func() time.Time, sleep func(context.Context, time.Duration) error) Option {
 	return func(c *Client) {
@@ -274,6 +281,9 @@ func NewClient(url string, callsPerSecond float64, opts ...Option) *Client {
 	if c.chunk == nil {
 		c.chunk = c.batchCapped
 	}
+	// After the options: the index names the endpoint in every message the
+	// URL is taken out of.
+	c.scrub = newScrubber(c.index, c.url)
 	return c
 }
 
@@ -448,18 +458,32 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 	return responses, limited, sentAt, err
 }
 
-// post performs the HTTP request itself.
+// isEndpointStatus reports whether an HTTP status is the endpoint failing
+// rather than the node answering: a server error, or a refusal to serve
+// this caller at all. An endpoint that answers 401 or 403 is misconfigured
+// or its key is rejected, which the next endpoint may well not be, so it
+// drives failover exactly as a 5xx does. Every other non-2xx status is
+// returned as an ordinary error: it says something about the request, and
+// retrying it elsewhere would only repeat it.
+func isEndpointStatus(code int) bool {
+	return code/100 == 5 || code == http.StatusUnauthorized || code == http.StatusForbidden
+}
+
+// post performs the HTTP request itself. Every error it returns is
+// sanitized: transport failures come back as *url.Error with the whole URL
+// in the message, and a provider is free to quote the request URL in its
+// response body or in a JSON-RPC error message.
 func (c *Client) post(ctx context.Context, payload []byte) (responses []rpcResponse, limited bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
-		return nil, false, fmt.Errorf("rpc: build request: %w", err)
+		return nil, false, c.scrub.errorf("rpc: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, false, endpointErrorf("rpc: %w", err)
+		return nil, false, &EndpointError{Err: c.scrub.wrap(err)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
@@ -468,20 +492,22 @@ func (c *Client) post(ctx context.Context, payload []byte) (responses []rpcRespo
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
-		return nil, false, endpointErrorf("rpc: read response: %w", err)
+		return nil, false, &EndpointError{Err: c.scrub.errorf("rpc: read response: %w", err)}
 	}
-	if resp.StatusCode/100 == 5 {
-		return nil, false, endpointErrorf("rpc: http %d: %s", resp.StatusCode, truncate(string(data), 200))
+	body := c.scrub.text(truncate(string(data), 200))
+	if isEndpointStatus(resp.StatusCode) {
+		return nil, false, endpointErrorf("rpc: %s: http %d: %s", c.scrub.name, resp.StatusCode, body)
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, false, fmt.Errorf("rpc: http %d: %s", resp.StatusCode, truncate(string(data), 200))
+		return nil, false, fmt.Errorf("rpc: %s: http %d: %s", c.scrub.name, resp.StatusCode, body)
 	}
 	if err := json.Unmarshal(data, &responses); err != nil {
 		// Some endpoints answer a batch with a single error object.
 		var single rpcResponse
 		if err2 := json.Unmarshal(data, &single); err2 != nil {
-			return nil, false, fmt.Errorf("rpc: decode response: %w", err)
+			return nil, false, c.scrub.errorf("rpc: decode response: %w", err)
 		}
+		single.Error = c.scrub.rpcError(single.Error)
 		if IsRateLimit(single.Error) {
 			return nil, true, nil
 		}
@@ -490,8 +516,9 @@ func (c *Client) post(ctx context.Context, payload []byte) (responses []rpcRespo
 		}
 		responses = []rpcResponse{single}
 	}
-	for _, r := range responses {
-		if IsRateLimit(r.Error) {
+	for i := range responses {
+		responses[i].Error = c.scrub.rpcError(responses[i].Error)
+		if IsRateLimit(responses[i].Error) {
 			return nil, true, nil
 		}
 	}

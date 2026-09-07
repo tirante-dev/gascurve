@@ -396,7 +396,7 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 		c.Top = oldest.Number
 	}
 	if c.DepthStart == 0 {
-		start, err := f.findBlockAt(ctx, f.now().Add(-f.cfg.BackfillDepth))
+		start, err := f.findHistoryStart(ctx, f.historyDepth(f.cfg.BackfillDepth))
 		if err != nil {
 			return BackfillIdle, err
 		}
@@ -525,19 +525,79 @@ func (f *Follower) segmentState(ctx context.Context, c *backfillCursor) (*pricer
 	return st, sql.NullInt64{}, nil
 }
 
-// findBlockAt binary-searches headers for the first block at or after t.
-func (f *Follower) findBlockAt(ctx context.Context, t time.Time) (uint64, error) {
+// maxHistoryDepth bounds a configured history depth where the cutoff is
+// computed. A time.Duration is int64 nanoseconds, so a depth near that
+// limit plus the originMargin the owner scan adds would wrap round to a
+// positive offset and place the cutoff after the head, marking the whole
+// configured depth permanently unavailable. A century is more history than
+// any Nitro chain has and leaves the arithmetic far from the boundary.
+const maxHistoryDepth = 100 * 365 * 24 * time.Hour
+
+// errTargetAfterHead marks a history cutoff later than the chain's head:
+// the chain is stalled, or the sampled head is behind. It is retryable and
+// nothing is written for it, so the next pass decides again instead of
+// recording an origin at the head.
+var errTargetAfterHead = errors.New("the history cutoff is later than the chain head, retrying")
+
+// historyDepth bounds a configured depth, so the caller may add
+// originMargin to the result without the duration arithmetic overflowing.
+func (f *Follower) historyDepth(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	if d > maxHistoryDepth {
+		f.log.Warn("history depth exceeds the supported maximum, capping it", "depth", d.String(), "cap", maxHistoryDepth.String())
+		return maxHistoryDepth
+	}
+	return d
+}
+
+// findHistoryStart is historyStart against the followed head.
+func (f *Follower) findHistoryStart(ctx context.Context, depth time.Duration) (uint64, error) {
 	head, err := f.currentHead(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return f.blockAt(ctx, head, t)
+	return f.historyStart(ctx, head, depth)
 }
 
-// blockAt is findBlockAt below a head the caller already knows.
-func (f *Follower) blockAt(ctx context.Context, head uint64, t time.Time) (uint64, error) {
+// historyStart is the first block of a history window depth wide: the
+// first block at or after depth before the head's own timestamp. The
+// window is measured from the chain, not from the host clock, so a clock
+// running ahead of a stalled chain cannot place the cutoff past the head
+// and mark the configured depth unavailable.
+func (f *Follower) historyStart(ctx context.Context, head uint64, depth time.Duration) (uint64, error) {
+	top, err := f.rpc.HeaderByNumber(ctx, head)
+	if err != nil {
+		return 0, fmt.Errorf("header %d: %w", head, err)
+	}
+	return f.blockAt(ctx, head, top, time.Unix(int64(top.Timestamp), 0).UTC().Add(-depth))
+}
+
+// blockAt binary-searches for the first block at or after t below head,
+// with top the header at head the caller already read. Both boundaries are
+// checked against real headers: a target at or before the first block is
+// genesis without a search, and a target after the head is a retryable
+// error rather than the head itself, which the caller would otherwise
+// persist as a scan origin, marking everything before it unavailable for
+// good.
+func (f *Follower) blockAt(ctx context.Context, head uint64, top *nitro.Header, t time.Time) (uint64, error) {
 	target := uint64(max(t.Unix(), 0))
-	lo, hi := uint64(1), head
+	if top.Timestamp < target {
+		return 0, fmt.Errorf("%w (head %d at %d, target %d)", errTargetAfterHead, head, top.Timestamp, target)
+	}
+	lo, hi := uint64(1), max(head, 1)
+	if lo >= hi {
+		return lo, nil
+	}
+	first, err := f.rpc.HeaderByNumber(ctx, lo)
+	if err != nil {
+		return 0, fmt.Errorf("header %d: %w", lo, err)
+	}
+	if first.Timestamp >= target {
+		return lo, nil
+	}
+	lo++
 	for lo < hi {
 		mid := lo + (hi-lo)/2
 		h, err := f.rpc.HeaderByNumber(ctx, mid)

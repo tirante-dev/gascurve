@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -530,7 +531,10 @@ func (c *Config) Validate(requireRPC bool) error {
 	return errors.Join(errs...)
 }
 
-// validateEndpoint checks an endpoint's budget and ws_url scheme.
+// validateEndpoint checks an endpoint's budget and its URL schemes. An
+// endpoint URL is a credential (providers put the key in the userinfo, in
+// a path segment or in the query), so a rejection says which setting is
+// wrong and never quotes the value.
 func validateEndpoint(where string, e EndpointConfig) []error {
 	var errs []error
 	switch {
@@ -541,10 +545,40 @@ func validateEndpoint(where string, e EndpointConfig) []error {
 	case e.CallsPerSecond > MaxCallsPerSecond:
 		errs = append(errs, fmt.Errorf("%s: calls_per_second %v exceeds %d (use 0 for a dedicated node)", where, e.CallsPerSecond, MaxCallsPerSecond))
 	}
-	if e.WSURL != "" && !strings.HasPrefix(e.WSURL, "ws://") && !strings.HasPrefix(e.WSURL, "wss://") {
-		errs = append(errs, fmt.Errorf("%s: ws_url %q must start with ws:// or wss://", where, e.WSURL))
+	if err := validateURLScheme(where, "rpc_url", e.RPCURL, "http://", "https://"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateURLScheme(where, "ws_url", e.WSURL, "ws://", "wss://"); err != nil {
+		errs = append(errs, err)
 	}
 	return errs
+}
+
+// validateURLScheme checks that a configured URL, when set, starts with
+// one of the allowed schemes and parses as an absolute URL with a host. A
+// wrong scheme is worth catching before the first call: an https RPC URL
+// given as a WebSocket, or the reverse, fails at every attempt, and a
+// scheme such as file:// would point the client somewhere it must never go.
+func validateURLScheme(where, field, raw string, schemes ...string) error {
+	if raw == "" {
+		return nil
+	}
+	bad := fmt.Errorf("%s: %s must start with %s", where, field, strings.Join(schemes, " or "))
+	ok := false
+	for _, scheme := range schemes {
+		if strings.HasPrefix(raw, scheme) {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return bad
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("%s: %s is not a valid URL", where, field)
+	}
+	return nil
 }
 
 // EnabledNetworks returns the networks with enabled: true.

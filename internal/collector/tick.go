@@ -164,13 +164,21 @@ func verifyChain(headers []nitro.Header) error {
 	return nil
 }
 
+// errEndpointChanged aborts an operation whose endpoint failed over to one
+// its decision was not taken for, so the decision is made again against the
+// endpoint that will actually serve the rest of the work.
+var errEndpointChanged = errors.New("the pool moved to another endpoint, deciding again")
+
 // catchUp fetches the headers after stored up to the sampled head and
 // appends the sampled header. On a paced network (pol is the active
-// endpoint's policy, taken once for the whole tick) a gap over budget is
-// skipped: the owner actions the gap crosses are still fetched and
-// committed with the seed, so the pricing timeline stays complete and the
-// notifications are not held back until the slow scan; the head is seeded
-// alone, the hole recorded, and nil returned.
+// endpoint's policy, bound to the endpoint generation it came from) a gap
+// over budget is skipped: the owner actions the gap crosses are still
+// fetched and committed with the seed, so the pricing timeline stays
+// complete and the notifications are not held back until the slow scan;
+// the head is seeded alone, the hole recorded, and nil returned. A
+// failover to a paced endpoint while the headers are being fetched makes
+// the decision again, so an unlimited catch-up is never carried on to the
+// public fallback that has to pay for it.
 func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uint64, pol policy) ([]nitro.Header, error) {
 	head := sample.Header.Number
 	if stored == 0 {
@@ -178,7 +186,8 @@ func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uin
 	}
 	from := stored + 1
 	maxGap := uint64(f.cfg.HeaderBatchSize) * uint64(f.cfg.MaxCatchUpBatches)
-	if gap := head - stored; !pol.unlimited && gap > maxGap {
+	gap := head - stored
+	skip := func() ([]nitro.Header, error) {
 		h := hole{From: from, To: head - 1}
 		f.log.Warn("catch-up gap exceeds budget, skipping blocks and restarting from the sampled head", "from", h.From, "to", h.To)
 		pending, err := f.fetchOwnerRange(ctx, from, head)
@@ -187,20 +196,41 @@ func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uin
 		}
 		return nil, f.seed(ctx, sample, &h, pending)
 	}
-	headers, err := f.fetchHeaders(ctx, from, head-1)
+	if !pol.unlimited && gap > maxGap {
+		return skip()
+	}
+	headers, err := f.fetchHeaders(ctx, from, head-1, func() error {
+		cur, changed := f.repolicy(pol)
+		if !changed || cur.unlimited || gap <= maxGap {
+			return nil
+		}
+		return errEndpointChanged
+	})
+	if errors.Is(err, errEndpointChanged) {
+		f.log.Warn("the endpoint changed to a paced one during the catch-up, skipping the rest of the gap", "from", from, "to", head-1)
+		return skip()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("headers %d..%d: %w", from, head-1, err)
 	}
 	return append(headers, sample.Header), nil
 }
 
-// fetchHeaders reads [from, to] in header_batch_size batches.
-func (f *Follower) fetchHeaders(ctx context.Context, from, to uint64) ([]nitro.Header, error) {
+// fetchHeaders reads [from, to] in header_batch_size batches. recheck, when
+// given, runs before every batch after the first and aborts the fetch with
+// its error, so a decision the whole range depends on can be revisited
+// between batches.
+func (f *Follower) fetchHeaders(ctx context.Context, from, to uint64, recheck func() error) ([]nitro.Header, error) {
 	if to < from {
 		return nil, nil
 	}
 	out := make([]nitro.Header, 0, to-from+1)
 	for start := from; start <= to; start += uint64(f.cfg.HeaderBatchSize) {
+		if start > from && recheck != nil {
+			if err := recheck(); err != nil {
+				return nil, err
+			}
+		}
 		end := min(start+uint64(f.cfg.HeaderBatchSize)-1, to)
 		numbers := make([]uint64, 0, end-start+1)
 		for n := start; n <= end; n++ {
@@ -262,12 +292,15 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 				return err
 			}
 		}
-		if err := f.rewindBackfill(ctx, s, ancestor, boundary, hasBoundary); err != nil {
+		cleared, err := f.rewindBackfill(ctx, s, ancestor, boundary, hasBoundary)
+		if err != nil {
 			return err
 		}
 		// A hole the filler had started writing into is restarted: what it
-		// wrote above the ancestor went with the orphaned chain.
-		if err := f.rewindHoles(ctx, s, ancestor); err != nil {
+		// wrote above the ancestor went with the orphaned chain. Its fold
+		// watermark is kept unless the additive buckets it folded into
+		// were deleted with the backfill's.
+		if err := f.rewindHoles(ctx, s, ancestor, cleared); err != nil {
 			return err
 		}
 		if ls != nil && ls.Block > ancestor {
@@ -305,20 +338,34 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 }
 
 // rewindNetworkHead moves networks.head_block and head_at down to the
-// surviving ancestor inside the rewind transaction. An ancestor with no
-// row left (everything was orphaned) leaves the head at zero.
+// surviving ancestor inside the rewind transaction. Nothing here is a
+// fresh sample: last_sample_at is taken from the newest state sample that
+// survived the rewind (the samples above the ancestor are deleted earlier
+// in the same transaction) and cleared when none did, rather than from the
+// clock, which would report the rewind itself as a successful sample. An
+// ancestor with no row left (everything was orphaned) nulls the head and
+// its time instead of storing an epoch one.
 func (f *Follower) rewindNetworkHead(ctx context.Context, s db.Store, ancestor uint64) error {
-	at := time.Unix(0, 0).UTC()
+	var head *uint64
+	var at *time.Time
 	if ancestor > 0 {
 		row, err := s.BlockByNumber(ctx, f.chainID, ancestor)
 		if err != nil {
 			return fmt.Errorf("ancestor block %d: %w", ancestor, err)
 		}
 		if row != nil {
-			at = row.TS
+			head, at = &ancestor, &row.TS
 		}
 	}
-	if err := s.UpdateNetworkHead(ctx, f.chainID, ancestor, at, f.now().UTC()); err != nil {
+	var sampledAt *time.Time
+	sample, err := s.LatestStateSample(ctx, f.chainID, false)
+	if err != nil {
+		return fmt.Errorf("surviving sample: %w", err)
+	}
+	if sample != nil {
+		sampledAt = &sample.SampledAt
+	}
+	if err := s.SetNetworkHead(ctx, f.chainID, head, at, sampledAt); err != nil {
 		return fmt.Errorf("network head: %w", err)
 	}
 	return nil
@@ -328,29 +375,32 @@ func (f *Follower) rewindNetworkHead(ctx context.Context, s db.Store, ancestor u
 // reaches above the ancestor: everything it folded came from the old fork
 // or was cut off, so its backfill-only buckets are dropped and the cursor
 // starts over (the row-backed buckets above the boundary are rebuilt from
-// the surviving rows by the rewind itself).
-func (f *Follower) rewindBackfill(ctx context.Context, s db.Store, ancestor uint64, boundary time.Time, hasBoundary bool) error {
+// the surviving rows by the rewind itself). It reports whether those
+// additive buckets were deleted, since everything a gap filler folded into
+// them went with them.
+func (f *Follower) rewindBackfill(ctx context.Context, s db.Store, ancestor uint64, boundary time.Time, hasBoundary bool) (cleared bool, err error) {
 	raw, ok, err := s.GetState(ctx, f.chainID, db.StateBackfillCursor)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !ok {
-		return nil
+		return false, nil
 	}
 	c := &backfillCursor{}
 	if err := json.Unmarshal([]byte(raw), c); err != nil {
-		return fmt.Errorf("backfill cursor: %w", err)
+		return false, fmt.Errorf("backfill cursor: %w", err)
 	}
 	if c.Top == 0 || c.Top-1 <= ancestor {
-		return nil
+		return false, nil
 	}
 	f.log.Warn("backfill range reaches above the reorg ancestor, restarting the backfill", "top", c.Top, "ancestor", ancestor)
 	if hasBoundary {
 		if _, err := s.DeleteBucketsBefore(ctx, f.chainID, boundary); err != nil {
-			return err
+			return false, err
 		}
+		cleared = true
 	}
-	return f.saveCursor(ctx, s, &backfillCursor{})
+	return cleared, f.saveCursor(ctx, s, &backfillCursor{})
 }
 
 // rewindCursor lowers a numeric checkpoint to block when it is beyond it.

@@ -84,6 +84,10 @@ func New(store db.Store, cfg config.ServerConfig, hub *Hub, log *logger.Logger, 
 		s.hub.live = s.buildLive
 		s.hub.network = s.networkModel
 		s.hub.setLimits(cfg.WSMaxPerIP, cfg.WSMaxTotal)
+		// The hello re-ages a cached snapshot's quote against the same
+		// cutoff /live applies, so both endpoints agree on what is live.
+		s.hub.ethUsdMaxAge = s.ethUsdMaxAge
+		s.hub.now = s.now
 	}
 	s.router = s.routes()
 	return s

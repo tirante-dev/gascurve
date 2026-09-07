@@ -58,11 +58,17 @@ func (f *Follower) sampleEthUsd(ctx context.Context) error {
 	if p == nil {
 		return nil
 	}
+	// The checkpoint comes first: a quote published in memory but not
+	// stored would be served by the tick and the WebSocket while /live,
+	// which reads the checkpoint, still showed the previous one.
+	raw, _ := json.Marshal(model.EthUsd{Price: p.Price, At: p.At.UTC().Format(time.RFC3339), Source: p.Source})
+	if err := f.store.SetState(ctx, f.chainID, db.StateEthUsd, string(raw)); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	f.ethUsdPrice = p
 	f.mu.Unlock()
-	raw, _ := json.Marshal(model.EthUsd{Price: p.Price, At: p.At.UTC().Format(time.RFC3339), Source: p.Source})
-	return f.store.SetState(ctx, f.chainID, db.StateEthUsd, string(raw))
+	return nil
 }
 
 // sampleSlow reads the L1 pricer getters and fee account balances; they are
@@ -183,14 +189,19 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 const originMargin = 10 * time.Minute
 
 // scanStart is where a fresh owner scan begins: the block at backfill_depth
-// (plus originMargin) before now, so the scan covers the history the
-// backfill can use and no more; a shallow depth, as in development, never
-// re-indexes a whole chain. A chain younger than the depth starts at
-// genesis, whose pricing state is nitro's default and needs no origin.
-// Otherwise the state in force at the cutoff is established first
-// (establishOrigin) and the scan runs from the cutoff on.
+// (plus originMargin) before the head's own timestamp, so the scan covers
+// the history the backfill can use and no more; a shallow depth, as in
+// development, never re-indexes a whole chain. The depth is bounded before
+// the margin is added to it, so no configured value can overflow the
+// arithmetic. A chain younger than the depth starts at genesis, whose
+// pricing state is nitro's default and needs no origin. Otherwise the
+// state in force at the cutoff is established first (establishOrigin) and
+// the scan runs from the cutoff on. A cutoff that cannot be resolved (the
+// head is behind it) is an error: nothing is written and the next pass
+// tries again, rather than an origin at the head marking all the history
+// before it unavailable.
 func (f *Follower) scanStart(ctx context.Context, head, gen uint64) (uint64, error) {
-	cutoff, err := f.blockAt(ctx, head, f.now().Add(-f.cfg.BackfillDepth-originMargin))
+	cutoff, err := f.historyStart(ctx, head, f.historyDepth(f.cfg.BackfillDepth)+originMargin)
 	if err != nil {
 		return 0, err
 	}
@@ -444,12 +455,15 @@ func (f *Follower) currentHead(ctx context.Context) (uint64, error) {
 }
 
 // scanBatchReports inspects new blocks for batch posting reports and
-// stores the decoded cost. The policy is the active endpoint's, taken once
-// for the whole scan: a budgeted endpoint only looks at two-transaction
-// blocks (the shape of a report block) and at most batchScanLimit of them
-// per slow tick; an unlimited one reads every block with full transactions
-// until it has caught up. The cursor commits under the generation check,
-// so blocks read from a fork the fast loop has rewound are discarded.
+// stores the decoded cost. The policy is the active endpoint's: a budgeted
+// endpoint only looks at two-transaction blocks (the shape of a report
+// block) and at most batchScanLimit of them per slow tick; an unlimited
+// one reads every block with full transactions until it has caught up.
+// It is bound to the endpoint generation and taken again whenever the pool
+// moved to another endpoint, so an unlimited scan does not keep reading
+// full blocks on a paced fallback. The cursor commits under the generation
+// check, so blocks read from a fork the fast loop has rewound are
+// discarded.
 func (f *Follower) scanBatchReports(ctx context.Context) error {
 	pol := f.policy()
 	gen, err := f.generation(ctx, f.store)
@@ -475,11 +489,15 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 		}
 		after = oldest.Number - 1
 	}
-	chunk := batchFetchChunk
-	if pol.unlimited {
-		chunk = nitro.MaxBatch
-	}
 	for {
+		if cur, changed := f.repolicy(pol); changed {
+			f.log.Info("the endpoint changed during the batch scan, taking its policy", "unlimited", cur.unlimited)
+			pol = cur
+		}
+		chunk := batchFetchChunk
+		if pol.unlimited {
+			chunk = nitro.MaxBatch
+		}
 		nums, err := f.batchCandidates(ctx, after, pol)
 		if err != nil {
 			return err

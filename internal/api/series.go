@@ -125,7 +125,9 @@ func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRang
 	}
 	width := db.Resolutions[rng.resolution]
 	for _, b := range buckets {
-		out.Points = append(out.Points, bucketPoint(b, width, now, liveStart))
+		if p, ok := bucketPoint(b, width, now, liveStart); ok {
+			out.Points = append(out.Points, p)
+		}
 	}
 	out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 	return out, nil
@@ -207,26 +209,48 @@ func (s *Server) liveStart(ctx context.Context, chainID uint64) (time.Time, erro
 	return time.Unix(v.TS, 0).UTC(), nil
 }
 
-// coverage is the part of a bucket the collector has indexed: what lies
-// after the live start and before now. Rates are taken over that span, so
-// the bucket in progress, or the first one after the collector started,
-// reads as the rate the chain ran at rather than as a fraction of a full
-// bucket, and the share is reported so a chart can mark the bucket as
-// partial. The span is never below one second nor above the width.
-func coverage(start time.Time, width time.Duration, now, liveStart time.Time) (secs uint64, share float64) {
+// coveredSpan is the part of a bucket the collector has indexed: what lies
+// before now, and, for the one bucket the live start falls inside, what
+// lies after that start. Rates are taken over that span, so the bucket in
+// progress, or the bucket the collector started in, reads as the rate the
+// chain ran at rather than as a fraction of a full bucket.
+//
+// A bucket that ends at or before the live start is whole: it was written
+// by the backfiller or by the gap filler, which index history the live
+// loop never saw, and trimming it to the live start would report a
+// complete hour as a fraction of a second. The span does not look inside a
+// bucket either: a hole in the middle of one is not represented, because
+// the gap filler closes those and the bucket is rebuilt whole.
+//
+// A zero or negative span means the bucket lies entirely at or after now.
+// Such a bucket is not a point and is not returned.
+func coveredSpan(start time.Time, width time.Duration, now, liveStart time.Time) time.Duration {
 	covStart, covEnd := start, start.Add(width)
-	if liveStart.After(covStart) {
+	if liveStart.After(covStart) && liveStart.Before(covEnd) {
 		covStart = liveStart
 	}
 	if now.Before(covEnd) {
 		covEnd = now
 	}
-	covered := min(max(covEnd.Sub(covStart), time.Second), width)
+	return min(covEnd.Sub(covStart), width)
+}
+
+// coverage renders a positive covered span: the divisor a rate is taken
+// over, and the share of the bucket the span is, which a chart uses to
+// mark the bucket as partial. The divisor is never zero, so a span shorter
+// than a second still counts as one.
+func coverage(covered, width time.Duration) (secs uint64, share float64) {
 	return max(uint64(covered/time.Second), 1), float64(covered) / float64(width)
 }
 
-func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) model.SeriesPoint {
-	secs, share := coverage(b.BucketStart, width, now, liveStart)
+// bucketPoint renders a bucket, or reports false for one that lies
+// entirely in the future.
+func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) (model.SeriesPoint, bool) {
+	covered := coveredSpan(b.BucketStart, width, now, liveStart)
+	if covered <= 0 {
+		return model.SeriesPoint{}, false
+	}
+	secs, share := coverage(covered, width)
 	var setID int64
 	if b.ConstraintSetID.Valid {
 		setID = b.ConstraintSetID.Int64
@@ -241,7 +265,7 @@ func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) mod
 		ExponentBips: b.ExponentEndBips, ConstraintBips: int64s(b.ConstraintBipsEnd), Backlogs: b.BacklogsEnd.Uint64s(), BacklogsMax: b.BacklogsMax.Uint64s(),
 		MinBaseFee: b.MinBaseFee.StringPtr(), FloorFeesWei: b.FloorFeesWei.StringPtr(), SurplusFeesWei: b.SurplusFeesWei.StringPtr(),
 		ConstraintSetID: setID, ReplayErrorBips: b.ReplayErrorBips,
-	}
+	}, true
 }
 
 // blockPoints renders one point per block. gasPerSecond is the total gas of
@@ -277,7 +301,8 @@ func stringPtr(v *big.Int) *string {
 	return &s
 }
 
-// stepDown folds blocks into fixed width buckets.
+// stepDown folds blocks into fixed width buckets, taking each step's rate
+// over the span it covers exactly as a stored bucket does.
 func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration, now time.Time) []model.SeriesPoint {
 	secs := int64(width / time.Second)
 	var out []model.SeriesPoint
@@ -299,7 +324,12 @@ func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration, n
 }
 
 type acc struct {
-	start          int64
+	start int64
+	// last is the newest block second the step carries: a step whose
+	// blocks reach the serving clock, or pass it when the collector's
+	// clock runs ahead, is covered to the end of that second rather than
+	// truncated to nothing.
+	last           int64
 	blocks         int64
 	gas            uint64
 	sum, fees      *big.Int
@@ -325,6 +355,7 @@ func (a *acc) add(b db.Block, setID int64) {
 		a.maxFee = fee
 	}
 	a.blocks++
+	a.last = max(a.last, b.TS.Unix())
 	a.gas += b.GasUsed
 	a.sum.Add(a.sum, fee)
 	gas := new(big.Int).SetUint64(b.GasUsed)
@@ -347,9 +378,17 @@ func (a *acc) add(b db.Block, setID int64) {
 }
 
 // point renders the step; the rate covers the part of the step before now
-// (the blocks are the whole coverage, so no live start applies here).
+// (the blocks are the whole coverage, so no live start applies here). A
+// step exists only because a block fell inside it, and the second that
+// block is in is covered whether or not the serving clock has reached it,
+// so a step always has a positive span: the clock only shortens a step
+// whose blocks are older than it.
 func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
-	secs, share := coverage(time.Unix(a.start, 0), width, now, time.Time{})
+	end := time.Unix(a.last+1, 0)
+	if end.Before(now) {
+		end = now
+	}
+	secs, share := coverage(coveredSpan(time.Unix(a.start, 0), width, end, time.Time{}), width)
 	avg := new(big.Int).Div(a.sum, big.NewInt(a.blocks))
 	if a.maxBacklog == nil {
 		a.maxBacklog = []uint64{}
