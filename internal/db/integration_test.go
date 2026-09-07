@@ -901,6 +901,125 @@ func TestIntegrationStore(t *testing.T) {
 	}
 }
 
+// TestIntegrationSetBasedEquivalence exercises multi-row writes, existing
+// conflicts, duplicate input keys, nullable pricing history and several
+// rebuild windows in the same call. The assertions use the same sequential
+// merge model as the old per-row FoldBuckets implementation. Only one of
+// the two rebuilt windows has poster gas, which pins that the grouped
+// rebuild decides receipt coverage per window rather than per statement.
+func TestIntegrationSetBasedEquivalence(t *testing.T) {
+	p := openIntegration(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+
+	seed := Block{ChainID: testChain, Number: 1, Hash: "seed", TS: base, GasUsed: 1, BaseFee: WeiFromUint64(10),
+		Backlogs: Uint64Array{1}, ConstraintBips: pq.Int64Array{2}, PredictedBaseFee: WeiFromUint64(11),
+		MinBaseFee: NullWeiFromUint64(5), PricingVersion: PricingFull}
+	if err := p.UpsertBlocks(ctx, []Block{seed}); err != nil {
+		t.Fatal(err)
+	}
+	update := seed
+	update.Hash, update.GasUsed, update.Backlogs = "update", 2, Uint64Array{3, math.MaxUint64}
+	other := Block{ChainID: testChain, Number: 2, Hash: "other", TS: base.Add(time.Minute), GasUsed: 3,
+		PosterGas: sql.NullInt64{Int64: 1, Valid: true},
+		BaseFee:   WeiFromUint64(20), Backlogs: Uint64Array{4, 5}, ConstraintBips: pq.Int64Array{6, 7},
+		PredictedBaseFee: WeiFromUint64(19), MinBaseFee: NullWeiFromUint64(7), PricingVersion: PricingFull}
+	final := update
+	final.Hash, final.GasUsed, final.PricingVersion = "final", 4, PricingUnknown
+	final.ConstraintBips, final.MinBaseFee = nil, NullWei{}
+	if err := p.UpsertBlocks(ctx, []Block{update, other, final}); err != nil {
+		t.Fatal(err)
+	}
+	gotBlock, err := p.BlockByNumber(ctx, testChain, 1)
+	if err != nil || gotBlock == nil {
+		t.Fatalf("upserted block: %+v %v", gotBlock, err)
+	}
+	if gotBlock.Hash != final.Hash || gotBlock.GasUsed != final.GasUsed || gotBlock.PricingVersion != PricingUnknown || gotBlock.MinBaseFee.Valid || gotBlock.ConstraintBips != nil || gotBlock.Backlogs[1] != math.MaxUint64 {
+		t.Fatalf("last duplicate block must win with nullability intact: %+v", gotBlock)
+	}
+	if gotBlock.PosterGas.Valid {
+		t.Fatalf("a null poster gas must survive the batch: %+v", gotBlock)
+	}
+	if gotOther, err := p.BlockByNumber(ctx, testChain, 2); err != nil || gotOther == nil || gotOther.Hash != other.Hash || !gotOther.MinBaseFee.Valid || gotOther.PosterGas != other.PosterGas {
+		t.Fatalf("second batched block: %+v %v", gotOther, err)
+	}
+
+	foldStart := base.Add(-time.Hour)
+	stored := Bucket{ChainID: testChain, Resolution: Resolution1m, BucketStart: foldStart, Blocks: 2, GasUsed: 2,
+		FeesWei: WeiFromUint64(8), BaseFeeMin: WeiFromUint64(4), BaseFeeAvg: WeiFromUint64(4), BaseFeeMax: WeiFromUint64(4),
+		BacklogsEnd: Uint64Array{5}, BacklogsMax: Uint64Array{5}, ConstraintSetID: sql.NullInt64{Int64: 10, Valid: true},
+		LastBlock: 10, PricingVersion: PricingUnknown}
+	if err := p.FoldBuckets(ctx, []Bucket{stored}); err != nil {
+		t.Fatal(err)
+	}
+	a := Bucket{ChainID: testChain, Resolution: Resolution1m, BucketStart: foldStart, Blocks: 1, GasUsed: 1,
+		FeesWei: WeiFromUint64(9), BaseFeeMin: WeiFromUint64(9), BaseFeeAvg: WeiFromUint64(9), BaseFeeMax: WeiFromUint64(9), BaseFeeSum: NullWeiFromUint64(9),
+		ExponentEndBips: 20, BacklogsEnd: Uint64Array{3, 6}, BacklogsMax: Uint64Array{3, 6}, ConstraintBipsEnd: pq.Int64Array{20, 1},
+		MinBaseFee: NullWeiFromUint64(2), FloorFeesWei: NullWeiFromUint64(2), SurplusFeesWei: NullWeiFromUint64(7), LastBlock: 20, PricingVersion: PricingFull}
+	b := Bucket{ChainID: testChain, Resolution: Resolution1m, BucketStart: foldStart, Blocks: 1, GasUsed: 1,
+		FeesWei: WeiFromUint64(3), BaseFeeMin: WeiFromUint64(3), BaseFeeAvg: WeiFromUint64(3), BaseFeeMax: WeiFromUint64(3), BaseFeeSum: NullWeiFromUint64(3),
+		ExponentEndBips: 30, BacklogsEnd: Uint64Array{7, 8}, BacklogsMax: Uint64Array{7, 8}, ConstraintSetID: sql.NullInt64{Int64: 20, Valid: true},
+		LastBlock: 30, PricingVersion: PricingUnknown}
+	separate := a
+	separate.BucketStart = foldStart.Add(time.Minute)
+	if err := p.FoldBuckets(ctx, []Bucket{a, separate, b}); err != nil {
+		t.Fatal(err)
+	}
+	wantFold := MergeBuckets(MergeBuckets(stored, a), b)
+	folded, err := p.Buckets(ctx, testChain, Resolution1m, foldStart, foldStart.Add(2*time.Minute))
+	if err != nil || len(folded) != 2 {
+		t.Fatalf("folded buckets: %+v %v", folded, err)
+	}
+	gotFold := folded[0]
+	if gotFold.Blocks != wantFold.Blocks || gotFold.GasUsed != wantFold.GasUsed || gotFold.FeesWei.String() != wantFold.FeesWei.String() || gotFold.BaseFeeAvg.String() != wantFold.BaseFeeAvg.String() || gotFold.BaseFeeAvg.Int64() != 4 {
+		t.Fatalf("set fold differs from sequential merge: %+v want %+v", gotFold, wantFold)
+	}
+	if gotFold.BaseFeeSum.Valid || gotFold.FloorFeesWei.Valid || gotFold.SurplusFeesWei.Valid || gotFold.MinBaseFee.Valid || gotFold.ConstraintBipsEnd != nil || gotFold.PricingVersion != PricingUnknown {
+		t.Fatalf("set fold changed unknown pricing fields: %+v", gotFold)
+	}
+	if gotFold.LastBlock != 30 || gotFold.ExponentEndBips != 30 || gotFold.BacklogsEnd[1] != 8 || gotFold.BacklogsMax[0] != 7 || gotFold.BacklogsMax[1] != 8 || gotFold.ConstraintSetID.Int64 != 20 {
+		t.Fatalf("set fold changed end-field conflict semantics: %+v", gotFold)
+	}
+
+	emptyStart := base.Add(2 * time.Minute)
+	stale := separate
+	stale.BucketStart = emptyStart
+	if err := p.FoldBuckets(ctx, []Bucket{stale}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RebuildBuckets(ctx, testChain, Resolution1m, []time.Time{base, base.Add(time.Minute), emptyStart, base}); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := p.Buckets(ctx, testChain, Resolution1m, base, base.Add(3*time.Minute))
+	if err != nil || len(rebuilt) != 2 {
+		t.Fatalf("rebuilt windows: %+v %v", rebuilt, err)
+	}
+	for i, got := range rebuilt {
+		block, err := p.BlockByNumber(ctx, testChain, uint64(i+1))
+		if err != nil || block == nil {
+			t.Fatalf("source block %d: %+v %v", i+1, block, err)
+		}
+		want := NewBucketBuilder(testChain, Resolution1m, got.BucketStart)
+		want.Add(*block, sql.NullInt64{})
+		expected := want.Bucket()
+		if got.Blocks != expected.Blocks || got.GasUsed != expected.GasUsed || got.FeesWei.String() != expected.FeesWei.String() || got.BaseFeeSum.Wei.String() != expected.BaseFeeSum.Wei.String() || got.BaseFeeAvg.String() != expected.BaseFeeAvg.String() || got.LastBlock != expected.LastBlock || got.PricingVersion != expected.PricingVersion {
+			t.Fatalf("rebuilt bucket %d: %+v want %+v", i, got, expected)
+		}
+		if got.FloorFeesWei.Valid != expected.FloorFeesWei.Valid || got.MinBaseFee.Valid != expected.MinBaseFee.Valid || (got.ConstraintBipsEnd == nil) != (expected.ConstraintBipsEnd == nil) {
+			t.Fatalf("rebuilt nullability %d: %+v want %+v", i, got, expected)
+		}
+		if got.PosterGas != expected.PosterGas || got.PosterFeesWei.Valid != expected.PosterFeesWei.Valid ||
+			(expected.PosterFeesWei.Valid && got.PosterFeesWei.Wei.String() != expected.PosterFeesWei.Wei.String()) ||
+			(expected.FloorFeesWei.Valid && got.FloorFeesWei.Wei.String() != expected.FloorFeesWei.Wei.String()) ||
+			(expected.SurplusFeesWei.Valid && got.SurplusFeesWei.Wei.String() != expected.SurplusFeesWei.Wei.String()) {
+			t.Fatalf("rebuilt poster accounting %d: %+v want %+v", i, got, expected)
+		}
+	}
+	if rebuilt[0].PosterGas.Valid || !rebuilt[1].PosterGas.Valid || !rebuilt[1].PosterFeesWei.Valid || !rebuilt[1].SurplusFeesWei.Valid {
+		t.Fatalf("receipt coverage must be decided per window: %+v %+v", rebuilt[0], rebuilt[1])
+	}
+}
+
 func TestIntegrationNotifyListen(t *testing.T) {
 	p := openIntegration(t)
 	url := os.Getenv("TEST_DB_URL")

@@ -156,8 +156,7 @@ func TestPostgresQueries(t *testing.T) {
 	if err := p.FoldBuckets(ctx, []Bucket{{ChainID: 4663, Resolution: "1m", BucketStart: now, Blocks: 1, FeesWei: WeiFromUint64(1), BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1), BacklogsEnd: Uint64Array{1}, BacklogsMax: Uint64Array{1}}}); err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectExec("WITH w AS").WithArgs(4663, "1m", now, now.Add(time.Minute), "9223372036854775807").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("DELETE FROM buckets WHERE chain_id = \\$1 AND resolution = \\$2 AND bucket_start = \\$3").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("WITH requested AS").WithArgs(4663, "1m", int64(60), sqlmock.AnyArg(), "9223372036854775807").WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := p.RebuildBuckets(ctx, 4663, "1m", []time.Time{now}); err != nil {
 		t.Fatal(err)
 	}
@@ -392,11 +391,77 @@ func TestPostgresErrors(t *testing.T) {
 	if err := p.Ping(ctx); !errors.Is(err, errBoom) {
 		t.Errorf("Ping: %v", err)
 	}
-	// The rebuild's empty-bucket delete can fail on its own.
-	mock.ExpectExec("WITH w AS").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("DELETE FROM buckets").WillReturnError(errBoom)
-	if err := p.RebuildBuckets(ctx, 1, "1m", []time.Time{now}); !errors.Is(err, errBoom) {
-		t.Errorf("RebuildBuckets delete: %v", err)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPostgresSetBasedRoundTrips pins the measured statement and transaction
+// count for a normal 100-row collector batch. The three write methods use one
+// statement each inside the caller's single transaction. The previous loops
+// used 100 block statements, 100 fold statements and 200 rebuild statements.
+func TestPostgresSetBasedRoundTrips(t *testing.T) {
+	p, mock := newMock(t)
+	ctx := context.Background()
+	const rows = 100
+	blocks := make([]Block, rows)
+	buckets := make([]Bucket, rows)
+	starts := make([]time.Time, rows)
+	for i := range rows {
+		start := now.Add(time.Duration(i) * time.Minute)
+		starts[i] = start
+		blocks[i] = Block{ChainID: 4663, Number: uint64(i + 1), TS: start, BaseFee: WeiFromUint64(1), PredictedBaseFee: WeiFromUint64(1)}
+		buckets[i] = Bucket{ChainID: 4663, Resolution: Resolution1m, BucketStart: start, Blocks: 1,
+			FeesWei: WeiFromUint64(1), BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1)}
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO blocks .*\\$1700").WillReturnResult(sqlmock.NewResult(0, rows))
+	mock.ExpectExec("INSERT INTO buckets .*\\$2300").WillReturnResult(sqlmock.NewResult(0, rows))
+	mock.ExpectExec("WITH requested AS .*unnest\\(\\$4::TIMESTAMPTZ\\[\\]\\)").WillReturnResult(sqlmock.NewResult(0, rows))
+	mock.ExpectCommit()
+	if err := p.WithChainTx(ctx, 4663, func(s Store) error {
+		if err := s.UpsertBlocks(ctx, blocks); err != nil {
+			return err
+		}
+		if err := s.FoldBuckets(ctx, buckets); err != nil {
+			return err
+		}
+		return s.RebuildBuckets(ctx, 4663, Resolution1m, starts)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPostgresDuplicateConflictKeys(t *testing.T) {
+	p, mock := newMock(t)
+	ctx := context.Background()
+	block := Block{ChainID: 4663, Number: 1, TS: now, BaseFee: WeiFromUint64(1), PredictedBaseFee: WeiFromUint64(1)}
+	mock.ExpectExec("INSERT INTO blocks").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO blocks").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.UpsertBlocks(ctx, []Block{block, block}); err != nil {
+		t.Fatal(err)
+	}
+
+	bucket := Bucket{ChainID: 4663, Resolution: Resolution1m, BucketStart: now, Blocks: 1,
+		FeesWei: WeiFromUint64(1), BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1)}
+	mock.ExpectExec("INSERT INTO buckets").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO buckets").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := p.FoldBuckets(ctx, []Bucket{bucket, bucket}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.UpsertBlocks(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.FoldBuckets(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RebuildBuckets(ctx, 4663, Resolution1m, nil); err != nil {
+		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
