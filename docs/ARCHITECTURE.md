@@ -253,14 +253,17 @@ Client to server: `{ type: 'pong' }` and `{ type: 'subscribe', network: string }
 
 ```
 src/app/                 layout, page (redirect to default network), [network]/page, [network]/how-it-works/page
-src/components/          PageHeader, LiveStrip, ConstraintCards, PricerEquation, HowItWorks (Explainer + TaylorChart), HistoryTabs, SeriesCharts,
-                         FeeFlows, L1Section, OwnerActionTimeline, NetworkSwitcher, DataFooter
+src/components/          PageHeader, LiveHero (live figures plus the base fee chart with a range control: Live 2 min from the block ring,
+                         or 1h/24h/30d/all from /series), ConstraintCards, PricerEquation, HowItWorks (Explainer + TaylorChart), HistoryTabs,
+                         SeriesCharts (constraint-level history), FeeFlows, L1Section, OwnerActionTimeline, NetworkSwitcher, DataFooter
 src/hooks/               useLive (WS + fallback), useSmoothedLive (250 ms render cadence, tweened values, one rAF loop), useSeries, useNetwork
 src/lib/api/             core.ts (fetch with timeout and retry), networks.ts, series.ts, live.ts, ws.ts
 src/lib/pricer.ts        approxExpBips and helpers in TS, unit-tested against the same vectors as Go
 src/types/               the shapes above
 src/utils/               formatting (gwei, gas, durations), bips math
 ```
+
+Units in copy: gas carries an SI prefix on the unit, never on the number (`11.2 Tgas`, `60 Mgas/s`, `812,345 gas` below one million). Figures that animate use fixed decimal counts per band so neighbouring elements never shift. USD figures (from `ethUsd`) are shown by default with the ETH amount on hover.
 
 Environment: `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`), `NEXT_PUBLIC_WS_URL` (derived from the API URL when unset), `NEXT_PUBLIC_SITE_URL`.
 
