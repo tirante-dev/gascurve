@@ -12,7 +12,7 @@ import { formatFloor } from "@/lib/feeChart";
 import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { gapBands, GapNote, PartialHatch, PartialNote, partialBandAreas } from "./ChartGaps";
-import { Card, ChartFrame, HatchPattern, Label, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
+import { Card, ChartFrame, HatchPattern, HoverNote, Label, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight, type NoteAlign } from "./primitives";
 
 const FLOOR_FILL = "var(--seq-2)";
 const SURPLUS_FILL = "var(--seq-8)";
@@ -116,20 +116,37 @@ export function incompleteTotalsNote(totals: FeeTotals): string | null {
   return `Indexed-block sums are lower bounds: ${reasons.join("; ")}. The per-day estimate waits for complete coverage.`;
 }
 
+/** Which edge a stat's note opens from, at each of the two column counts the stats grid has. */
+type UsdPlacement = { align: NoteAlign; alignSm: NoteAlign };
+
+/**
+ * Where each stat's note opens from. The stats are laid out `grid-cols-2
+ * sm:grid-cols-5`, so a stat's column changes with the breakpoint and no one
+ * edge keeps a note inside the card at both: narrow, the odd stats are the
+ * right-hand column; wide, only the last two sit near the right edge.
+ */
+const USD_PLACEMENT: readonly UsdPlacement[] = [
+  { align: "start", alignSm: "start" },
+  { align: "end", alignSm: "start" },
+  { align: "start", alignSm: "start" },
+  { align: "end", alignSm: "end" },
+  { align: "start", alignSm: "end" },
+];
+
 /**
  * The dollar line under an ETH total, hovering to the multiplication that
  * produced it and the quote it used, or nothing at all when there is no fresh
  * quote to convert with. `sig` is the significant digits the total above it is
- * drawn to, so the working quotes the figure beside it.
+ * drawn to, so the working quotes the figure beside it. `place` is the edge
+ * the note opens from; see USD_PLACEMENT.
  */
-function usdLine(eth: number, ethUsd: EthUsd | null | undefined, nowMs: number, sig: number): ReactNode {
+function usdLine(eth: number, ethUsd: EthUsd | null | undefined, nowMs: number, sig: number, place: UsdPlacement): ReactNode {
   const math = usdMath(eth, ethUsd, nowMs, (v) => formatSignificant(v, sig));
   if (math === null) return undefined;
   return (
-    <span title={math.title}>
-      <span aria-hidden="true">${math.usd}</span>
-      <span className="sr-only">{math.description}</span>
-    </span>
+    <HoverNote lines={[math.line, math.provenance]} description={math.description} align={place.align} alignSm={place.alignSm}>
+      ${math.usd}
+    </HoverNote>
   );
 }
 
@@ -248,11 +265,11 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
         {totals && series ? (
           <>
             <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-5">
-              <Stat label={`${incomplete ? "Indexed fees" : "Fees"} in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, nowMs, 4)} />
-              <Stat label="Per day (est.)" value={totals.perDay === null ? "n/a" : formatSignificant(totals.perDay, 4)} unit={totals.perDay === null ? undefined : "ETH"} size="sm" hint={totals.perDay === null ? undefined : usdLine(totals.perDay, ethUsd, nowMs, 4)} />
-              <Stat label={incomplete ? "Indexed floor to infra" : "Floor to infra"} value={totals.known > 0 ? formatSignificant(totals.floorEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.floorEth, ethUsd, nowMs, 3) : undefined} />
-              <Stat label={incomplete ? "Indexed congestion" : "Congestion to network"} value={totals.known > 0 ? formatSignificant(totals.surplusEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.surplusEth, ethUsd, nowMs, 3) : undefined} />
-              <Stat label={incomplete ? "Indexed poster fee" : "Poster fee to L1 pricer"} value={totals.known > 0 ? formatSignificant(totals.posterEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.posterEth, ethUsd, nowMs, 3) : undefined} />
+              <Stat label={`${incomplete ? "Indexed fees" : "Fees"} in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, nowMs, 4, USD_PLACEMENT[0])} />
+              <Stat label="Per day (est.)" value={totals.perDay === null ? "n/a" : formatSignificant(totals.perDay, 4)} unit={totals.perDay === null ? undefined : "ETH"} size="sm" hint={totals.perDay === null ? undefined : usdLine(totals.perDay, ethUsd, nowMs, 4, USD_PLACEMENT[1])} />
+              <Stat label={incomplete ? "Indexed floor to infra" : "Floor to infra"} value={totals.known > 0 ? formatSignificant(totals.floorEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.floorEth, ethUsd, nowMs, 3, USD_PLACEMENT[2]) : undefined} />
+              <Stat label={incomplete ? "Indexed congestion" : "Congestion to network"} value={totals.known > 0 ? formatSignificant(totals.surplusEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.surplusEth, ethUsd, nowMs, 3, USD_PLACEMENT[3]) : undefined} />
+              <Stat label={incomplete ? "Indexed poster fee" : "Poster fee to L1 pricer"} value={totals.known > 0 ? formatSignificant(totals.posterEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.posterEth, ethUsd, nowMs, 3, USD_PLACEMENT[4]) : undefined} />
             </div>
             {totalsNote ? <p className="mt-2 text-xs text-ink-3">{totalsNote}</p> : null}
             {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}; all three destination totals leave them out.</p> : null}

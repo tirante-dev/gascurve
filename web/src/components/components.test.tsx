@@ -398,10 +398,14 @@ describe("LiveHero", () => {
     expect(screen.getByText("0.25")).toBeInTheDocument();
     // The dollar sign is outside the reserved box, so a changing digit cannot move it.
     expect(screen.getByText("0.04").previousSibling).toHaveTextContent("$");
-    // The ETH figure is never lost, and the quote that priced it is named: hover and the accessible description both carry the working.
-    expect(screen.getByText("0.04").closest("[title]")).toHaveAttribute("title", "0.00000839 ETH × $4,200.0/ETH = $0.04\ncoingecko, 5 min ago");
+    // The ETH figure is never lost, and the quote that priced it is named: the note and the accessible description both carry the working.
+    expect(screen.getByText("0.00000839 ETH × $4,200.0/ETH = $0.04")).toBeInTheDocument();
+    // Both tiles name the quote that priced them.
+    expect(screen.getAllByText("coingecko, 5 min ago")).toHaveLength(2);
     expect(screen.getByText("0.04 US dollars, 0.00000839 ETH at 4,200.0 dollars per ETH, quoted by coingecko 5 min ago")).toBeInTheDocument();
     expect(screen.queryByText("0.00000839")).toBeNull();
+    // The two tiles sit side by side, so the right-hand note opens leftwards to stay inside the card.
+    expect(screen.getByText("0.25").closest(".group")?.querySelector(".right-0")).not.toBeNull();
   });
   it("falls back to ETH when there is no quote at all and when the one there is has gone stale", () => {
     // Eleven minutes old: past the ten minute cutoff, so the fee has moved on and the price has not.
@@ -418,11 +422,54 @@ describe("LiveHero", () => {
     const now = Date.parse("2026-09-06T07:20:00Z");
     const { rerender } = render(<CostTile label="21k transfer" eth={0.0000084} ethUsd={null} nowMs={now} />);
     expect(screen.getByText("0.00000840")).toBeInTheDocument();
+    // No quote, no note: an ETH figure has no arithmetic to show.
+    expect(document.querySelector(".cursor-help")).toBeNull();
     rerender(<CostTile label="21k transfer" eth={0.0000084} ethUsd={{ price: "4200.00", at: "2026-09-06T07:19:26Z", source: "coinbase" }} nowMs={now} />);
-    // The dollars are what is drawn; the multiplication and the quote behind it are a hover away and in the description.
+    // The dollars are what is drawn; the multiplication and the quote behind it
+    // are in the note the trigger opens, not a title the reader cannot see.
     const usd = screen.getByText("0.04");
-    expect(usd.closest("[title]")).toHaveAttribute("title", "0.00000840 ETH × $4,200.0/ETH = $0.04\ncoinbase, 34 s ago");
+    expect(usd.closest("[title]")).toBeNull();
+    expect(screen.getByText("0.00000840 ETH × $4,200.0/ETH = $0.04")).toBeInTheDocument();
+    expect(screen.getByText("coinbase, 34 s ago")).toBeInTheDocument();
     expect(screen.getByText("0.04 US dollars, 0.00000840 ETH at 4,200.0 dollars per ETH, quoted by coinbase 34 s ago")).toBeInTheDocument();
+    // And the figure says it is inspectable rather than leaving the reader to guess.
+    const trigger = usd.closest(".cursor-help");
+    expect(trigger).not.toBeNull();
+    expect(trigger).toHaveAttribute("tabindex", "0");
+  });
+  it("closes the note on Escape and offers it again the next time the reader asks for it", async () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    render(<CostTile label="21k transfer" eth={0.0000084} ethUsd={{ price: "4200.00", at: "2026-09-06T07:19:26Z", source: "coinbase" }} nowMs={now} />);
+    const trigger = screen.getByText("0.04").closest(".cursor-help") as HTMLElement;
+    const note = screen.getByText("0.00000840 ETH × $4,200.0/ETH = $0.04").parentElement?.parentElement as HTMLElement;
+    // Hover and focus are what open it, so those are the classes to watch.
+    const opens = () => note.className.includes("group-hover:block");
+    trigger.focus();
+    expect(opens()).toBe(true);
+    // WCAG 1.4.13 wants content shown on focus to be dismissable without moving focus.
+    await userEvent.keyboard("{Escape}");
+    expect(opens()).toBe(false);
+    expect(trigger).toHaveFocus();
+    // And asking for it again brings it back, rather than the tile losing its working for good.
+    fireEvent.mouseEnter(trigger.parentElement as HTMLElement);
+    expect(opens()).toBe(true);
+  });
+  it("closes a note the pointer opened, where Escape never reaches the figure", async () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    render(<CostTile label="21k transfer" eth={0.0000084} ethUsd={{ price: "4200.00", at: "2026-09-06T07:19:26Z", source: "coinbase" }} nowMs={now} />);
+    const group = (screen.getByText("0.04").closest(".cursor-help") as HTMLElement).parentElement as HTMLElement;
+    const note = screen.getByText("0.00000840 ETH × $4,200.0/ETH = $0.04").parentElement?.parentElement as HTMLElement;
+    const opens = () => note.className.includes("group-hover:block");
+    // Hovering moves no focus, so the key goes to the body, not to the figure.
+    fireEvent.mouseEnter(group);
+    expect(opens()).toBe(true);
+    expect(document.body).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    expect(opens()).toBe(false);
+    // The pointer never moved, which is what the requirement is about.
+    fireEvent.mouseLeave(group);
+    fireEvent.mouseEnter(group);
+    expect(opens()).toBe(true);
   });
   it("measures the sample age from the wall clock", () => {
     expect(COLLECTOR_LAG_S).toBe(5);
@@ -478,8 +525,47 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("22.0")).toBeInTheDocument();
     expect(screen.getByText("11.1")).toBeInTheDocument();
     expect(screen.getByText("0.0244")).toBeInTheDocument();
-    expect(screen.getByText(/244 bips/)).toBeInTheDocument();
-    expect(screen.getByText(/32,119 bips/)).toBeInTheDocument();
+    expect(screen.getByText("0.0244").closest("div")).toHaveTextContent("backlog / (target × window), 244 bips");
+    expect(screen.getByText("3.2119").closest("div")).toHaveTextContent("backlog / (target × window), 32,119 bips");
+    // The unit says what it means rather than leaving the reader to guess: the
+    // note gives the figure in ordinary decimal, and the same facts are in the
+    // description for a reader who never gets a hover.
+    expect(screen.getByText("244 bips = 0.0244")).toBeInTheDocument();
+    expect(screen.getByText("32,119 bips = 3.2119")).toBeInTheDocument();
+    expect(screen.getByText("244 bips is 0.0244. basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.")).toBeInTheDocument();
+    // Focus opens the note as hover does, and nothing is left on a `title` the reader cannot see.
+    const bips = screen.getByText("244 bips = 0.0244").closest(".group")?.querySelector(".cursor-help");
+    expect(bips).not.toBeNull();
+    expect(bips).toHaveAttribute("tabindex", "0");
+    expect(screen.getByText("0.0244").closest("[title]")).toBeNull();
+    // The x cell is the right-hand column, so its note opens leftwards to stay
+    // inside the card, and it anchors to the line rather than to the word:
+    // against the word a 42ch panel runs off the right of a 375px screen.
+    expect(screen.getByText("244 bips = 0.0244").closest(".right-0")).not.toBeNull();
+    expect(screen.getByText("244 bips = 0.0244").closest("dd")).toHaveClass("relative");
+  });
+  it("keeps the note reachable by pointer and dismissible by keyboard", async () => {
+    const blocks = sawtoothBlocks(20, snapshot.block.ts);
+    const values = { ...targetValues(snapshot, blocks, 0), backlogs: [22_000_000, 11_100_000_000_000], bips: [244.4, 32_118.5] };
+    render(<ConstraintCardsView network="robinhood" snapshot={snapshot} values={values} blocks={blocks} />);
+    const panel = screen.getByText("244 bips = 0.0244").closest(".absolute") as HTMLElement;
+    // The pointer has to be able to reach the note it opened: the gap between
+    // the figure and the panel is padding on a hoverable box, not a margin
+    // across which `:hover` would be lost.
+    expect(panel).not.toHaveClass("pointer-events-none");
+    expect(panel).toHaveClass("pb-2");
+    expect(panel).toHaveClass("group-hover:block");
+    // And a keyboard reader can put it away without moving focus, which is what
+    // WCAG 1.4.13 asks of content that opens on focus.
+    const trigger = screen.getByText("244 bips = 0.0244").closest(".group")?.querySelector(".cursor-help") as HTMLElement;
+    trigger.focus();
+    await userEvent.keyboard("{Escape}");
+    expect(panel).not.toHaveClass("group-hover:block");
+    expect(panel).toHaveClass("hidden");
+    // It is the note in the way that was dismissed, not the note as such: the
+    // next hover brings it back.
+    fireEvent.mouseEnter(screen.getByText("244 bips = 0.0244").closest(".group") as HTMLElement);
+    expect(panel).toHaveClass("group-hover:block");
   });
   it("subscribes to the frame store and says so when nothing contributes", () => {
     const frame = createFrameStore();

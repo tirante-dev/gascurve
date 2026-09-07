@@ -6,23 +6,24 @@ import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
 import { AVERAGE_WINDOW_S, isShortWindow, SAWTOOTH_WINDOW_S, sawtoothChart, sawtoothSamples, SHORT_WINDOW_S, targetValues, type BlockPlaces, type LiveValues, type SawtoothSample } from "@/lib/smoothing";
 import type { BlockPoint, Constraint, LegacyParams, LiveSnapshot } from "@/types";
 import { niceStep } from "@/lib/hero";
-import { constraintGauge, constraintGaugeSpanLabel, constraintGaugeTitle, contributionRampStep, legacyGauge, legacyGaugeSpanLabel, legacyGaugeTitle, seriesColor } from "@/utils/chart";
+import { constraintGauge, constraintGaugeNote, constraintGaugeSpanLabel, contributionRampStep, legacyGauge, legacyGaugeNote, legacyGaugeSpanLabel, seriesColor } from "@/utils/chart";
 import { FIXED_WIDTH_CH, formatDrainEquivalence, formatDuration, formatGas, formatGasPerSecond, formatInteger, formatPercent, gasParts, gasPerSecondParts, unbroken } from "@/utils/format";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { RESYNC_COPY, WAITING_COPY } from "./LiveHero";
 import { chartView } from "@/lib/chartViews";
 import { EnlargeLink } from "./ChartActions";
-import { Card, ChartFrame, Figure, Label, Stat, Swatch, type ChartHeight } from "./primitives";
+import { Bips, Card, ChartFrame, Figure, HoverNote, Label, Stat, Swatch, type ChartHeight } from "./primitives";
 
 /**
  * A meter whose fill carries magnitude on the sequential ramp; the track is an
- * inset of the surface. `title` says what one mark on it is worth, so the
- * scale can be read without knowing the pricer.
+ * inset of the surface. What one mark on it is worth is not written here: a
+ * 10 px bar is nothing to hover at, so the scale is explained by the note on
+ * the far-end label underneath, which is the part a reader actually reads.
  */
-export function Gauge({ fraction, step, label, title, marks = [] }: { fraction: number; step: number; label: string; title?: string; marks?: number[] }) {
+export function Gauge({ fraction, step, label, marks = [] }: { fraction: number; step: number; label: string; marks?: number[] }) {
   const pct = (Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : 0) * 100;
   return (
-    <div className="relative h-2.5 w-full rounded-sm bg-track" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label={label} title={title}>
+    <div className="relative h-2.5 w-full rounded-sm bg-track" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label={label}>
       <div className="h-full rounded-sm" style={{ width: `${pct}%`, background: `var(--seq-${step})` }} />
       {marks.map((m) => (
         <span key={m} className="absolute top-[-3px] h-4 w-px bg-ink-3" style={{ left: `${Math.min(100, m * 100)}%` }} aria-hidden="true" />
@@ -126,7 +127,8 @@ function ConstraintCard({ network, c, index, backlog, bips, share, samples, plac
   // The gauge spans whole windows of target; marks are capped so a huge
   // backlog over a tiny window cannot ask for a billion elements.
   const gauge = constraintGauge(c, backlog);
-  const { scale, denominator } = gauge;
+  const { scale } = gauge;
+  const note = constraintGaugeNote(c, gauge);
   const short = samples !== null;
   return (
     <Card>
@@ -173,7 +175,10 @@ function ConstraintCard({ network, c, index, backlog, bips, share, samples, plac
           <dd className="num mt-0.5 text-ink">
             <Figure ch={FIXED_WIDTH_CH.x}>{(bips / 10_000).toFixed(4)}</Figure>
           </dd>
-          <dd className="num text-xs text-ink-3">backlog / (target × window), {Math.round(bips).toLocaleString("en-US")} bips</dd>
+          {/* `relative` is what the note anchors to: against the word it would run off a phone's screen. */}
+          <dd className="num relative text-xs text-ink-3">
+            backlog / (target × window), <Bips value={bips} />
+          </dd>
         </div>
       </dl>
       {samples ? (
@@ -184,17 +189,22 @@ function ConstraintCard({ network, c, index, backlog, bips, share, samples, plac
       ) : null}
       <div className="mt-4">
         {/* The far end says what it is in words: whole windows of target, and
-            the gas that comes to. The bar's own title says what one window is. */}
+            the gas that comes to. It opens to what a window of target is,
+            because neither the count nor the gas says why the bar is scaled
+            that way, or that the scale moves with the backlog. */}
         <Gauge
           fraction={gauge.fraction}
           step={contributionRampStep(bips)}
           label={`Constraint ${index + 1} backlog as a fraction of ${formatInteger(scale)} window${scale > 1 ? "s" : ""} of target`}
-          title={constraintGaugeTitle(denominator)}
           marks={gauge.marks}
         />
         <div className="mt-1 flex justify-between gap-3 text-[11px] text-ink-3">
           <span className="num">0</span>
-          <span className="num text-right">{constraintGaugeSpanLabel(gauge)}</span>
+          {/* Opens from the right: the label sits on the card's right edge, and
+              the panel is far wider than it. */}
+          <HoverNote align="end" lines={note.lines} description={note.description}>
+            <span className="num text-right">{constraintGaugeSpanLabel(gauge)}</span>
+          </HoverNote>
         </div>
       </div>
     </Card>
@@ -203,6 +213,7 @@ function ConstraintCard({ network, c, index, backlog, bips, share, samples, plac
 
 function LegacyCard({ legacy, backlog, bips }: { legacy: LegacyParams; backlog: number; bips: number }) {
   const gauge = legacyGauge(legacy, backlog);
+  const note = legacyGaugeNote(gauge);
   const x = bips / 10_000;
   return (
     <Card>
@@ -241,13 +252,14 @@ function LegacyCard({ legacy, backlog, bips }: { legacy: LegacyParams; backlog: 
           fraction={gauge.fraction}
           step={contributionRampStep(bips)}
           label={gauge.free > 0 ? "Legacy backlog against the tolerance threshold" : "Legacy backlog in units of inertia times speed limit"}
-          title={legacyGaugeTitle(gauge)}
           marks={gauge.marks}
         />
         <div className="mt-1 flex justify-between gap-3 text-[11px] text-ink-3">
           <span className="num">0</span>
           <span className="num">{gauge.free > 0 ? `tolerance at ${formatGas(gauge.free)}` : gauge.unit > 0 ? `x = 1 at ${formatGas(gauge.unit)}` : "no scale"}</span>
-          <span className="num text-right">{legacyGaugeSpanLabel(gauge)}</span>
+          <HoverNote align="end" lines={note.lines} description={note.description}>
+            <span className="num text-right">{legacyGaugeSpanLabel(gauge)}</span>
+          </HoverNote>
         </div>
       </div>
     </Card>
