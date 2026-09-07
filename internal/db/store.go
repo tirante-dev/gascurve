@@ -276,7 +276,9 @@ type Store interface {
 	// SetPosterGas records receipt-backed poster gas on stored blocks by
 	// number, leaving every other column alone. A number no longer stored (a
 	// rewind or retention removed it) is skipped rather than inserted, and so
-	// is a value the row's own gas total cannot hold.
+	// is a value the row's own gas total cannot hold. A number or value past
+	// what the BIGINT columns hold describes no row this store could have and
+	// is refused rather than skipped in silence.
 	SetPosterGas(ctx context.Context, chainID uint64, gas map[uint64]uint64) error
 
 	// FoldBuckets adds partial buckets into the stored rows.

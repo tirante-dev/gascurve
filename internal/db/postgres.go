@@ -450,8 +450,18 @@ func (p *Postgres) SetPosterGas(ctx context.Context, chainID uint64, gas map[uin
 	if len(gas) == 0 {
 		return nil
 	}
+	// Both columns are BIGINT, so a value past its range describes no row
+	// this store could hold. Nothing incorrect would be written (a wrapped
+	// number matches no row and a wrapped gas fails the guard below), but it
+	// would be skipped without a word and the error range below would name
+	// blocks nobody asked for. Refuse the batch instead: a caller that got
+	// here is wrong about its own numbers, and the rows come from these
+	// columns in the first place.
 	numbers := make([]int64, 0, len(gas))
-	for n := range gas {
+	for n, g := range gas {
+		if n > math.MaxInt64 || g > math.MaxInt64 {
+			return fmt.Errorf("set poster gas: block %d gas %d is outside the range the column holds", n, g)
+		}
 		numbers = append(numbers, int64(n))
 	}
 	slices.Sort(numbers)

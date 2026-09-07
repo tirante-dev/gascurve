@@ -1142,6 +1142,19 @@ func TestIntegrationPosterGasRepair(t *testing.T) {
 	if err := p.SetPosterGas(ctx, testChain, nil); err != nil {
 		t.Fatalf("an empty write: %v", err)
 	}
+	// Both columns are BIGINT, so a value past its range describes no row
+	// this store could hold. It is refused rather than wrapped negative and
+	// skipped without a word.
+	for name, arg := range map[string]map[uint64]uint64{
+		"a block number past the column": {math.MaxInt64 + 1: 10},
+		"a gas value past the column":    {204: math.MaxInt64 + 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := p.SetPosterGas(ctx, testChain, arg); err == nil {
+				t.Fatal("accepted a value the column cannot hold")
+			}
+		})
+	}
 }
 
 func numbersOf(blocks []Block) []uint64 {
