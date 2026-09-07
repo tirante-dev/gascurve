@@ -168,7 +168,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 
 | Method and path | Purpose |
 |---|---|
-| `GET /health`, `GET /ready` | liveness; readiness checks DB |
+| `GET /health`, `GET /ready` | liveness; readiness checks DB and the PostgreSQL notification listener |
 | `GET /networks` | `Network[]` |
 | `GET /networks/{network}` | `Network` |
 | `GET /networks/{network}/live` | `LiveSnapshot` (same as WS `tick`), `Cache-Control: no-store` |
@@ -178,7 +178,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 | `GET /networks/{network}/owner-actions` | `OwnerAction[]` newest first |
 | `GET /networks/{network}/batches?range=…` | `BatchSeries` (L1 cost per bucket, batch cadence) |
 | `GET /networks/{network}/l1?range=…` | `L1Series` (pricer getters over time, from state samples) |
-| `GET /status` | `{ version, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion, holes: { pending, blocks, unfillable }, activeEndpoint, failovers, endpoints: [{ index, ws, archive, disabled, error: string | null, wsCooling, wsError: string | null }] }] }` (`headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion` are nullable; `endpoints` is `[]` when unknown; endpoint URLs are never exposed, in `error` and `wsError` either. `wsCooling` reports an endpoint whose WebSocket is cooled down after a dial, subscribe or repeated disconnect failure: its JSON-RPC keeps serving ordinary calls while the head subscription moves to another endpoint. `holes.pending` counts the ranges queued for the gap filler, `holes.unfillable` the ones nothing can be replayed into, and `holes.blocks` how many blocks are still not indexed across both) |
+| `GET /status` | `{ version, listener: { ready, reconnects, lastError }, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion, holes: { pending, blocks, unfillable }, activeEndpoint, failovers, endpoints: [{ index, ws, archive, disabled, error: string | null, wsCooling, wsError: string | null }] }] }` (`listener.lastError` is null while its PostgreSQL LISTEN connection is ready. `listener.reconnects` counts successful recoveries after startup. `headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion` are nullable; `endpoints` is `[]` when unknown; endpoint URLs are never exposed, in `error` and `wsError` either. `wsCooling` reports an endpoint whose WebSocket is cooled down after a dial, subscribe or repeated disconnect failure: its JSON-RPC keeps serving ordinary calls while the head subscription moves to another endpoint. `holes.pending` counts the ranges queued for the gap filler, `holes.unfillable` the ones nothing can be replayed into, and `holes.blocks` how many blocks are still not indexed across both) |
 | `GET /ws?network=…` | WebSocket, see §7 |
 
 Points in `Series`, `BatchSeries` and `L1Series` are always ascending by `t`. Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applied server-side if more than 2000 points), `24h` → `1m` buckets, `30d` → `15m`, `all` → `1h`. `/live` returns 404 until the collector has produced a sample. Arrays are never `null` in responses. `L1Series` reaches back at most `collector.sample_retention`.
@@ -266,6 +266,8 @@ Server to client, one JSON object per message:
 ```
 
 Client to server: `{ type: 'pong' }` and `{ type: 'subscribe', network: string }` to switch networks on the same socket. The server closes idle sockets that miss two pings. The web client reconnects with exponential back-off (1 s to 30 s) and falls back to polling `/live` every 2 s while disconnected.
+
+The API supervises its PostgreSQL notification listener. Ordinary connection loss is handled by lib/pq, and an unexpected close of lib/pq's notification channel replaces the whole listener without closing the hub's stable input. Readiness is false while the listener is disconnected. Every successful reconnect sends a reconciliation marker before later notifications, so the hub refreshes stored blocks, rebuilds a newer live snapshot and delivers missed owner actions before resuming normal fan-out. If the stable supervised input ever closes without process cancellation, the API exits instead of serving WebSocket pings from a permanently stale hub.
 
 ## 8. Web (`web/`, Next.js App Router, TypeScript strict, Tailwind, Recharts, Vitest)
 

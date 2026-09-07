@@ -212,7 +212,13 @@ export type NetworkStatus = {
   arbosVersion?: number | null;
 };
 
-export type StatusResponse = { version: string; networks: NetworkStatus[] };
+export type ListenerStatus = {
+  ready: boolean;
+  reconnects: number;
+  lastError: string | null;
+};
+
+export type StatusResponse = { version: string; listener: ListenerStatus; networks: NetworkStatus[] };
 
 export type ApiErrorBody = { error: { code: string; message: string } };
 

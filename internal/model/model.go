@@ -417,9 +417,19 @@ type NetworkStatus struct {
 	EndpointsStatus
 }
 
-// Status is the /status response.
+// ListenerStatus is the API's PostgreSQL notification feed status. LastError
+// is null while the listener is ready.
+type ListenerStatus struct {
+	Ready      bool    `json:"ready"`
+	Reconnects uint64  `json:"reconnects"`
+	LastError  *string `json:"lastError"`
+}
+
+// Status is the /status response. Listener is omitted only for an API server
+// built without a live WebSocket feed.
 type Status struct {
 	Version  string          `json:"version"`
+	Listener *ListenerStatus `json:"listener,omitempty"`
 	Networks []NetworkStatus `json:"networks"`
 }
 

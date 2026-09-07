@@ -40,6 +40,10 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "not_ready", "database unavailable")
 		return
 	}
+	if s.listener != nil && !s.listener.Status().Ready {
+		writeError(w, http.StatusServiceUnavailable, "not_ready", "notification listener unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, cacheNone, map[string]string{"status": "ready"})
 }
 
@@ -460,6 +464,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := model.Status{Version: s.version, Networks: make([]model.NetworkStatus, 0, len(rows))}
+	if s.listener != nil {
+		status := s.listener.Status()
+		listener := &model.ListenerStatus{Ready: status.Ready, Reconnects: status.Reconnects}
+		if status.Error != "" {
+			listener.LastError = &status.Error
+		}
+		out.Listener = listener
+	}
 	for _, n := range rows {
 		st, err := s.store.States(r.Context(), n.ChainID)
 		if err != nil {
