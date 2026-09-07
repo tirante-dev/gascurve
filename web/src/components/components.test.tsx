@@ -131,8 +131,71 @@ describe("LiveHero", () => {
   });
   it("does not relabel total throughput as compute throughput against an old api", () => {
     render(<LiveHeroView network="robinhood" snapshot={{ ...snapshot, computeGasPerSecond: undefined }} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(screen.getByText("Compute gas/s (10 s)").parentElement).toHaveTextContent("n/a");
-    expect(screen.getByText("Compute gas/s (60 s)").parentElement).toHaveTextContent("n/a");
+    expect(screen.getByText("Network load (10 s)").closest(".min-w-0")).toHaveTextContent("n/a");
+    expect(screen.getByText("Network load (60 s)").closest(".min-w-0")).toHaveTextContent("n/a");
+  });
+  it("labels the figures in plain words and keeps the precise term a hover away, in the accessible name too", () => {
+    render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    for (const [label, term] of [
+      ["Base fee now", "the price of one unit of gas right now, in gwei"],
+      ["Network load (10 s)", "compute gas per second, averaged over the last 10 s"],
+      ["Send", "a 21,000 gas transfer at the base fee now"],
+      ["Swap", "a 150,000 gas swap at the base fee now"],
+      ["Who gets the fee", "where each unit of compute gas's fee goes"],
+      ["to infrastructure", "floor to infra"],
+      ["to the network", "congestion to network"],
+    ]) {
+      const word = screen.getByText(label);
+      // The term is in the note, set as text rather than as a figure, and in the description a screen reader gets instead.
+      const note = screen.getByText(term);
+      expect(note).not.toHaveClass("num");
+      expect(word.closest(".group")).toContainElement(note);
+      const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      expect(word.nextSibling).toHaveTextContent(new RegExp(`^${literal(label)}: ${literal(term)}`));
+    }
+    // The old labels went into the notes, not away.
+    expect(screen.queryByText("21k transfer")).toBeNull();
+    expect(screen.queryByText("150k swap")).toBeNull();
+    expect(screen.queryByText("Compute gas/s (10 s)")).toBeNull();
+    expect(screen.getByText("receipt poster gas is paid separately, to the L1 pricer pool")).toBeInTheDocument();
+  });
+  it("draws the multiplier over the floor as a speedometer, coloured by which of three bands it falls in", () => {
+    const at = (multiplier: number) => ({ ...targetValues(snapshot, [], 0), multiplier });
+    // The sample is 19.99 times its floor: on the red band, and the needle just short of the top (a decade per half turn).
+    const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    const dial = screen.getByTestId("fee-dial");
+    expect(reservedWidth(within(dial).getByText("19.99"))).toBe("5ch");
+    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-critical");
+    expect(within(dial).getByText("over floor")).toBeInTheDocument();
+    expect(dial.querySelectorAll("[data-band]")).toHaveLength(3);
+    expect(dial.querySelector("[data-band='warning']")).toHaveAttribute("stroke", "var(--dial-band-warning)");
+    const needle = within(dial).getByTestId("fee-dial-needle");
+    expect(Number(needle.getAttribute("x2"))).toBeGreaterThan(50);
+    expect(Number(needle.getAttribute("x2"))).toBeLessThan(70);
+    // The working is the hover note, and the description says the same to a screen reader.
+    expect(within(dial).getByText("19.99× the 0.02 gwei floor")).toBeInTheDocument();
+    expect(within(dial).getByText("0.3997 gwei ≈ 19.99 × 0.02 gwei")).toBeInTheDocument();
+    expect(within(dial).getByText("green to 2× the floor, amber to 10×, red above")).toBeInTheDocument();
+    expect(within(dial).getByText("19.99 times the 0.02 gwei floor, far above the floor: green to 2× the floor, amber to 10×, red above.")).toBeInTheDocument();
+    // At the floor the needle rests at the left end, in the green.
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(1)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-good");
+    expect(Number(within(dial).getByTestId("fee-dial-needle").getAttribute("x2"))).toBeLessThan(20);
+    // Ten times the floor is the top of the dial, still amber; a hair over is red.
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-warning");
+    expect(Number(within(dial).getByTestId("fee-dial-needle").getAttribute("x2"))).toBeCloseTo(50, 1);
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10.01)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-critical");
+    // The tone follows the printed figure: 10.004 prints as "10.00×", which the note says is still amber.
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10.004)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(within(dial).getByText("10.00")).toBeInTheDocument();
+    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-warning");
+    // A thousandfold spike pins the needle at the right end rather than swinging it off the dial.
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(1000)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(Number(within(dial).getByTestId("fee-dial-needle").getAttribute("x2"))).toBeGreaterThan(80);
+    // The line under the fee keeps the floor and x; the multiplier lives in the tile alone.
+    expect(screen.getByText(/floor 0.02 gwei ·/)).toHaveTextContent("floor 0.02 gwei · x 3.2425");
   });
   it("renders the eased figures rather than the sample when a frame has them", () => {
     const values = { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.5, multiplier: 25, gasPerSecond10: 41_000_000, transferEth: 1.05e-5, exponent: 3.3 };
@@ -149,7 +212,7 @@ describe("LiveHero", () => {
     expect(screen.getByText("0.3997")).toBeInTheDocument();
     act(() => frame.set({ blocks: [], places: NO_PLACES, values: { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.75 }, nowMs: Date.parse(snapshot.sampledAt) }));
     expect(screen.getByText("0.7500")).toBeInTheDocument();
-    expect(screen.getByText(/last 0 blocks/)).toBeInTheDocument();
+    expect(screen.getByText(/0 blocks · /)).toBeInTheDocument();
   });
   it("charts the block ring against the floor, with a relative time axis", () => {
     render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
@@ -195,14 +258,18 @@ describe("LiveHero", () => {
     const throughput = screen.getByRole("figure", { name: /^Compute gas carried per second over the last 120 seconds/ });
     expect(throughput.firstElementChild).toHaveClass("h-[120px]");
     expect(throughput.firstElementChild).toHaveClass("lg:h-[140px]");
-    expect(screen.getByText(/^Compute gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
+    // The caption leads with the plain reading and keeps the measurement after it.
+    expect(screen.getByText("Network load, second by second, over the last 120 s")).toBeInTheDocument();
+    expect(screen.getByText(/compute gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
+    expect(screen.getByText("Base fee, block by block, over the last 120 s")).toBeInTheDocument();
     // Its own enlarge control, at the range on screen.
     expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=live");
 
     // A history range: the bucketed rate against every target in force.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" series={history} model="constraints" />);
     expect(screen.getByRole("figure", { name: /^Compute gas used per second in .* with each constraint target/ })).toBeInTheDocument();
-    expect(screen.getByText(/^Compute gas per second per bucket against each target in force ·/)).toBeInTheDocument();
+    expect(screen.getByText("Network load per bucket against each target in force, 24h")).toBeInTheDocument();
+    expect(screen.getByText(/^· compute gas per second · /)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=24h");
   });
   it("draws the canonical blocks after a reorg, not the orphaned ones", () => {
@@ -361,7 +428,6 @@ describe("LiveHero", () => {
     expect(window.localStorage.getItem(HERO_RANGE_KEY)).toBe("live");
     expect(seriesMock.calls.at(-1)).toEqual([null, null]);
   });
-
   it("waits for the first sample, and says so differently while a reorg is being repaired", () => {
     const { rerender } = render(<LiveHero network="robinhood" live={{ display: null, frame: createFrameStore(), resyncing: false }} status="connecting" model="constraints" />);
     expect(screen.getByText("Waiting for the first sample.")).toBeInTheDocument();

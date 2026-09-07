@@ -114,7 +114,25 @@ export type NoteFlow = "block" | "inline";
  * note permanently unopenable, which is worse than what it was fixing; a
  * missed arrival costs nothing, because the next one clears it.
  */
-export function HoverNote({ children, lines, description, align = "start", alignSm = align, flow = "block" }: { children: ReactNode; lines: readonly string[]; description: string; align?: NoteAlign; /** The edge to line up with from the `sm` breakpoint up; defaults to `align`, which is one edge at every width. */ alignSm?: NoteAlign; flow?: NoteFlow }) {
+export function HoverNote({
+  children,
+  lines,
+  description,
+  align = "start",
+  alignSm = align,
+  flow = "block",
+  lead = "figure",
+}: {
+  children: ReactNode;
+  lines: readonly string[];
+  description: string;
+  align?: NoteAlign;
+  /** The edge to line up with from the `sm` breakpoint up; defaults to `align`, which is one edge at every width. */
+  alignSm?: NoteAlign;
+  flow?: NoteFlow;
+  /** What the first line is: a figure's working, set in the mono face, or a term's definition, set as text. */
+  lead?: "figure" | "text";
+}) {
   const [dismissed, setDismissed] = useState(false);
   const [under, setUnder] = useState(false);
   // Only while the pointer is on the note: a page of these should not each hold
@@ -154,13 +172,29 @@ export function HoverNote({ children, lines, description, align = "start", align
             zoom, the equation wraps rather than running off the card. */}
         <span className="block w-max max-w-[min(42ch,calc(100vw_-_5rem))] rounded-md border border-hairline bg-surface px-3 py-2 text-left text-xs font-normal leading-snug shadow-lg">
           {lines.map((line, i) => (
-            <span key={i} className={i === 0 ? "num block text-ink" : "block text-ink-2"}>
+            <span key={i} className={i === 0 ? `${lead === "figure" ? "num " : ""}block text-ink` : "block text-ink-2"}>
               {line}
             </span>
           ))}
         </span>
       </span>
     </span>
+  );
+}
+
+/**
+ * Plain words on the page with the precise term a hover away. The label says
+ * what a reader who has never met the pricer would call the thing ("Network
+ * load"); the note says what the figure actually is ("compute gas per second,
+ * averaged over 10 s") and, where one line is not enough, why. Nothing is
+ * taken off the page: the term moves from the label into the note, and the
+ * accessible name carries both.
+ */
+export function Term({ children, lines, align, alignSm, flow }: { children: string; lines: readonly string[]; align?: NoteAlign; alignSm?: NoteAlign; flow?: NoteFlow }) {
+  return (
+    <HoverNote lines={lines} description={`${children}: ${lines.join(". ")}.`} align={align} alignSm={alignSm} flow={flow} lead="text">
+      {children}
+    </HoverNote>
   );
 }
 
