@@ -25,6 +25,7 @@ import (
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
+	"github.com/tirante-dev/gascurve/internal/prices"
 )
 
 // RPC is the subset of nitro.Client the collector uses, so loops can be
@@ -169,6 +170,9 @@ type Follower struct {
 	sleep   func(context.Context, time.Duration) error
 	heads   HeadSource
 	chainID uint64
+	// ethUsd is the process-wide ETH/USD cache, nil when the source is
+	// disabled or unusable.
+	ethUsd *ethUsdCache
 	// tickInterval is the fast loop's cadence: the network's tick_interval
 	// when set, else collector.tick_interval.
 	tickInterval time.Duration
@@ -199,6 +203,9 @@ type Follower struct {
 	scanOrigin *scanOrigin
 	l1         *model.L1
 	accounts   *model.Accounts
+	// ethUsdPrice is the last quote the slow loop obtained, published in a
+	// tick only while it is younger than cfg.EthUsdMaxAge.
+	ethUsdPrice *prices.Price
 	// slowGen counts the slow samples taken and slowSaved the newest one a
 	// tick has persisted. A tick clears only the generation it wrote, so a
 	// sample published while its transaction ran is still persisted by the
@@ -334,6 +341,12 @@ func NewFollower(o Options) *Follower {
 	if f.cfg.BackfillAnchorInterval <= 0 {
 		f.cfg.BackfillAnchorInterval = defaultAnchorInterval
 	}
+	if f.cfg.EthUsdMaxAge <= 0 {
+		f.cfg.EthUsdMaxAge = defaultEthUsdMaxAge
+	}
+	if f.cfg.EthUsdSource != "" {
+		f.ethUsd = ethUsdCacheFor(f.cfg.EthUsdSource, f.cfg.SlowInterval, f.log)
+	}
 	f.tickInterval = o.Network.EffectiveTickInterval(f.cfg)
 	return f
 }
@@ -466,7 +479,40 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	if err := f.loadLiveStartLocked(ctx); err != nil {
 		return err
 	}
+	if err := f.loadEthUsdLocked(ctx); err != nil {
+		return err
+	}
 	f.initialized = true
+	return nil
+}
+
+// loadEthUsdLocked restores the recorded ETH/USD spot, so a restarted
+// collector keeps publishing it until it ages out rather than waiting for
+// the first slow tick. An unreadable row is dropped, never fatal: the price
+// is decoration on the snapshot, not chain state. Nothing is restored while
+// the source is disabled.
+func (f *Follower) loadEthUsdLocked(ctx context.Context) error {
+	if f.ethUsd == nil {
+		return nil
+	}
+	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StateEthUsd)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	var v model.EthUsd
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		f.log.Warn("unreadable eth/usd checkpoint, ignoring it", "err", err.Error())
+		return nil
+	}
+	at, err := time.Parse(time.RFC3339, v.At)
+	if err != nil {
+		f.log.Warn("unreadable eth/usd timestamp, ignoring it", "err", err.Error())
+		return nil
+	}
+	f.ethUsdPrice = &prices.Price{Price: v.Price, At: at, Source: v.Source}
 	return nil
 }
 

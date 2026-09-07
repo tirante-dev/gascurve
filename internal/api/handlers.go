@@ -145,14 +145,15 @@ func (s *Server) buildLive(ctx context.Context, chainID uint64) (*model.LiveSnap
 	var snap *model.LiveSnapshot
 	err := s.store.WithSnapshotTx(ctx, func(st db.Store) error {
 		var err error
-		snap, err = buildLiveIn(ctx, st, chainID)
+		snap, err = buildLiveIn(ctx, st, chainID, s.now(), s.ethUsdMaxAge)
 		return err
 	})
 	return snap, err
 }
 
-// buildLiveIn is buildLive against one store view.
-func buildLiveIn(ctx context.Context, store db.Store, chainID uint64) (*model.LiveSnapshot, error) {
+// buildLiveIn is buildLive against one store view. now and maxAge apply the
+// collector's staleness rule to the recorded ETH/USD spot.
+func buildLiveIn(ctx context.Context, store db.Store, chainID uint64, now time.Time, maxAge time.Duration) (*model.LiveSnapshot, error) {
 	sample, err := store.LatestStateSample(ctx, chainID, false)
 	if err != nil {
 		return nil, err
@@ -200,6 +201,9 @@ func buildLiveIn(ctx context.Context, store db.Store, chainID uint64) (*model.Li
 		return nil, fmt.Errorf("decode prices: %w", err)
 	}
 	snap.MultiplierBips = multiplierBips(sample.BaseFee.BigInt(), sample.MinBaseFee.BigInt())
+	if snap.EthUsd, err = ethUsdFromState(ctx, store, chainID, now, maxAge); err != nil {
+		return nil, err
+	}
 	if slow != nil && slow.L1 != nil {
 		snap.L1 = &model.L1{}
 		if err := slow.L1.Unmarshal(snap.L1); err != nil {
@@ -228,6 +232,28 @@ func buildLiveIn(ctx context.Context, store db.Store, chainID uint64) (*model.Li
 		snap.Block = model.LiveBlock{Number: sample.BlockNumber, BaseFee: sample.BaseFee.String()}
 	}
 	return snap, nil
+}
+
+// ethUsdFromState reads the ETH/USD spot the collector recorded for a chain
+// and applies the same rule as the tick: a quote older than maxAge is null
+// rather than served as live. The API never fetches a price itself.
+func ethUsdFromState(ctx context.Context, store db.Store, chainID uint64, now time.Time, maxAge time.Duration) (*model.EthUsd, error) {
+	raw, ok, err := store.GetState(ctx, chainID, db.StateEthUsd)
+	if err != nil || !ok {
+		return nil, err
+	}
+	var v model.EthUsd
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return nil, fmt.Errorf("decode eth/usd: %w", err)
+	}
+	at, err := time.Parse(time.RFC3339, v.At)
+	if err != nil {
+		return nil, fmt.Errorf("decode eth/usd timestamp: %w", err)
+	}
+	if now.Sub(at) > maxAge {
+		return nil, nil
+	}
+	return &v, nil
 }
 
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {

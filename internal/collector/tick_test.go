@@ -1120,12 +1120,12 @@ func TestHelpers(t *testing.T) {
 	if weiString(nil) != "0" || weiString(big.NewInt(7)) != "7" || bigOrZero(nil).Sign() != 0 || bigOrZero(big.NewInt(3)).Int64() != 3 {
 		t.Fatal("weiString / bigOrZero")
 	}
-	snap := buildSnapshot(1, s, &pricer.Result{ErrorBips: 3}, model.GasPerSecond{}, nil, nil)
+	snap := buildSnapshot(1, s, &pricer.Result{ErrorBips: 3}, model.GasPerSecond{}, nil, nil, nil)
 	if snap.ReplayErrorBips != 3 || snap.MultiplierBips != 0 || snap.MinBaseFee != "9" {
 		t.Fatalf("buildSnapshot: %+v", snap)
 	}
 	nilFee := &nitro.Sample{Constraints: []nitro.Constraint{{Target: 1, Window: 2, Backlog: 3}}}
-	if snap := buildSnapshot(1, nilFee, &pricer.Result{}, model.GasPerSecond{}, nil, nil); snap.MinBaseFee != "0" {
+	if snap := buildSnapshot(1, nilFee, &pricer.Result{}, model.GasPerSecond{}, nil, nil, nil); snap.MinBaseFee != "0" {
 		t.Fatalf("nil min fee: %+v", snap)
 	}
 	f := newTestFollower(t, newFakeRPC(1), dbtest.New())

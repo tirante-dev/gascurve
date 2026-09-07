@@ -650,6 +650,10 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 	headAt := time.Unix(int64(sample.Header.Timestamp), 0).UTC()
 	f.mu.Lock()
 	l1, accounts, ls := f.l1, f.accounts, f.liveStart
+	// The staleness rule is applied at publication, not at the fetch: a
+	// quote older than eth_usd_max_age is dropped from this snapshot and
+	// the NOTIFY payload rather than shown as live.
+	ethUsd := ethUsdModel(f.ethUsdPrice, f.now(), f.cfg.EthUsdMaxAge)
 	slowGen := f.slowGen
 	includeSlow := slowGen > f.slowSaved
 	observed := f.observedSetLocked(sample, pending)
@@ -689,7 +693,7 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 		if err != nil {
 			return fmt.Errorf("gas per second: %w", err)
 		}
-		snap := buildSnapshot(f.chainID, sample, headResult, model.GasPerSecond{S10: g10 / 10, S60: g60 / 60}, l1, accounts)
+		snap := buildSnapshot(f.chainID, sample, headResult, model.GasPerSecond{S10: g10 / 10, S60: g60 / 60}, l1, accounts, ethUsd)
 		snapshot = &snap
 		row, err := sampleRow(f.chainID, sample, &snap, includeSlow)
 		if err != nil {
@@ -811,8 +815,9 @@ func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, 
 	return rows
 }
 
-// buildSnapshot assembles the LiveSnapshot from a sample.
-func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Result, gps model.GasPerSecond, l1 *model.L1, accounts *model.Accounts) model.LiveSnapshot {
+// buildSnapshot assembles the LiveSnapshot from a sample. ethUsd is the
+// spot the caller already checked for staleness, nil when there is none.
+func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Result, gps model.GasPerSecond, l1 *model.L1, accounts *model.Accounts, ethUsd *model.EthUsd) model.LiveSnapshot {
 	live := stateFromSample(sample)
 	_, exponent, per := live.Step(0)
 	h := sample.Header
@@ -841,6 +846,7 @@ func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Resu
 		L1:              l1,
 		Accounts:        accounts,
 		ReplayErrorBips: headResult.ErrorBips,
+		EthUsd:          ethUsd,
 	}
 	for i, c := range sample.Constraints {
 		snap.Constraints = append(snap.Constraints, model.Constraint{Target: c.Target, Window: c.Window, Backlog: c.Backlog, ExponentBips: int64(per[i])})

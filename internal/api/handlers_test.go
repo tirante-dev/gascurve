@@ -98,6 +98,10 @@ func seed(t *testing.T) *dbtest.MemStore {
 	must(s.SetState(ctx, robinhood, db.StateBackfillCursor, `{"done":true}`))
 	must(s.SetState(ctx, robinhood, db.StateEndpoints, `{"activeEndpoint":1,"failovers":3,"endpoints":[{"index":0,"ws":false,"archive":false,"disabled":true,"error":"reports chain id 1, configured 4663"},{"index":1,"ws":true,"archive":true,"disabled":false,"error":null}]}`))
 	must(s.SetState(ctx, testnet, db.StateEndpoints, `not json`))
+	// The ETH/USD spot the collector recorded: fresh for robinhood, older
+	// than the default max age for the testnet.
+	must(s.SetState(ctx, robinhood, db.StateEthUsd, `{"price":"4523.40","at":"2026-09-06T07:18:00Z","source":"coinbase"}`))
+	must(s.SetState(ctx, testnet, db.StateEthUsd, `{"price":"4523.40","at":"2026-09-06T07:09:00Z","source":"coinbase"}`))
 	return s
 }
 
@@ -197,6 +201,9 @@ func TestEndpoints(t *testing.T) {
 			if s.GasPerSecond.S10 != 1_000_000 || s.GasPerSecond.S60 != 500_000 || s.ReplayErrorBips != 15 || s.Prices.PerArbGasTotal != "6" {
 				t.Fatalf("live gps/error: %+v", s)
 			}
+			if s.EthUsd == nil || s.EthUsd.Price != "4523.40" || s.EthUsd.Source != "coinbase" || s.EthUsd.At != "2026-09-06T07:18:00Z" {
+				t.Fatalf("live eth/usd: %+v", s.EthUsd)
+			}
 		}},
 		{"/api/v1/networks/robinhood-testnet/live", 200, cacheNone, func(t *testing.T, b []byte) {
 			var s model.LiveSnapshot
@@ -208,6 +215,10 @@ func TestEndpoints(t *testing.T) {
 			}
 			if !strings.Contains(string(b), `"constraints":[]`) {
 				t.Fatalf("constraints must be an empty array: %s", b)
+			}
+			// A quote older than eth_usd_max_age is null, not stale data.
+			if s.EthUsd != nil || !strings.Contains(string(b), `"ethUsd":null`) {
+				t.Fatalf("a stale spot must be null: %s", b)
 			}
 		}},
 		{"/api/v1/networks/arbitrum-one/live", 404, cacheNone, nil},
@@ -514,6 +525,90 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 	// Stepping down folds unknown blocks into an unknown split.
 	if p := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}}, nil, 5*time.Second); len(p) != 1 || p[0].FloorFeesWei != nil {
 		t.Fatalf("step down with an unknown block: %+v", p)
+	}
+}
+
+// TestLiveEthUsd: /live applies the collector's staleness rule to the
+// recorded spot, serves null when there is none and refuses to invent one
+// from a row it cannot read.
+func TestLiveEthUsd(t *testing.T) {
+	ctx := context.Background()
+	liveSpot := func(t *testing.T, ts *httptest.Server) (*model.EthUsd, int) {
+		t.Helper()
+		resp, body := get(t, ts, "/api/v1/networks/robinhood/live")
+		if resp.StatusCode != 200 {
+			return nil, resp.StatusCode
+		}
+		var snap model.LiveSnapshot
+		decode(t, body, &snap)
+		return snap.EthUsd, resp.StatusCode
+	}
+	// Exactly at the default cutoff the quote is still live; a second past
+	// it, it is null.
+	for _, tc := range []struct {
+		name string
+		age  time.Duration
+		want bool
+	}{
+		{"at the cutoff", config.DefaultEthUsdMaxAge, true},
+		{"past the cutoff", config.DefaultEthUsdMaxAge + time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := seed(t)
+			row := `{"price":"4523.40","at":"` + now.Add(-tc.age).Format(time.RFC3339) + `","source":"coinbase"}`
+			if err := store.SetState(ctx, robinhood, db.StateEthUsd, row); err != nil {
+				t.Fatal(err)
+			}
+			spot, code := liveSpot(t, newServer(t, store))
+			if code != 200 || (spot != nil) != tc.want {
+				t.Fatalf("%d %+v", code, spot)
+			}
+		})
+	}
+	// No row at all: null, not an error.
+	store := seed(t)
+	if err := store.DeleteState(ctx, robinhood, db.StateEthUsd); err != nil {
+		t.Fatal(err)
+	}
+	if spot, code := liveSpot(t, newServer(t, store)); code != 200 || spot != nil {
+		t.Fatalf("missing row: %d %+v", code, spot)
+	}
+	// A row that cannot be read is an error rather than a silent null.
+	for _, row := range []string{`not json`, `{"price":"4523.40","at":"yesterday","source":"coinbase"}`} {
+		store := seed(t)
+		if err := store.SetState(ctx, robinhood, db.StateEthUsd, row); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := liveSpot(t, newServer(t, store)); code != 500 {
+			t.Fatalf("unreadable row %q served %d", row, code)
+		}
+	}
+	// A read failure is reported too.
+	store = seed(t)
+	store.SetFailure("GetState", true)
+	if _, code := liveSpot(t, newServer(t, store)); code != 500 {
+		t.Fatalf("state read failure served %d", code)
+	}
+}
+
+// TestEthUsdMaxAgeOption: the API's cutoff follows the collector's
+// configuration, and a non-positive value keeps the default.
+func TestEthUsdMaxAgeOption(t *testing.T) {
+	store := seed(t)
+	cfg := config.ServerConfig{RateLimitPerSecond: 1000, RateLimitBurst: 1000}
+	// The seeded robinhood quote is two minutes old: a one-minute cutoff
+	// drops it, the default keeps it.
+	short := New(store, cfg, nil, logger.Nop(), WithClock(func() time.Time { return now }), WithEthUsdMaxAge(time.Minute))
+	snap, err := short.buildLive(context.Background(), robinhood)
+	if err != nil || snap.EthUsd != nil {
+		t.Fatalf("a one-minute cutoff should drop a two-minute-old quote: %+v %v", snap.EthUsd, err)
+	}
+	deflt := New(store, cfg, nil, logger.Nop(), WithClock(func() time.Time { return now }), WithEthUsdMaxAge(0))
+	if deflt.ethUsdMaxAge != config.DefaultEthUsdMaxAge {
+		t.Fatalf("max age = %v, want the default", deflt.ethUsdMaxAge)
+	}
+	if snap, err = deflt.buildLive(context.Background(), robinhood); err != nil || snap.EthUsd == nil {
+		t.Fatalf("the default cutoff should keep it: %+v %v", snap.EthUsd, err)
 	}
 }
 

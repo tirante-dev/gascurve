@@ -1,6 +1,7 @@
 // Package config loads gascurve configuration from a YAML file (config.yaml
 // or CONFIG_PATH) and applies environment overrides: DB_URL, PORT, LOG_LEVEL,
-// DEV_MODE and per-network NETWORK_<NAME>_RPC_URL, NETWORK_<NAME>_WS_URL,
+// DEV_MODE, ETH_USD_SOURCE, ETH_USD_MAX_AGE and per-network
+// NETWORK_<NAME>_RPC_URL, NETWORK_<NAME>_WS_URL,
 // NETWORK_<NAME>_ENABLED, NETWORK_<NAME>_CALLS_PER_SECOND,
 // NETWORK_<NAME>_ARCHIVE and NETWORK_<NAME>_TICK_INTERVAL, where NAME is
 // the network name upper-cased with dashes replaced by underscores.
@@ -21,6 +22,8 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+
+	"github.com/tirante-dev/gascurve/internal/prices"
 )
 
 // Config is the full configuration tree.
@@ -115,7 +118,22 @@ type CollectorConfig struct {
 	// after the active one failed before the primary is probed again with
 	// one eth_chainId (default 60s).
 	FailoverCooldown time.Duration `mapstructure:"failover_cooldown"`
+	// EthUsdSource names the ETH/USD spot provider the slow loop reads once
+	// per slow_interval for the whole process (not once per network):
+	// "coinbase" (default), "coingecko", or an https URL answering JSON
+	// with a top-level price holding a string or a number. An empty value
+	// disables the fetch and every snapshot then reports ethUsd: null.
+	// Environment: ETH_USD_SOURCE.
+	EthUsdSource string `mapstructure:"eth_usd_source"`
+	// EthUsdMaxAge is how long a fetched spot stays in the snapshot: past
+	// it the tick and /live report ethUsd: null rather than a stale price
+	// (default 10m). Environment: ETH_USD_MAX_AGE.
+	EthUsdMaxAge time.Duration `mapstructure:"eth_usd_max_age"`
 }
+
+// DefaultEthUsdMaxAge is the fallback for collector.eth_usd_max_age, used
+// by the API when it is not configured.
+const DefaultEthUsdMaxAge = 10 * time.Minute
 
 // EndpointConfig is one JSON-RPC endpoint of a network. The primary is
 // described by the network's own rpc_url, ws_url, archive and
@@ -294,6 +312,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collector.backfill_anchor_interval", 1000)
 	v.SetDefault("collector.max_catch_up_batches", 10)
 	v.SetDefault("collector.failover_cooldown", "60s")
+	v.SetDefault("collector.eth_usd_source", "coinbase")
+	v.SetDefault("collector.eth_usd_max_age", DefaultEthUsdMaxAge.String())
 	v.SetDefault("log_level", "info")
 }
 
@@ -317,6 +337,18 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 			return fmt.Errorf("DEV_MODE: %w", err)
 		}
 		cfg.Server.DevMode = b
+	}
+	// An empty ETH_USD_SOURCE is meaningful (it disables the spot fetch),
+	// so the variable being set is enough, unlike the others.
+	if s, ok := getenv("ETH_USD_SOURCE"); ok {
+		cfg.Collector.EthUsdSource = strings.TrimSpace(s)
+	}
+	if s, ok := getenv("ETH_USD_MAX_AGE"); ok && s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("ETH_USD_MAX_AGE: %w", err)
+		}
+		cfg.Collector.EthUsdMaxAge = d
 	}
 	for i := range cfg.Networks {
 		n := &cfg.Networks[i]
@@ -444,6 +476,7 @@ func (c *Config) Validate(requireRPC bool) error {
 		"collector.sample_retention":  c.Collector.SampleRetention,
 		"collector.backfill_depth":    c.Collector.BackfillDepth,
 		"collector.failover_cooldown": c.Collector.FailoverCooldown,
+		"collector.eth_usd_max_age":   c.Collector.EthUsdMaxAge,
 	} {
 		if d <= 0 {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
@@ -457,6 +490,9 @@ func (c *Config) Validate(requireRPC bool) error {
 	}
 	if c.Collector.MaxCatchUpBatches <= 0 {
 		errs = append(errs, fmt.Errorf("collector.max_catch_up_batches %d must be positive", c.Collector.MaxCatchUpBatches))
+	}
+	if err := prices.ValidateSource(c.Collector.EthUsdSource); err != nil {
+		errs = append(errs, fmt.Errorf("collector.eth_usd_source: %w", err))
 	}
 	names := map[string]bool{}
 	ids := map[uint64]bool{}

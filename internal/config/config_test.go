@@ -80,6 +80,9 @@ func TestLoadWith(t *testing.T) {
 	if cfg.Collector.BackfillAnchorInterval != 1000 || cfg.Collector.MaxCatchUpBatches != 10 || cfg.Collector.FailoverCooldown != time.Minute {
 		t.Fatalf("collector defaults not applied: %+v", cfg.Collector)
 	}
+	if cfg.Collector.EthUsdSource != "coinbase" || cfg.Collector.EthUsdMaxAge != DefaultEthUsdMaxAge {
+		t.Fatalf("eth/usd defaults not applied: %+v", cfg.Collector)
+	}
 	if cfg.Server.WSMaxPerIP != 8 || cfg.Server.WSMaxTotal != 2000 || len(cfg.Server.TrustedProxies) != 0 {
 		t.Fatalf("server defaults not applied: %+v", cfg.Server)
 	}
@@ -195,6 +198,39 @@ func TestEnvOverrides(t *testing.T) {
 	}
 }
 
+// TestEthUsdEnv: the source and the max age come from the environment, and
+// an empty ETH_USD_SOURCE disables the fetch rather than being ignored.
+func TestEthUsdEnv(t *testing.T) {
+	p := writeYAML(t, sampleYAML)
+	cfg, err := LoadWith(Options{Path: p, Getenv: envOf(map[string]string{
+		"ETH_USD_SOURCE":  " coingecko ",
+		"ETH_USD_MAX_AGE": "90s",
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Collector.EthUsdSource != "coingecko" || cfg.Collector.EthUsdMaxAge != 90*time.Second {
+		t.Fatalf("eth/usd env not applied: %+v", cfg.Collector)
+	}
+	cfg, err = LoadWith(Options{Path: p, Getenv: envOf(map[string]string{"ETH_USD_SOURCE": ""})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Collector.EthUsdSource != "" {
+		t.Fatalf("an empty ETH_USD_SOURCE must disable the fetch, got %q", cfg.Collector.EthUsdSource)
+	}
+	for _, m := range []map[string]string{
+		{"ETH_USD_MAX_AGE": "soon"},
+		{"ETH_USD_MAX_AGE": "-1m"},
+		{"ETH_USD_SOURCE": "kraken"},
+		{"ETH_USD_SOURCE": "http://insecure.example"},
+	} {
+		if _, err := LoadWith(Options{Path: p, Getenv: envOf(m)}); err == nil {
+			t.Fatalf("expected error for %v", m)
+		}
+	}
+}
+
 func TestEnvErrors(t *testing.T) {
 	p := writeYAML(t, sampleYAML)
 	for _, m := range []map[string]string{
@@ -263,6 +299,7 @@ func TestValidate(t *testing.T) {
 				TickInterval: time.Second, SlowInterval: time.Second, HeaderBatchSize: 10,
 				BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: time.Hour,
 				BackfillAnchorInterval: 1000, MaxCatchUpBatches: 10, FailoverCooldown: time.Minute,
+				EthUsdSource: "coinbase", EthUsdMaxAge: DefaultEthUsdMaxAge,
 			},
 			Networks: []NetworkConfig{{Name: "a", ChainID: 1, CallsPerSecond: 1, Enabled: true, RPCURL: "http://x", Fallbacks: []EndpointConfig{{RPCURL: "http://y", WSURL: "wss://y", Archive: true, CallsPerSecond: 2}}}},
 		}
@@ -310,6 +347,9 @@ func TestValidate(t *testing.T) {
 		"fallback ws":         func(c *Config) { c.Networks[0].Fallbacks[0].WSURL = "http://y" },
 		"fallback rpc":        func(c *Config) { c.Networks[0].Fallbacks[0].RPCURL = "" },
 		"network tick":        func(c *Config) { c.Networks[0].TickInterval = -time.Second },
+		"eth usd max age":     func(c *Config) { c.Collector.EthUsdMaxAge = 0 },
+		"eth usd source":      func(c *Config) { c.Collector.EthUsdSource = "http://insecure.example" },
+		"eth usd source name": func(c *Config) { c.Collector.EthUsdSource = "kraken" },
 	}
 	for name, mutate := range cases {
 		c := base()
@@ -323,6 +363,14 @@ func TestValidate(t *testing.T) {
 	c.Networks[0].CallsPerSecond = MinCallsPerSecond
 	if err := c.Validate(true); err != nil {
 		t.Errorf("the minimum budget must be accepted: %v", err)
+	}
+	// Every supported spot source, and the empty one that disables it.
+	for _, source := range []string{"", "coinbase", "coingecko", "https://prices.example/eth"} {
+		c := base()
+		c.Collector.EthUsdSource = source
+		if err := c.Validate(true); err != nil {
+			t.Errorf("eth_usd_source %q rejected: %v", source, err)
+		}
 	}
 }
 

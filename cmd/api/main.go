@@ -70,7 +70,7 @@ func run() error {
 	hub := api.NewHub(store, log, api.WithOrigins(cfg.Server.CORSOrigins))
 	go hub.Run(ctx, listener)
 
-	server := api.New(store, cfg.Server, hub, log, api.WithVersion(version.Version))
+	server := api.New(store, cfg.Server, hub, log, api.WithVersion(version.Version), api.WithEthUsdMaxAge(cfg.Collector.EthUsdMaxAge))
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Server.Port)),
 		Handler:           server.Handler(),

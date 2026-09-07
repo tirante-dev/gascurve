@@ -28,6 +28,15 @@ collector:
   backfill_anchor_interval: 1000  # blocks between state anchors when a network is archive: true
   max_catch_up_batches: 10   # paced networks skip a catch-up gap larger than this many header batches; unlimited networks never skip
   failover_cooldown: 60s     # time on a fallback endpoint before the primary is probed again (one eth_chainId)
+  # ETH/USD spot for the fee cards, fetched server side by the slow loop
+  # (the browser never calls a price API). One fetch per interval for the
+  # whole process, shared by every network. Supported: coinbase (Coinbase's
+  # public spot endpoint, no key), coingecko (the public simple price
+  # endpoint), or an https URL answering JSON with a top-level price holding
+  # a string or a number. Leave it empty to disable: every snapshot then
+  # reports ethUsd: null. Environment: ETH_USD_SOURCE, ETH_USD_MAX_AGE.
+  eth_usd_source: coinbase
+  eth_usd_max_age: 10m       # past this a quote is reported as null rather than shown as live
 
 # Every network is an Arbitrum Nitro chain. calls_per_second is the budget for
 # a public endpoint and counts JSON-RPC calls, including items inside a batch

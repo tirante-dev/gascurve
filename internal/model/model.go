@@ -116,6 +116,17 @@ type Accounts struct {
 	L1Reward Account `json:"l1Reward"`
 }
 
+// EthUsd is the ETH/USD spot the collector's slow loop fetched (server
+// side, never the browser). Price is a decimal string with two decimal
+// places, At is when it was fetched and Source names the provider
+// (coinbase, coingecko or custom, never a URL). A snapshot carries null
+// instead once the quote is older than collector.eth_usd_max_age.
+type EthUsd struct {
+	Price  string `json:"price"`
+	At     string `json:"at"`
+	Source string `json:"source"`
+}
+
 // LiveSnapshot is the per-tick state, published with NOTIFY and served by
 // /live and the WebSocket tick message.
 type LiveSnapshot struct {
@@ -134,6 +145,8 @@ type LiveSnapshot struct {
 	L1              *L1           `json:"l1,omitempty"`
 	Accounts        *Accounts     `json:"accounts,omitempty"`
 	ReplayErrorBips int64         `json:"replayErrorBips"`
+	// EthUsd is null when no spot was fetched or the last one is stale.
+	EthUsd *EthUsd `json:"ethUsd"`
 }
 
 // BlockPoint is one replayed block. Backlogs are the end-of-block values,

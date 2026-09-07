@@ -59,6 +59,10 @@ const (
 	// state in force there when an archive endpoint could sample it, or a
 	// marker that nothing before the block can be reconstructed.
 	StateOwnerScanOrigin = "owner_scan_origin"
+	// StateEthUsd is the last ETH/USD spot the slow loop fetched
+	// ({"price":"…","at":"RFC3339","source":"…"}), recorded per chain so the
+	// API can serve it in /live without an outbound call of its own.
+	StateEthUsd = "eth_usd"
 )
 
 // Open connects to Postgres and applies pool limits.

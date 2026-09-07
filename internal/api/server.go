@@ -45,6 +45,9 @@ type Server struct {
 	version string
 	now     func() time.Time
 	router  chi.Router
+	// ethUsdMaxAge mirrors collector.eth_usd_max_age: a recorded spot older
+	// than this is served as null.
+	ethUsdMaxAge time.Duration
 }
 
 // Option customizes a Server.
@@ -56,13 +59,24 @@ func WithClock(now func() time.Time) Option { return func(s *Server) { s.now = n
 // WithVersion sets the version reported by /status.
 func WithVersion(v string) Option { return func(s *Server) { s.version = v } }
 
+// WithEthUsdMaxAge sets how long a recorded ETH/USD spot is served before
+// /live reports null. It must match the collector's
+// collector.eth_usd_max_age; a non-positive value keeps the default.
+func WithEthUsdMaxAge(d time.Duration) Option {
+	return func(s *Server) {
+		if d > 0 {
+			s.ethUsdMaxAge = d
+		}
+	}
+}
+
 // New builds the server and its router. hub may be nil when the WebSocket
 // is not wanted.
 func New(store db.Store, cfg config.ServerConfig, hub *Hub, log *logger.Logger, opts ...Option) *Server {
 	if log == nil {
 		log = logger.Nop()
 	}
-	s := &Server{store: store, cfg: cfg, log: log, hub: hub, now: time.Now, version: "dev"}
+	s := &Server{store: store, cfg: cfg, log: log, hub: hub, now: time.Now, version: "dev", ethUsdMaxAge: config.DefaultEthUsdMaxAge}
 	for _, o := range opts {
 		o(s)
 	}

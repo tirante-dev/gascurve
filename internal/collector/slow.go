@@ -13,8 +13,9 @@ import (
 	"github.com/tirante-dev/gascurve/internal/nitro"
 )
 
-// SlowTick runs the slow loop once: L1 getters, fee accounts, ArbOS
-// version, owner action logs, batch report scan, pruning and RPC stats.
+// SlowTick runs the slow loop once: the ETH/USD spot, L1 getters, fee
+// accounts, ArbOS version, owner action logs, batch report scan, pruning
+// and RPC stats.
 // Every step runs even when an earlier one failed; errors are joined.
 func (f *Follower) SlowTick(ctx context.Context) error {
 	if err := f.ensureInit(ctx); err != nil {
@@ -25,6 +26,7 @@ func (f *Follower) SlowTick(ctx context.Context) error {
 		name string
 		fn   func(context.Context) error
 	}{
+		{"eth usd", f.sampleEthUsd},
 		{"l1", f.sampleSlow},
 		{"arbos", f.checkArbOSVersion},
 		{"owner actions", f.scanOwnerActions},
@@ -41,6 +43,26 @@ func (f *Follower) SlowTick(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// sampleEthUsd refreshes the ETH/USD spot from the process-wide cache (one
+// fetch per slow_interval, shared by every network) and records it for this
+// chain, so the API can serve it without an outbound call. A failed fetch
+// is not an error here: the previous value stands until the tick finds it
+// older than eth_usd_max_age.
+func (f *Follower) sampleEthUsd(ctx context.Context) error {
+	if f.ethUsd == nil {
+		return nil
+	}
+	p := f.ethUsd.value(ctx, f.now(), f.log)
+	if p == nil {
+		return nil
+	}
+	f.mu.Lock()
+	f.ethUsdPrice = p
+	f.mu.Unlock()
+	raw, _ := json.Marshal(model.EthUsd{Price: p.Price, At: p.At.UTC().Format(time.RFC3339), Source: p.Source})
+	return f.store.SetState(ctx, f.chainID, db.StateEthUsd, string(raw))
 }
 
 // sampleSlow reads the L1 pricer getters and fee account balances; they are

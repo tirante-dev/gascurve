@@ -115,6 +115,10 @@ func TestWebSocketFlow(t *testing.T) {
 	if hello.Network.ChainID != robinhood || hello.Snapshot.Block.Number != 1030 || len(hello.RecentBlocks) != 30 || hello.RecentBlocks[0].Number != 1001 {
 		t.Fatalf("hello: %+v", hello)
 	}
+	// The hub's snapshot is the same shape as /live, spot included.
+	if hello.Snapshot.EthUsd == nil || hello.Snapshot.EthUsd.Price != "4523.40" {
+		t.Fatalf("hello snapshot spot: %+v", hello.Snapshot.EthUsd)
+	}
 	if h.hub.ClientCount(robinhood) != 1 {
 		t.Fatal("client not subscribed")
 	}
