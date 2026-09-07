@@ -305,6 +305,33 @@ func uniqueLayers[T any, K comparable](rows []T, key func(T) K) [][]T {
 	return layers
 }
 
+// blockSpan is the lowest and highest block number in a batch. A batched
+// statement fails as a whole, so its error names the rows it carried
+// rather than only the statement that carried them.
+func blockSpan(batch []Block) (lo, hi uint64) {
+	lo, hi = batch[0].Number, batch[0].Number
+	for _, b := range batch[1:] {
+		lo, hi = min(lo, b.Number), max(hi, b.Number)
+	}
+	return lo, hi
+}
+
+// bucketSpan is the earliest and latest bucket start in a batch, for the
+// same reason as blockSpan. One batch may hold several resolutions, so
+// only the window they cover is named.
+func bucketSpan(batch []Bucket) (first, last time.Time) {
+	first, last = batch[0].BucketStart, batch[0].BucketStart
+	for _, b := range batch[1:] {
+		if b.BucketStart.Before(first) {
+			first = b.BucketStart
+		}
+		if b.BucketStart.After(last) {
+			last = b.BucketStart
+		}
+	}
+	return first, last
+}
+
 // UpsertBlocks writes blocks, replacing replay fields on conflict.
 func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
 	const columns = 16
@@ -328,7 +355,8 @@ func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
 				constraint_bips = EXCLUDED.constraint_bips, exponent_bips = EXCLUDED.exponent_bips,
 				predicted_base_fee = EXCLUDED.predicted_base_fee, min_base_fee = EXCLUDED.min_base_fee,
 				anchored = EXCLUDED.anchored, pricing_version = EXCLUDED.pricing_version`, args...); err != nil {
-				return fmt.Errorf("upsert blocks batch: %w", err)
+				lo, hi := blockSpan(batch)
+				return fmt.Errorf("upsert %d blocks %d..%d: %w", len(batch), lo, hi, err)
 			}
 		}
 	}
@@ -449,7 +477,8 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 				constraint_set_id = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN COALESCE(EXCLUDED.constraint_set_id, buckets.constraint_set_id) ELSE buckets.constraint_set_id END,
 				replay_error_bips = GREATEST(buckets.replay_error_bips, EXCLUDED.replay_error_bips),
 				last_block = GREATEST(buckets.last_block, EXCLUDED.last_block)`, args...); err != nil {
-				return fmt.Errorf("fold buckets batch: %w", err)
+				first, last := bucketSpan(batch)
+				return fmt.Errorf("fold %d buckets %s..%s: %w", len(batch), first.UTC().Format(time.RFC3339), last.UTC().Format(time.RFC3339), err)
 			}
 		}
 	}
@@ -472,6 +501,13 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 	if len(starts) == 0 {
 		return nil
 	}
+	// The upserted CTE below is deliberately not referenced by the DELETE.
+	// A data-modifying CTE always runs to completion whether or not the
+	// primary query reads its output, and the two touch disjoint rows: the
+	// insert covers exactly the requested starts that have blocks, the
+	// delete exactly the ones that do not. Joining the delete to it would
+	// be worse than redundant, since a rebuild that inserts nothing would
+	// then delete nothing and leave the emptied buckets behind.
 	if _, err := p.exec(ctx, `
 			WITH requested AS (
 				SELECT DISTINCT bucket_start, bucket_start + $3::BIGINT * interval '1 second' AS bucket_end
