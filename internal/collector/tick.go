@@ -193,13 +193,19 @@ func (f *Follower) catchUp(ctx context.Context, sample *nitro.Sample, stored uin
 	gap := head - stored
 	skip := func() ([]nitro.Header, error) {
 		h := hole{From: from, To: head - 1}
-		f.metrics.GapSkipped()
 		f.log.Warn("catch-up gap exceeds budget, skipping blocks and restarting from the sampled head", "from", h.From, "to", h.To)
 		pending, err := f.fetchOwnerRange(ctx, from, head)
 		if err != nil {
 			return nil, err
 		}
-		return nil, f.seed(ctx, sample, &h, pending)
+		if err := f.seed(ctx, sample, &h, pending); err != nil {
+			return nil, err
+		}
+		// Counted only now: the seed is the transaction that records the
+		// hole and moves the head, so a failed fetch or a refused commit
+		// must not report a gap that history will not have to fill.
+		f.metrics.GapSkipped()
+		return nil, nil
 	}
 	if !pol.unlimited && gap > maxGap {
 		return skip()

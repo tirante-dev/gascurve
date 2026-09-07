@@ -7,11 +7,11 @@ Every rule is built into a list first, so an alert switched off leaves no
 empty group behind, and a group with nothing in it is not emitted at all
 (the operator rejects one).
 
-Every rule is scoped to the job label an operator derives from a
-ServiceMonitor, which is the Service name, so two releases in one cluster
-never alert on each other's metrics. Scraping through a hand-written
-scrape_config with a different job name therefore needs
-metrics.prometheusRule set aside as well; see the chart README.
+Every rule is scoped to the job and namespace of this release's targets,
+so two releases never alert on each other's metrics, whether they share a
+cluster or only a name. Scraping through a hand-written scrape_config with
+a different job name therefore needs metrics.prometheusRule set aside as
+well; see the chart README.
 
 Prometheus label and value references are written as raw literals here, so
 Helm leaves them for Prometheus to expand.
@@ -19,6 +19,15 @@ Helm leaves them for Prometheus to expand.
 {{- $pr := .Values.metrics.prometheusRule }}
 {{- $alerts := $pr.alerts }}
 {{- $fullname := include "gascurve.fullname" . }}
+{{/*
+The selector every rule is scoped by: the job label an operator derives
+from a ServiceMonitor (the Service name) and the namespace the targets are
+in. The job alone is not enough, because two namespaces running a release
+of the same name produce the same job, and their series would then be
+aggregated together.
+*/}}
+{{- $apiTarget := printf "job=\"%s-api\",namespace=\"%s\"" $fullname .Release.Namespace }}
+{{- $collectorTarget := printf "job=\"%s-collector\",namespace=\"%s\"" $fullname .Release.Namespace }}
 {{- $apiJob := printf "%s-api" $fullname }}
 {{- $collectorJob := printf "%s-collector" $fullname }}
 {{- $network := `{{ $labels.network }}` }}
@@ -32,7 +41,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorLagDedicated"
-  "expr" (printf "gascurve_collector_head_lag_seconds{job=\"%s\",network=~\"%s\"} > %v" $collectorJob $pr.dedicatedNetworks .threshold)
+  "expr" (printf "gascurve_collector_head_lag_seconds{%s,network=~\"%s\"} > %v" $collectorTarget $pr.dedicatedNetworks .threshold)
   "for" .for "severity" .severity
   "summary" (printf "gascurve collector is behind on %s" $network)
   "description" (printf "The collector's head on %s (chain %s) has been %ss old for %s. This network follows a dedicated endpoint and normally sits at 0 to 2 seconds, so anything near %v seconds is a stall, not load." $network $chain $seconds .for .threshold)) }}
@@ -42,7 +51,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorLagPublic"
-  "expr" (printf "gascurve_collector_head_lag_seconds{job=\"%s\",network!~\"%s\"} > %v" $collectorJob $pr.dedicatedNetworks .threshold)
+  "expr" (printf "gascurve_collector_head_lag_seconds{%s,network!~\"%s\"} > %v" $collectorTarget $pr.dedicatedNetworks .threshold)
   "for" .for "severity" .severity
   "summary" (printf "gascurve collector is behind on %s" $network)
   "description" (printf "The collector's head on %s (chain %s) has been %ss old for %s. This network is followed over a public RPC and normally sits at 20 to 60 seconds, so %v seconds means the call budget is no longer keeping up." $network $chain $seconds .for .threshold)) }}
@@ -52,7 +61,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorSampleStale"
-  "expr" (printf "time() - gascurve_collector_last_sample_timestamp_seconds{job=\"%s\"} > %v" $collectorJob .threshold)
+  "expr" (printf "time() - gascurve_collector_last_sample_timestamp_seconds{%s} > %v" $collectorTarget .threshold)
   "for" .for "severity" .severity
   "summary" (printf "gascurve collector has taken no sample for %s" $network)
   "description" (printf "No successful state sample for %s (chain %s) in %ss. The fast loop samples every 0.5 to 3 seconds, so this is the follower not running, its RPC refusing every call, or the database refusing writes." $network $chain $seconds)) }}
@@ -62,7 +71,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorRateLimited"
-  "expr" (printf "rate(gascurve_collector_rate_limit_events_total{job=\"%s\"}[5m]) > %v" $collectorJob .threshold)
+  "expr" (printf "rate(gascurve_collector_rate_limit_events_total{%s}[5m]) > %v" $collectorTarget .threshold)
   "for" .for "severity" .severity
   "summary" (printf "gascurve collector is being throttled on %s" $network)
   "description" (printf "The endpoints serving %s (chain %s) have reported throttling %s times a second for %s. Each event costs a 2 to 60 second back-off shared by every loop, so history work stalls first. Lower calls_per_second for that network, or give it an endpoint with a real budget." $network $chain $rate .for)) }}
@@ -72,7 +81,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorEndpointsExhausted"
-  "expr" (printf "min by (network, chain_id) (gascurve_collector_endpoint_disabled{job=\"%s\"}) == 1" $collectorJob)
+  "expr" (printf "min by (network, chain_id) (gascurve_collector_endpoint_disabled{%s}) == 1" $collectorTarget)
   "for" .for "severity" .severity
   "summary" (printf "every gascurve RPC endpoint for %s is disabled" $network)
   "description" (printf "Every endpoint configured for %s (chain %s) has been disabled for %s, so nothing can serve it. /status names the endpoints by index and says why each was disabled." $network $chain .for)) }}
@@ -82,10 +91,10 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorDown"
-  "expr" (printf "up{job=\"%s\"} == 0" $collectorJob)
+  "expr" (printf "absent(up{%s} == 1)" $collectorTarget)
   "for" .for "severity" .severity
   "summary" "gascurve collector is not being scraped"
-  "description" (printf "The collector (job %s) has not answered a scrape for %s. Every other collector alert goes quiet with it, because its series stop existing rather than going bad." $collectorJob .for)) }}
+  "description" (printf "No collector target (job %s) has answered a scrape for %s. Every other collector alert goes quiet with it, because its series stop existing rather than going bad. absent(up == 1) rather than up == 0, so a target service discovery has removed altogether still fires." $collectorJob .for)) }}
 {{- end }}
 {{- end }}
 
@@ -94,17 +103,17 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $apiRules = append $apiRules (dict
   "alert" "GascurveApiDown"
-  "expr" (printf "up{job=\"%s\"} == 0" $apiJob)
+  "expr" (printf "absent(up{%s} == 1)" $apiTarget)
   "for" .for "severity" .severity
   "summary" "gascurve api is not being scraped"
-  "description" (printf "The api (job %s) has not answered a scrape for %s. Every replica is down, or the whole Service has no ready endpoints." $apiJob .for)) }}
+  "description" (printf "No api replica (job %s) has answered a scrape for %s: every replica is down, the Service has no ready endpoints, or the targets are gone. absent(up == 1) rather than up == 0, so one replica down does not page and no target at all still does." $apiJob .for)) }}
 {{- end }}
 {{- end }}
 {{- with $alerts.apiErrorRate }}
 {{- if .enabled }}
 {{- $apiRules = append $apiRules (dict
   "alert" "GascurveApiErrorRate"
-  "expr" (printf "sum(rate(gascurve_api_requests_total{job=\"%s\",status=~\"5..\"}[5m])) / sum(rate(gascurve_api_requests_total{job=\"%s\"}[5m])) > %v" $apiJob $apiJob .threshold)
+  "expr" (printf "sum(rate(gascurve_api_requests_total{%s,status=~\"5..\"}[5m])) / sum(rate(gascurve_api_requests_total{%s}[5m])) > %v" $apiTarget $apiTarget .threshold)
   "for" .for "severity" .severity
   "summary" "gascurve api is answering errors"
   "description" (printf "%s of the requests the api answered over the last 5 minutes were 5xx, for %s. The api reads PostgreSQL and nothing else, so this is the database or a query, never an RPC." $percent .for)) }}
@@ -114,7 +123,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $apiRules = append $apiRules (dict
   "alert" "GascurveDatabaseUnreachable"
-  "expr" (printf "sum(rate(gascurve_api_requests_total{job=\"%s\",route=~\"(/api/v1)?/ready\",status=\"503\"}[5m])) > 0" $apiJob)
+  "expr" (printf "sum(rate(gascurve_api_requests_total{%s,route=~\"(/api/v1)?/ready\",status=\"503\"}[5m])) > 0" $apiTarget)
   "for" .for "severity" .severity
   "summary" "gascurve cannot reach PostgreSQL"
   "description" (printf "The api's readiness endpoint has been answering 503 for %s. It answers 503 for one reason: the database ping failed. The collector cannot write either while this holds." .for)) }}

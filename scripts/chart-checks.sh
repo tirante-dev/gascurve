@@ -181,6 +181,17 @@ reject "metrics_port above the maximum" "metrics_port" \
   --set database.existingSecret=my-db --set config.collector.metrics_port=70000
 reject "unknown field under metrics" "not_a_field" \
   --set database.existingSecret=my-db --set metrics.not_a_field=x
+# An alert whose expression compares against a threshold cannot render
+# without one: "> <nil>" is PromQL the operator rejects, and the alert would
+# then be missing rather than misconfigured.
+reject "threshold alert with its threshold removed" "threshold" \
+  --set database.existingSecret=my-db --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.alerts.apiErrorRate.threshold=null
+# And one that compares nothing takes no threshold, so a value put on the
+# wrong alert is a typo rather than a setting.
+reject "threshold on an alert that compares nothing" "threshold" \
+  --set database.existingSecret=my-db --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.alerts.apiDown.threshold=5
 
 echo "== metrics disabled by default"
 if render "metrics-default" "${work}/metrics-off.yaml" --values "${ci}/existing-secret-values.yaml"; then
@@ -211,11 +222,17 @@ if render "metrics" "${work}/metrics.yaml" --values "${ci}/metrics-values.yaml";
   has "${work}/metrics.yaml" 'alert: GascurveApiDown' "metrics: the api down alert is missing"
   has "${work}/metrics.yaml" 'alert: GascurveApiErrorRate' "metrics: the api error rate alert is missing"
   has "${work}/metrics.yaml" 'alert: GascurveDatabaseUnreachable' "metrics: the database alert is missing"
-  # Every rule names this release's job, so two releases in one cluster
-  # never alert on each other's metrics.
-  if ! awk '/^ *expr: /{ if ($0 !~ /job=/) { print "    " $0; bad = 1 } } END { exit bad }' "${work}/metrics.yaml"; then
-    fail "metrics: the rule above is not scoped to this release's job"
+  # Every rule names this release's job and namespace, so two releases
+  # never alert on each other's metrics, whether they share a cluster or
+  # only a name.
+  if ! awk '/^ *expr: /{ if ($0 !~ /job=/ || $0 !~ /namespace=/) { print "    " $0; bad = 1 } } END { exit bad }' "${work}/metrics.yaml"; then
+    fail "metrics: the rule above is not scoped to this release's job and namespace"
   fi
+  # up == 0 matches only a target that still exists and failed; it goes
+  # quiet exactly when the target is removed, which is the outage the
+  # alert is for.
+  has "${work}/metrics.yaml" 'expr: "absent(up{job=..gascurve-api' "metrics: the api down alert does not use absent(up == 1)"
+  lacks "${work}/metrics.yaml" 'up{[^}]*} == 0' "metrics: an up == 0 alert cannot fire once its target is gone"
   # An alert switched off leaves no rule behind.
   lacks "${work}/metrics.yaml" 'alert: GascurveCollectorDown' "metrics: rendered an alert that was disabled"
   ok "ServiceMonitors, PrometheusRule and the split lag thresholds"

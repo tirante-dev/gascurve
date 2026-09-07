@@ -17,6 +17,10 @@ import (
 const (
 	// serverReadHeaderTimeout bounds a slow request line and headers.
 	serverReadHeaderTimeout = 10 * time.Second
+	// serverWriteTimeout bounds a scrape whose client stops reading, so a
+	// stalled reader cannot pin a handler goroutine for the life of the
+	// process.
+	serverWriteTimeout = 30 * time.Second
 	// serverShutdownTimeout bounds the graceful stop.
 	serverShutdownTimeout = 5 * time.Second
 )
@@ -51,7 +55,7 @@ func NewServer(ctx context.Context, addr string, g prometheus.Gatherer, log *log
 	})
 	return &Server{
 		ln:  ln,
-		srv: &http.Server{Handler: mux, ReadHeaderTimeout: serverReadHeaderTimeout},
+		srv: &http.Server{Handler: mux, ReadHeaderTimeout: serverReadHeaderTimeout, WriteTimeout: serverWriteTimeout},
 		log: log,
 	}, nil
 }
@@ -79,6 +83,11 @@ func (s *Server) Run(ctx context.Context) error {
 	sctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
 	defer cancel()
 	if err := s.srv.Shutdown(sctx); err != nil {
+		// The graceful stop ran out of time, so a connection is still
+		// being served. Close it rather than returning while its goroutine
+		// runs on.
+		_ = s.srv.Close()
+		<-errc
 		return fmt.Errorf("metrics shutdown: %w", err)
 	}
 	return <-errc
