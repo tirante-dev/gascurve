@@ -82,7 +82,7 @@ const snapshot: LiveSnapshot = {
 
 describe("SeriesCharts", () => {
   it("draws one series per constraint set with set-aware legends and an explicit unknown-split series", () => {
-    render(<SeriesCharts series={series} loading={false} model="constraints" />);
+    render(<SeriesCharts network="robinhood" range="24h" series={series} loading={false} model="constraints" />);
     expect(screen.getAllByText("C2 · 30 Mgas/s · 24 h · set 5 (from block 10)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("C2 · 40 Mgas/s · 24 h · set 6 (from block 20)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("unknown split (total x, constraint set unknown)").length).toBeGreaterThan(0);
@@ -93,7 +93,7 @@ describe("SeriesCharts", () => {
   });
 
   it("exposes every bucket in a table and lets the keyboard inspect any point", () => {
-    render(<SeriesCharts series={series} loading={false} model="constraints" />);
+    render(<SeriesCharts network="robinhood" range="24h" series={series} loading={false} model="constraints" />);
     const summary = screen.getByText(/Data table \(3 buckets/);
     const details = summary.closest("details") as HTMLDetailsElement;
     expect(within(details).queryByRole("table")).toBeNull();
@@ -123,18 +123,18 @@ describe("SeriesCharts", () => {
   });
 
   it("handles empty, loading and legacy series", () => {
-    const { rerender } = render(<SeriesCharts series={null} loading model="constraints" />);
+    const { rerender } = render(<SeriesCharts network="robinhood" range="24h" series={null} loading model="constraints" />);
     expect(screen.getByText("Loading history.")).toBeInTheDocument();
-    rerender(<SeriesCharts series={{ ...series, points: [] }} loading={false} model="constraints" />);
+    rerender(<SeriesCharts network="robinhood" range="24h" series={{ ...series, points: [] }} loading={false} model="constraints" />);
     expect(screen.getByText("No buckets in this range yet.")).toBeInTheDocument();
-    rerender(<SeriesCharts series={{ ...series, constraintSets: [], ownerActions: [], points: [point({ t: 1, exponentBips: 1260, constraintBips: [1260], backlogs: [7], backlogsMax: [7] })] }} loading={false} model="legacy" />);
+    rerender(<SeriesCharts network="robinhood" range="24h" series={{ ...series, constraintSets: [], ownerActions: [], points: [point({ t: 1, exponentBips: 1260, constraintBips: [1260], backlogs: [7], backlogsMax: [7] })] }} loading={false} model="legacy" />);
     expect(screen.getAllByText("legacy backlog").length).toBeGreaterThan(0);
   });
 
   it("labels history by the network's model, never by an empty set list", () => {
     // Early history: a constrained chain before any set is known. Two backlogs, two contributions, no sets.
     const early: Series = { ...series, constraintSets: [], ownerActions: [], points: [point({ t: 1, constraintSetId: 0, exponentBips: 32_425, constraintBips: [34, 32_391], backlogs: [3_111_506, 11_194_391_810_886], backlogsMax: [3_111_506, 11_194_391_810_886] })] };
-    const { rerender } = render(<SeriesCharts series={early} loading={false} model="constraints" />);
+    const { rerender } = render(<SeriesCharts network="robinhood" range="24h" series={early} loading={false} model="constraints" />);
     expect(screen.queryByText("legacy backlog")).toBeNull();
     expect(screen.getByText("C1 · definition unknown")).toBeInTheDocument();
     expect(screen.getByText("C2 · definition unknown")).toBeInTheDocument();
@@ -149,10 +149,10 @@ describe("SeriesCharts", () => {
     // Both backlog panels carry data: the second is not left empty.
     expect(screen.getAllByText("11.2 Tgas").length).toBeGreaterThan(0);
     expect(screen.getAllByText("3.11 Mgas").length).toBeGreaterThan(0);
-    rerender(<SeriesCharts series={early} loading={false} model="unknown" />);
+    rerender(<SeriesCharts network="robinhood" range="24h" series={early} loading={false} model="unknown" />);
     expect(screen.queryByText("legacy backlog")).toBeNull();
     expect(screen.getByText("C1 · definition unknown")).toBeInTheDocument();
-    rerender(<SeriesCharts series={early} loading={false} model="legacy" />);
+    rerender(<SeriesCharts network="robinhood" range="24h" series={early} loading={false} model="legacy" />);
     expect(screen.getAllByText("legacy backlog").length).toBeGreaterThan(0);
   });
 
@@ -167,7 +167,7 @@ describe("SeriesCharts", () => {
 
   it("shows history from before the split migration as the unrecorded split, with n/a for the fee parts", () => {
     const early = point({ t: 1788679140, gasUsed: 100, feesWei: "2000000000000000000", floorFeesWei: null, surplusFeesWei: null, baseFeeMin: "100000000", baseFeeAvg: "300000000", baseFeeMax: "400000000", minBaseFee: "100000000", exponentBips: 10_000, constraintBips: null, backlogs: [1, 2], backlogsMax: [1, 2], constraintSetId: 5 });
-    render(<SeriesCharts series={{ ...series, points: [early, ...series.points] }} loading={false} model="constraints" />);
+    render(<SeriesCharts network="robinhood" range="24h" series={{ ...series, points: [early, ...series.points] }} loading={false} model="constraints" />);
     // Both unknown-split reasons are in the legend, since the range has both.
     expect(screen.getAllByText("unknown split (total x, split not recorded)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("unknown split (total x, constraint set unknown)").length).toBeGreaterThan(0);
@@ -195,7 +195,7 @@ describe("SeriesCharts", () => {
     // recorded: the tooltip and the inspector may say that, and must not also
     // list each constraint at 0.0000.
     const unrecorded = point({ t: 1788679140, exponentBips: 10_000, constraintBips: null, backlogs: [1, 2], backlogsMax: [1, 2], constraintSetId: 5, minBaseFee: "100000000", baseFeeMin: "100000000", baseFeeAvg: "100000000", baseFeeMax: "100000000" });
-    render(<SeriesCharts series={{ ...series, points: [unrecorded, ...series.points] }} loading={false} model="constraints" />);
+    render(<SeriesCharts network="robinhood" range="24h" series={{ ...series, points: [unrecorded, ...series.points] }} loading={false} model="constraints" />);
     const slider = screen.getByRole("slider", { name: /Select a bucket/ });
     fireEvent.change(slider, { target: { value: "0" } });
     expect(screen.getByText("unknown split (total x, split not recorded)", { selector: "dt" })).toBeInTheDocument();
@@ -252,7 +252,7 @@ describe("FeeFlows", () => {
     expect(totals.total).toBeCloseTo(5);
     expect(totals.floorEth).toBeCloseTo(2.2);
     expect(totals.surplusEth).toBeCloseTo(2.8);
-    render(<FeeFlows snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
+    render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText("2.2")).toBeInTheDocument();
     expect(screen.getByText("2.8")).toBeInTheDocument();
     const summary = screen.getByText(/Data table \(3 buckets\)/);
@@ -265,21 +265,21 @@ describe("FeeFlows", () => {
   it("puts a dollar line under each ETH total while the quote is fresh, and drops it once the quote is stale", () => {
     const now = NOW_MS;
     const priced = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:15:00Z", source: "coingecko" } };
-    const { rerender } = render(<FeeFlows snapshot={priced} series={series} model="constraints" nowMs={now} />);
+    const { rerender } = render(<FeeFlows network="robinhood" range="24h" snapshot={priced} series={series} model="constraints" nowMs={now} />);
     // 5 ETH of fees, 2.2 to the infra account and 2.8 to the network account, at 4,200 dollars.
     expect(screen.getByText("$21,000.0")).toBeInTheDocument();
     expect(screen.getByText("$9,240.0")).toBeInTheDocument();
     expect(screen.getByText("$11,760.0")).toBeInTheDocument();
     // Eleven minutes old: the same rule as the live tiles, so the totals go back to ETH alone.
-    rerender(<FeeFlows snapshot={{ ...priced, ethUsd: { ...priced.ethUsd, at: "2026-09-06T07:09:00Z" } }} series={series} model="constraints" nowMs={now} />);
+    rerender(<FeeFlows network="robinhood" range="24h" snapshot={{ ...priced, ethUsd: { ...priced.ethUsd, at: "2026-09-06T07:09:00Z" } }} series={series} model="constraints" nowMs={now} />);
     expect(screen.queryByText("$21,000.0")).toBeNull();
     // And a network whose collector has no price feed never shows one.
-    rerender(<FeeFlows snapshot={snapshot} series={series} model="constraints" nowMs={now} />);
+    rerender(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={now} />);
     expect(screen.queryByText(/^\$/)).toBeNull();
     expect(screen.getByText("2.2")).toBeInTheDocument();
   });
   it("renders without a snapshot or history", () => {
-    render(<FeeFlows snapshot={null} series={null} nowMs={NOW_MS} />);
+    render(<FeeFlows network="robinhood" range="24h" snapshot={null} series={null} nowMs={NOW_MS} />);
     expect(screen.getByText("No history loaded.")).toBeInTheDocument();
     expect(screen.getByText(/none yet/)).toBeInTheDocument();
     expect(screen.queryByText(/predate the fee split/)).toBeNull();
@@ -298,7 +298,7 @@ describe("FeeFlows", () => {
     expect(feeTotals(series).unsplit).toBe(0);
     expect(unsplitNote(1)).toBe("1 bucket predates the fee split");
     expect(unsplitNote(1200)).toBe("1,200 buckets predate the fee split");
-    render(<FeeFlows snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
+    render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText(/^2 buckets predate the fee split/)).toBeInTheDocument();
     expect(screen.getByText("unknown split (predates the fee split)")).toBeInTheDocument();
     expect(screen.getByRole("figure", { name: /hatched where the split predates the record/ })).toBeInTheDocument();
@@ -314,7 +314,7 @@ describe("FeeFlows", () => {
   });
   it("draws the unknown series as a hatch in the chart and the same hatch in its legend", () => {
     const mixed: Series = { ...series, points: [point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }), ...series.points] };
-    render(<FeeFlows snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
+    render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
     const item = screen.getByText("unknown split (predates the fee split)", { selector: "li span" }).closest("li") as HTMLLIElement;
     const swatch = item.querySelector("span[aria-hidden]") as HTMLElement;
     // The legend carries the pattern, not a solid square: the association with
@@ -336,7 +336,7 @@ describe("FeeFlows", () => {
   });
 
   it("shows no unknown-split legend or footnote when every bucket carries the split", () => {
-    render(<FeeFlows snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
+    render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
     expect(screen.queryByText(/predate the fee split/)).toBeNull();
     expect(screen.queryByText("unknown split (predates the fee split)")).toBeNull();
     expect(screen.getByText("congestion to network", { selector: "li span" })).toBeInTheDocument();
@@ -347,12 +347,12 @@ describe("ConstraintCards", () => {
   it("recomputes x, shares and colours from the eased backlogs", () => {
     // A 30M backlog over 60M × 120 s: 41 bips at the sample, 1.3% of x.
     const long = { ...snapshot, constraints: [{ ...snapshot.constraints[0], window: 120 }, snapshot.constraints[1]] };
-    const { rerender } = render(<ConstraintCardsView snapshot={long} values={null} blocks={[]} />);
+    const { rerender } = render(<ConstraintCardsView network="robinhood" snapshot={long} values={null} blocks={[]} />);
     expect(screen.getByText("0.0041")).toBeInTheDocument();
     expect(screen.getByText("0.1%").parentElement).toHaveTextContent("0.1% of x");
     expect(screen.queryByText(/avg 2 s/)).toBeNull();
     // One second later the 30M backlog has drained at 60M/s: x1 is 0, share 0, and the card says so.
-    rerender(<ConstraintCardsView snapshot={long} values={targetValues(long, [], 1)} blocks={[]} />);
+    rerender(<ConstraintCardsView network="robinhood" snapshot={long} values={targetValues(long, [], 1)} blocks={[]} />);
     expect(screen.getByText("0.0000")).toBeInTheDocument();
     expect(screen.getByText("no contribution")).toBeInTheDocument();
     expect(screen.getByText("100.0%").parentElement).toHaveTextContent("100.0% of x");
@@ -362,7 +362,7 @@ describe("ConstraintCards", () => {
   it("draws a bounded number of gauge marks however large the backlog", () => {
     // Target 1, window 1, backlog a billion: a billion windows of target.
     const huge = { ...snapshot, constraints: [{ target: 1, window: 1, backlog: 1_000_000_000, exponentBips: 0 }] };
-    render(<ConstraintCardsView snapshot={huge} values={null} blocks={[]} />);
+    render(<ConstraintCardsView network="robinhood" snapshot={huge} values={null} blocks={[]} />);
     const meter = screen.getByRole("meter");
     expect(meter.querySelectorAll("span").length).toBeLessThanOrEqual(24);
     expect(meter).toHaveAttribute("aria-valuenow", "100");
@@ -371,7 +371,7 @@ describe("ConstraintCards", () => {
   });
 
   it("defines the legacy gauge for zero tolerance and for a zero denominator", () => {
-    const { rerender } = render(<ConstraintCardsView snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 0, backlog: 1_000_000_000 } }} values={null} blocks={[]} />);
+    const { rerender } = render(<ConstraintCardsView network="robinhood" snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 0, backlog: 1_000_000_000 } }} values={null} blocks={[]} />);
     expect(screen.getByText("no free gas: every unit prices")).toBeInTheDocument();
     expect(screen.getByText("x = 1 at 714 Mgas")).toBeInTheDocument();
     expect(screen.getByText("1.43 Ggas")).toBeInTheDocument();
@@ -380,7 +380,7 @@ describe("ConstraintCards", () => {
     expect(meter.querySelectorAll("span")).toHaveLength(1);
     // (1B * 10000) / 714M = 14005 bips.
     expect(screen.getByText(/x = 1.4005/)).toBeInTheDocument();
-    rerender(<ConstraintCardsView snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 0, tolerance: 0, backlog: 5 } }} values={null} blocks={[]} />);
+    rerender(<ConstraintCardsView network="robinhood" snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 0, tolerance: 0, backlog: 5 } }} values={null} blocks={[]} />);
     expect(screen.getByText("no scale (zero inertia or speed limit)")).toBeInTheDocument();
     expect(screen.getByText("n/a")).toBeInTheDocument();
     expect(screen.getByRole("meter")).toHaveAttribute("aria-valuenow", "0");
@@ -389,9 +389,9 @@ describe("ConstraintCards", () => {
 
   it("recomputes the legacy exponent from the drained backlog", () => {
     const legacy: LiveSnapshot = { ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 160_000_000 } };
-    const { rerender } = render(<ConstraintCardsView snapshot={legacy} values={null} blocks={[]} />);
+    const { rerender } = render(<ConstraintCardsView network="robinhood" snapshot={legacy} values={null} blocks={[]} />);
     expect(screen.getByText(/x = 0.1260/)).toBeInTheDocument();
-    rerender(<ConstraintCardsView snapshot={legacy} values={targetValues(legacy, [], 10)} blocks={[]} />);
+    rerender(<ConstraintCardsView network="robinhood" snapshot={legacy} values={targetValues(legacy, [], 10)} blocks={[]} />);
     // 70M drained: (90M - 70M) * 10000 / 714M = 280 bips.
     expect(screen.getByText(/x = 0.0280/)).toBeInTheDocument();
     expect(screen.getByText("90.0")).toBeInTheDocument();

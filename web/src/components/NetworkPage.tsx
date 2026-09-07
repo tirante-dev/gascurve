@@ -2,9 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "@/hooks/useApi";
-import { useLive } from "@/hooks/useLive";
-import { useSmoothedLive } from "@/hooks/useSmoothedLive";
 import { useNetwork } from "@/hooks/useNetwork";
+import { useNetworkLive } from "@/hooks/useNetworkLive";
 import { useSeries } from "@/hooks/useSeries";
 import { useTicker } from "@/hooks/useTicker";
 import { getOwnerActions } from "@/lib/api/constraints";
@@ -39,11 +38,9 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
   const { network, setNetwork, replaceNetwork } = useNetwork();
   const name = network || routeNetwork;
   const [range, setRange] = useState<SeriesRange>("24h");
-  const live = useLive(name);
-  // The feed ticks every block; the page follows the smoothed view of it, so
-  // everything below the live strip re-renders at the display cadence at most.
-  const smooth = useSmoothedLive(live);
-  const snapshot = smooth.display;
+  // One socket and one smoothing loop for the page; a chart's own page takes
+  // the same feed from the same hook.
+  const { live, smooth, snapshot } = useNetworkLive(name);
   const series = useSeries(name, range);
   const networks = useApi("networks", useCallback((signal: AbortSignal) => listNetworks({ signal }), []), { refetchMs: 300_000 });
   const apiStatus = useApi("status", useCallback((signal: AbortSignal) => getStatus({ signal }), []), { refetchMs: 60_000 });
@@ -97,7 +94,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         </div>
 
         <Section id="pricer" title="The pricer, live">
-          <ConstraintCards live={smooth} />
+          <ConstraintCards network={name} live={smooth} />
           <div className="mt-6">
             <PricerEquation snapshot={snapshot} />
           </div>
@@ -120,11 +117,11 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
           aside={<HistoryTabs range={range} onChange={setRange} loading={series.loading} />}
         >
           {series.error ? <p className="mb-3 text-sm text-critical">Could not load history: {series.error}</p> : null}
-          <SeriesCharts series={series.data} loading={series.loading} model={model} />
+          <SeriesCharts network={name} range={range} series={series.data} loading={series.loading} model={model} />
         </Section>
 
         <Section id="fees" title="Fee flows">
-          <FeeFlows snapshot={snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} nowMs={now} />
+          <FeeFlows network={name} range={range} snapshot={snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} nowMs={now} />
         </Section>
 
         <Section id="l1" title="L1">

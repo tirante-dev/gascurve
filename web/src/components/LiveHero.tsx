@@ -28,7 +28,9 @@ import {
   gasPerSecondParts,
   weiToGweiNumber,
 } from "@/utils/format";
+import { chartView } from "@/lib/chartViews";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
+import { EnlargeLink } from "./ChartActions";
 import { Figure, Label, Stat, StatusPill } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
 
@@ -63,15 +65,18 @@ export function heroTooltipRows(): TooltipRow[] {
   ];
 }
 
+/** The height the hero's chart stands at on the network page; the enlarged view passes its own. */
+export const HERO_CHART_HEIGHT = "h-[180px] lg:h-[260px]";
+
 /**
  * The box the hero chart draws in, at one height in every state: live,
  * historical, loading, empty and failed all fill the same frame, so switching
  * range moves nothing on the page around it.
  */
-export function ChartBox({ label, busy, children }: { label: string; busy?: boolean; children: ReactNode }) {
+export function ChartBox({ label, busy, height = HERO_CHART_HEIGHT, children }: { label: string; busy?: boolean; height?: string; children: ReactNode }) {
   return (
     <div role="figure" aria-label={label} aria-busy={busy}>
-      <div className="h-[180px] w-full rounded-sm bg-chart lg:h-[260px]">{children}</div>
+      <div className={`w-full rounded-sm bg-chart ${height}`}>{children}</div>
     </div>
   );
 }
@@ -91,7 +96,7 @@ const HERO_AXIS_WIDTH = 56;
  * colour rather than a gradient, so the mark carries no meaning the data does
  * not. Memoised on its points, which move with the frame clock.
  */
-export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText }: { points: HeroPoint[]; floorGwei: number; floorText: string }) {
+export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText, height }: { points: HeroPoint[]; floorGwei: number; floorText: string; height?: string }) {
   const span = heroSpan();
   const ticks = useMemo(() => heroTicks(span), [span]);
   // The axis from the previous render stands while the data still fits it
@@ -106,7 +111,7 @@ export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText 
       ? "Base fee per block, waiting for blocks"
       : `Base fee per block over the last ${span} seconds, ${points.length} blocks, ${formatGweiFixed(Math.min(...fees))} to ${formatGweiFixed(Math.max(...fees))} gwei, with the floor at ${formatGweiFixed(floorGwei)} gwei`;
   return (
-    <ChartBox label={label} busy={points.length < 2}>
+    <ChartBox label={label} busy={points.length < 2} height={height}>
       {points.length < 2 ? (
         <ChartNote>Waiting for blocks.</ChartNote>
       ) : (
@@ -148,11 +153,11 @@ export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText 
  * dashed rule, and one marker per owner action. Log scale, because a range
  * that spans a congestion event spans two orders of magnitude.
  */
-export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabel }: { data: FeeChartData; rangeLabel: string }) {
+export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabel, height }: { data: FeeChartData; rangeLabel: string; height?: string }) {
   const rows = useMemo(() => feeTooltipRows(), []);
   const note = useMemo(() => ownerActionNote(data.markers, data.bucketSeconds), [data.markers, data.bucketSeconds]);
   return (
-    <ChartBox label={feeChartLabel(rangeLabel, data.points)}>
+    <ChartBox label={feeChartLabel(rangeLabel, data.points)} height={height}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={data.drawn} margin={{ top: 8, right: 10, bottom: 2, left: 0 }}>
           <CartesianGrid vertical={false} />
@@ -270,6 +275,66 @@ export function CostTile({ label, eth, usdPerEth }: { label: string; eth: number
   );
 }
 
+/**
+ * The chart column of the hero: the caption and the chart the chosen range
+ * calls for, in one frame at every one of them. The detail route draws the
+ * same thing at its own height, so the enlarged base fee is this component
+ * and not a second implementation of it.
+ */
+export function HeroChartPanel({
+  snapshot,
+  blocks,
+  nowMs,
+  range,
+  series,
+  seriesLoading = false,
+  seriesError = null,
+  model = "unknown",
+  height,
+}: {
+  snapshot: LiveSnapshot;
+  blocks: BlockPoint[];
+  nowMs: number;
+  range: HeroRange;
+  series: Series | null;
+  seriesLoading?: boolean;
+  seriesError?: string | null;
+  model?: PricerModel;
+  height?: string;
+}) {
+  // Against the frame's wall clock: the chart slides every frame, and a block keeps its place.
+  const points = useMemo(() => heroChartData(blocks, nowMs), [blocks, nowMs]);
+  const data = useMemo(() => feeChartData(range === "live" ? null : series, model), [range, series, model]);
+  const floorGwei = weiToGweiNumber(snapshot.minBaseFee);
+  const rangeLabel = HERO_RANGE_LABELS[range];
+  const caption =
+    range === "live"
+      ? `Base fee per block \u00b7 last ${points.length} blocks \u00b7 ${formatGasFixed(snapshot.block.gasUsed)} in block ${formatInteger(snapshot.block.number)}`
+      : feeChartCaption(rangeLabel, data.points);
+  return (
+    <>
+      <p className="text-xs text-ink-3">{caption}</p>
+      {range === "live" ? (
+        <HeroChart points={points} floorGwei={floorGwei} floorText={formatGwei(snapshot.minBaseFee)} height={height} />
+      ) : seriesError !== null && series === null ? (
+        <ChartBox label={`Base fee over ${rangeLabel}, unavailable`} height={height}>
+          <ChartNote>Could not load {rangeLabel}: {seriesError}</ChartNote>
+        </ChartBox>
+      ) : series === null ? (
+        <ChartBox label={`Base fee over ${rangeLabel}, loading`} busy height={height}>
+          <ChartNote>{seriesLoading ? `Loading ${rangeLabel}.` : `No history for ${rangeLabel} yet.`}</ChartNote>
+        </ChartBox>
+      ) : data.points.length === 0 ? (
+        <ChartBox label={feeChartLabel(rangeLabel, data.points)} height={height}>
+          <ChartNote>No buckets in {rangeLabel} yet.</ChartNote>
+        </ChartBox>
+      ) : (
+        <HeroHistoryChart data={data} rangeLabel={rangeLabel} height={height} />
+      )}
+    </>
+  );
+}
+
 /** Copy for an empty hero: a reorg took the last state away, or nothing has arrived yet. */
 export const RESYNC_COPY = "Resyncing after a reorg.";
 export const WAITING_COPY = "Waiting for the first sample.";
@@ -289,6 +354,7 @@ export function LiveHero({ network, live, status, model }: { network: string; li
   const series = useSeries(historical === null ? null : network, historical);
   return (
     <LiveHeroView
+      network={network}
       snapshot={live.display}
       values={frame.values}
       blocks={frame.blocks}
@@ -315,6 +381,7 @@ export function LiveHero({ network, live, status, model }: { network: string; li
  * state away, or a feed that has not delivered one yet.
  */
 export function LiveHeroView({
+  network,
   snapshot,
   values,
   blocks,
@@ -328,6 +395,7 @@ export function LiveHeroView({
   seriesError = null,
   model = "unknown",
 }: {
+  network: string;
   snapshot: LiveSnapshot | null;
   values: LiveValues | null;
   blocks: BlockPoint[];
@@ -341,9 +409,6 @@ export function LiveHeroView({
   seriesError?: string | null;
   model?: PricerModel;
 }) {
-  // Against the frame's wall clock: the chart slides every frame, and a block keeps its place.
-  const points = useMemo(() => (snapshot ? heroChartData(blocks, nowMs) : []), [snapshot, blocks, nowMs]);
-  const data = useMemo(() => feeChartData(range === "live" ? null : series, model), [range, series, model]);
   if (!snapshot) {
     return (
       <div className="vw-card p-5 text-sm text-ink-2" aria-busy="true">
@@ -361,12 +426,6 @@ export function LiveHeroView({
   const age = sampleAge(snapshot.sampledAt, nowMs);
   // No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all.
   const usdPerEth = freshUsdPrice(snapshot.ethUsd, nowMs);
-  const floorGwei = weiToGweiNumber(snapshot.minBaseFee);
-  const rangeLabel = HERO_RANGE_LABELS[range];
-  const caption =
-    range === "live"
-      ? `Base fee per block · last ${points.length} blocks · ${formatGasFixed(snapshot.block.gasUsed)} in block ${formatInteger(snapshot.block.number)}`
-      : feeChartCaption(rangeLabel, data.points);
   return (
     <div className="vw-card p-5">
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -409,26 +468,12 @@ export function LiveHeroView({
         <div className="flex flex-col gap-3 lg:col-span-8">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <RangeTabs options={HERO_RANGE_OPTIONS} value={range} onChange={onRangeChange ?? (() => undefined)} label="Base fee chart range" loading={range !== "live" && seriesLoading && series !== null} />
-            <StatusPill status={status} />
+            <div className="flex items-center gap-2">
+              <StatusPill status={status} />
+              <EnlargeLink network={network} view={chartView("base-fee")} range={range} size="hero" />
+            </div>
           </div>
-          <p className="text-xs text-ink-3">{caption}</p>
-          {range === "live" ? (
-            <HeroChart points={points} floorGwei={floorGwei} floorText={formatGwei(snapshot.minBaseFee)} />
-          ) : seriesError !== null && series === null ? (
-            <ChartBox label={`Base fee over ${rangeLabel}, unavailable`}>
-              <ChartNote>Could not load {rangeLabel}: {seriesError}</ChartNote>
-            </ChartBox>
-          ) : series === null ? (
-            <ChartBox label={`Base fee over ${rangeLabel}, loading`} busy>
-              <ChartNote>{seriesLoading ? `Loading ${rangeLabel}.` : `No history for ${rangeLabel} yet.`}</ChartNote>
-            </ChartBox>
-          ) : data.points.length === 0 ? (
-            <ChartBox label={feeChartLabel(rangeLabel, data.points)}>
-              <ChartNote>No buckets in {rangeLabel} yet.</ChartNote>
-            </ChartBox>
-          ) : (
-            <HeroHistoryChart data={data} rangeLabel={rangeLabel} />
-          )}
+          <HeroChartPanel snapshot={snapshot} blocks={blocks} nowMs={nowMs} range={range} series={series} seriesLoading={seriesLoading} seriesError={seriesError} model={model} />
         </div>
       </div>
     </div>

@@ -141,7 +141,7 @@ With `ws_url` the follower starts on the timer, pauses timer sampling once the `
 
 Slow loop, every `collector.slow_interval` (60 s): the ETH/USD spot from `collector.eth_usd_source` (default Coinbase's public spot endpoint, no key; disable with an empty value), stored in `collector_state` and included in every snapshot until it is older than `collector.eth_usd_max_age` (default 10 m); L1 pricer getters (`getL1BaseFeeEstimate`, `getL1PricingSurplus`, `getL1FeesAvailable`, `getL1PricingUnitsSinceUpdate`, `getLastL1PricingUpdateTime`, `getL1PricingEquilibrationUnits`, `getPerBatchGasCharge`, `getL1RewardRate`), fee-account balances (`ArbOwnerPublic.getInfraFeeAccount/getNetworkFeeAccount`, `ArbGasInfo.getL1RewardRecipient`, `eth_getBalance`), `eth_getLogs` on `0x…70` for new `OwnerActs` since the cursor, batch-report scan of new 2-transaction blocks, pruning.
 
-Backfill job (resumable, checkpoint in `collector_state`): walks backwards from the first stored block to `collector.backfill_depth` fetching headers, replaying from the nearest earlier `constraint_sets` row (starting backlogs from the owner action), and writing buckets only. Runs at low priority inside the same budget (it yields whenever the fast loop needs calls). On `archive: true` networks it re-anchors backlogs from historical state every `backfill_anchor_interval` blocks and records the replay error observed just before each anchor.
+Backfill job (resumable, checkpoint in `collector_state`): walks backwards from the first stored block to `collector.backfill_depth` fetching headers (the owner-action scan starts at the same depth plus a ten-minute margin, sampling the pricing state there from an archive endpoint when one exists, so a shallow development depth never re-indexes a whole chain), replaying from the nearest earlier `constraint_sets` row (starting backlogs from the owner action), and writing buckets only. Runs at low priority inside the same budget (it yields whenever the fast loop needs calls). On `archive: true` networks it re-anchors backlogs from historical state every `backfill_anchor_interval` blocks and records the replay error observed just before each anchor.
 
 Rate limiting: a token bucket per endpoint, `calls_per_second` tokens/s, burst 2× that. Every JSON-RPC call consumes one token, including each item inside a batch. Batches never exceed 100 items, never exceed the endpoint's pacer burst minus the fast reserve on a budgeted endpoint, and are never sent concurrently for the same network. The pacer never spends tokens the bucket does not hold and has two lanes: the head or timer tick's state sample is `Fast` and draws from a reserve of `max(1, rate/4)` tokens per second without queueing; whatever a fast caller needs beyond the reserve queues first come, first served with `Bulk` (everything else), so a demanding tick on a small budget can never starve the slow loop or the backfill. `tick_interval` can be set per network (`NETWORK_<NAME>_TICK_INTERVAL`); dedicated endpoints run at 250 ms, public ones stay at 1 s. Rate limiting is recognised from HTTP 429 and from JSON-RPC errors with codes -32005 or -32007 or a message naming a rate or request limit (QuickNode reports its 50 requests per second as `-32007`); all of these back off with the same exponential schedule (2 s to 60 s), share the endpoint's cooldown, halve the endpoint's batch cap, and drive failover when persistent. All requests send `User-Agent: gascurve/<version>`.
 
@@ -252,7 +252,8 @@ Client to server: `{ type: 'pong' }` and `{ type: 'subscribe', network: string }
 ## 8. Web (`web/`, Next.js App Router, TypeScript strict, Tailwind, Recharts, Vitest)
 
 ```
-src/app/                 layout, page (redirect to default network), [network]/page, [network]/how-it-works/page
+src/app/                 layout, page (redirect to default network), [network]/page, [network]/how-it-works/page,
+                         [network]/charts/[chart]/page (one chart enlarged; ?range= and ?constraint= deep-link the view)
 src/components/          PageHeader, LiveHero (live figures plus the base fee chart with a range control: Live 2 min from the block ring,
                          or 1h/24h/30d/all from /series), ConstraintCards, PricerEquation, HowItWorks (Explainer + TaylorChart), HistoryTabs,
                          SeriesCharts (constraint-level history), FeeFlows, L1Section, OwnerActionTimeline, NetworkSwitcher, DataFooter
@@ -262,6 +263,8 @@ src/lib/pricer.ts        approxExpBips and helpers in TS, unit-tested against th
 src/types/               the shapes above
 src/utils/               formatting (gwei, gas, durations), bips math
 ```
+
+Every chart card carries an enlarge control linking to `/{network}/charts/{chart}`, where `chart` is one of the registry ids in `src/lib/chartViews.ts`: `base-fee`, `backlog-sawtooth`, `contribution`, `gas-per-second`, `backlogs`, `fee-flows`, `l1`, `taylor`. The enlarged page draws the same component with the same hooks at a taller frame, keeps the range in `?range=` and the constraint slot in `?constraint=`, and offers tabs across every chart plus a link back to the section it came from.
 
 Units in copy: gas carries an SI prefix on the unit, never on the number (`11.2 Tgas`, `60 Mgas/s`, `812,345 gas` below one million). Figures that animate use fixed decimal counts per band so neighbouring elements never shift. USD figures (from `ethUsd`) are shown by default with the ETH amount on hover.
 

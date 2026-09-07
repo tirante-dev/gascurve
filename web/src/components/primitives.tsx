@@ -129,14 +129,22 @@ export function Legend({ items }: { items: { label: string; color: string; kind?
 }
 
 /**
+ * How tall a chart frame stands: a number of pixels, or the utility classes
+ * that size it. An enlarged chart is sized against the viewport, which is a
+ * class and not a number.
+ */
+export type ChartHeight = number | string;
+
+/**
  * Charts scroll inside this frame on narrow screens; the page never scrolls
  * sideways. The frame paints the chart surface, the colour every series
  * palette was validated against, so marks never sit on the card colour.
  */
-export function ChartFrame({ height, minWidth = 560, children, label }: { height: number; minWidth?: number; children: ReactNode; label: string }) {
+export function ChartFrame({ height, minWidth = 560, children, label }: { height: ChartHeight; minWidth?: number; children: ReactNode; label: string }) {
+  const sized = typeof height === "string";
   return (
     <div className="-mx-1 overflow-x-auto px-1" role="figure" aria-label={label}>
-      <div className="rounded-sm bg-chart" style={{ height, minWidth }}>
+      <div className={`rounded-sm bg-chart ${sized ? height : ""}`} style={{ height: sized ? undefined : height, minWidth }}>
         {children}
       </div>
     </div>

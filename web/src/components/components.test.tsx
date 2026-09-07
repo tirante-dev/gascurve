@@ -88,14 +88,14 @@ const history: Series = {
 
 describe("LiveHero", () => {
   it("lays the figures out in the left four columns and the chart in the right eight", () => {
-    const { container } = render(<LiveHeroView snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    const { container } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     const grid = container.querySelector(".lg\\:grid-cols-12");
     expect(grid).not.toBeNull();
     expect(grid?.querySelector(".lg\\:col-span-4")).not.toBeNull();
     expect(grid?.querySelector(".lg\\:col-span-8")).not.toBeNull();
   });
   it("shows the fee, multiplier, floor, stats and costs at fixed widths", () => {
-    render(<LiveHeroView snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     const hero = screen.getByText("0.3997");
     expect(hero).toHaveClass("tabular-nums");
     expect(hero).toHaveStyle({ minWidth: "6ch" });
@@ -117,7 +117,7 @@ describe("LiveHero", () => {
   });
   it("renders the eased figures rather than the sample when a frame has them", () => {
     const values = { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.5, multiplier: 25, gasPerSecond10: 41_000_000, transferEth: 1.05e-5, exponent: 3.3 };
-    render(<LiveHeroView snapshot={snapshot} values={values} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    render(<LiveHeroView network="robinhood" snapshot={snapshot} values={values} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByText("0.5000")).toBeInTheDocument();
     expect(screen.getByText("25.00")).toBeInTheDocument();
     expect(screen.getByText("41.0")).toBeInTheDocument();
@@ -133,7 +133,7 @@ describe("LiveHero", () => {
     expect(screen.getByText(/last 0 blocks/)).toBeInTheDocument();
   });
   it("charts the block ring against the floor, with a relative time axis", () => {
-    render(<LiveHeroView snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     const chart = screen.getByRole("figure", { name: "Base fee per block over the last 120 seconds, 20 blocks, 0.3997 to 0.3997 gwei, with the floor at 0.0200 gwei" });
     // Always two minutes, whatever the ring covers, so a filling ring never rescales the axis; it reads in relative time.
     expect(within(chart).getByText("-2:00")).toBeInTheDocument();
@@ -161,9 +161,9 @@ describe("LiveHero", () => {
     const canonical = ring.slice(-3).map((b) => ({ ...b, baseFee: "800000000" }));
     const blocks = applyReorg(ring, head - 3, canonical);
     expect(blocks).toHaveLength(20);
-    const { rerender } = render(<LiveHeroView snapshot={snapshot} values={null} blocks={ring} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={ring} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByRole("figure", { name: /0.3997 to 0.3997 gwei/ })).toBeInTheDocument();
-    rerender(<LiveHeroView snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByRole("figure", { name: /0.3997 to 0.8000 gwei/ })).toBeInTheDocument();
   });
   it("names what a hovered block carried", () => {
@@ -182,12 +182,12 @@ describe("LiveHero", () => {
   });
   it("swaps the chart body for the chosen range and puts the live ring back, leaving the figures on the left alone", async () => {
     const onRangeChange = vi.fn();
-    const { rerender } = render(<LiveHeroView snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="live" onRangeChange={onRangeChange} />);
+    const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="live" onRangeChange={onRangeChange} />);
     expect(screen.getByRole("tab", { name: "Live" })).toHaveAttribute("aria-selected", "true");
     await userEvent.click(screen.getByRole("tab", { name: "24h" }));
     expect(onRangeChange).toHaveBeenCalledWith("24h");
 
-    rerender(<LiveHeroView snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" onRangeChange={onRangeChange} series={history} model="constraints" />);
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" onRangeChange={onRangeChange} series={history} model="constraints" />);
     const chart = screen.getByRole("figure", { name: /^Base fee over 24h on a log scale, 2 buckets/ });
     expect(chart.firstElementChild).toHaveClass("h-[180px]");
     expect(chart.firstElementChild).toHaveClass("lg:h-[260px]");
@@ -201,14 +201,14 @@ describe("LiveHero", () => {
     expect(screen.getByText("55,812,345")).toBeInTheDocument();
     expect(screen.getByText("38.0")).toBeInTheDocument();
 
-    rerender(<LiveHeroView snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="live" onRangeChange={onRangeChange} series={history} model="constraints" />);
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={sawtoothBlocks(2, snapshot.block.ts)} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="live" onRangeChange={onRangeChange} series={history} model="constraints" />);
     expect(screen.getByRole("figure", { name: /^Base fee per block over the last 120 seconds/ })).toBeInTheDocument();
     expect(screen.queryByRole("figure", { name: /log scale/ })).toBeNull();
   });
 
   it("keeps the chart box at one height while a range loads, when it is empty and when it fails", () => {
     const box = () => screen.getByRole("figure").firstElementChild;
-    const props = { snapshot, values: null, blocks: [], nowMs: Date.parse(snapshot.sampledAt), status: "open" as const, range: "30d" as const, model: "constraints" as const };
+    const props = { network: "robinhood", snapshot, values: null, blocks: [], nowMs: Date.parse(snapshot.sampledAt), status: "open" as const, range: "30d" as const, model: "constraints" as const };
     const { rerender } = render(<LiveHeroView {...props} series={null} seriesLoading />);
     expect(screen.getByText("Loading 30d.")).toBeInTheDocument();
     expect(box()).toHaveClass("h-[180px]");
@@ -253,12 +253,12 @@ describe("LiveHero", () => {
   });
   it("shows the chain's cadence while the sample is fresh and a collector lag warning once it is stale", () => {
     // The block closed at 07:19:59Z and was sampled at 07:20:00Z; three seconds later both are fresh.
-    const { rerender } = render(<LiveHeroView snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse("2026-09-06T07:20:03Z")} status="open" />);
+    const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse("2026-09-06T07:20:03Z")} status="open" />);
     expect(screen.getByText("Since last block")).toBeInTheDocument();
     expect(screen.getByText("4.0")).toBeInTheDocument();
     expect(screen.queryByText(/collector lagging/)).toBeNull();
     // Twelve seconds after the sample the number would read as a chain stall; it is the collector that is behind.
-    rerender(<LiveHeroView snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse("2026-09-06T07:20:12.4Z")} status="open" />);
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse("2026-09-06T07:20:12.4Z")} status="open" />);
     const pill = screen.getByText("collector lagging 12 s");
     expect(pill).toHaveClass("text-warning");
     expect(pill).toHaveAttribute("title", expect.stringContaining("12 s old"));
@@ -267,7 +267,7 @@ describe("LiveHero", () => {
   });
   it("prices the transfer and swap tiles in dollars when the quote is fresh, keeping the ETH amount on hover and in the description", () => {
     const priced = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:15:00Z", source: "coingecko" } };
-    render(<LiveHeroView snapshot={priced} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    render(<LiveHeroView network="robinhood" snapshot={priced} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     // 21,000 gas at 0.3997 gwei is 0.0000084 ETH: about four cents.
     expect(screen.getByText("0.04")).toHaveStyle({ minWidth: "6ch" });
     expect(screen.getByText("0.25")).toBeInTheDocument();
@@ -281,11 +281,11 @@ describe("LiveHero", () => {
   it("falls back to ETH when there is no quote at all and when the one there is has gone stale", () => {
     // Eleven minutes old: past the ten minute cutoff, so the fee has moved on and the price has not.
     const stale = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:09:00Z", source: "coingecko" } };
-    const { rerender } = render(<LiveHeroView snapshot={stale} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    const { rerender } = render(<LiveHeroView network="robinhood" snapshot={stale} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByText("0.00000839")).toHaveStyle({ minWidth: "10ch" });
     expect(screen.queryByText("0.04")).toBeNull();
     // And with no quote the tiles are exactly what they were before there was one.
-    rerender(<LiveHeroView snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByText("0.00000839")).toBeInTheDocument();
     expect(screen.getByText("0.0000600")).toBeInTheDocument();
   });
@@ -305,7 +305,7 @@ describe("LiveHero", () => {
 
 describe("ConstraintCards", () => {
   it("renders one card per constraint with its share of x, the sample standing in before any frame", () => {
-    render(<ConstraintCardsView snapshot={snapshot} values={null} blocks={[]} />);
+    render(<ConstraintCardsView network="robinhood" snapshot={snapshot} values={null} blocks={[]} />);
     expect(screen.getByText("Constraint 1")).toBeInTheDocument();
     expect(screen.getByText("Constraint 2")).toBeInTheDocument();
     expect(screen.getByText("99.9%").parentElement).toHaveTextContent("99.9% of x");
@@ -330,7 +330,7 @@ describe("ConstraintCards", () => {
   it("charts the raw sawtooth of a short window against its drain threshold, and shows the eased figures", () => {
     const blocks = sawtoothBlocks(20, snapshot.block.ts);
     const values = { ...targetValues(snapshot, blocks, 0), backlogs: [22_000_000, 11_100_000_000_000], bips: [244.4, 32_118.5] };
-    render(<ConstraintCardsView snapshot={snapshot} values={values} blocks={blocks} />);
+    render(<ConstraintCardsView network="robinhood" snapshot={snapshot} values={values} blocks={blocks} />);
     // The label names the span, the scale and the threshold, so the chart is
     // readable without seeing it: the peak is 40M, the threshold 60M, and the
     // axis tops out at the larger of the two.
@@ -354,14 +354,14 @@ describe("ConstraintCards", () => {
   });
   it("subscribes to the frame store and says so when nothing contributes", () => {
     const frame = createFrameStore();
-    render(<ConstraintCards live={{ display: snapshot, frame, resyncing: false }} />);
+    render(<ConstraintCards network="robinhood" live={{ display: snapshot, frame, resyncing: false }} />);
     expect(screen.getByText("3.11")).toBeInTheDocument();
     act(() => frame.set({ blocks: [], values: { ...targetValues(snapshot, [], 0), backlogs: [0, 0], bips: [0, 0], shares: [0, 0] }, nowMs: 0 }));
     expect(screen.getAllByText("no contribution")).toHaveLength(2);
     expect(screen.getAllByText("0.0000")).toHaveLength(2);
   });
   it("renders the legacy card for legacy networks", () => {
-    render(<ConstraintCardsView snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 90_000_000 } }} values={null} blocks={[]} />);
+    render(<ConstraintCardsView network="robinhood" snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 90_000_000 } }} values={null} blocks={[]} />);
     expect(screen.getByText(/Legacy pricer/)).toBeInTheDocument();
     expect(screen.getByText("70 Mgas free")).toBeInTheDocument();
     expect(screen.getByText(/x = 0.0280/)).toBeInTheDocument();
@@ -369,9 +369,9 @@ describe("ConstraintCards", () => {
     expect(screen.queryByText(/2 s average/)).toBeNull();
   });
   it("handles a missing snapshot, and names a reorg repair as one", () => {
-    const { rerender } = render(<ConstraintCardsView snapshot={null} values={null} blocks={[]} />);
+    const { rerender } = render(<ConstraintCardsView network="robinhood" snapshot={null} values={null} blocks={[]} />);
     expect(screen.getByText("Waiting for the first sample.")).toBeInTheDocument();
-    rerender(<ConstraintCardsView snapshot={null} values={null} blocks={[]} resyncing />);
+    rerender(<ConstraintCardsView network="robinhood" snapshot={null} values={null} blocks={[]} resyncing />);
     expect(screen.getByText("Resyncing after a reorg.")).toBeInTheDocument();
   });
   it("draws nothing until there are two samples, and scales the axis to the threshold when the backlog stays under it", () => {

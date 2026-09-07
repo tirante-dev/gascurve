@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { PricerModel, Series } from "@/types";
+import type { PricerModel, Series, SeriesRange } from "@/types";
+import { chartView } from "@/lib/chartViews";
 import { describeAction, feeChartData, feeTooltipRows, ownerActionNote } from "@/lib/feeChart";
 import {
   hasUnknownSets,
@@ -22,13 +23,18 @@ import {
   type Segment,
 } from "@/utils/chart";
 import { formatDateTime, formatGas, formatGasPerSecond, formatInteger, formatSignificant, formatTick, unbroken } from "@/utils/format";
+import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip, applicableRows, type TooltipRow } from "./ChartTooltip";
-import { ChartFrame, Legend } from "./primitives";
+import { ChartFrame, Legend, type ChartHeight } from "./primitives";
 
 const SYNC_ID = "history";
 
 /** Gas ticks carry their unit ("30 Mgas"), so the axis reserves the width for one. */
 const GAS_AXIS_WIDTH = 62;
+
+/** The heights the history charts stand at on the network page; the enlarged views pass their own. */
+export const SERIES_CHART_HEIGHT = 220;
+export const BACKLOG_CHART_HEIGHT = 140;
 
 /** True when segment `s` is the one in force for the hovered or selected row. */
 function inForce(s: Segment): (row: Record<string, unknown>) => boolean {
@@ -62,16 +68,209 @@ function formatFeePart(eth: number | null): string {
   return eth === null ? "n/a" : formatSignificant(eth, 4);
 }
 
-function ChartBlock({ title, legend, children, height, label }: { title: string; legend?: { label: string; color: string; kind?: "rect" | "line" }[]; children: React.ReactNode; height: number; label: string }) {
+/**
+ * Everything the history charts draw, derived once from a Series: the rows
+ * themselves, the constraint segments the sets divide them into, and the
+ * tooltip rows and legends that follow from those. The network page and the
+ * enlarged view of a single chart both build this, so the two draw the same
+ * marks from the same numbers.
+ */
+export type SeriesModel = {
+  points: ChartPoint[];
+  drawn: ChartPoint[];
+  markers: ReturnType<typeof feeChartData>["markers"];
+  span: number;
+  segments: Segment[];
+  /** True when some point's constraint set is not known, so its backlogs go under the unlabelled slots. */
+  unknown: boolean;
+  /** True when some point's set is known but its per-constraint split was never recorded. */
+  unrecorded: boolean;
+  count: number;
+  indices: number[];
+  hasTargets: boolean;
+  note: (row: Record<string, unknown>) => string | null;
+  feeRows: TooltipRow[];
+  contributionRows: TooltipRow[];
+  gasRows: TooltipRow[];
+  backlogRows: TooltipRow[];
+  backlogRowsFor: (index: number) => TooltipRow[];
+  contributionLegend: { label: string; color: string; kind?: "rect" | "line" }[];
+  gasLegend: { label: string; color: string; kind?: "rect" | "line" }[];
+};
+
+export function buildSeriesModel(series: Series, model: PricerModel): SeriesModel {
+  // The charts draw `drawn`, which duplicates each bucket where the set in
+  // force changes so a replacement is a vertical edge rather than a slope
+  // across the bucket; `points` is one row per bucket, for the table and the
+  // inspector. The base fee itself is drawn by the hero, at every range, so
+  // it is not here.
+  const { points, drawn, markers, span, bucketSeconds } = feeChartData(series, model);
+  const segments = segmentsFor(series, model);
+  // Two ways a point ends up in the unknown-split series: its set is not
+  // known (backlogs then go under the unlabelled slots too), or its set is
+  // known but its per-constraint split was never recorded.
+  const unknown = hasUnknownSets(series, model);
+  const unrecorded = hasUnrecordedSplit(series);
+  const count = seriesCount(series);
+  const indices = Array.from({ length: count }, (_, i) => i);
+  const note = ownerActionNote(markers, bucketSeconds);
+
+  const contributionRows: TooltipRow[] = segments.map((s) => ({
+    label: s.label,
+    color: s.color,
+    kind: "rect",
+    value: (r) => known(r[s.key], (v) => v.toFixed(4)),
+    when: splitInForce(s),
+  }));
+  if (unknown) contributionRows.push({ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => known(r[UNKNOWN_KEY], (v) => v.toFixed(4)), when: (r) => r.setKnown === false });
+  if (unrecorded) contributionRows.push({ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => known(r[UNKNOWN_KEY], (v) => v.toFixed(4)), when: (r) => r.setKnown === true && r.splitKnown === false });
+  contributionRows.push({ label: "x total", value: (r) => Number(r.x).toFixed(4) });
+
+  const gasRows: TooltipRow[] = [{ label: "gas per second", color: "var(--series-1)", value: (r) => formatGasPerSecond(Number(r.gps)) }];
+  indices.forEach((i) => gasRows.push({ label: `target C${i + 1} in force`, color: seriesColor(i), value: (r) => formatGasPerSecond(Number(r[targetKey(i)])), when: (r) => typeof r[targetKey(i)] === "number" }));
+
+  const backlogRowsFor = (i: number): TooltipRow[] => [
+    ...segments
+      .filter((s) => s.index === i)
+      .map((s): TooltipRow => ({
+        label: `backlog ${s.label}`,
+        color: s.color,
+        value: (r) => known(r[s.backlogKey], (v) => formatGas(v)),
+        when: (r) => inForce(s)(r) && typeof r[s.backlogKey] === "number",
+      })),
+    ...(unknown
+      ? [
+          {
+            label: `backlog C${i + 1} (set unknown)`,
+            color: UNKNOWN_COLOR,
+            value: (r: Record<string, unknown>) => known(r[unknownBacklogKey(i)], (v) => formatGas(v)),
+            when: (r: Record<string, unknown>) => r.setKnown === false && typeof r[unknownBacklogKey(i)] === "number",
+          },
+        ]
+      : []),
+  ];
+
+  const contributionLegend = [
+    ...segments.map((s) => ({ label: s.label, color: s.color })),
+    ...(unknown ? [{ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR }] : []),
+    ...(unrecorded ? [{ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR }] : []),
+  ];
+  const hasTargets = segments.some((s) => s.constraint !== null);
+  const gasLegend = [{ label: "gas/s", color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
+
+  return {
+    points,
+    drawn,
+    markers,
+    span,
+    segments,
+    unknown,
+    unrecorded,
+    count,
+    indices,
+    hasTargets,
+    note,
+    feeRows: feeTooltipRows(),
+    contributionRows,
+    gasRows,
+    backlogRows: indices.flatMap(backlogRowsFor),
+    backlogRowsFor,
+    contributionLegend,
+    gasLegend,
+  };
+}
+
+/** The time axis every history chart shares, so hovering one lines up with the rest. */
+function timeAxis(span: number) {
+  return <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />;
+}
+
+/** Owner actions as dashed rules, numbered chronologically; the list under the charts decodes them. */
+function markerLines(markers: SeriesModel["markers"]) {
+  return markers.map((m, i) => (
+    <ReferenceLine key={`${m.t}-${m.action.txHash}`} x={m.t} stroke={MARKER_COLOR} strokeWidth={1} strokeDasharray="2 3" label={{ value: String(i + 1), position: "insideTopLeft", fill: "var(--ink-2)", fontSize: 10 }} />
+  ));
+}
+
+const bucketTitle = (t: number) => formatDateTime(t);
+
+/** Each constraint's share of the exponent, stacked, one series per constraint set. */
+export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
+  return (
+    <ChartFrame height={height} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
+          <CartesianGrid vertical={false} />
+          {timeAxis(m.span)}
+          <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
+          <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.contributionRows} note={m.note} />} />
+          {m.segments.map((s) => (
+            <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
+          ))}
+          {m.unknown || m.unrecorded ? (
+            <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
+          ) : null}
+          {markerLines(m.markers)}
+        </AreaChart>
+      </ResponsiveContainer>
+    </ChartFrame>
+  );
+}
+
+/** Gas carried per second against the target of every constraint in force. */
+export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
+  return (
+    <ChartFrame height={height} label="Gas used per second with each constraint target in force drawn as a stepped line">
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
+          <CartesianGrid vertical={false} />
+          {timeAxis(m.span)}
+          <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
+          <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.note} />} />
+          <Area type="monotone" dataKey="gps" stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+          {m.hasTargets ? m.indices.map((i) => <Line key={i} type="stepAfter" dataKey={targetKey(i)} stroke={seriesColor(i)} strokeDasharray="4 3" dot={false} isAnimationActive={false} />) : null}
+        </ComposedChart>
+      </ResponsiveContainer>
+    </ChartFrame>
+  );
+}
+
+/** One slot's backlog over time, on its own scale. A replaced constraint starts a new series. */
+export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }: { m: SeriesModel; index: number; label: string; height?: ChartHeight }) {
+  return (
+    <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+          <CartesianGrid vertical={false} />
+          {timeAxis(m.span)}
+          <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
+          <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.note} />} />
+          {m.segments
+            .filter((s) => s.index === index)
+            .map((s) => (
+              <Area key={s.backlogKey} type="monotone" dataKey={s.backlogKey} connectNulls={false} stroke={s.color} strokeWidth={2} fill={s.color} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+            ))}
+          {m.unknown ? (
+            <Area type="monotone" dataKey={unknownBacklogKey(index)} connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={2} strokeDasharray="4 3" fill={UNKNOWN_COLOR} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+          ) : null}
+        </AreaChart>
+      </ResponsiveContainer>
+    </ChartFrame>
+  );
+}
+
+/** The card a history chart sits in: its name, its legend and the control that enlarges it. */
+function ChartBlock({ title, legend, action, children }: { title: string; legend?: { label: string; color: string; kind?: "rect" | "line" }[]; action?: ReactNode; children: ReactNode }) {
   return (
     <div className="vw-card p-3">
-      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
         <h3 className="text-sm font-semibold text-ink">{title}</h3>
-        {legend && legend.length > 1 ? <Legend items={legend} /> : null}
+        <div className="flex items-center gap-3">
+          {legend && legend.length > 1 ? <Legend items={legend} /> : null}
+          {action}
+        </div>
       </div>
-      <ChartFrame height={height} label={label}>
-        {children}
-      </ChartFrame>
+      {children}
     </div>
   );
 }
@@ -110,116 +309,36 @@ function PointInspector({ points, groups, note }: { points: ChartPoint[]; groups
 /**
  * History charts. `model` is the network's pricer (from the api's Network or
  * the live snapshot): the series carries none of its own, and an empty
- * constraint-set list means "no set known", never "legacy".
+ * constraint-set list means "no set known", never "legacy". Every card links
+ * to the chart's own page at the range on screen.
  */
-export function SeriesCharts({ series, loading, model }: { series: Series | null; loading: boolean; model: PricerModel }) {
-  // One row per bucket for the table and the inspector; the charts draw
-  // `drawn`, which duplicates each bucket where the set in force changes so a
-  // replacement is a vertical edge rather than a slope across the bucket. The
-  // base fee itself is drawn by the hero, at every range, so it is not here.
-  const { points, drawn, markers, span, bucketSeconds } = useMemo(() => feeChartData(series, model), [series, model]);
-  const segments = useMemo(() => (series ? segmentsFor(series, model) : []), [series, model]);
-  // Two ways a point ends up in the unknown-split series: its set is not
-  // known (backlogs then go under the unlabelled slots too), or its set is
-  // known but its per-constraint split was never recorded.
-  const unknown = series ? hasUnknownSets(series, model) : false;
-  const unrecorded = series ? hasUnrecordedSplit(series) : false;
-  const unknownSplit = unknown || unrecorded;
-  const count = series ? seriesCount(series) : 0;
-  const indices = Array.from({ length: count }, (_, i) => i);
+export function SeriesCharts({ network, range, series, loading, model }: { network: string; range: SeriesRange; series: Series | null; loading: boolean; model: PricerModel }) {
+  const m = useMemo(() => (series ? buildSeriesModel(series, model) : null), [series, model]);
   const [tableOpen, setTableOpen] = useState(false);
-  const tickFormatter = (t: number) => formatTick(t, span);
-  const title = (t: number) => formatDateTime(t);
-  const note = ownerActionNote(markers, bucketSeconds);
 
-  if (!series) {
+  if (!series || m === null) {
     return (
       <div className="vw-card p-6 text-sm text-ink-2" aria-busy={loading}>
         {loading ? "Loading history." : "No history yet."}
       </div>
     );
   }
-  if (points.length === 0) {
+  if (m.points.length === 0) {
     return <div className="vw-card p-6 text-sm text-ink-2">No buckets in this range yet.</div>;
   }
 
-  const feeRows: TooltipRow[] = feeTooltipRows();
-  const contributionRows: TooltipRow[] = segments.map((s) => ({
-    label: s.label,
-    color: s.color,
-    kind: "rect",
-    value: (r) => known(r[s.key], (v) => v.toFixed(4)),
-    when: splitInForce(s),
-  }));
-  if (unknown) contributionRows.push({ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => known(r[UNKNOWN_KEY], (v) => v.toFixed(4)), when: (r) => r.setKnown === false });
-  if (unrecorded) contributionRows.push({ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR, kind: "rect", value: (r) => known(r[UNKNOWN_KEY], (v) => v.toFixed(4)), when: (r) => r.setKnown === true && r.splitKnown === false });
-  contributionRows.push({ label: "x total", value: (r) => Number(r.x).toFixed(4) });
-  const gasRows: TooltipRow[] = [{ label: "gas per second", color: "var(--series-1)", value: (r) => formatGasPerSecond(Number(r.gps)) }];
-  indices.forEach((i) => gasRows.push({ label: `target C${i + 1} in force`, color: seriesColor(i), value: (r) => formatGasPerSecond(Number(r[targetKey(i)])), when: (r) => typeof r[targetKey(i)] === "number" }));
-  const backlogRowsFor = (i: number): TooltipRow[] => [
-    ...segments
-      .filter((s) => s.index === i)
-      .map((s): TooltipRow => ({
-        label: `backlog ${s.label}`,
-        color: s.color,
-        value: (r) => known(r[s.backlogKey], (v) => formatGas(v)),
-        when: (r) => inForce(s)(r) && typeof r[s.backlogKey] === "number",
-      })),
-    ...(unknown
-      ? [
-          {
-            label: `backlog C${i + 1} (set unknown)`,
-            color: UNKNOWN_COLOR,
-            value: (r: Record<string, unknown>) => known(r[unknownBacklogKey(i)], (v) => formatGas(v)),
-            when: (r: Record<string, unknown>) => r.setKnown === false && typeof r[unknownBacklogKey(i)] === "number",
-          },
-        ]
-      : []),
-  ];
-  const backlogRows: TooltipRow[] = indices.flatMap(backlogRowsFor);
-  const contributionLegend = [
-    ...segments.map((s) => ({ label: s.label, color: s.color })),
-    ...(unknown ? [{ label: UNKNOWN_LABEL, color: UNKNOWN_COLOR }] : []),
-    ...(unrecorded ? [{ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR }] : []),
-  ];
-  const hasTargets = segments.some((s) => s.constraint !== null);
-  const gasLegend = [{ label: "gas/s", color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
-  // Markers carry their chronological number; the list under the charts decodes them.
-  const markerLines = markers.map((m, i) => (
-    <ReferenceLine key={`${m.t}-${m.action.txHash}`} x={m.t} stroke={MARKER_COLOR} strokeWidth={1} strokeDasharray="2 3" label={{ value: String(i + 1), position: "insideTopLeft", fill: "var(--ink-2)", fontSize: 10 }} />
-  ));
-
-  const xAxis = <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={tickFormatter} tickLine={false} axisLine={false} minTickGap={48} />;
-
   return (
     <div className="flex flex-col gap-4" style={{ opacity: loading ? 0.7 : 1, transition: "opacity 200ms" }}>
-      <ChartBlock title="Contribution to x per constraint" legend={contributionLegend} height={220} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={drawn} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
-            <CartesianGrid vertical={false} />
-            {xAxis}
-            <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
-            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={title} rows={contributionRows} note={note} />} />
-            {segments.map((s) => (
-              <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
-            ))}
-            {unknownSplit ? <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} /> : null}
-            {markerLines}
-          </AreaChart>
-        </ResponsiveContainer>
+      <ChartBlock
+        title="Contribution to x per constraint"
+        legend={m.contributionLegend}
+        action={<EnlargeLink network={network} view={chartView("contribution")} range={range} />}
+      >
+        <ContributionChart m={m} />
       </ChartBlock>
 
-      <ChartBlock title="Gas per second against each target" legend={gasLegend} height={220} label="Gas used per second with each constraint target in force drawn as a stepped line">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={drawn} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
-            <CartesianGrid vertical={false} />
-            {xAxis}
-            <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
-            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={title} rows={gasRows} note={note} />} />
-            <Area type="monotone" dataKey="gps" stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
-            {hasTargets ? indices.map((i) => <Line key={i} type="stepAfter" dataKey={targetKey(i)} stroke={seriesColor(i)} strokeDasharray="4 3" dot={false} isAnimationActive={false} />) : null}
-          </ComposedChart>
-        </ResponsiveContainer>
+      <ChartBlock title="Gas per second against each target" legend={m.gasLegend} action={<EnlargeLink network={network} view={chartView("gas-per-second")} range={range} />}>
+        <GasPerSecondChart m={m} />
       </ChartBlock>
 
       <div className="vw-card p-3">
@@ -227,58 +346,52 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
           <h3 className="text-sm font-semibold text-ink">Backlog per constraint (gas)</h3>
           <span className="text-xs text-ink-3">one panel per slot, each on its own scale; a replaced constraint starts a new series</span>
         </div>
-        <div className={`grid gap-3 ${count > 2 ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
-          {indices.map((i) => (
+        <div className={`grid gap-3 ${m.count > 2 ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
+          {m.indices.map((i) => (
             <div key={i}>
               <div className="mb-1 flex items-center gap-1.5 text-xs text-ink-2">
                 <span className="inline-block h-2.5 w-2.5 rounded-[2px]" style={{ background: seriesColor(i) }} aria-hidden="true" />
-                {slotLabel(series, i, model)}
+                <span className="min-w-0">{slotLabel(series, i, model)}</span>
+                <EnlargeLink
+                  network={network}
+                  view={chartView("backlogs")}
+                  range={range}
+                  constraint={i}
+                  size="hero"
+                  label={`the ${slotLabel(series, i, model)} backlog`}
+                  className="ml-auto"
+                />
               </div>
-              <ChartFrame height={140} minWidth={260} label={`Backlog of ${slotLabel(series, i, model)} over time`}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={drawn} syncId={SYNC_ID} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
-                    <CartesianGrid vertical={false} />
-                    {xAxis}
-                    <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
-                    <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={title} rows={backlogRowsFor(i)} note={note} />} />
-                    {segments
-                      .filter((s) => s.index === i)
-                      .map((s) => (
-                        <Area key={s.backlogKey} type="monotone" dataKey={s.backlogKey} connectNulls={false} stroke={s.color} strokeWidth={2} fill={s.color} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
-                      ))}
-                    {unknown ? <Area type="monotone" dataKey={unknownBacklogKey(i)} connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={2} strokeDasharray="4 3" fill={UNKNOWN_COLOR} fillOpacity={0.1} isAnimationActive={false} activeDot={false} /> : null}
-                  </AreaChart>
-                </ResponsiveContainer>
-              </ChartFrame>
+              <BacklogChart m={m} index={i} label={slotLabel(series, i, model)} />
             </div>
           ))}
         </div>
       </div>
 
-      {markers.length > 0 ? (
+      {m.markers.length > 0 ? (
         <ol className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink-2">
-          {markers.map((m, i) => (
-            <li key={`${m.t}-${m.action.txHash}`}>
+          {m.markers.map((mk, i) => (
+            <li key={`${mk.t}-${mk.action.txHash}`}>
               <span className="num mr-1 rounded bg-surface-2 px-1 text-ink">{i + 1}</span>
-              <span className="num text-ink">{formatDateTime(m.t)}</span> · {describeAction(m.action)}
+              <span className="num text-ink">{formatDateTime(mk.t)}</span> · {describeAction(mk.action)}
             </li>
           ))}
         </ol>
       ) : null}
 
       <PointInspector
-        points={points}
+        points={m.points}
         groups={[
-          { title: "fee", rows: feeRows },
-          { title: "split", rows: contributionRows },
-          { title: "gas", rows: gasRows },
-          { title: "backlog", rows: backlogRows },
+          { title: "fee", rows: m.feeRows },
+          { title: "split", rows: m.contributionRows },
+          { title: "gas", rows: m.gasRows },
+          { title: "backlog", rows: m.backlogRows },
         ]}
-        note={note}
+        note={m.note}
       />
 
       <details className="text-xs text-ink-2" onToggle={(e) => setTableOpen((e.currentTarget as HTMLDetailsElement).open)}>
-        <summary className="cursor-pointer select-none">Data table ({formatInteger(points.length)} buckets, every value the charts draw)</summary>
+        <summary className="cursor-pointer select-none">Data table ({formatInteger(m.points.length)} buckets, every value the charts draw)</summary>
         {tableOpen ? (
           <div className="mt-2 max-h-[480px] overflow-auto">
             <table className="num w-full min-w-[960px] text-left">
@@ -293,7 +406,7 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
                   <th scope="col" className="py-1 pr-3 font-medium">x</th>
                   <th scope="col" className="py-1 pr-3 font-medium">split (set)</th>
                   <th scope="col" className="py-1 pr-3 font-medium">gas/s</th>
-                  {indices.map((i) => (
+                  {m.indices.map((i) => (
                     <th key={i} scope="col" className="py-1 pr-3 font-medium">
                       backlog C{i + 1}
                     </th>
@@ -305,7 +418,7 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
                 </tr>
               </thead>
               <tbody>
-                {points.map((p: ChartPoint) => (
+                {m.points.map((p: ChartPoint) => (
                   <tr key={p.t} className="border-t border-hairline">
                     <th scope="row" className="py-1 pr-3 font-normal">{formatDateTime(p.t)}</th>
                     <td className="py-1 pr-3">{formatSignificant(p.feeAvg, 4)}</td>
@@ -314,11 +427,11 @@ export function SeriesCharts({ series, loading, model }: { series: Series | null
                     <td className="py-1 pr-3">{formatSignificant(p.floor, 3)}</td>
                     <td className="py-1 pr-3">{p.x.toFixed(4)}</td>
                     <td className="py-1 pr-3">
-                      {describeSplit(p, segments)} ({p.setKnown ? `set ${p.constraintSetId}` : "unknown set"})
+                      {describeSplit(p, m.segments)} ({p.setKnown ? `set ${p.constraintSetId}` : "unknown set"})
                     </td>
                     <td className="py-1 pr-3">{formatGasPerSecond(p.gps)}</td>
-                    {indices.map((i) => {
-                      const s = p.setKnown ? segments.find((seg) => seg.setId === p.constraintSetId && seg.index === i) : undefined;
+                    {m.indices.map((i) => {
+                      const s = p.setKnown ? m.segments.find((seg) => seg.setId === p.constraintSetId && seg.index === i) : undefined;
                       const v = s ? p[s.backlogKey] : p.setKnown ? null : p[unknownBacklogKey(i)];
                       return (
                         <td key={i} className="py-1 pr-3">

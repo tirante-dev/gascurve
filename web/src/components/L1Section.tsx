@@ -5,24 +5,42 @@ import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YA
 import { useApi } from "@/hooks/useApi";
 import { getBatches } from "@/lib/api/batches";
 import { getL1 } from "@/lib/api/l1";
-import type { LiveSnapshot, Series, SeriesRange } from "@/types";
-import { joinCosts, logDomain, resampleFees, spanSeconds } from "@/utils/chart";
+import type { BatchSeries, L1Series, LiveSnapshot, Series, SeriesRange } from "@/types";
+import { chartView } from "@/lib/chartViews";
+import { joinCosts, logDomain, resampleFees, spanSeconds, type CostRow } from "@/utils/chart";
 import { formatDateTime, formatDuration, formatEth, formatGas, formatGwei, formatInteger, formatSignificant, formatTick } from "@/utils/format";
+import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip } from "./ChartTooltip";
-import { Card, ChartFrame, Legend, Stat } from "./primitives";
+import { Card, ChartFrame, Legend, Stat, type ChartHeight } from "./primitives";
 
 // "batch" is exactly one point per posting report (every 12 to 24 s on Robinhood).
 // Both reports and L2 fees are grouped into 15 s buckets before the join, so a
 // bucket that holds two reports counts its L2 fees once.
 export const RESOLUTION_SECONDS: Record<string, number> = { batch: 15, "1m": 60, "15m": 900, "1h": 3600 };
 
-/** L1 pricer values and what the chain pays Ethereum against what users pay. Collapsed by default. */
-export function L1Section({ network, range, snapshot, series }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null }) {
-  const [open, setOpen] = useState(false);
+/** The height the cost chart stands at in the section; the enlarged view passes its own. */
+export const L1_CHART_HEIGHT = 220;
+
+/** What the section and the enlarged chart both need: the joined rows and what they add up to. */
+export type L1Costs = {
+  rows: CostRow[];
+  span: number;
+  domain: [number, number];
+  totals: { l1Eth: number; l2Eth: number; count: number; interval: number };
+  batches: ReturnType<typeof useApi<BatchSeries>>;
+  l1: ReturnType<typeof useApi<L1Series>>;
+};
+
+/**
+ * Batch posting reports joined to the L2 fees of the same buckets. `enabled`
+ * is false while the section is collapsed, so a page that never opens it
+ * never asks the api for either series.
+ */
+export function useL1Costs(network: string, range: SeriesRange, series: Series | null, enabled = true): L1Costs {
   const batchFetcher = useCallback((signal: AbortSignal) => getBatches(network, range, { signal }), [network, range]);
   const l1Fetcher = useCallback((signal: AbortSignal) => getL1(network, range, { signal }), [network, range]);
-  const batches = useApi(open ? `${network}:${range}:batches` : null, batchFetcher);
-  const l1 = useApi(open ? `${network}:${range}:l1` : null, l1Fetcher);
+  const batches = useApi<BatchSeries>(enabled ? `${network}:${range}:batches` : null, batchFetcher);
+  const l1 = useApi<L1Series>(enabled ? `${network}:${range}:l1` : null, l1Fetcher);
 
   const rows = useMemo(() => {
     if (!batches.data || !series) return [];
@@ -37,6 +55,52 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
     return { l1Eth, l2Eth, count, interval: count > 0 && span > 0 ? span / count : 0 };
   }, [rows, span]);
   const domain = useMemo(() => logDomain(rows.flatMap((r) => [r.l1Eth, r.l2Eth])), [rows]);
+  return { rows, span, domain, totals, batches, l1 };
+}
+
+/** The legend the cost chart carries: each line with what it came to over the range. */
+export function l1CostLegend(totals: L1Costs["totals"]) {
+  return [
+    { label: `L2 fees ${formatSignificant(totals.l2Eth, 3)} ETH`, color: "var(--series-1)", kind: "line" as const },
+    { label: `L1 posting ${formatSignificant(totals.l1Eth, 3)} ETH`, color: "var(--series-2)", kind: "line" as const },
+  ];
+}
+
+/** What users paid against what the chain paid Ethereum, per bucket, on a log scale. */
+export function L1CostChart({ rows, span, domain, height = L1_CHART_HEIGHT }: { rows: CostRow[]; span: number; domain: [number, number]; height?: ChartHeight }) {
+  return (
+    <ChartFrame height={height} label="L2 fees and L1 posting cost per bucket on a log scale">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={rows} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+          <CartesianGrid vertical={false} />
+          <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
+          <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
+          <Tooltip
+            isAnimationActive={false}
+            content={(props) => (
+              <ChartTooltip
+                {...props}
+                title={(t) => formatDateTime(t)}
+                rows={[
+                  { label: "L2 fees", color: "var(--series-1)", value: (r) => `${formatSignificant(Number(r.l2Eth), 4)} ETH` },
+                  { label: "L1 posting cost", color: "var(--series-2)", value: (r) => `${formatSignificant(Number(r.l1Eth), 4)} ETH` },
+                  { label: "batches", value: (r) => formatInteger(Number(r.batches)) },
+                ]}
+              />
+            )}
+          />
+          <Line type="monotone" dataKey="l2Eth" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
+          <Line type="monotone" dataKey="l1Eth" stroke="var(--series-2)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
+        </LineChart>
+      </ResponsiveContainer>
+    </ChartFrame>
+  );
+}
+
+/** L1 pricer values and what the chain pays Ethereum against what users pay. Collapsed by default. */
+export function L1Section({ network, range, snapshot, series }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null }) {
+  const [open, setOpen] = useState(false);
+  const { rows, span, domain, totals, batches, l1 } = useL1Costs(network, range, series, open);
   const l1State = snapshot?.l1;
   const [tableOpen, setTableOpen] = useState(false);
 
@@ -71,43 +135,17 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
           transactions.
         </p>
         <div className="mt-4">
-          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-ink">What users pay against what the chain pays Ethereum (ETH per bucket, log scale)</h3>
-            <Legend
-              items={[
-                { label: `L2 fees ${formatSignificant(totals.l2Eth, 3)} ETH`, color: "var(--series-1)", kind: "line" },
-                { label: `L1 posting ${formatSignificant(totals.l1Eth, 3)} ETH`, color: "var(--series-2)", kind: "line" },
-              ]}
-            />
+            <div className="flex items-center gap-3">
+              <Legend items={l1CostLegend(totals)} />
+              <EnlargeLink network={network} view={chartView("l1")} range={range} />
+            </div>
           </div>
           {batches.error ? <p className="text-sm text-critical">Could not load batches: {batches.error}</p> : null}
           {l1.error ? <p className="text-sm text-critical">Could not load L1 series: {l1.error}</p> : null}
           {rows.length > 0 ? (
-            <ChartFrame height={220} label="L2 fees and L1 posting cost per bucket on a log scale">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={rows} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
-                  <CartesianGrid vertical={false} />
-                  <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
-                  <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
-                  <Tooltip
-                    isAnimationActive={false}
-                    content={(props) => (
-                      <ChartTooltip
-                        {...props}
-                        title={(t) => formatDateTime(t)}
-                        rows={[
-                          { label: "L2 fees", color: "var(--series-1)", value: (r) => `${formatSignificant(Number(r.l2Eth), 4)} ETH` },
-                          { label: "L1 posting cost", color: "var(--series-2)", value: (r) => `${formatSignificant(Number(r.l1Eth), 4)} ETH` },
-                          { label: "batches", value: (r) => formatInteger(Number(r.batches)) },
-                        ]}
-                      />
-                    )}
-                  />
-                  <Line type="monotone" dataKey="l2Eth" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
-                  <Line type="monotone" dataKey="l1Eth" stroke="var(--series-2)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
-                </LineChart>
-              </ResponsiveContainer>
-            </ChartFrame>
+            <L1CostChart rows={rows} span={span} domain={domain} />
           ) : (
             <Card className="text-sm text-ink-2">{batches.loading ? "Loading batch reports." : "No batch reports in this range."}</Card>
           )}

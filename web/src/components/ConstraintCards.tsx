@@ -10,7 +10,9 @@ import { constraintGauge, contributionRampStep, legacyGauge, seriesColor } from 
 import { FIXED_WIDTH_CH, formatDrainEquivalence, formatDuration, formatGas, formatGasPerSecond, formatInteger, formatPercent, gasParts, gasPerSecondParts, unbroken } from "@/utils/format";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { RESYNC_COPY, WAITING_COPY } from "./LiveHero";
-import { Card, ChartFrame, Figure, Label, Swatch } from "./primitives";
+import { chartView } from "@/lib/chartViews";
+import { EnlargeLink } from "./ChartActions";
+import { Card, ChartFrame, Figure, Label, Stat, Swatch, type ChartHeight } from "./primitives";
 
 /** A meter whose fill carries magnitude on the sequential ramp; the track is an inset of the surface. */
 export function Gauge({ fraction, step, label, marks = [] }: { fraction: number; step: number; label: string; marks?: number[] }) {
@@ -80,15 +82,16 @@ const SAWTOOTH_TICKS = [-SAWTOOTH_WINDOW_S, -10, -5, 0];
  * Memoised on the samples: they change when blocks arrive, the card
  * re-renders every frame.
  */
-export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, nowMs = 0 }: { samples: SawtoothSample[]; color: string; target: number; index: number; nowMs?: number }) {
+export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, nowMs = 0, height = SAWTOOTH_HEIGHT }: { samples: SawtoothSample[]; color: string; target: number; index: number; nowMs?: number; height?: ChartHeight }) {
   const data = useMemo(() => sawtoothChart(samples, nowMs), [samples, nowMs]);
-  if (data.length < 2) return <div className="w-full rounded-sm bg-chart" style={{ height: SAWTOOTH_HEIGHT }} aria-hidden="true" />;
+  const sized = typeof height === "string";
+  if (data.length < 2) return <div className={`w-full rounded-sm bg-chart ${sized ? height : ""}`} style={{ height: sized ? undefined : height }} aria-hidden="true" />;
   const peak = Math.max(...data.map((d) => d.backlog));
   const max = Math.max(peak, target);
   const axis = backlogAxis(max);
   return (
     <ChartFrame
-      height={SAWTOOTH_HEIGHT}
+      height={height}
       minWidth={260}
       label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(axis.top)}, with the ${AVERAGE_WINDOW_S} s average and a dashed threshold at ${formatGas(target)}: it ${drainLabel(target)} boundary`}
     >
@@ -117,7 +120,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
   );
 });
 
-function ConstraintCard({ c, index, backlog, bips, share, samples, nowMs }: { c: Constraint; index: number; backlog: number; bips: number; share: number; samples: SawtoothSample[] | null; nowMs: number }) {
+function ConstraintCard({ network, c, index, backlog, bips, share, samples, nowMs }: { network: string; c: Constraint; index: number; backlog: number; bips: number; share: number; samples: SawtoothSample[] | null; nowMs: number }) {
   // The gauge spans whole windows of target; marks are capped so a huge
   // backlog over a tiny window cannot ask for a billion elements.
   const gauge = constraintGauge(c, backlog);
@@ -130,15 +133,18 @@ function ConstraintCard({ c, index, backlog, bips, share, samples, nowMs }: { c:
           <Swatch color={seriesColor(index)} />
           <span className="text-sm font-semibold text-ink">Constraint {index + 1}</span>
         </div>
-        <span className="text-xs text-ink-3">
-          {share > 0 ? (
-            <>
-              <Figure ch={5}>{formatPercent(share, 1)}</Figure> of x
-            </>
-          ) : (
-            "no contribution"
-          )}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-ink-3">
+            {share > 0 ? (
+              <>
+                <Figure ch={5}>{formatPercent(share, 1)}</Figure> of x
+              </>
+            ) : (
+              "no contribution"
+            )}
+          </span>
+          {samples ? <EnlargeLink network={network} view={chartView("backlog-sawtooth")} constraint={index} label={`the constraint ${index + 1} backlog`} /> : null}
+        </div>
       </div>
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
         <div>
@@ -238,13 +244,13 @@ const MOTION_NOTE = "Figures ease toward each sample over about 300 ms. Long win
 const SAWTOOTH_NOTE = `Windows of ${formatDuration(SHORT_WINDOW_S)} or less are shown as a ${AVERAGE_WINDOW_S} s average: nitro pays a backlog down only when the block timestamp advances, so within one second every block adds gas and the whole second's drain lands at once. The raw sparkline shows that sawtooth.`;
 
 /** One card per constraint, subscribed to the frame store: the figures move every frame, the page around them does not. */
-export function ConstraintCards({ live }: { live: SmoothedLive }) {
+export function ConstraintCards({ network, live }: { network: string; live: SmoothedLive }) {
   const frame = useLiveFrame(live.frame);
-  return <ConstraintCardsView snapshot={live.display} values={frame.values} blocks={frame.blocks} nowMs={frame.nowMs} resyncing={live.resyncing} />;
+  return <ConstraintCardsView network={network} snapshot={live.display} values={frame.values} blocks={frame.blocks} nowMs={frame.nowMs} resyncing={live.resyncing} />;
 }
 
 /** The cards with everything they show as plain props; until the first frame has eased values the sample stands in. */
-export function ConstraintCardsView({ snapshot, values, blocks, nowMs = 0, resyncing = false }: { snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[]; nowMs?: number; resyncing?: boolean }) {
+export function ConstraintCardsView({ network, snapshot, values, blocks, nowMs = 0, resyncing = false }: { network: string; snapshot: LiveSnapshot | null; values: LiveValues | null; blocks: BlockPoint[]; nowMs?: number; resyncing?: boolean }) {
   const samples = useMemo(() => {
     if (!snapshot || snapshot.model === "legacy") return [];
     return snapshot.constraints.map((c, i) => (isShortWindow(c.window) ? sawtoothSamples(blocks, i, snapshot.block.ts) : null));
@@ -266,12 +272,61 @@ export function ConstraintCardsView({ snapshot, values, blocks, nowMs = 0, resyn
     <div>
       <div className={`grid gap-4 sm:grid-cols-2 ${cols}`}>
         {constraints.map((c, i) => (
-          <ConstraintCard key={`${c.target}-${c.window}-${i}`} c={c} index={i} backlog={v.backlogs[i] ?? c.backlog} bips={v.bips[i] ?? c.exponentBips} share={v.shares[i] ?? 0} samples={samples[i] ?? null} nowMs={nowMs} />
+          <ConstraintCard key={`${c.target}-${c.window}-${i}`} network={network} c={c} index={i} backlog={v.backlogs[i] ?? c.backlog} bips={v.bips[i] ?? c.exponentBips} share={v.shares[i] ?? 0} samples={samples[i] ?? null} nowMs={nowMs} />
         ))}
       </div>
       <p className="mt-2 text-xs text-ink-3">
         {MOTION_NOTE}
         {anyShort ? ` ${SAWTOOTH_NOTE}` : ""}
+      </p>
+    </div>
+  );
+}
+
+/** The slots of a snapshot's constraint set whose window is short enough to draw a sawtooth for. */
+export function shortWindowIndices(snapshot: LiveSnapshot | null): number[] {
+  if (!snapshot || snapshot.model === "legacy") return [];
+  return snapshot.constraints.map((c, i) => (isShortWindow(c.window) ? i : -1)).filter((i) => i >= 0);
+}
+
+/**
+ * One short window's backlog, enlarged: the figures the card quotes beside
+ * the chart it draws, so the target, the threshold and the 2 s average are
+ * readable next to the sawtooth rather than only in its tooltip.
+ */
+export function SawtoothPanel({
+  snapshot,
+  values,
+  blocks,
+  nowMs = 0,
+  index,
+  height = SAWTOOTH_HEIGHT,
+}: {
+  snapshot: LiveSnapshot;
+  values: LiveValues | null;
+  blocks: BlockPoint[];
+  nowMs?: number;
+  index: number;
+  height?: ChartHeight;
+}) {
+  const samples = useMemo(() => sawtoothSamples(blocks, index, snapshot.block.ts), [blocks, index, snapshot.block.ts]);
+  const c = snapshot.constraints[index];
+  const v = values ?? targetValues(snapshot, blocks, 0);
+  const backlog = v.backlogs[index] ?? c.backlog;
+  const target = gasPerSecondParts(c.target);
+  const threshold = gasParts(c.target, true);
+  const average = gasParts(backlog, true);
+  return (
+    <div>
+      <div className="mb-4 grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
+        <Stat label="Target" value={target.value} unit={target.unit} size="sm" />
+        <Stat label="Window" value={formatDuration(c.window)} size="sm" />
+        <Stat label="Threshold" value={threshold.value} unit={threshold.unit} size="sm" hint={drainLabel(c.target)} />
+        <Stat label={`Backlog (avg ${AVERAGE_WINDOW_S} s)`} value={<Figure ch={FIXED_WIDTH_CH.gas}>{average.value}</Figure>} unit={average.unit} size="sm" hint={formatDrainEquivalence(backlog, c.target)} />
+      </div>
+      <Sawtooth samples={samples} color={seriesColor(index)} target={c.target} index={index} nowMs={nowMs} height={height} />
+      <p className="mt-2 text-xs text-ink-3">
+        {drainLabel(c.target)} boundary; bursts show as sawteeth. The thin line is the {AVERAGE_WINDOW_S} s average. {SAWTOOTH_NOTE}
       </p>
     </div>
   );

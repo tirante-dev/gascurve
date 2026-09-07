@@ -103,7 +103,7 @@ export function HowItWorks({ network }: { network: string }) {
                 </dl>
                 {live.error || constraints.error ? <p className="mt-3 text-xs text-ink-3">The api did not answer for the live values, so the figures above and in the prose fall back to generic ones.</p> : null}
               </Card>
-              <TaylorChart snapshot={snapshot} />
+              <TaylorChart snapshot={snapshot} network={network} />
             </div>
           </div>
         </Section>
