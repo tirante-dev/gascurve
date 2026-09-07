@@ -53,12 +53,14 @@ collector:
 # carries one call at a time. A QuickNode endpoint
 # enforces 50 requests per second, counting every item inside a batch, and
 # reports the excess as a JSON-RPC error (-32007 "50/second request limit
-# reached") rather than an HTTP 429; give it calls_per_second: 40 so the
-# burst stays under its limit.
+# reached") rather than an HTTP 429. The pacer's burst is twice the
+# sustained rate, so give it calls_per_second: 25: the one-second peaks then
+# stay under the window, where 40 tripped it several times a minute and each
+# trip cost a 2 s back-off that stalled the backfill and the gap filler.
 # Optional per network:
 #   tick_interval: overrides collector.tick_interval for this network (the
 #            polling cadence, and the safety timer while a newHeads
-#            subscription is down). A dedicated endpoint can run at 250ms;
+#            subscription is down). A dedicated endpoint can run at 500ms;
 #            a public one should stay at 1s, since every tick costs about
 #            five calls and a 250ms tick would want most of a 4/s budget.
 #            Environment: NETWORK_<NAME>_TICK_INTERVAL.
