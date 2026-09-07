@@ -4,17 +4,17 @@ import { BANDS_LINE, DIAL_BANDS, DIAL_CX, DIAL_CY, DIAL_RADIUS, dialArc, dialPoi
 import { FIXED_WIDTH_CH, formatGweiFixed, formatMultiplierFixed } from "@/utils/format";
 import { Figure, HoverNote } from "./primitives";
 
-/** The colour of each band, the page's own status tones, which both themes carry. */
+/** The stroke of each band, and the text colour of the figure under it: two tokens per tone, because a 9 px band and 20 px text need different contrast (see globals.css). */
 const TONE_COLOR: Record<DialTone, string> = {
-  good: "var(--good)",
-  warning: "var(--dial-warning)",
-  critical: "var(--critical)",
+  good: "var(--dial-band-good)",
+  warning: "var(--dial-band-warning)",
+  critical: "var(--dial-band-critical)",
 };
 
 const TONE_TEXT: Record<DialTone, string> = {
-  good: "text-good",
+  good: "text-dial-good",
   warning: "text-dial-warning",
-  critical: "text-critical",
+  critical: "text-dial-critical",
 };
 
 /** The stroke of the three bands. */
@@ -34,10 +34,14 @@ const NEEDLE_RADIUS = DIAL_RADIUS - BAND_WIDTH;
  * a sample.
  */
 export function FeeDial({ baseFeeGwei, floorGwei, multiplier }: { baseFeeGwei: number; floorGwei: string; multiplier: number }) {
-  const tone = dialTone(multiplier);
   const figure = formatMultiplierFixed(multiplier);
+  // The tone follows the figure as printed, not the raw multiplier: 2.004×
+  // prints as "2.00×", and a "2.00×" in amber under a note that says green
+  // runs to 2× would contradict itself.
+  const tone = dialTone(Number(figure));
   const tip = dialPoint(dialPosition(multiplier), NEEDLE_RADIUS);
-  const lines = [`${figure}× the ${floorGwei} gwei floor`, `${formatGweiFixed(baseFeeGwei)} gwei = ${figure} × ${floorGwei} gwei`, BANDS_LINE];
+  // Each side is rounded on its own, so the product is only ever about equal.
+  const lines = [`${figure}× the ${floorGwei} gwei floor`, `${formatGweiFixed(baseFeeGwei)} gwei ≈ ${figure} × ${floorGwei} gwei`, BANDS_LINE];
   const description = `${figure} times the ${floorGwei} gwei floor, ${TONE_SENTENCE[tone]}: ${BANDS_LINE}.`;
   return (
     <div className="vw-tile rounded-md bg-surface-2 px-3 pt-2 pb-1.5" data-testid="fee-dial">
