@@ -99,6 +99,8 @@ func seed(t *testing.T) *dbtest.MemStore {
 	must(s.SetState(ctx, robinhood, db.StateBackfillCursor, `{"done":true}`))
 	must(s.SetState(ctx, robinhood, db.StateEndpoints, `{"activeEndpoint":1,"failovers":3,"endpoints":[{"index":0,"ws":false,"archive":false,"disabled":true,"error":"reports chain id 1, configured 4663"},{"index":1,"ws":true,"archive":true,"disabled":false,"error":null}]}`))
 	must(s.SetState(ctx, testnet, db.StateEndpoints, `not json`))
+	must(s.SetState(ctx, robinhood, db.StateHoles, `[{"from":1001,"to":1100,"at":"2026-09-06T07:00:00Z","next":1051},{"from":0,"to":499,"at":"2026-09-06T07:00:00Z","reason":"no state"}]`))
+	must(s.SetState(ctx, testnet, db.StateHoles, `not json`))
 	// The ETH/USD spot the collector recorded: fresh for robinhood, older
 	// than the default max age for the testnet.
 	must(s.SetState(ctx, robinhood, db.StateEthUsd, `{"price":"4523.40","at":"2026-09-06T07:18:00Z","source":"coinbase"}`))
@@ -389,6 +391,19 @@ func TestEndpoints(t *testing.T) {
 			}
 			if !strings.Contains(string(b), `"lastSampleAt":null`) {
 				t.Fatalf("null lastSampleAt expected: %s", b)
+			}
+			// Holes are summarized: what is queued for the gap filler, how
+			// many blocks are still missing and what can never be filled.
+			if rh.Holes.Pending != 1 || rh.Holes.Unfillable != 1 || rh.Holes.Blocks != 50+500 {
+				t.Fatalf("status holes: %+v", rh.Holes)
+			}
+			// A network without a checkpoint, or with an unreadable one,
+			// reports zeros rather than failing the whole status.
+			if s.Networks[1].Holes != (model.HolesStatus{}) || s.Networks[2].Holes != (model.HolesStatus{}) {
+				t.Fatalf("status holes default: %+v %+v", s.Networks[1].Holes, s.Networks[2].Holes)
+			}
+			if !strings.Contains(string(b), `"holes":{"pending":1,"blocks":550,"unfillable":1}`) {
+				t.Fatalf("holes json: %s", b)
 			}
 			if rh.ActiveEndpoint != 1 || rh.Failovers != 3 || len(rh.Endpoints) != 2 || !rh.Endpoints[0].Disabled || rh.Endpoints[0].Index != 0 || !rh.Endpoints[1].WS || !rh.Endpoints[1].Archive {
 				t.Fatalf("status endpoints: %+v", rh.EndpointsStatus)

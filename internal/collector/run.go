@@ -12,7 +12,8 @@ import (
 	"github.com/tirante-dev/gascurve/internal/nitro"
 )
 
-// Run drives the fast loop, the slow loop and the backfill until ctx ends.
+// Run drives the fast loop, the slow loop and the history loop (gap
+// filling and the backfill) until ctx ends.
 // It returns early when the follower cannot initialize or when the RPC
 // reports a different chain id than the one configured: nothing from the
 // wrong chain may be written under this network's identity.
@@ -31,7 +32,7 @@ func (f *Follower) Run(ctx context.Context) error {
 	}()
 	go func() {
 		defer wg.Done()
-		f.runBackfill(ctx)
+		f.runHistory(ctx)
 	}()
 	f.runFast(ctx)
 	wg.Wait()
@@ -174,9 +175,39 @@ func (f *Follower) runSlow(ctx context.Context) {
 	}
 }
 
-func (f *Follower) runBackfill(ctx context.Context) {
+// runHistory is the loop that rebuilds history: every iteration fills one
+// batch of the newest fillable hole, and only when nothing is fillable
+// does it spend the iteration on the backfill. Gap filling outlives the
+// backfill, which finishes once and for all, because a paced network
+// keeps skipping ranges as it follows the head.
+func (f *Follower) runHistory(ctx context.Context) {
+	backfilled := false
 	for ctx.Err() == nil {
-		status, err := f.BackfillStep(ctx)
+		status, err := f.FillStep(ctx)
+		if err != nil && ctx.Err() == nil {
+			f.log.Warn("gap fill error", "err", err.Error())
+			if err := f.sleep(ctx, restartDelay); err != nil {
+				return
+			}
+			continue
+		}
+		switch status {
+		case FillProgressed:
+			continue
+		case FillIdle:
+			if err := f.sleep(ctx, backfillIdle); err != nil {
+				return
+			}
+			continue
+		case FillNone:
+		}
+		if backfilled {
+			if err := f.sleep(ctx, backfillIdle); err != nil {
+				return
+			}
+			continue
+		}
+		back, err := f.BackfillStep(ctx)
 		if err != nil && ctx.Err() == nil {
 			f.log.Warn("backfill error", "err", err.Error())
 			if err := f.sleep(ctx, restartDelay); err != nil {
@@ -184,9 +215,9 @@ func (f *Follower) runBackfill(ctx context.Context) {
 			}
 			continue
 		}
-		switch status {
+		switch back {
 		case BackfillDone:
-			return
+			backfilled = true
 		case BackfillIdle:
 			if err := f.sleep(ctx, backfillIdle); err != nil {
 				return

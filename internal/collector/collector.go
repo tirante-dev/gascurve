@@ -1,9 +1,9 @@
 // Package collector follows Arbitrum Nitro chains: one Follower per network
 // samples the precompiles every tick, fetches the headers it missed, replays
 // the pricer forward from a known state with re-anchoring, rebuilds buckets,
-// records owner actions, batch posting reports and L1 pricer state, runs a
-// resumable backfill and publishes a LiveSnapshot with NOTIFY after each
-// tick.
+// records owner actions, batch posting reports and L1 pricer state, refills
+// the ranges it had to skip, runs a resumable backfill and publishes a
+// LiveSnapshot with NOTIFY after each tick.
 package collector
 
 import (
@@ -242,12 +242,15 @@ type liveStart struct {
 	TS    int64  `json:"ts"`
 }
 
-// hole is a block range the replay skipped (collector_state holes).
-type hole struct {
-	From uint64 `json:"from"`
-	To   uint64 `json:"to"`
-	At   string `json:"at"`
-}
+// hole is a block range the collector did not index (collector_state
+// holes). A hole without a reason is queued work: the gap filler replays
+// it forward from the stored block before it, tracking its progress in
+// Next. A hole with reasonNoState has nothing to replay from and is only
+// re-examined when a stored state appears before it.
+type hole = model.Hole
+
+// reasonNoState marks a hole no replay can fill.
+const reasonNoState = model.HoleReasonNoState
 
 // scanOrigin is where a deliberately truncated owner scan began
 // (collector_state owner_scan_origin). With Archive the complete pricer
@@ -613,26 +616,16 @@ func (f *Follower) boundaryLocked() (time.Time, bool) {
 	return time.Unix(f.liveStart.TS, 0).UTC().Truncate(boundaryWidth), true
 }
 
-// recordHole appends a skipped range to collector_state holes.
+// recordHole appends an un-indexed range to collector_state holes. A hole
+// without a reason is queued for the gap filler; one recorded with
+// reasonNoState is only work if a state ever appears before it.
 func (f *Follower) recordHole(ctx context.Context, s db.Store, h hole) error {
-	raw, ok, err := s.GetState(ctx, f.chainID, db.StateHoles)
+	holes, err := f.loadHoles(ctx, s)
 	if err != nil {
 		return err
-	}
-	holes := make([]hole, 0, 1)
-	if ok {
-		if err := json.Unmarshal([]byte(raw), &holes); err != nil {
-			f.log.Warn("unreadable holes checkpoint, starting over", "err", err.Error())
-			holes = nil
-		}
 	}
 	h.At = f.now().UTC().Format(time.RFC3339)
-	holes = append(holes, h)
-	b, err := json.Marshal(holes)
-	if err != nil {
-		return err
-	}
-	return s.SetState(ctx, f.chainID, db.StateHoles, string(b))
+	return f.saveHoles(ctx, s, append(holes, h))
 }
 
 // reloadSetsLocked refreshes the constraint set, minimum fee and legacy

@@ -295,21 +295,82 @@ type EndpointsStatus struct {
 	Endpoints      []EndpointStatus `json:"endpoints"`
 }
 
+// HoleReasonNoState marks a hole no replay can ever fill: no block
+// before it is stored with a pricing state, so nothing can be replayed
+// forward into it. The gap filler skips these and /status counts them as
+// unfillable.
+const HoleReasonNoState = "no state"
+
+// Hole is one block range the collector did not index, recorded in
+// collector_state under the holes key. Next is the gap filler's progress
+// cursor: blocks below it are filled, 0 means nothing yet. Reason is set
+// only when the range can never be replayed (HoleReasonNoState); an empty
+// Reason means the range is queued for filling.
+type Hole struct {
+	From   uint64 `json:"from"`
+	To     uint64 `json:"to"`
+	At     string `json:"at"`
+	Next   uint64 `json:"next,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Start is the first block still to fill: the cursor when it has moved
+// into the range, the range's own start otherwise.
+func (h Hole) Start() uint64 {
+	if h.Next > h.From && h.Next <= h.To {
+		return h.Next
+	}
+	return h.From
+}
+
+// Blocks is how many blocks of the range are still not indexed.
+func (h Hole) Blocks() uint64 {
+	if h.To < h.Start() {
+		return 0
+	}
+	return h.To - h.Start() + 1
+}
+
+// HolesStatus summarizes a network's holes for /status: how many ranges
+// wait for the gap filler, how many blocks they still cover in total
+// (unfillable ones included, since those blocks are missing too) and how
+// many ranges can never be filled.
+type HolesStatus struct {
+	Pending    int    `json:"pending"`
+	Blocks     uint64 `json:"blocks"`
+	Unfillable int    `json:"unfillable"`
+}
+
+// SummarizeHoles counts the recorded holes for /status.
+func SummarizeHoles(holes []Hole) HolesStatus {
+	out := HolesStatus{}
+	for _, h := range holes {
+		if h.Reason == "" {
+			out.Pending++
+		} else {
+			out.Unfillable++
+		}
+		out.Blocks += h.Blocks()
+	}
+	return out
+}
+
 // NetworkStatus is the collector status of one network. HeadAt,
 // LagSeconds and LastSampleAt are null before the first head.
 type NetworkStatus struct {
-	Name            string  `json:"name"`
-	ChainID         uint64  `json:"chainId"`
-	Enabled         bool    `json:"enabled"`
-	HeadBlock       uint64  `json:"headBlock"`
-	HeadAt          *string `json:"headAt"`
-	LagSeconds      *int64  `json:"lagSeconds"`
-	LastSampleAt    *string `json:"lastSampleAt"`
-	LastError       *string `json:"lastError"`
-	RateLimitEvents uint64  `json:"rateLimitEvents"`
-	Last429At       *string `json:"last429At"`
-	BackfillCursor  *string `json:"backfillCursor"`
-	ArbOSVersion    *string `json:"arbosVersion"`
+	Name            string      `json:"name"`
+	ChainID         uint64      `json:"chainId"`
+	Enabled         bool        `json:"enabled"`
+	HeadBlock       uint64      `json:"headBlock"`
+	HeadAt          *string     `json:"headAt"`
+	LagSeconds      *int64      `json:"lagSeconds"`
+	LastSampleAt    *string     `json:"lastSampleAt"`
+	LastError       *string     `json:"lastError"`
+	RateLimitEvents uint64      `json:"rateLimitEvents"`
+	Last429At       *string     `json:"last429At"`
+	BackfillCursor  *string     `json:"backfillCursor"`
+	ArbOSVersion    *string     `json:"arbosVersion"`
+	Holes           HolesStatus `json:"holes"`
 	EndpointsStatus
 }
 

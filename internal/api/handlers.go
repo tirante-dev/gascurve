@@ -468,10 +468,28 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ns.Last429At = optString(st, db.StateLast429At)
 		ns.BackfillCursor = optString(st, db.StateBackfillCursor)
 		ns.ArbOSVersion = optString(st, db.StateArbOSVersion)
+		ns.Holes = holesStatus(st)
 		ns.EndpointsStatus = endpointsStatus(st)
 		out.Networks = append(out.Networks, ns)
 	}
 	writeJSON(w, http.StatusOK, cacheNone, out)
+}
+
+// holesStatus summarizes the ranges the collector has not indexed: how
+// many are queued for the gap filler, how many blocks they still cover
+// and how many can never be filled (nothing before them is stored with a
+// pricing state). A network without a checkpoint, or with an unreadable
+// one, reports zeros.
+func holesStatus(st map[string]string) model.HolesStatus {
+	raw, ok := st[db.StateHoles]
+	if !ok {
+		return model.HolesStatus{}
+	}
+	var holes []model.Hole
+	if err := json.Unmarshal([]byte(raw), &holes); err != nil {
+		return model.HolesStatus{}
+	}
+	return model.SummarizeHoles(holes)
 }
 
 // endpointsStatus decodes the collector's endpoint routing state; a

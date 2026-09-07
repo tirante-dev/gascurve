@@ -461,7 +461,7 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 // so the range is reported as missing rather than reconstructed from the
 // live model.
 func (f *Follower) holeToDepth(ctx context.Context, c *backfillCursor, gen uint64) (BackfillStatus, error) {
-	h := hole{From: c.DepthStart, To: c.End - 1}
+	h := hole{From: c.DepthStart, To: c.End - 1, Reason: reasonNoState}
 	f.log.Warn("no independently known pricer state below the backfill range, recording it as a hole",
 		"from", h.From, "to", h.To)
 	c.Done = true

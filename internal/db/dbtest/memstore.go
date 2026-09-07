@@ -295,6 +295,7 @@ func (m *MemStore) sortedBlocks(chainID uint64) []db.Block {
 
 // BlockByNumber returns one block.
 func (m *MemStore) BlockByNumber(_ context.Context, chainID, number uint64) (*db.Block, error) {
+	m.hook("BlockByNumber")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.fail("BlockByNumber"); err != nil {
@@ -904,6 +905,7 @@ func stateKey(chainID uint64, key string) string { return fmt.Sprintf("%d/%s", c
 
 // GetState reads a checkpoint.
 func (m *MemStore) GetState(_ context.Context, chainID uint64, key string) (value string, found bool, err error) {
+	m.hook("GetState")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.fail("GetState"); err != nil {

@@ -403,3 +403,64 @@ func TestFollowerRunOnRealSocket(t *testing.T) {
 		t.Fatalf("head = %d", f.Head())
 	}
 }
+
+// TestRunHistoryFillsGaps: the history loop requeues what the fast loop
+// skipped. A paced network's gap is recorded, the loop retries through a
+// failing endpoint, then fills the range block by block, and it keeps
+// running after the backfill is done because a paced network goes on
+// skipping ranges.
+func TestRunHistoryFillsGaps(t *testing.T) {
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, CallsPerSecond: 4, Enabled: true},
+		Collector: fastConfig(),
+		RPC:       rpc,
+		Store:     store,
+		Log:       logger.Nop(),
+		Now:       func() time.Time { return baseTime.Add(100 * time.Second) },
+		Sleep:     quickSleep,
+	})
+	// Every header fetch fails at first, so both error paths of the loop
+	// run: the gap fill's and the backfill's.
+	rpc.errs["HeadersByNumbers"] = errRPC
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = f.Run(ctx)
+	}()
+	waitFor(t, "the first head", func() bool { return f.Head() == 1000 })
+	rpc.setHead(1150)
+	waitFor(t, "the skipped gap", func() bool { return len(holesOf(t, store)) == 1 })
+	// While the fast loop catches up the history loop stands down.
+	f.catchingUp.Store(true)
+	time.Sleep(20 * time.Millisecond)
+	f.catchingUp.Store(false)
+	// With a hole queued every header fetch belongs to the filler, so the
+	// attempts through the failing endpoint run its error path.
+	attempts := rpc.calledTimes("HeadersByNumbers")
+	waitFor(t, "a failed fill attempt", func() bool { return rpc.calledTimes("HeadersByNumbers") > attempts+2 })
+	rpc.mu.Lock()
+	delete(rpc.errs, "HeadersByNumbers")
+	rpc.mu.Unlock()
+	waitFor(t, "the gap fill", func() bool { return holesOf(t, store) == nil })
+	// Only once nothing is fillable does the loop turn to the backfill,
+	// and it keeps running after that.
+	waitFor(t, "the backfill", func() bool {
+		c, err := f.loadCursor(context.Background())
+		return err == nil && c.Done
+	})
+	cancel()
+	<-done
+	for _, want := range []uint64{1001, 1075, 1149} {
+		if b, _ := store.BlockByNumber(context.Background(), 4663, want); b == nil {
+			t.Fatalf("block %d must be indexed", want)
+		}
+	}
+	if b, _ := store.BlockByNumber(context.Background(), 4663, 600); b == nil {
+		t.Fatal("the backfill must run once nothing is fillable")
+	}
+}

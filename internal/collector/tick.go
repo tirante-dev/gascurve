@@ -211,8 +211,9 @@ func (f *Follower) fetchHeaders(ctx context.Context, from, to uint64) ([]nitro.H
 // contributions, owner actions, constraint sets, batch reports, state
 // samples, the owner and batch cursors, the owner scan checkpoint, and,
 // when they lie above the ancestor, the live start and the backfill cursor
-// (whose backfill-only buckets are dropped for re-backfilling). It reloads
-// the head from the database and returns it.
+// (whose backfill-only buckets are dropped for re-backfilling). The cursor
+// of every hole the rewind reaches into goes back to the start of its
+// range. It reloads the head from the database and returns it.
 func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, error) {
 	ancestor, err := f.findAncestor(ctx, from)
 	if err != nil {
@@ -251,6 +252,11 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 			}
 		}
 		if err := f.rewindBackfill(ctx, s, ancestor, boundary, hasBoundary); err != nil {
+			return err
+		}
+		// A hole the filler had started writing into is restarted: what it
+		// wrote above the ancestor went with the orphaned chain.
+		if err := f.rewindHoles(ctx, s, ancestor); err != nil {
 			return err
 		}
 		if ls != nil && ls.Block > ancestor {
@@ -475,6 +481,21 @@ func replayLive(chainID uint64, st *pricer.State, prevTs uint64, headers []nitro
 		}
 		return nil, false
 	}
+	rows, results = replayForward(chainID, st, prevTs, headers, tl, anchor)
+	if !sameShape(st, sample) || st.MinBaseFee.Cmp(bigOrZero(sample.MinBaseFee)) != 0 {
+		return nil, nil, false
+	}
+	return rows, results, true
+}
+
+// replayForward replays headers through st, splitting the run at every
+// block where the timeline records a pricer change (a constraint set, the
+// minimum fee, a legacy parameter) and pinning the backlogs wherever
+// anchor supplies real ones. It is the shared core of the live catch-up
+// and of the gap filler: st is advanced to the end of the last header and
+// each row carries the floor in force at its block.
+func replayForward(chainID uint64, st *pricer.State, prevTs uint64, headers []nitro.Header, tl *timeline, anchor pricer.Anchor) ([]db.Block, []pricer.Result) {
+	var results []pricer.Result
 	fees := map[uint64]*big.Int{}
 	start := 0
 	for start < len(headers) {
@@ -493,11 +514,8 @@ func replayLive(chainID uint64, st *pricer.State, prevTs uint64, headers []nitro
 		prevTs = chunk[len(chunk)-1].Timestamp
 		start = end
 	}
-	if !sameShape(st, sample) || st.MinBaseFee.Cmp(bigOrZero(sample.MinBaseFee)) != 0 {
-		return nil, nil, false
-	}
-	rows = blockRows(chainID, headers, results, func(n uint64) *big.Int { return fees[n] })
-	return rows, results, true
+	rows := blockRows(chainID, headers, results, func(n uint64) *big.Int { return fees[n] })
+	return rows, results
 }
 
 // replayStateLocked returns a clone of the committed replay state, or

@@ -59,7 +59,16 @@ type fakeRPC struct {
 	backlogsAt    func(uint64) []uint64
 	constraintsAt func(uint64) []nitro.Constraint
 	txCount       func(uint64) int
-	sampledAt     time.Time
+	// parentOverride replaces the parent hash a header reports, so a test
+	// can break the links a fetched range has to satisfy without moving
+	// the blocks themselves onto a fork.
+	parentOverride map[uint64]string
+	// noHeaders makes HeadersByNumbers answer with nothing, the way an
+	// endpoint that has not seen the range does, and headerShift makes it
+	// answer with the wrong blocks.
+	noHeaders   bool
+	headerShift uint64
+	sampledAt   time.Time
 }
 
 func newFakeRPC(head uint64) *fakeRPC {
@@ -145,7 +154,11 @@ func (f *fakeRPC) fork(at uint64, tag string) {
 }
 
 func (f *fakeRPC) header(n uint64) nitro.Header {
-	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: f.hashFor(n - 1), Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)]}
+	parent := f.hashFor(n - 1)
+	if h, ok := f.parentOverride[n]; ok {
+		parent = h
+	}
+	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)]}
 }
 
 func (f *fakeRPC) ChainID(context.Context) (uint64, error) {
@@ -220,12 +233,15 @@ func (f *fakeRPC) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]nit
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.headerCalls = append(f.headerCalls, append([]uint64(nil), numbers...))
+	if f.noHeaders {
+		return nil, nil
+	}
 	out := make([]nitro.Header, 0, len(numbers))
 	for _, n := range numbers {
 		if n > f.head {
 			return nil, fmt.Errorf("block %d not found", n)
 		}
-		out = append(out, f.header(n))
+		out = append(out, f.header(n+f.headerShift))
 	}
 	return out, nil
 }

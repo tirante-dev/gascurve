@@ -261,7 +261,7 @@ func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64) erro
 			}
 		}
 		if !origin.Archive && cutoff > 0 {
-			if err := f.recordHole(ctx, s, hole{From: 0, To: cutoff - 1}); err != nil {
+			if err := f.recordHole(ctx, s, hole{From: 0, To: cutoff - 1, Reason: reasonNoState}); err != nil {
 				return err
 			}
 		}
