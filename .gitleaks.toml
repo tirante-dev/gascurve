@@ -43,3 +43,15 @@ targetRules = ["generic-api-key"]
 condition = "AND"
 paths = ['''^internal/api/ws_test\.go$''']
 regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
+
+# internal/nitro/redact_test.go proves that a keyed endpoint URL never reaches
+# an error, a log line or /status. Its fixture key is invented for that test
+# and exists nowhere else; it has to look like a credential for the test to
+# mean anything. Scoped the same way as the two above: one rule, one file, one
+# exact value, so any other secret in that file is still reported.
+[[allowlists]]
+description = "internal/nitro/redact_test.go: the invented key the redaction tests scrub"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^internal/nitro/redact_test\.go$''']
+regexes = ['''^s3cret-api-key-0123456789$''']
