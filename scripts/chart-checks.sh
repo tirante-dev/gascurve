@@ -181,6 +181,17 @@ reject "metrics_port above the maximum" "metrics_port" \
   --set database.existingSecret=my-db --set config.collector.metrics_port=70000
 reject "unknown field under metrics" "not_a_field" \
   --set database.existingSecret=my-db --set metrics.not_a_field=x
+# An alert whose expression compares against a threshold cannot render
+# without one: "> <nil>" is PromQL the operator rejects, and the alert would
+# then be missing rather than misconfigured.
+reject "threshold alert with its threshold removed" "threshold" \
+  --set database.existingSecret=my-db --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.alerts.apiErrorRate.threshold=null
+# And one that compares nothing takes no threshold, so a value put on the
+# wrong alert is a typo rather than a setting.
+reject "threshold on an alert that compares nothing" "threshold" \
+  --set database.existingSecret=my-db --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.alerts.apiDown.threshold=5
 
 echo "== metrics disabled by default"
 if render "metrics-default" "${work}/metrics-off.yaml" --values "${ci}/existing-secret-values.yaml"; then
@@ -211,10 +222,27 @@ if render "metrics" "${work}/metrics.yaml" --values "${ci}/metrics-values.yaml";
   has "${work}/metrics.yaml" 'alert: GascurveApiDown' "metrics: the api down alert is missing"
   has "${work}/metrics.yaml" 'alert: GascurveApiErrorRate' "metrics: the api error rate alert is missing"
   has "${work}/metrics.yaml" 'alert: GascurveDatabaseUnreachable' "metrics: the database alert is missing"
-  # Every rule names this release's job, so two releases in one cluster
-  # never alert on each other's metrics.
-  if ! awk '/^ *expr: /{ if ($0 !~ /job=/) { print "    " $0; bad = 1 } } END { exit bad }' "${work}/metrics.yaml"; then
-    fail "metrics: the rule above is not scoped to this release's job"
+  # Every rule names this release's job and namespace, so two releases
+  # never alert on each other's metrics, whether they share a cluster or
+  # only a name.
+  if ! awk '/^ *expr: /{ if ($0 !~ /job=/ || $0 !~ /namespace=/) { print "    " $0; bad = 1 } } END { exit bad }' "${work}/metrics.yaml"; then
+    fail "metrics: the rule above is not scoped to this release's job and namespace"
+  fi
+  # up == 0 matches only a target that still exists and failed; it goes
+  # quiet exactly when the target is removed, which is the outage the
+  # alert is for.
+  has "${work}/metrics.yaml" 'expr: "absent(up{job=..gascurve-api' "metrics: the api down alert does not use absent(up == 1)"
+  lacks "${work}/metrics.yaml" 'up{[^}]*} == 0' "metrics: an up == 0 alert cannot fire once its target is gone"
+  # absent() takes its labels from a bare selector and not from a
+  # comparison, and sum() and min by () drop them, so the job and the
+  # namespace are literal labels on every rule: without them two releases
+  # fire alerts Alertmanager cannot tell apart.
+  if ! awk '/^ *- alert: /{ rule = $0; job = 0; ns = 0 }
+    /^ *job: /{ job = 1 }
+    /^ *namespace: /{ ns = 1 }
+    /^ *description: /{ if (!job || !ns) { print "    " rule; bad = 1 } }
+    END { exit bad }' "${work}/metrics.yaml"; then
+    fail "metrics: the rule above does not label the alert with this release's job and namespace"
   fi
   # An alert switched off leaves no rule behind.
   lacks "${work}/metrics.yaml" 'alert: GascurveCollectorDown' "metrics: rendered an alert that was disabled"
@@ -230,6 +258,22 @@ if render "metrics-port-zero" "${work}/metrics-zero.yaml" --values "${ci}/existi
   ok "collector server, Service and ServiceMonitor all gone, api untouched"
 fi
 
+# absent(up == 1) fires when no target exists at all, so a rule kept for a
+# component this release does not scrape pages for ever. The groups are
+# gated on the same condition as the ServiceMonitors.
+echo "== no rules for a component this release does not scrape"
+if render "rules-port-zero" "${work}/rules-zero.yaml" --values "${ci}/metrics-values.yaml" \
+  --set config.collector.metrics_port=0; then
+  lacks "${work}/rules-zero.yaml" 'name: gascurve\.collector' "rules-port-zero: collector rules rendered although nothing scrapes the collector"
+  has "${work}/rules-zero.yaml" 'name: gascurve\.api' "rules-port-zero: the api rules went away with the collector's"
+  ok "collector group gone, api group untouched"
+fi
+if render "rules-web-only" "${work}/rules-web.yaml" --values "${ci}/metrics-values.yaml" \
+  --set api.enabled=false --set collector.enabled=false --set web.enabled=true; then
+  lacks "${work}/rules-web.yaml" 'kind: PrometheusRule' "rules-web-only: rendered rules for an api and a collector this release does not deploy"
+  ok "no PrometheusRule at all on a web-only install"
+fi
+
 echo "== an ingress with no backend is refused"
 reject "ingress enabled with api and web disabled" "/ingress/enabled" \
   --set database.existingSecret=my-db --set api.enabled=false --set web.enabled=false \
@@ -239,6 +283,63 @@ reject "ingress with no backend, schema validation skipped" "no HTTP paths" \
   --skip-schema-validation \
   --set database.existingSecret=my-db --set api.enabled=false --set web.enabled=false \
   --set ingress.enabled=true --set ingress.host=gascurve.com
+
+echo "== ingress client identity and isolation are explicit"
+reject "ingress and api without trusted proxies" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com
+reject "ingress and api without trusted proxies, schema validation skipped" "trusted_proxies is empty" \
+  --skip-schema-validation \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com
+reject "malformed trusted proxy CIDR" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=not-a-cidr'
+reject "trusted proxy that trusts every peer" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=0.0.0.0/0'
+reject "trusted proxy that trusts every peer, schema validation skipped" "trusts every reachable peer" \
+  --skip-schema-validation \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=::/0'
+reject "trusted proxy octet with a leading zero" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=01.2.3.4'
+reject "trusted proxy that is not a whole IPv6 address" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=:::'
+reject "NetworkPolicy selector using In with no values" "allowedPeers" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set-json 'api.networkPolicy.allowedPeers=[{"podSelector":{"matchExpressions":[{"key":"role","operator":"In"}]}}]'
+reject "NetworkPolicy selector using Exists with values" "allowedPeers" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set-json 'api.networkPolicy.allowedPeers=[{"podSelector":{"matchExpressions":[{"key":"role","operator":"Exists","values":["proxy"]}]}}]'
+reject "empty ingress controller NetworkPolicy peers" "allowedPeers" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set-json 'api.networkPolicy.allowedPeers=[]'
+
+reject "API ServiceMonitor blocked by the chart's own NetworkPolicy" "monitoringPeers" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set metrics.serviceMonitor.enabled=true
+reject "API ServiceMonitor blocked by the chart's own NetworkPolicy, schema validation skipped" "apiDown" \
+  --skip-schema-validation \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set metrics.serviceMonitor.enabled=true
 
 echo "== database.url renders the chart-managed Secret"
 if render "database-url" "${work}/url.yaml" --values "${ci}/database-url-values.yaml"; then
@@ -259,8 +360,45 @@ fi
 echo "== ingress"
 if render "ingress" "${work}/ingress.yaml" --values "${ci}/ingress-values.yaml"; then
   has "${work}/ingress.yaml" 'kind: Ingress' "ingress: no Ingress rendered"
+  has "${work}/ingress.yaml" 'trusted_proxies:' "ingress: trusted proxy configuration did not reach the ConfigMap"
+  has "${work}/ingress.yaml" '10.244.0.0/16' "ingress: trusted proxy CIDR did not reach the ConfigMap"
+  has "${work}/ingress.yaml" 'kind: NetworkPolicy' "ingress: no API NetworkPolicy rendered"
+  has "${work}/ingress.yaml" 'kubernetes.io/metadata.name: ingress-nginx' "ingress: NetworkPolicy does not select the ingress-nginx namespace"
+  has "${work}/ingress.yaml" 'app.kubernetes.io/component: controller' "ingress: NetworkPolicy does not select ingress controller pods"
+  has "${work}/ingress.yaml" 'port: http' "ingress: NetworkPolicy does not limit access to the API HTTP port"
   lacks "${work}/ingress.yaml" 'kind: Secret' "ingress: rendered a Secret, but database.existingSecret was set"
-  ok "Ingress rendered"
+  ok "Ingress, trusted proxies and API NetworkPolicy rendered"
+fi
+
+if render "ingress-peer-expressions" "${work}/ingress-peer-expressions.yaml" \
+  --values "${ci}/ingress-values.yaml" \
+  --set-json 'api.networkPolicy.allowedPeers=[{"namespaceSelector":{"matchExpressions":[{"key":"kubernetes.io/metadata.name","operator":"In","values":["ingress-nginx"]}]},"podSelector":{"matchExpressions":[{"key":"app.kubernetes.io/component","operator":"Exists"}]}}]'; then
+  has "${work}/ingress-peer-expressions.yaml" 'operator: In' "ingress-peer-expressions: the In selector did not reach the NetworkPolicy"
+  has "${work}/ingress-peer-expressions.yaml" 'operator: Exists' "ingress-peer-expressions: the Exists selector did not reach the NetworkPolicy"
+  ok "well formed matchExpressions peers render"
+fi
+
+if render "ingress-scraped" "${work}/ingress-scraped.yaml" \
+  --values "${ci}/ingress-values.yaml" --set metrics.serviceMonitor.enabled=true \
+  --set-json 'api.networkPolicy.monitoringPeers=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"mon"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"prometheus"}}}]'; then
+  has "${work}/ingress-scraped.yaml" 'kind: ServiceMonitor' "ingress-scraped: no ServiceMonitor rendered"
+  has "${work}/ingress-scraped.yaml" 'kubernetes.io/metadata.name: mon' "ingress-scraped: NetworkPolicy does not admit the monitoring peer"
+  ok "a declared monitoring peer reaches the API through its NetworkPolicy"
+fi
+
+if render "ingress-policy-disabled" "${work}/ingress-policy-disabled.yaml" \
+  --values "${ci}/ingress-values.yaml" --set api.networkPolicy.enabled=false; then
+  has "${work}/ingress-policy-disabled.yaml" 'kind: Ingress' "ingress-policy-disabled: no Ingress rendered"
+  lacks "${work}/ingress-policy-disabled.yaml" 'kind: NetworkPolicy' "ingress-policy-disabled: API NetworkPolicy rendered although its chart control is disabled"
+  ok "API NetworkPolicy control can defer to an equivalent external policy"
+fi
+
+if render "web-only-ingress" "${work}/web-only-ingress.yaml" \
+  --set database.existingSecret=my-db --set api.enabled=false \
+  --set ingress.enabled=true --set ingress.host=gascurve.com; then
+  has "${work}/web-only-ingress.yaml" 'kind: Ingress' "web-only-ingress: no Ingress rendered"
+  lacks "${work}/web-only-ingress.yaml" 'kind: NetworkPolicy' "web-only-ingress: rendered an API NetworkPolicy with no API"
+  ok "web-only ingress needs neither API proxy trust nor an API NetworkPolicy"
 fi
 
 echo "== web only"
@@ -342,16 +480,17 @@ fi
 # dry-run renders it, but Helm 3 still probes the cluster for its version
 # first, so these two checks are skipped where no cluster is reachable (CI).
 # The env-var behaviour they accompany is asserted above through the manifests.
+# notes_check <label> <values file> <has|lacks> <pattern> <what the pattern warns about>
 notes_check() {
-  local label="$1" values="$2" mode="$3"
+  local label="$1" values="$2" mode="$3" pattern="$4" what="$5"
   local out="${work}/${label}-notes.txt"
   if helm install gascurve "${chart}" --dry-run=client --values "${values}" > "${out}" 2>&1; then
     if [ "${mode}" = has ]; then
-      has "${out}" 'extraEnv is deprecated' "${label}: NOTES.txt does not warn about the deprecated alias"
-      ok "NOTES warns about the deprecated alias"
+      has "${out}" "${pattern}" "${label}: NOTES.txt does not warn about ${what}"
+      ok "NOTES warns about ${what}"
     else
-      lacks "${out}" 'extraEnv is deprecated' "${label}: NOTES.txt warns about the deprecated alias although only the component lists are used"
-      ok "NOTES stays quiet for the component lists"
+      lacks "${out}" "${pattern}" "${label}: NOTES.txt warns about ${what} when it should not"
+      ok "NOTES stays quiet about ${what}"
     fi
   elif grep -q 'cluster unreachable' "${out}"; then
     echo "  skip: ${label} NOTES check (no cluster reachable for helm install --dry-run=client)"
@@ -359,8 +498,16 @@ notes_check() {
     fail "${label}: helm install --dry-run=client failed: $(tr '\n' ' ' < "${out}")"
   fi
 }
-notes_check "deprecated-extra-env" "${ci}/deprecated-extra-env-values.yaml" has
-notes_check "secret-rpc" "${ci}/secret-rpc-values.yaml" lacks
+notes_check "deprecated-extra-env" "${ci}/deprecated-extra-env-values.yaml" has \
+  'extraEnv is deprecated' "the deprecated alias"
+notes_check "secret-rpc" "${ci}/secret-rpc-values.yaml" lacks \
+  'extraEnv is deprecated' "the deprecated alias"
+# An api with no chart-managed Ingress may still sit behind a tunnel or an
+# Ingress this chart does not own, which the render checks cannot see.
+notes_check "no-ingress-proxy-trust" "${ci}/secret-rpc-values.yaml" has \
+  'config.server.trusted_proxies is empty' "an api that may be fronted by a proxy the chart cannot see"
+notes_check "ingress-proxy-trust" "${ci}/ingress-values.yaml" lacks \
+  'config.server.trusted_proxies is empty' "an api that may be fronted by a proxy the chart cannot see"
 
 if [ "${failures}" -ne 0 ]; then
   echo "chart-checks: ${failures} check(s) failed" >&2

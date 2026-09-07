@@ -1,0 +1,28 @@
+{{- if and .Values.ingress.enabled .Values.api.enabled .Values.api.networkPolicy.enabled }}
+{{- if empty .Values.api.networkPolicy.allowedPeers -}}
+{{- fail "api.networkPolicy.enabled is true for an ingress deployment but api.networkPolicy.allowedPeers is empty. Configure the ingress controller NetworkPolicy peers, or disable the chart policy only after applying an equivalent policy outside this chart." -}}
+{{- end -}}
+{{- if and .Values.metrics.serviceMonitor.enabled (empty .Values.api.networkPolicy.monitoringPeers) -}}
+{{- fail "metrics.serviceMonitor.enabled is true, but this NetworkPolicy admits only api.networkPolicy.allowedPeers, so Prometheus cannot reach /metrics on the api's HTTP port and this chart's own apiDown alert fires against a healthy api. Set api.networkPolicy.monitoringPeers to the Prometheus pods (keeping their addresses out of config.server.trusted_proxies), or turn off metrics.serviceMonitor.enabled and scrape through a path aware policy or a metrics proxy instead. Those peers can reach every api route, not only /metrics, because /metrics shares the port." -}}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gascurve.fullname" . }}-api
+  labels:
+    {{- include "gascurve.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gascurve.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- toYaml (concat .Values.api.networkPolicy.allowedPeers (default (list) .Values.api.networkPolicy.monitoringPeers)) | nindent 8 }}
+      ports:
+        - port: http
+          protocol: TCP
+{{- end }}

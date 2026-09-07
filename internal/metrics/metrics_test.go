@@ -97,6 +97,15 @@ func TestMonotonicMirrorsGrowth(t *testing.T) {
 	if got := testutil.ToFloat64(c); got != 11 {
 		t.Fatalf("counter after a restarted source = %v, want 11", got)
 	}
+	// The documented limit: a source replaced by one that has already
+	// passed the last value read looks exactly like ordinary growth, and
+	// the difference is lost. Nothing in this repository is exposed to it,
+	// because the counters mirrored here live as long as the process, but
+	// the helper must not be relied on for more than it does.
+	m.observe(20)
+	if got := testutil.ToFloat64(c); got != 29 {
+		t.Fatalf("counter = %v, want 29", got)
+	}
 }
 
 func TestBoolValue(t *testing.T) {
