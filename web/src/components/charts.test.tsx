@@ -308,6 +308,8 @@ describe("FeeFlows", () => {
     const { rerender } = render(<FeeFlows network="robinhood" range="24h" snapshot={priced} series={series} model="constraints" nowMs={now} />);
     // 5 ETH of fees, 2.2 to the infra account and 2.8 to the network account, at 4,200 dollars.
     expect(screen.getByText("$21,000.0")).toBeInTheDocument();
+    // Each dollar line hovers to the multiplication that produced it, quoting the ETH total drawn above it.
+    expect(screen.getByText("$21,000.0").closest("[title]")).toHaveAttribute("title", "5 ETH × $4,200.0/ETH = $21,000.0\ncoingecko, 5 min ago");
     expect(screen.getByText("$9,240.0")).toBeInTheDocument();
     expect(screen.getByText("$11,760.0")).toBeInTheDocument();
     // Eleven minutes old: the same rule as the live tiles, so the totals go back to ETH alone.

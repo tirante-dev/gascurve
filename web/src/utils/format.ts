@@ -310,6 +310,50 @@ export function freshUsdPrice(ethUsd: EthUsd | null | undefined, nowMs: number):
   return Number.isFinite(price) && price > 0 ? price : null;
 }
 
+/** One USD figure and the working behind it, in the three forms a tile needs. */
+export type UsdMath = {
+  /** The dollar figure alone, sign outside: "0.04". */
+  usd: string;
+  /** The multiplication on one line: "0.00000839 ETH × $4,182.3/ETH = $0.04". */
+  line: string;
+  /** Which quote priced it and how old that quote is: "coinbase, 34 s ago". */
+  provenance: string;
+  /** Both, for a title attribute: a browser breaks the tooltip on the newline. */
+  title: string;
+  /** The same facts in prose, for the accessible description. */
+  description: string;
+};
+
+/**
+ * A fee priced in dollars, together with its working. Every USD figure on the
+ * page is one ETH amount times one quote, and neither the multiplication nor
+ * the quote it used should be something a reader has to take on trust.
+ *
+ * Null under exactly the condition freshUsdPrice is null under, so a caller
+ * that falls back to ETH on a null keeps drawing what it always did.
+ *
+ * `formatEth` is how the caller renders the ETH amount elsewhere on the page:
+ * the working has to quote the figure the reader can see beside it, not a
+ * second rounding of the same number.
+ */
+export function usdMath(eth: number, ethUsd: EthUsd | null | undefined, nowMs: number, formatEth: (eth: number) => string = formatEthFixed): UsdMath | null {
+  const price = freshUsdPrice(ethUsd, nowMs);
+  if (price === null || !ethUsd) return null;
+  const usd = formatUsdFixed(eth * price);
+  const ethText = `${formatEth(eth)} ETH`;
+  const rate = formatUsdFixed(price);
+  const age = formatDuration(Math.max(0, (nowMs - Date.parse(ethUsd.at)) / 1000));
+  const line = `${ethText} × $${rate}/ETH = $${usd}`;
+  const provenance = `${ethUsd.source}, ${age} ago`;
+  return {
+    usd,
+    line,
+    provenance,
+    title: `${line}\n${provenance}`,
+    description: `${usd} US dollars, ${ethText} at ${rate} dollars per ETH, quoted by ${ethUsd.source} ${age} ago`,
+  };
+}
+
 /** Plain integer with thousands separators. */
 export function formatInteger(n: number): string {
   if (!Number.isFinite(n)) return "n/a";
