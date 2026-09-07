@@ -418,6 +418,95 @@ func TestRepairBatchFollowsTheBudgetAndTheNarrowing(t *testing.T) {
 	if n := f.repairBatchFor(20); n != 10 {
 		t.Fatalf("a narrowing above the configured size gave %d", n)
 	}
+	// A spare budget under the smallest batch raises the size back up, but
+	// never past the narrowing: a batch that fails whole because one target
+	// in it will not read has to reach the single-block path that steps
+	// that target over, or the repair retries the same blocks for good.
+	rpc.mu.Lock()
+	rpc.available = 0
+	rpc.mu.Unlock()
+	if n := f.repairBatchFor(0); n != minBackfillBatch {
+		t.Fatalf("no budget gave %d, want the smallest batch %d", n, minBackfillBatch)
+	}
+	for _, narrowed := range []int{1, 2} {
+		if n := f.repairBatchFor(narrowed); n != narrowed {
+			t.Fatalf("narrowed to %d with no budget gave %d", narrowed, n)
+		}
+	}
+}
+
+// The retention horizon does not fall on every resolution at once. A row
+// whose hour has gone short can still have whole minute and quarter-hour
+// buckets, and stepping the cursor past it would leave those blank for good.
+func TestRepairStepRebuildsTheResolutionsThatAreStillWhole(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(30_000)
+	store := dbtest.New()
+	// Blocks at 07:47:30, deep enough into the hour that the three
+	// resolutions truncate to three different bucket starts.
+	seedBlocksWithoutPosterGas(t, rpc, store, 28_500, 28_505)
+	ts := time.Unix(int64(tsFor(28_500)), 0).UTC()
+	now := ts.Add(90 * time.Second)
+	f := newTestFollower(t, rpc, store, func(o *Options) { o.Now = func() time.Time { return now } })
+	if err := f.saveLiveStart(ctx, store, &liveStart{Block: 28_500, TS: int64(tsFor(28_500))}); err != nil {
+		t.Fatal(err)
+	}
+	// Puts the horizon on the quarter-hour bucket's start: that one and the
+	// minute bucket are whole, the hour started well before it.
+	horizon := ts.Truncate(15 * time.Minute)
+	f.cfg.BlockRetention = now.Sub(horizon) + repairPruneSlack
+	if got := wholeResolutions(ts, horizon); len(got) != 2 {
+		t.Fatalf("resolutions still whole: %v, want the minute and quarter-hour ones", got)
+	}
+
+	if status, err := f.RepairStep(ctx); err != nil || status != RepairProgressed {
+		t.Fatalf("repair: %v %v", status, err)
+	}
+	if got := posterGasOf(t, store, 28_500); !got.Valid {
+		t.Fatal("a row whose finer buckets are whole was skipped")
+	}
+	for _, res := range []string{db.Resolution1m, db.Resolution15m} {
+		buckets, err := store.Buckets(ctx, 4663, res, ts.Add(-time.Hour), ts.Add(time.Hour))
+		if err != nil || len(buckets) == 0 {
+			t.Fatalf("%s buckets: %d %v", res, len(buckets), err)
+		}
+		for _, b := range buckets {
+			if !b.PosterGas.Valid {
+				t.Fatalf("%s bucket %s was not repaired", res, b.BucketStart)
+			}
+		}
+	}
+	// The hour is not rebuilt, because its window has lost rows to retention.
+	hours, err := store.Buckets(ctx, 4663, db.Resolution1h, ts.Add(-time.Hour), ts.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range hours {
+		if b.PosterGas.Valid {
+			t.Fatalf("an hour whose window is short was rebuilt anyway: %s", b.BucketStart)
+		}
+	}
+}
+
+func TestWholeResolutions(t *testing.T) {
+	// 10:47:30 truncates to three different starts: 10:47, 10:45 and 10:00.
+	ts := time.Date(2026, 9, 7, 10, 47, 30, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		horizon time.Time
+		want    int
+	}{
+		{"every window whole", ts.Add(-2 * time.Hour), 3},
+		{"the hour has gone short", time.Date(2026, 9, 7, 10, 30, 0, 0, time.UTC), 2},
+		{"only the minute is left", time.Date(2026, 9, 7, 10, 46, 0, 0, time.UTC), 1},
+		{"nothing is rebuildable", ts.Add(time.Hour), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wholeResolutions(ts, tc.horizon); len(got) != tc.want {
+				t.Fatalf("resolutions %v, want %d of them", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestPosterGasCursorRoundTrips(t *testing.T) {

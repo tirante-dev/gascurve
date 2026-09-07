@@ -125,13 +125,34 @@ const maxRepairAttempts = 3
 // available budget counts rather than half of it.
 func (f *Follower) repairBatchFor(narrowed int) int {
 	n := f.cfg.HeaderBatchSize
-	if narrowed > 0 && narrowed < n {
-		n = narrowed
-	}
 	if avail := max(f.rpc.Available(), 0); avail < n {
 		n = max(avail, minBackfillBatch)
 	}
+	// The narrowing is applied last and wins. A spare budget below the
+	// smallest batch raises the size back to minBackfillBatch, and a batch
+	// that fails whole because one target in it will not read would then
+	// never reach the single-block path that steps that target over: the
+	// repair would retry the same few blocks for good.
+	if narrowed > 0 && narrowed < n {
+		n = narrowed
+	}
 	return max(n, 1)
+}
+
+// wholeResolutions names the stored resolutions whose bucket over ts still
+// has every one of its rows, which is the condition for rebuilding it from
+// them. A bucket is whole while its own start is at or above the retention
+// horizon; the finer the resolution, the later its bucket starts, so a row
+// near the horizon can repair its minute and quarter-hour buckets after its
+// hour has already gone short.
+func wholeResolutions(ts, horizon time.Time) []string {
+	out := make([]string, 0, len(db.ResolutionOrder))
+	for _, res := range db.ResolutionOrder {
+		if !ts.UTC().Truncate(db.Resolutions[res]).Before(horizon) {
+			out = append(out, res)
+		}
+	}
+	return out
 }
 
 // RepairStep fills in poster gas for one batch of the blocks stored without
@@ -185,35 +206,48 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 	}
 	next := rows[len(rows)-1].Number + 1
 
-	// Which rows are worth a call. Two ways one is not, and both are read
-	// off the bucket the row belongs to rather than off the row: what gets
-	// rebuilt is the bucket, so the bucket is what has to be in scope and
-	// whole. Below the boundary the buckets are the backfill's, which owns
-	// them additively (history_epoch rebuilds those); at or above it they
-	// are rebuilt from rows, including the rows of the boundary hour that
-	// sit below the first live block. Past the retention horizon the window
-	// is losing the rows a rebuild would read.
+	// Which rows are worth a call, and which resolutions each one can still
+	// repair. Both questions are asked of the buckets the row falls in
+	// rather than of the row, because the bucket is what gets rebuilt.
+	//
+	// Below the boundary the buckets are the backfill's, which owns them
+	// additively (history_epoch rebuilds those). The test is the row's own
+	// timestamp, the same split commitFill makes, so the rows of the
+	// boundary hour that sit below the first live block stay in scope.
+	//
+	// Past the retention horizon a window is losing the rows a rebuild would
+	// read, and that falls per resolution rather than all at once: a
+	// horizon inside an hour leaves that hour's bucket short while the
+	// minute and quarter-hour buckets after it are whole. Taking the hour
+	// as the answer for all three would step the cursor past those rows and
+	// leave the finer buckets blank for good, so a row is read when any
+	// resolution can still use it and only those resolutions are rebuilt.
 	horizon := f.now().Add(-f.cfg.BlockRetention).Add(repairPruneSlack)
 	targets := make([]nitro.ReceiptTarget, 0, len(rows))
 	repairable := make([]db.Block, 0, len(rows))
+	byResolution := make(map[string][]db.Block, len(db.ResolutionOrder))
 	var backfilled, stale int
 	for _, b := range rows {
-		bucket := b.TS.UTC().Truncate(boundaryWidth)
-		switch {
-		case bucket.Before(boundary):
+		if b.TS.Before(boundary) {
 			backfilled++
-		case bucket.Before(horizon):
+			continue
+		}
+		whole := wholeResolutions(b.TS, horizon)
+		if len(whole) == 0 {
 			stale++
-		default:
-			targets = append(targets, nitro.ReceiptTarget{Number: b.Number, Hash: b.Hash, TxCount: b.TxCount, GasUsed: b.GasUsed})
-			repairable = append(repairable, b)
+			continue
+		}
+		targets = append(targets, nitro.ReceiptTarget{Number: b.Number, Hash: b.Hash, TxCount: b.TxCount, GasUsed: b.GasUsed})
+		repairable = append(repairable, b)
+		for _, res := range whole {
+			byResolution[res] = append(byResolution[res], b)
 		}
 	}
 	if backfilled > 0 {
 		f.log.Debug("passing over blocks whose buckets the backfill owns", "blocks", backfilled, "boundary", boundary)
 	}
 	if stale > 0 {
-		f.log.Info("passing over blocks whose buckets retention empties before a rebuild could read them", "blocks", stale, "horizon", horizon)
+		f.log.Info("passing over blocks no resolution can still rebuild whole", "blocks", stale, "horizon", horizon)
 	}
 	if len(targets) == 0 {
 		c.Next = next
@@ -231,8 +265,12 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 			return err
 		}
 		for _, res := range db.ResolutionOrder {
-			if err := s.RebuildBuckets(ctx, f.chainID, res, db.BucketStarts(repairable, res)); err != nil {
-				return fmt.Errorf("poster gas buckets: %w", err)
+			rebuild := byResolution[res]
+			if len(rebuild) == 0 {
+				continue
+			}
+			if err := s.RebuildBuckets(ctx, f.chainID, res, db.BucketStarts(rebuild, res)); err != nil {
+				return fmt.Errorf("poster gas %s buckets: %w", res, err)
 			}
 		}
 		return f.savePosterGasCursor(ctx, s, c)
