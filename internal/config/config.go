@@ -130,7 +130,19 @@ type CollectorConfig struct {
 	// it the tick and /live report ethUsd: null rather than a stale price
 	// (default 10m). Environment: ETH_USD_MAX_AGE.
 	EthUsdMaxAge time.Duration `mapstructure:"eth_usd_max_age"`
+	// MetricsPort is the port the collector serves Prometheus metrics on
+	// (default 9090). It is the collector's only HTTP server and answers
+	// /metrics alone. Zero disables it. The api has an HTTP server already
+	// and serves /metrics on server.port. Environment: METRICS_PORT.
+	MetricsPort int `mapstructure:"metrics_port"`
 }
+
+// DefaultMetricsPort is the fallback for collector.metrics_port.
+const DefaultMetricsPort = 9090
+
+// MetricsEnabled reports whether the collector should run its metrics
+// server.
+func (c CollectorConfig) MetricsEnabled() bool { return c.MetricsPort > 0 }
 
 // DefaultEthUsdMaxAge is the fallback for collector.eth_usd_max_age, used
 // by the API when it is not configured.
@@ -315,6 +327,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collector.failover_cooldown", "60s")
 	v.SetDefault("collector.eth_usd_source", "coinbase")
 	v.SetDefault("collector.eth_usd_max_age", DefaultEthUsdMaxAge.String())
+	v.SetDefault("collector.metrics_port", DefaultMetricsPort)
 	v.SetDefault("log_level", "info")
 }
 
@@ -328,6 +341,13 @@ func applyEnv(cfg *Config, getenv func(string) (string, bool)) error {
 			return fmt.Errorf("PORT: %w", err)
 		}
 		cfg.Server.Port = p
+	}
+	if s, ok := getenv("METRICS_PORT"); ok && s != "" {
+		p, err := strconv.Atoi(s)
+		if err != nil {
+			return fmt.Errorf("METRICS_PORT: %w", err)
+		}
+		cfg.Collector.MetricsPort = p
 	}
 	if s, ok := getenv("LOG_LEVEL"); ok && s != "" {
 		cfg.LogLevel = s
@@ -491,6 +511,10 @@ func (c *Config) Validate(requireRPC bool) error {
 	}
 	if c.Collector.MaxCatchUpBatches <= 0 {
 		errs = append(errs, fmt.Errorf("collector.max_catch_up_batches %d must be positive", c.Collector.MaxCatchUpBatches))
+	}
+	// Zero switches the metrics server off; anything else must be a port.
+	if c.Collector.MetricsPort < 0 || c.Collector.MetricsPort > 65535 {
+		errs = append(errs, fmt.Errorf("collector.metrics_port %d out of range (0 disables it)", c.Collector.MetricsPort))
 	}
 	if err := prices.ValidateSource(c.Collector.EthUsdSource); err != nil {
 		errs = append(errs, fmt.Errorf("collector.eth_usd_source: %w", err))

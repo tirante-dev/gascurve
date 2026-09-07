@@ -67,6 +67,9 @@ type EndpointStatus struct {
 	// JSON-RPC answers can still have a socket that does not work.
 	WSCooling bool
 	WSError   string
+	// RateLimitEvents is how often this endpoint has reported throttling.
+	// It only ever grows, so an observer can report it as a counter.
+	RateLimitEvents uint64
 }
 
 // PoolStatus is the pool's routing state for /status.
@@ -197,7 +200,7 @@ func (p *Pool) Status() PoolStatus {
 		until, reason := e.wsCooling()
 		st.Endpoints[i] = EndpointStatus{
 			Index: i, WS: e.wsURL != "", Archive: e.archive, Disabled: e.Disabled(), Error: e.Reason(),
-			WSCooling: !until.IsZero(), WSError: reason,
+			WSCooling: !until.IsZero(), WSError: reason, RateLimitEvents: e.Stats().RateLimitEvents,
 		}
 	}
 	return st
@@ -676,6 +679,8 @@ func (p *Pool) Stats() Stats {
 		s := e.Stats()
 		out.CallsLast10s += s.CallsLast10s
 		out.RateLimitEvents += s.RateLimitEvents
+		out.FastCalls += s.FastCalls
+		out.BulkCalls += s.BulkCalls
 		if s.Last429At.After(out.Last429At) {
 			out.Last429At = s.Last429At
 		}

@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/tirante-dev/gascurve/internal/db"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
@@ -44,6 +45,13 @@ const (
 	// than growing a row without end.
 	maxHoles = 256
 )
+
+// holesState summarizes the recorded holes for the instruments, the same
+// way /status summarizes them.
+func holesState(holes []hole) metrics.HolesState {
+	s := model.SummarizeHoles(holes)
+	return metrics.HolesState{Pending: s.Pending, Blocks: s.Blocks, Unfillable: s.Unfillable}
+}
 
 // loadHoles reads the recorded holes. An unreadable checkpoint is reported
 // as none: it is a record of what is missing, never chain state, so it is
@@ -197,8 +205,12 @@ func (f *Follower) fillStep(ctx context.Context) (FillStatus, error) {
 		return FillNone, err
 	}
 	holes, err := f.loadHoles(ctx, f.store)
-	if err != nil || len(holes) == 0 {
+	if err != nil {
 		return FillNone, err
+	}
+	f.metrics.ObserveHoles(holesState(holes))
+	if len(holes) == 0 {
+		return FillNone, nil
 	}
 	target, reasons, err := f.pickHole(ctx, holes)
 	if err != nil {
@@ -644,6 +656,7 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db
 		return err
 	}
 	if done {
+		f.metrics.HoleFilled()
 		f.log.Info("gap filled", "from", h.From, "to", h.To)
 	}
 	return nil

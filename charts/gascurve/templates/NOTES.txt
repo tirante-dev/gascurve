@@ -38,6 +38,23 @@ Migrations run as an init container (gascurve-migrate up) on the
   kubectl logs {{ . }} -c migrate
 {{- end }}
 {{- end }}
+{{- if $deployments }}
+
+Metrics: /metrics on
+{{- if .Values.api.enabled }} the api's port {{ .Values.api.service.port }}{{ end }}
+{{- if and .Values.api.enabled .Values.collector.enabled (gt (int .Values.config.collector.metrics_port) 0) }} and{{ end }}
+{{- if and .Values.collector.enabled (gt (int .Values.config.collector.metrics_port) 0) }} the collector's port {{ .Values.config.collector.metrics_port }}{{ end }}.
+{{- if and .Values.collector.enabled (not (gt (int .Values.config.collector.metrics_port) 0)) }}
+The collector's metrics server is off (config.collector.metrics_port is 0).
+{{- end }}
+{{- if not (and .Values.metrics.serviceMonitor.enabled .Values.metrics.prometheusRule.enabled) }}
+Prometheus operator objects still to enable:
+{{- if not .Values.metrics.serviceMonitor.enabled }} metrics.serviceMonitor.enabled{{ end }}
+{{- if and (not .Values.metrics.serviceMonitor.enabled) (not .Values.metrics.prometheusRule.enabled) }},{{ end }}
+{{- if not .Values.metrics.prometheusRule.enabled }} metrics.prometheusRule.enabled{{ end }}.
+Both need the operator's CRDs; see Metrics and alerts in charts/gascurve/README.md.
+{{- end }}
+{{- end }}
 {{- if and .Values.database.existingSecret $deployments }}
 
 Database credentials come from Secret {{ .Values.database.existingSecret }}.

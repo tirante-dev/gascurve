@@ -31,6 +31,8 @@ helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
 | `config` | Rendered to `config.yaml` (networks, collector pacing, CORS) | see values.yaml |
 | `collector.extraEnv`, `api.extraEnv`, `migrations.extraEnv` | Extra env for that container only. Private RPC URLs belong in `collector.extraEnv` | `[]` |
 | `extraEnv` | Deprecated alias applied to all three. Kept so existing installs keep working; move entries to the component lists | `[]` |
+| `config.collector.metrics_port` | Port for the collector's own `/metrics` server. `0` disables it, and its Service and ServiceMonitor go with it | `9090` |
+| `metrics.serviceMonitor.enabled`, `metrics.prometheusRule.enabled` | Prometheus operator objects. See Metrics and alerts | `false`, `false` |
 
 The web image is built with `NEXT_PUBLIC_API_URL=/api/v1`, so it talks to the API through the same host. Put the API on another host only if you rebuild the image with a different value.
 
@@ -74,6 +76,50 @@ collector:
       valueFrom:
         secretKeyRef: { name: gascurve-rpc, key: robinhood }
 ```
+
+## Metrics and alerts
+
+Both binaries serve Prometheus metrics at `/metrics` whatever this chart is told: the api on `config.server.port`, next to the REST API and the WebSocket, and the collector on `config.collector.metrics_port` (9090) from a small server of its own, since it otherwise runs no HTTP server at all. That server reads the registry alone, so a follower stuck on an RPC call or on the database still answers a scrape. `docs/ARCHITECTURE.md` §9 lists every series and its labels; no endpoint URL is ever a label value, because endpoint URLs carry keys.
+
+The Ingress does not expose either endpoint: it routes `/api` to the api and everything else to web, so `/metrics` is reachable from inside the cluster only.
+
+The chart always renders a headless Service for the collector (`<release>-collector`, port `metrics`), so a plain `scrape_config` can find it without the Prometheus operator. What is opt in is the operator's own objects, which need the `ServiceMonitor` and `PrometheusRule` CRDs:
+
+```bash
+helm upgrade gascurve … \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.serviceMonitor.labels.release=kube-prometheus-stack \
+  --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.labels.release=kube-prometheus-stack
+```
+
+Most operators only pick up objects carrying a label their selector asks for. Find yours with:
+
+```bash
+kubectl get prometheus -A -o jsonpath='{range .items[*]}{.spec.serviceMonitorSelector}{"\n"}{.spec.ruleSelector}{"\n"}{end}'
+```
+
+`metrics.prometheusRule.alertLabels` is added to every alert, for Alertmanager routing (`--set metrics.prometheusRule.alertLabels.team=platform`).
+
+### Alerts
+
+Each alert can be switched off on its own, and its window, threshold and severity changed, under `metrics.prometheusRule.alerts.<name>`. `enabled`, `for` and `severity` are required; `threshold` is ignored by the alerts that compare nothing.
+
+| Alert | Default | Fires when |
+|---|---|---|
+| `collectorLagDedicated` | `> 30s` for `5m`, warning | a network on a dedicated endpoint falls behind |
+| `collectorLagPublic` | `> 180s` for `15m`, warning | a network on a public RPC falls behind |
+| `collectorSampleStale` | no sample for `300s`, held `2m`, critical | the fast loop is not sampling at all |
+| `collectorRateLimited` | `> 0.2` events/s for `15m`, warning | an endpoint keeps throttling the collector |
+| `collectorEndpointsExhausted` | `5m`, critical | every endpoint of a network is disabled |
+| `collectorDown` | `5m`, critical | the collector answers no scrape |
+| `apiDown` | `5m`, critical | the api answers no scrape |
+| `apiErrorRate` | `> 5%` 5xx for `10m`, warning | the api is failing requests |
+| `databaseUnreachable` | `3m`, critical | `/ready` answers 503, which it does only when the database ping fails |
+
+Lag is the one figure that needs two rules. A network with a dedicated endpoint normally sits at 0 to 2 seconds; one followed over a public RPC at its documented 4 calls per second normally sits at 20 to 60 seconds, because a tick costs about five calls and the catch-up gets what is left. A single threshold would either page constantly on the public networks or never fire on the dedicated one. `metrics.prometheusRule.dedicatedNetworks` is a regular expression on the `network` label that splits the fleet; it defaults to `robinhood` and must be widened when more networks move onto dedicated nodes.
+
+`collectorDown` and `apiDown` match `up{job="<release>-collector"}` and `up{job="<release>-api"}`, which is the job label an operator derives from a ServiceMonitor (the Service name). Scraping through a hand-written `scrape_config` with a different job name means those two alerts never fire; the rest do not depend on it.
 
 ## Migrations
 

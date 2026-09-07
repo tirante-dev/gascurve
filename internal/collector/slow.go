@@ -618,15 +618,23 @@ func (f *Follower) prune(ctx context.Context) error {
 }
 
 // persistStats records rate limit accounting and, with a pool, the
-// endpoint routing state for /status.
+// endpoint routing state for /status. It is also where the RPC counters
+// reach the instruments: they are observed before the checkpoint writes,
+// so a database that is refusing writes does not also take the endpoint
+// series away.
 func (f *Follower) persistStats(ctx context.Context) error {
 	st := f.rpc.Stats()
+	var status *nitro.PoolStatus
+	if f.pool != nil {
+		ps := f.pool.Status()
+		status = &ps
+	}
+	f.metrics.ObservePool(poolMetrics(st, status))
 	if err := f.store.SetState(ctx, f.chainID, db.StateRateLimitEvents, strconv.FormatUint(st.RateLimitEvents, 10)); err != nil {
 		return err
 	}
-	if f.pool != nil {
-		status := f.pool.Status()
-		b, err := json.Marshal(endpointsStatus(status))
+	if status != nil {
+		b, err := json.Marshal(endpointsStatus(*status))
 		if err != nil {
 			return fmt.Errorf("encode endpoints: %w", err)
 		}
@@ -635,7 +643,7 @@ func (f *Follower) persistStats(ctx context.Context) error {
 		}
 		// A disabled endpoint is an error the operator must see even though
 		// the network keeps running on another one.
-		if msg := endpointError(status); msg != "" {
+		if msg := endpointError(*status); msg != "" {
 			if err := f.store.SetNetworkError(ctx, f.chainID, msg); err != nil {
 				return err
 			}

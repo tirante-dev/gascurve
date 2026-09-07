@@ -18,6 +18,7 @@ collector (cmd/collector)  ──writes──▶  PostgreSQL  ◀──reads─�
 - The **api** never calls an RPC. It reads Postgres and fans live updates out to WebSocket clients using Postgres `LISTEN gascurve_live`.
 - The **web** app never calls an RPC. It uses the REST API for history and the WebSocket for live updates, with polling of `/live` as a fallback.
 - **migrate** (`cmd/migrate`) applies schema migrations. Runtime binaries only run migrations when `database.run_migrations: true`.
+- Both runtime binaries expose Prometheus metrics at `/metrics` (§9). The api serves them on `server.port` next to the REST API; the collector, which otherwise runs no HTTP server, serves them on `collector.metrics_port` from a server that shares nothing with the followers.
 
 ## 2. Networks
 
@@ -287,7 +288,56 @@ Environment: `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`), `NE
 
 Coverage gate (90% lines) applies to `src/lib/**`, `src/hooks/**`, `src/utils/**`. Components are tested where behaviour is non-trivial.
 
-## 9. Versioning, images and delivery
+## 9. Metrics (`internal/metrics`, Prometheus)
+
+Both binaries serve the exposition format at `/metrics`, from `internal/metrics` and the `prometheus/client_golang` registry: the api on `server.port` (alongside the REST API and the WebSocket, outside the request timeout and not counted by its own request instruments), the collector on `collector.metrics_port` (default 9090, `METRICS_PORT`; `0` disables it) from a small server that serves `/metrics` and answers 404 to everything else. Both registries also carry the standard Go runtime and process collectors (`go_*`, `process_*`).
+
+Instruments are written from points the code already reaches and are never read back by the application, so a scrape reads the registry alone: a follower stuck on an RPC call or on the database still answers one. Nothing in the collector writes a metric before its transaction commits, so a gauge never claims progress that was rolled back.
+
+**No endpoint URL is ever a label value.** Endpoints are identified by their index in the network's endpoint list, exactly as `/status` reports them; `internal/nitro` scrubs URLs from every error it returns for the same reason.
+
+Every collector series carries `network` (the configured name) and `chain_id` (decimal), and the per-endpoint ones add `endpoint` (the index).
+
+| Series | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `gascurve_collector_head_block` | gauge | | number of the newest committed block |
+| `gascurve_collector_head_lag_seconds` | gauge | | age of that block, the figure `/status` reports as `lagSeconds` |
+| `gascurve_collector_last_sample_timestamp_seconds` | gauge | | unix time of the last successful state sample |
+| `gascurve_collector_tick_duration_seconds` | histogram | | wall time of one fast tick, failed ticks included |
+| `gascurve_collector_rpc_calls_total` | counter | `class` (`fast`, `bulk`) | JSON-RPC calls sent, one per item inside a batch, by pacer lane |
+| `gascurve_collector_rate_limit_events_total` | counter | | times any endpoint of this network reported throttling |
+| `gascurve_collector_endpoint_rate_limit_events_total` | counter | `endpoint` | the same, per endpoint |
+| `gascurve_collector_active_endpoint` | gauge | | index of the endpoint ordinary calls go to |
+| `gascurve_collector_endpoint_failovers_total` | counter | | times the pool moved to another endpoint |
+| `gascurve_collector_endpoint_disabled` | gauge | `endpoint` | 1 while that endpoint is disabled |
+| `gascurve_collector_endpoint_ws_cooling` | gauge | `endpoint` | 1 while that endpoint's WebSocket is cooled down |
+| `gascurve_collector_backfill_cursor_block` | gauge | | block the active backfill segment has replayed to |
+| `gascurve_collector_backfill_floor_block` | gauge | | oldest block `collector.backfill_depth` reaches |
+| `gascurve_collector_backfill_blocks_remaining` | gauge | | blocks between them, over every segment still to come |
+| `gascurve_collector_backfill_done` | gauge | | 1 once the cursor reports the depth rebuilt |
+| `gascurve_collector_holes_pending` | gauge | | ranges queued for the gap filler |
+| `gascurve_collector_holes_blocks` | gauge | | blocks not indexed, queued and unfillable together |
+| `gascurve_collector_holes_unfillable` | gauge | | ranges nothing can be replayed into |
+| `gascurve_collector_holes_filled_total` | counter | | ranges the gap filler has completed |
+| `gascurve_collector_catch_up_gaps_skipped_total` | counter | | catch-up gaps skipped for exceeding the call budget |
+
+The three `holes_*` gauges are the same summary `/status` serves as `holes`, and the endpoint gauges the same state it serves as `endpoints`.
+
+The api's series carry no network label: it serves every network from one process.
+
+| Series | Type | Labels | Meaning |
+|---|---|---|---|
+| `gascurve_api_requests_total` | counter | `route`, `method`, `status` | requests served |
+| `gascurve_api_request_duration_seconds` | histogram | `route`, `method` | time to serve one request |
+| `gascurve_api_ws_clients` | gauge | | WebSocket clients currently subscribed |
+| `gascurve_api_ws_frames_sent_total` | counter | | frames written to clients, pings included |
+| `gascurve_api_ws_clients_dropped_total` | counter | | clients closed for a full outbound queue |
+
+`route` is the chi route pattern (`/api/v1/networks/{network}/series`), resolved after the handler returned, never the request path: a network name or a block number must not become a series of its own. A request no route claims is labeled with the wildcard chi matched (`/api/v1/*`), or `unmatched` when it never reached the router. `/metrics` and `/api/v1/ws` are not counted: one is the scrape itself, the other a long-lived connection whose duration says nothing about request latency.
+
+The chart renders a `ServiceMonitor` per deployable and a `PrometheusRule` (both off by default, both needing the Prometheus operator's CRDs) plus a headless Service for the collector, which has no Service of its own otherwise. Thresholds and alert windows are values; see `charts/gascurve/README.md`.
+
+## 10. Versioning, images and delivery
 
 One version for the whole repo, managed by release-please from the Go component; `web/package.json` is bumped as an extra file. Three images: `gascurve-collector`, `gascurve-api`, `gascurve-web`, each built for `linux/amd64` and `linux/arm64`. The Helm chart under `charts/gascurve` is versioned separately and records the application version it ships as `Chart.yaml` `appVersion`.
 

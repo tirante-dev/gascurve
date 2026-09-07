@@ -161,6 +161,70 @@ reject "fallback list too short for the fallbacks configured" "position 1" \
   --set 'collector.extraEnv[0].name=NETWORK_ROBINHOOD_FALLBACK_RPC_URLS' \
   --set-string 'collector.extraEnv[0].value=https://one.example'
 
+echo "== metrics: the operator objects are opt in"
+
+# Schema: an alert's window is a Prometheus duration, its severity is one of
+# three, and an unknown alert name is a typo rather than a new rule.
+reject "alert severity that is not a severity" "severity" \
+  --set database.existingSecret=my-db --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.alerts.apiDown.severity=page
+reject "alert window that is not a duration" "for" \
+  --set database.existingSecret=my-db --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.alerts.apiDown.for=soon
+reject "unknown alert name" "not_an_alert" \
+  --set database.existingSecret=my-db --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.alerts.not_an_alert.enabled=true
+reject "scrape interval that is not a duration" "interval" \
+  --set database.existingSecret=my-db --set metrics.serviceMonitor.enabled=true \
+  --set metrics.serviceMonitor.interval=often
+reject "metrics_port above the maximum" "metrics_port" \
+  --set database.existingSecret=my-db --set config.collector.metrics_port=70000
+reject "unknown field under metrics" "not_a_field" \
+  --set database.existingSecret=my-db --set metrics.not_a_field=x
+
+echo "== metrics disabled by default"
+if render "metrics-default" "${work}/metrics-off.yaml" --values "${ci}/existing-secret-values.yaml"; then
+  lacks "${work}/metrics-off.yaml" 'kind: ServiceMonitor' "metrics-default: rendered a ServiceMonitor although metrics.serviceMonitor.enabled is false"
+  lacks "${work}/metrics-off.yaml" 'kind: PrometheusRule' "metrics-default: rendered a PrometheusRule although metrics.prometheusRule.enabled is false"
+  # The binaries serve /metrics whatever the operator objects say, so the
+  # collector keeps its port and its Service either way.
+  has "${work}/metrics-off.yaml" 'name: gascurve-collector' "metrics-default: no collector Service, so nothing can scrape the collector"
+  has "${work}/metrics-off.yaml" 'containerPort: 9090' "metrics-default: the collector container does not declare its metrics port"
+  ok "no operator objects, but the collector is still scrapable"
+fi
+
+echo "== metrics enabled"
+if render "metrics" "${work}/metrics.yaml" --values "${ci}/metrics-values.yaml"; then
+  has "${work}/metrics.yaml" 'kind: ServiceMonitor' "metrics: no ServiceMonitor rendered"
+  has "${work}/metrics.yaml" 'kind: PrometheusRule' "metrics: no PrometheusRule rendered"
+  has "${work}/metrics.yaml" 'name: gascurve-api' "metrics: no api ServiceMonitor"
+  has "${work}/metrics.yaml" 'name: gascurve-collector' "metrics: no collector ServiceMonitor"
+  has "${work}/metrics.yaml" 'release: kube-prometheus-stack' "metrics: the operator selector labels did not reach the objects"
+  has "${work}/metrics.yaml" 'team: platform' "metrics: alertLabels did not reach the alerts"
+  # The two lag rules split the fleet on the network label, so a public RPC
+  # sitting at 20 to 60 seconds cannot fire the dedicated threshold.
+  has "${work}/metrics.yaml" 'network=~..robinhood|robinhood-testnet' "metrics: the dedicated lag rule does not select the dedicated networks"
+  has "${work}/metrics.yaml" 'network!~..robinhood|robinhood-testnet' "metrics: the public lag rule does not exclude the dedicated networks"
+  has "${work}/metrics.yaml" 'alert: GascurveCollectorSampleStale' "metrics: the stale sample alert is missing"
+  has "${work}/metrics.yaml" 'alert: GascurveCollectorEndpointsExhausted' "metrics: the exhausted endpoints alert is missing"
+  has "${work}/metrics.yaml" 'alert: GascurveCollectorRateLimited' "metrics: the rate limit alert is missing"
+  has "${work}/metrics.yaml" 'alert: GascurveApiDown' "metrics: the api down alert is missing"
+  has "${work}/metrics.yaml" 'alert: GascurveApiErrorRate' "metrics: the api error rate alert is missing"
+  has "${work}/metrics.yaml" 'alert: GascurveDatabaseUnreachable' "metrics: the database alert is missing"
+  # An alert switched off leaves no rule behind.
+  lacks "${work}/metrics.yaml" 'alert: GascurveCollectorDown' "metrics: rendered an alert that was disabled"
+  ok "ServiceMonitors, PrometheusRule and the split lag thresholds"
+fi
+
+echo "== metrics_port: 0 takes the collector's server away"
+if render "metrics-port-zero" "${work}/metrics-zero.yaml" --values "${ci}/existing-secret-values.yaml" \
+  --set config.collector.metrics_port=0 --set metrics.serviceMonitor.enabled=true; then
+  lacks "${work}/metrics-zero.yaml" 'containerPort: 9090' "metrics-port-zero: the collector still declares a metrics port"
+  lacks "${work}/metrics-zero.yaml" 'port: metrics' "metrics-port-zero: something still scrapes the collector"
+  has "${work}/metrics-zero.yaml" 'port: http' "metrics-port-zero: the api ServiceMonitor went away with the collector's"
+  ok "collector server, Service and ServiceMonitor all gone, api untouched"
+fi
+
 echo "== an ingress with no backend is refused"
 reject "ingress enabled with api and web disabled" "/ingress/enabled" \
   --set database.existingSecret=my-db --set api.enabled=false --set web.enabled=false \
@@ -248,6 +312,7 @@ if render "homelab" "${work}/homelab-collector.yaml" --values "${ci}/homelab-val
 fi
 if render "homelab" "${work}/homelab-config.yaml" --values "${ci}/homelab-values.yaml" \
   --show-only templates/configmap.yaml; then
+  has "${work}/homelab-config.yaml" 'metrics_port: 9090' "homelab: the collector metrics port did not reach config.yaml"
   has "${work}/homelab-config.yaml" 'tick_interval: 500ms' "homelab: tick_interval 500ms did not reach config.yaml"
   has "${work}/homelab-config.yaml" 'calls_per_second: 25' "homelab: the 25 calls per second budget did not reach config.yaml"
   has "${work}/homelab-config.yaml" 'backfill_depth: 720h' "homelab: backfill_depth 720h did not reach config.yaml"
