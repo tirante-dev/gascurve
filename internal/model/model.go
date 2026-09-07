@@ -208,8 +208,14 @@ type Reorg struct {
 
 // Series is a history response.
 type Series struct {
-	Range          string          `json:"range"`
-	Resolution     string          `json:"resolution"`
+	Range      string `json:"range"`
+	Resolution string `json:"resolution"`
+	// From and To bound the requested window in unix seconds, whatever the
+	// points cover: a chart draws the whole window and shows what is not
+	// indexed as missing rather than stretching the data across it. For
+	// the all range From is the first indexed point (To when there is none).
+	From           int64           `json:"from"`
+	To             int64           `json:"to"`
 	ConstraintSets []ConstraintSet `json:"constraintSets"`
 	OwnerActions   []OwnerAction   `json:"ownerActions"`
 	Points         []SeriesPoint   `json:"points"`
@@ -239,6 +245,8 @@ type BatchPoint struct {
 type BatchSeries struct {
 	Range      string       `json:"range"`
 	Resolution string       `json:"resolution"`
+	From       int64        `json:"from"`
+	To         int64        `json:"to"`
 	Points     []BatchPoint `json:"points"`
 }
 
@@ -254,6 +262,8 @@ type L1Point struct {
 // L1Series is the /l1 response.
 type L1Series struct {
 	Range  string    `json:"range"`
+	From   int64     `json:"from"`
+	To     int64     `json:"to"`
 	Points []L1Point `json:"points"`
 }
 

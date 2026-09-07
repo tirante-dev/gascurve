@@ -59,6 +59,20 @@ func (r seriesRange) window(now time.Time) (from, to time.Time) {
 	return now.Add(-r.duration), to
 }
 
+// bounds is the window as the response reports it, in unix seconds: the
+// requested window for a bounded range; for the all range, which has no
+// start of its own, the first indexed point (or the end when there is
+// none), so a chart never draws an axis from 1970.
+func (r seriesRange) bounds(from, to time.Time, first int64, any bool) (int64, int64) {
+	if r.duration == 0 {
+		if !any {
+			return to.Unix(), to.Unix()
+		}
+		return first, to.Unix()
+	}
+	return from.Unix(), to.Unix()
+}
+
 // buildSeries assembles a Series for a range.
 func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRange) (*model.Series, error) {
 	now := s.now()
@@ -98,6 +112,7 @@ func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRang
 			out.Resolution = "block"
 			out.Points = blockPoints(blocks, sets)
 		}
+		out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 		return out, nil
 	}
 	buckets, err := s.store.Buckets(ctx, chainID, rng.resolution, from, to)
@@ -108,7 +123,15 @@ func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRang
 	for _, b := range buckets {
 		out.Points = append(out.Points, bucketPoint(b, width))
 	}
+	out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 	return out, nil
+}
+
+func firstPoint(points []model.SeriesPoint) int64 {
+	if len(points) == 0 {
+		return 0
+	}
+	return points[0].T
 }
 
 // setsInForce returns the sets active during a window starting at from:

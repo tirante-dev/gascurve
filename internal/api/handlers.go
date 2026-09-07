@@ -401,6 +401,7 @@ func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {
 			L1BaseFeeAvg: b.L1BaseFeeAvg.String(), CalldataBytes: b.CalldataBytes,
 		})
 	}
+	out.From, out.To = rng.bounds(from, to, firstBatch(out.Points), len(out.Points) > 0)
 	writeJSON(w, http.StatusOK, rng.cache, out)
 }
 
@@ -431,6 +432,7 @@ func (s *Server) handleL1(w http.ResponseWriter, r *http.Request) {
 			FeesAvailable: l1.FeesAvailable, UnitsSinceUpdate: l1.UnitsSinceUpdate,
 		})
 	}
+	out.From, out.To = rng.bounds(from, to, firstL1(out.Points), len(out.Points) > 0)
 	writeJSON(w, http.StatusOK, rng.cache, out)
 }
 
@@ -571,4 +573,18 @@ func multiplierBips(baseFee, minFee *big.Int) int64 {
 		return 1<<63 - 1
 	}
 	return m.Int64()
+}
+
+func firstBatch(points []model.BatchPoint) int64 {
+	if len(points) == 0 {
+		return 0
+	}
+	return points[0].T
+}
+
+func firstL1(points []model.L1Point) int64 {
+	if len(points) == 0 {
+		return 0
+	}
+	return points[0].T
 }

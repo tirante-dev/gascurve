@@ -209,6 +209,7 @@ type BlockPoint = {
 
 type Series = {
   range: '1h' | '24h' | '30d' | 'all'; resolution: 'block' | '5s' | '1m' | '15m' | '1h';
+  from: number; to: number;   // the requested window in unix seconds, whatever the points cover; charts draw the whole window and show what is missing as not indexed. For 'all', from is the first indexed point (equal to to when nothing is indexed)
   constraintSets: ConstraintSet[];         // sets that were in force during the range, for markers and card layout
   ownerActions: OwnerAction[];             // within the range, for chart markers
   points: SeriesPoint[];
@@ -229,8 +230,8 @@ type OwnerAction = {
   args: Record<string, unknown>;           // decoded when the selector is known, else { raw: '0x…' }. setGasPricingConstraints: { constraints: [{ gasTargetPerSecond, adjustmentWindowSeconds, startingBacklog }] }; setMinimumL2BaseFee: { priceInWei: string }
 }
 
-type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; /* 'batch' = exactly one point per report, never grouped, used for 1h */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
-type L1Series = { range: string; points: { t: number; baseFeeEstimate: string; surplus: string; feesAvailable: string; unitsSinceUpdate: number }[] }
+type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; from: number; to: number; /* window as in Series */ /* 'batch' = exactly one point per report, never grouped, used for 1h */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
+type L1Series = { range: string; from: number; to: number; /* window as in Series */ points: { t: number; baseFeeEstimate: string; surplus: string; feesAvailable: string; unitsSinceUpdate: number }[] }
 ```
 
 ## 7. WebSocket (`/api/v1/ws?network=robinhood`)

@@ -274,6 +274,11 @@ func TestEndpoints(t *testing.T) {
 			if s.Resolution != "1m" || len(s.Points) != 3 || s.Points[0].Blocks != 10 || s.Points[0].GasPerSecond != 1 || s.Points[0].ConstraintSetID != 2 || s.Points[0].BaseFeeAvg != "2" {
 				t.Fatalf("series 24h: %+v", s)
 			}
+			// The window is reported whatever the points cover, so a chart
+			// draws the whole day and shows the rest as not indexed.
+			if s.From != now.Add(-24*time.Hour).Unix() || s.To != now.Add(time.Second).Unix() {
+				t.Fatalf("series 24h window: %d..%d", s.From, s.To)
+			}
 			if p := s.Points[0]; *p.MinBaseFee != "7" || *p.FloorFeesWei != "700" || *p.SurplusFeesWei != "300" || p.ConstraintBips[0] != 5 {
 				t.Fatalf("bucket point contract fields: %+v", p)
 			}
@@ -290,6 +295,10 @@ func TestEndpoints(t *testing.T) {
 			decode(t, b, &s)
 			if s.Resolution != "1h" || len(s.Points) != 3 || len(s.ConstraintSets) != 2 {
 				t.Fatalf("series all: %+v", s)
+			}
+			// The all range starts where the data does, never in 1970.
+			if s.From != s.Points[0].T || s.To != now.Add(time.Second).Unix() {
+				t.Fatalf("series all window: %d..%d (first point %d)", s.From, s.To, s.Points[0].T)
 			}
 		}},
 		{"/api/v1/networks/robinhood/series?range=2y", 400, cacheNone, nil},
@@ -332,6 +341,9 @@ func TestEndpoints(t *testing.T) {
 			if s.Range != "24h" || s.Resolution != "1m" || len(s.Points) != 2 || s.Points[0].Batches != 1 || s.Points[0].WeiSpent != "5000" || s.Points[0].L1BaseFeeAvg != "5" || s.Points[0].CalldataBytes != 100 || s.Points[1].Batches != 2 {
 				t.Fatalf("batches: %+v", s)
 			}
+			if s.From != now.Add(-24*time.Hour).Unix() || s.To != now.Add(time.Second).Unix() {
+				t.Fatalf("batches window: %d..%d", s.From, s.To)
+			}
 		}},
 		{"/api/v1/networks/robinhood/batches?range=1h", 200, cacheHour, func(t *testing.T, b []byte) {
 			var s model.BatchSeries
@@ -356,7 +368,7 @@ func TestEndpoints(t *testing.T) {
 		{"/api/v1/networks/robinhood/l1?range=all", 200, cacheAll, func(t *testing.T, b []byte) {
 			var s model.L1Series
 			decode(t, b, &s)
-			if len(s.Points) != 1 {
+			if len(s.Points) != 1 || s.From != s.Points[0].T || s.To != now.Add(time.Second).Unix() {
 				t.Fatalf("l1 hourly: %+v", s)
 			}
 		}},
@@ -989,5 +1001,24 @@ func TestHelpers(t *testing.T) {
 	}
 	if legacyExponent(&model.LegacyParams{SpeedLimit: 1, Inertia: 1, Tolerance: 1, Backlog: 0}) != 0 || legacyExponent(&model.LegacyParams{SpeedLimit: 10, Inertia: 10, Tolerance: 1, Backlog: 110}) != 10_000 {
 		t.Fatal("legacyExponent")
+	}
+}
+
+// TestRangeBounds: a bounded range reports its window; the all range
+// reports the first indexed point, or an empty window when nothing is.
+func TestRangeBounds(t *testing.T) {
+	from, to := ranges[rangeDay].window(now)
+	if f, tt := ranges[rangeDay].bounds(from, to, 5, true); f != from.Unix() || tt != to.Unix() {
+		t.Fatalf("day: %d..%d", f, tt)
+	}
+	from, to = ranges[rangeAll].window(now)
+	if f, tt := ranges[rangeAll].bounds(from, to, 1_700_000_000, true); f != 1_700_000_000 || tt != to.Unix() {
+		t.Fatalf("all: %d..%d", f, tt)
+	}
+	if f, tt := ranges[rangeAll].bounds(from, to, 0, false); f != to.Unix() || tt != to.Unix() {
+		t.Fatalf("all, nothing indexed: %d..%d", f, tt)
+	}
+	if firstPoint(nil) != 0 || firstBatch(nil) != 0 || firstL1(nil) != 0 {
+		t.Fatal("first of nothing is zero")
 	}
 }
