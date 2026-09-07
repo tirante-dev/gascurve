@@ -122,7 +122,12 @@ export const DOT_RADIUS = 1;
 export const MISSING_STROKE_OPACITY = 0.5;
 export const MISSING_DASH = "2 2";
 
-/** The pattern the missing-series bands are filled from. Put it in the chart's own `defs`. */
+/**
+ * The pattern the missing-series bands are filled from. Put it in the chart's
+ * own `defs`, and only where a band is actually drawn: several charts on one
+ * page each carry their own copy under the same id, and every copy is the
+ * same definition, so whichever one `url(#id)` finds paints the same dots.
+ */
 export function MissingDots() {
   return (
     <pattern id={MISSING_PATTERN_ID} width={DOT_SPACING} height={DOT_SPACING} patternUnits="userSpaceOnUse">

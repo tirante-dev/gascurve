@@ -302,9 +302,11 @@ export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth =
       <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit} with each constraint target in force drawn as a stepped line`}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
-            <defs>
-              <MissingDots />
-            </defs>
+            {m.gasMissing.length > 0 ? (
+              <defs>
+                <MissingDots />
+              </defs>
+            ) : null}
             <CartesianGrid vertical={false} />
             {gapBands(m.gaps.gaps, m.gaps.window)}
             {missingBandAreas(m.gasMissing, m.gaps.window)}
@@ -329,9 +331,11 @@ export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }:
       <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
-            <defs>
-              <MissingDots />
-            </defs>
+            {m.backlogMissingFor(index).length > 0 ? (
+              <defs>
+                <MissingDots />
+              </defs>
+            ) : null}
             <CartesianGrid vertical={false} />
             {gapBands(m.gaps.gaps, m.gaps.window)}
             {missingBandAreas(m.backlogMissingFor(index), m.gaps.window)}
