@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,59 @@ import (
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
 )
+
+func TestBackfillConstraintResetUsesTransactionGas(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	rpc.constraints = []nitro.Constraint{{Target: 60_000_000, Window: 15, Backlog: 9}}
+	store := dbtest.New()
+	oldEntries := []model.ConstraintSetEntry{{Target: 40_000_000, Window: 30, StartingBacklog: 1_000}}
+	newParams := []nitro.ConstraintParam{{GasTargetPerSecond: 60_000_000, AdjustmentWindowSeconds: 15, StartingBacklog: 5}}
+	for _, set := range []db.ConstraintSet{
+		{ChainID: 4663, EffectiveBlock: 100, EffectiveAt: baseTime, Source: model.SourceGenesis, Constraints: entriesJSON(oldEntries)},
+		{ChainID: 4663, EffectiveBlock: 500, EffectiveAt: baseTime, Source: model.SourceOwnerAction, Constraints: entriesJSON(entriesOf(newParams))},
+	} {
+		if _, err := store.InsertConstraintSet(ctx, set); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args, err := db.MarshalJSONB(map[string]any{"constraints": newParams})
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := db.OwnerAction{
+		ChainID: 4663, BlockNumber: 500, TxHash: "0xlate", TxIndex: sql.NullInt64{Int64: 2, Valid: true},
+		LogIndex: 9, TS: time.Unix(int64(tsFor(500)), 0).UTC(), Method: "setGasPricingConstraints", Args: args,
+	}
+	if _, err := store.InsertOwnerActions(ctx, []db.OwnerAction{action}); err != nil {
+		t.Fatal(err)
+	}
+	rpc.receipts[action.TxHash] = nitro.Receipt{
+		TxHash: action.TxHash, BlockNumber: action.BlockNumber, TxIndex: 2,
+		GasUsed: 100_000, CumulativeGasUsed: 900_000,
+	}
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = 70 * time.Second
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.ownerScanThrough = 999
+	f.mu.Unlock()
+	if status, err := f.BackfillStep(ctx); err != nil || status != BackfillProgressed {
+		t.Fatalf("backfill: %v %v", status, err)
+	}
+	block, err := store.BlockByNumber(ctx, 4663, 500)
+	if err != nil || block == nil {
+		t.Fatalf("block 500: %+v %v", block, err)
+	}
+	if want := 5 + gasFor(500) - 800_000; block.Backlogs[0] != want {
+		t.Fatalf("block 500 backlog = %d, want %d", block.Backlogs[0], want)
+	}
+	if rpc.calledTimes("TransactionReceipts") != 1 {
+		t.Fatalf("receipt calls = %d", rpc.calledTimes("TransactionReceipts"))
+	}
+}
 
 func seedSets(t *testing.T, store *dbtest.MemStore) {
 	t.Helper()
@@ -762,7 +816,10 @@ func replayErrorAt(t *testing.T, f *Follower, number uint64) int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := f.replaySegment(st, c, headers, anchor, fees)
+	rows, err := f.replaySegment(context.Background(), st, c, headers, anchor, fees)
+	if err != nil {
+		t.Fatal(err)
+	}
 	last := rows[len(rows)-1]
 	if last.Number != number || !last.Anchored {
 		t.Fatalf("expected anchored row %d: %+v", number, last)
@@ -796,7 +853,10 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 		t.Fatal("101 is not an anchor block")
 	}
 	headers, _ := rpc.HeadersByNumbers(ctx, numbers)
-	rows := f.replaySegment(st, &backfillCursor{}, headers, anchor, fees)
+	rows, err := f.replaySegment(context.Background(), st, &backfillCursor{}, headers, anchor, fees)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, r := range rows {
 		anchored := r.Number == 100 || r.Number == 105
 		if r.Anchored != anchored {

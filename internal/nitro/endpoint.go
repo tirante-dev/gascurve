@@ -270,6 +270,12 @@ func (e *Endpoint) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block
 	return blocksByNumbers(ctx, numbers, true, e.batch)
 }
 
+// TransactionReceipts fetches receipts in batches of at most the adaptive
+// cap.
+func (e *Endpoint) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
+	return transactionReceipts(ctx, hashes, e.batch)
+}
+
 // MaxLogRange is the widest block range one eth_getLogs asks for before an
 // endpoint has said otherwise, and the ceiling the learned range grows back
 // to.

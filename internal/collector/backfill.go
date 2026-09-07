@@ -175,7 +175,10 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err != nil {
 		return BackfillIdle, err
 	}
-	rows := f.replaySegment(st, c, headers, anchor, anchorFees)
+	rows, err := f.replaySegment(ctx, st, c, headers, anchor, anchorFees)
+	if err != nil {
+		return BackfillIdle, err
+	}
 	for _, r := range rows {
 		if r.Anchored {
 			c.LastAnchor, c.LastAnchorErrorBips = r.Number, db.ReplayErrorBips(r)
@@ -336,16 +339,20 @@ func (f *Follower) backfillFees(tl *timeline, c *backfillCursor, headers []nitro
 // limit, inertia and tolerance changes) and pinning backlogs wherever
 // anchor says so. Segmenting on fees alone would price historical legacy
 // blocks with today's parameters.
-func (f *Follower) replaySegment(st *pricer.State, c *backfillCursor, headers []nitro.Header, anchor pricer.Anchor, anchorFees map[uint64]*big.Int) []db.Block {
+func (f *Follower) replaySegment(ctx context.Context, st *pricer.State, c *backfillCursor, headers []nitro.Header, anchor pricer.Anchor, anchorFees map[uint64]*big.Int) ([]db.Block, error) {
 	f.mu.Lock()
 	tl := f.timelineLocked(nil)
 	f.mu.Unlock()
+	actions, err := f.resolveActionBlocks(ctx, headers, tl)
+	if err != nil {
+		return nil, err
+	}
 	fees := f.backfillFees(tl, c, headers, anchorFees)
 	legacies := make([]*pricer.Legacy, len(headers))
 	if st.Legacy != nil {
 		base := *st.Legacy
 		for i, h := range headers {
-			legacies[i] = tl.legacyAt(h.Number, &base)
+			legacies[i] = tl.legacyBefore(h.Number, &base)
 		}
 	}
 	rows := make([]db.Block, 0, len(headers))
@@ -359,17 +366,12 @@ func (f *Follower) replaySegment(st *pricer.State, c *backfillCursor, headers []
 			end++
 		}
 		chunk := headers[start:end]
-		blocks := make([]pricer.Block, len(chunk))
-		for i, h := range chunk {
-			blocks[i] = pricer.Block{Number: h.Number, Timestamp: h.Timestamp, GasUsed: h.GasUsed, BaseFee: h.BaseFee}
-		}
-		results := pricer.Replay(st, prevTs, blocks, anchor)
-		fee := st.MinBaseFee
-		rows = append(rows, blockRows(f.chainID, chunk, results, func(uint64) *big.Int { return fee })...)
+		chunkRows, _ := replayForward(f.chainID, st, prevTs, chunk, tl, anchor, actions)
+		rows = append(rows, chunkRows...)
 		prevTs = chunk[len(chunk)-1].Timestamp
 		start = end
 	}
-	return rows
+	return rows, nil
 }
 
 // applyLegacyParams copies the parameters in force into the replay state,

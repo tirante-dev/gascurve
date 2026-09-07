@@ -517,7 +517,18 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 			return FillIdle, err
 		}
 	}
-	rows, filledTail, end := f.replayHole(t, headers, tail)
+	f.mu.Lock()
+	tl := f.timelineLocked(nil)
+	f.mu.Unlock()
+	actionHeaders := append([]nitro.Header(nil), headers...)
+	if tail != nil {
+		actionHeaders = append(actionHeaders, headerOf(*tail))
+	}
+	actions, err := f.resolveActionBlocks(ctx, actionHeaders, tl)
+	if err != nil {
+		return FillIdle, err
+	}
+	rows, filledTail, end := f.replayHole(t, headers, tail, tl, actions)
 	h.Next, h.State = from+n, end
 	return FillProgressed, f.commitFill(ctx, gen, h, rows, filledTail, h.Next > h.To)
 }
@@ -553,12 +564,9 @@ func (f *Follower) holeTail(ctx context.Context, h hole, prevHeader nitro.Header
 // a block whose state was really sampled. A stored block carrying another
 // pricer shape than the replay ends on cannot be joined to it: the range
 // is still written, its error simply stays unrecorded.
-func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Block) (rows []db.Block, filled *db.Block, end *model.HoleState) {
-	f.mu.Lock()
-	tl := f.timelineLocked(nil)
-	f.mu.Unlock()
+func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Block, tl *timeline, actions actionBlocks) (rows []db.Block, filled *db.Block, end *model.HoleState) {
 	st := t.state
-	rows, _ = replayForward(f.chainID, st, t.prevTs, headers, tl, nil)
+	rows, _ = replayForward(f.chainID, st, t.prevTs, headers, tl, nil, actions)
 	lastHeader := headers[len(headers)-1]
 	var setID int64
 	f.mu.Lock()
@@ -572,23 +580,27 @@ func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Bl
 	if tail == nil {
 		return rows, nil, end
 	}
-	if len(tail.Backlogs) != len(st.Backlogs()) {
+	backlogs := tail.Backlogs.Uint64s()
+	head := headerOf(*tail)
+	anchored, _ := replayForward(f.chainID, st, lastHeader.Timestamp, []nitro.Header{head}, tl,
+		func(uint64) ([]uint64, bool) { return backlogs, true }, actions)
+	if len(tail.Backlogs) != len(anchored[0].Backlogs) {
 		f.log.Warn("the block after the gap carries another pricer shape, leaving its replay error unrecorded",
-			"block", tail.Number, "backlogs", len(tail.Backlogs), "replay", len(st.Backlogs()))
+			"block", tail.Number, "backlogs", len(tail.Backlogs), "replay", len(anchored[0].Backlogs))
 		return rows, nil, end
 	}
-	backlogs := tail.Backlogs.Uint64s()
-	head := nitro.Header{
-		Number: tail.Number, Hash: tail.Hash, ParentHash: tail.ParentHash, Timestamp: uint64(tail.TS.Unix()),
-		GasUsed: tail.GasUsed, BaseFee: tail.BaseFee.BigInt(), L1BlockNumber: tail.L1Block, TxCount: tail.TxCount,
-	}
-	anchored, _ := replayForward(f.chainID, st, lastHeader.Timestamp, []nitro.Header{head}, tl,
-		func(uint64) ([]uint64, bool) { return backlogs, true })
 	merged := *tail
 	merged.PredictedBaseFee = anchored[0].PredictedBaseFee
 	merged.ExponentBips, merged.ConstraintBips = anchored[0].ExponentBips, anchored[0].ConstraintBips
 	f.log.Info("gap replay reached the sampled head", "block", merged.Number, "replayErrorBips", db.ReplayErrorBips(merged))
 	return rows, &merged, end
+}
+
+func headerOf(block db.Block) nitro.Header {
+	return nitro.Header{
+		Number: block.Number, Hash: block.Hash, ParentHash: block.ParentHash, Timestamp: uint64(block.TS.Unix()),
+		GasUsed: block.GasUsed, BaseFee: block.BaseFee.BigInt(), L1BlockNumber: block.L1Block, TxCount: block.TxCount,
+	}
 }
 
 // commitFill writes one batch of a hole and its progress in one chain

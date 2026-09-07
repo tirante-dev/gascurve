@@ -113,7 +113,7 @@ state_samples       (chain_id, sampled_at, block_number, base_fee, min_base_fee,
                      prices JSONB /* getPricesInWei tuple */, l1 JSONB /* pricer getters */,
                      accounts JSONB /* {infra:{address,balance}, network:{...}, l1Reward:{...}} or null */,
                      PK(chain_id, sampled_at))                   -- l1/accounts only on slow ticks; pruned after sample_retention
-owner_actions       (chain_id, block_number, tx_hash, log_index, ts, method, selector, args JSONB,
+owner_actions       (chain_id, block_number, tx_hash, tx_index INT NULL /* null for rows scanned before it was recorded */, log_index, ts, method, selector, args JSONB,
                      PK(chain_id, tx_hash, log_index))
 constraint_sets     (id SERIAL PK, chain_id, effective_block, effective_at, constraints JSONB, source TEXT /* 'genesis'|'owner_action'|'observed' */)
 batch_reports       (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero,
