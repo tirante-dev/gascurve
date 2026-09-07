@@ -17,8 +17,11 @@ export function seriesKey(network: string, range: SeriesRange): string {
   return `${network}:${range}`;
 }
 
+/** One in-flight request, the controller that can cancel it, and how many views are waiting on it. */
+type Shared = { promise: Promise<Series>; controller: AbortController; consumers: number; settled: boolean };
+
 /** The request in flight for each key, so a second asker joins it instead of starting another. */
-const inFlight = new Map<string, Promise<Series>>();
+const inFlight = new Map<string, Shared>();
 
 /** Forgets any request still in flight. Nothing is cached, so this only ever costs an extra fetch. */
 export function resetSharedSeries(): void {
@@ -31,24 +34,49 @@ export function resetSharedSeries(): void {
  * refetch together, so two views on one range must not become two requests to
  * the api. Nothing is held after the request settles, so the refetch interval
  * still decides when data is refreshed and no view is ever handed a stale
- * range. No caller's abort reaches the request: one view walking away must not
- * cancel the fetch the other is waiting on.
+ * range.
+ *
+ * One caller's abort never cancels the fetch another is waiting on: consumers
+ * are counted per key against a shared controller, and the request is
+ * cancelled only when the last of them leaves before it settles. Rapid range
+ * switching used to leave one abandoned request per visited key running
+ * through its ten-second timeout and two retries with nobody to hand the
+ * result to.
  */
-export function fetchSharedSeries(network: string, range: SeriesRange): Promise<Series> {
+export function fetchSharedSeries(network: string, range: SeriesRange, signal?: AbortSignal): Promise<Series> {
   const key = seriesKey(network, range);
-  const existing = inFlight.get(key);
-  if (existing) return existing;
-  const promise = getSeries(network, range);
-  inFlight.set(key, promise);
-  const done = () => {
-    if (inFlight.get(key) === promise) inFlight.delete(key);
+  let entry = inFlight.get(key);
+  if (entry === undefined) {
+    const controller = new AbortController();
+    const started: Shared = { promise: getSeries(network, range, { signal: controller.signal }), controller, consumers: 0, settled: false };
+    const done = () => {
+      started.settled = true;
+      if (inFlight.get(key) === started) inFlight.delete(key);
+    };
+    started.promise.then(done, done);
+    inFlight.set(key, started);
+    entry = started;
+  }
+  const shared = entry;
+  shared.consumers += 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    signal?.removeEventListener("abort", release);
+    shared.consumers -= 1;
+    if (shared.consumers > 0 || shared.settled) return;
+    // Nobody is waiting on this request any more.
+    if (inFlight.get(key) === shared) inFlight.delete(key);
+    shared.controller.abort();
   };
-  promise.then(done, done);
-  return promise;
+  shared.promise.then(release, release);
+  signal?.addEventListener("abort", release);
+  return shared.promise;
 }
 
 /** The bucketed history of a range. A null network or range fetches nothing and reads as empty. */
 export function useSeries(network: string | null, range: SeriesRange | null): ApiState<Series> {
-  const fetcher = useCallback(() => fetchSharedSeries(network ?? "", range ?? "1h"), [network, range]);
+  const fetcher = useCallback((signal: AbortSignal) => fetchSharedSeries(network ?? "", range ?? "1h", signal), [network, range]);
   return useApi<Series>(network !== null && range !== null ? seriesKey(network, range) : null, fetcher, { refetchMs: range === null ? 0 : refetchIntervalFor(range) });
 }

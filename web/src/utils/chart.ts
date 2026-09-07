@@ -1,5 +1,6 @@
 // Pure helpers that turn api shapes into what the charts draw.
 
+import { bucketSeconds as bucketWidth } from "@/lib/gaps";
 import { coverageOf, partialKinds, type PartialKind } from "@/lib/partial";
 import { saturatingCastToBips, saturatingUMul, toUint64 } from "@/lib/pricer";
 import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesPoint } from "@/types";
@@ -160,9 +161,14 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">, m
   // while the owner-action scan is still catching up (a 6-constraint genesis
   // set against a 2-constraint live model, for example). Such sets are left
   // out and their points fall back to the unknown split.
+  // With points in hand only the sets that match one of them are drawable: a
+  // set whose shape no point agrees with would put empty C3 to C6 panels and
+  // labels that describe nothing in front of the reader. Points that match no
+  // set stay unknown instead. With no points at all there is nothing to
+  // contradict, so every set in the range keeps its segments.
   const usable = sets.filter((set) => series.points.some((p) => p.constraintSetId === set.id && shapeMatches(set, p)));
   const out: Segment[] = [];
-  for (const set of usable.length > 0 ? usable : sets) {
+  for (const set of series.points.length === 0 ? sets : usable) {
     set.constraints.slice(0, MAX_SERIES).forEach((c, i) => {
       out.push({ key: contributionKey(set.id, i), backlogKey: backlogKey(set.id, i), setId: set.id, index: i, label: segmentLabel(set, i, c), color: seriesColor(i), constraint: c });
     });
@@ -203,7 +209,7 @@ export function hasUnknownSets(series: Pick<Series, "constraintSets" | "points">
   return series.points.some((p) => ownSegments(bySet, p) === undefined);
 }
 
-/** True when some point's per-constraint split was never recorded (history from before migration 000006). */
+/** True when some point's per-constraint split was never recorded (pricing version 0 history). */
 export function hasUnrecordedSplit(series: Pick<Series, "points">): boolean {
   return series.points.some((p) => p.constraintBips === null);
 }
@@ -213,12 +219,18 @@ export function hasUnknownSplit(series: Pick<Series, "constraintSets" | "points"
   return hasUnrecordedSplit(series) || hasUnknownSets(series, model);
 }
 
-/** How many constraint slots the charts should draw: from the sets, or from the data for legacy networks. */
-export function seriesCount(series: Pick<Series, "constraintSets" | "points">): number {
-  const fromSets = Math.max(0, ...series.constraintSets.map((s) => s.constraints.length));
-  if (fromSets > 0) return Math.min(MAX_SERIES, fromSets);
+/**
+ * How many constraint slots the charts should draw, and so how many the
+ * constraint switcher offers: the slots the drawable segments cover, and the
+ * slots the points themselves carry. A set whose shape no point matches
+ * contributes no segments (see `segmentsFor`) and so no slots, which is what
+ * keeps a six-constraint genesis set from offering C1 to C6 over two-slot
+ * live data.
+ */
+export function seriesCount(series: Pick<Series, "constraintSets" | "points">, model: PricerModel = "unknown"): number {
+  const fromSegments = Math.max(0, ...segmentsFor(series, model).map((s) => s.index + 1));
   const fromPoints = Math.max(0, ...series.points.map((p) => Math.max(p.backlogs.length, p.constraintBips?.length ?? 0)));
-  return Math.min(MAX_SERIES, fromPoints);
+  return Math.min(MAX_SERIES, Math.max(fromSegments, fromPoints));
 }
 
 /** Label for backlog panel `index`: every definition that slot had in the range, oldest first; unlabelled when none is known. */
@@ -235,8 +247,8 @@ export type ChartPoint = {
   feeAvg: number;
   feeMin: number;
   feeMax: number;
-  /** Floor in force at the bucket's last block, gwei; drawn as a stepped line. */
-  floor: number;
+  /** Floor in force at the bucket's last block, gwei; drawn as a stepped line. Null when the bucket holds a block with pricing version 0, which recorded no floor. */
+  floor: number | null;
   x: number;
   gps: number;
   feesEth: number;
@@ -277,7 +289,7 @@ export type ChartPoint = {
  * Flattens a Series into chart rows with numbers the axes can scale.
  * Contributions come from the api's start-of-block `constraintBips`, never
  * from end-of-block backlogs, and are divided by 10,000 only for display. A
- * point with a null split (history from before migration 000006) keeps its
+ * point with a null split (pricing version 0 history) keeps its
  * set for backlogs and targets but puts its whole x under `cUnknown`; null
  * floor and surplus fees leave both null and put the bucket's fees under
  * `unsplitFeesEth`, never zero. One row per bucket; `withSetBoundaries` adds
@@ -286,11 +298,12 @@ export type ChartPoint = {
 export function buildChartPoints(series: Series, model: PricerModel): ChartPoint[] {
   const segments = segmentsFor(series, model);
   const bySet = groupBySet(segments);
-  const slots = seriesCount(series);
-  // Which buckets the collector indexed only part of, from their position in
-  // the range: the last one is still filling, an earlier one is where
-  // indexing began.
-  const kinds = partialKinds(series.points);
+  const slots = seriesCount(series, model);
+  // Which buckets the collector indexed only part of. A partial bucket is the
+  // one still filling only when it runs up to the right edge of the range;
+  // one that stops short of it is a bucket indexing only reached part way
+  // into, whichever end of the data it sits at.
+  const kinds = partialKinds(series.points, { to: series.to, step: bucketWidth(series.resolution, series.points) });
   return series.points.map((p, i) => {
     const own = ownSegments(bySet, p);
     const split = p.constraintBips;
@@ -303,7 +316,7 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
       feeAvg: weiToGweiNumber(p.baseFeeAvg),
       feeMin: weiToGweiNumber(p.baseFeeMin),
       feeMax: weiToGweiNumber(p.baseFeeMax),
-      floor: weiToGweiNumber(p.minBaseFee),
+      floor: p.minBaseFee === null ? null : weiToGweiNumber(p.minBaseFee),
       x: bipsToXValue(p.exponentBips),
       gps: p.gasPerSecond,
       feesEth,

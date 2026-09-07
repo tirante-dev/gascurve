@@ -226,6 +226,26 @@ func (p *Postgres) UpdateNetworkHead(ctx context.Context, chainID, headBlock uin
 	return err
 }
 
+// SetNetworkHead records the head after a rewind, nulling the fields that
+// no longer have a value. last_error is left alone: a rewind is not a
+// successful sample and must not clear a standing error.
+func (p *Postgres) SetNetworkHead(ctx context.Context, chainID uint64, headBlock *uint64, headAt, sampledAt *time.Time) error {
+	var block sql.NullInt64
+	if headBlock != nil {
+		block = sql.NullInt64{Int64: int64(*headBlock), Valid: true}
+	}
+	var at, sampled sql.NullTime
+	if headAt != nil {
+		at = sql.NullTime{Time: *headAt, Valid: true}
+	}
+	if sampledAt != nil {
+		sampled = sql.NullTime{Time: *sampledAt, Valid: true}
+	}
+	_, err := p.exec(ctx, `UPDATE networks SET head_block = $2, head_at = $3, last_sample_at = $4, updated_at = now() WHERE chain_id = $1`,
+		chainID, block, at, sampled)
+	return err
+}
+
 // SetNetworkError records or clears the last error.
 func (p *Postgres) SetNetworkError(ctx context.Context, chainID uint64, msg string) error {
 	var v sql.NullString
@@ -473,6 +493,13 @@ func (p *Postgres) LatestStateSample(ctx context.Context, chainID uint64, withL1
 		q += ` AND l1 IS NOT NULL`
 	}
 	return getOne[StateSample](ctx, p, q+` ORDER BY sampled_at DESC LIMIT 1`, chainID)
+}
+
+// StateSampleAt returns the newest sample at or below a block.
+func (p *Postgres) StateSampleAt(ctx context.Context, chainID, block uint64) (*StateSample, error) {
+	return getOne[StateSample](ctx, p, `SELECT `+sampleColumns+`
+		FROM state_samples WHERE chain_id = $1 AND block_number <= $2
+		ORDER BY block_number DESC, sampled_at DESC LIMIT 1`, chainID, block)
 }
 
 // L1Samples returns one L1-carrying sample per step.

@@ -464,3 +464,59 @@ func TestRunHistoryFillsGaps(t *testing.T) {
 		t.Fatal("the backfill must run once nothing is fillable")
 	}
 }
+
+// TestRunHistoryRestartsBackfillAfterRewind: a rewind below the backfill's
+// top drops its buckets and resets its cursor. Completion must not be
+// cached anywhere but in that cursor, or the deleted history is never
+// rebuilt for the life of the process.
+func TestRunHistoryRestartsBackfillAfterRewind(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, CallsPerSecond: 4, Enabled: true},
+		Collector: fastConfig(),
+		RPC:       rpc,
+		Store:     store,
+		Log:       logger.Nop(),
+		Now:       func() time.Time { return baseTime.Add(100 * time.Second) },
+		Sleep:     quickSleep,
+	})
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.runHistory(hctx)
+	}()
+	waitFor(t, "the first backfill", func() bool {
+		c, err := f.loadCursor(ctx)
+		return err == nil && c.Done && c.Top == 1000
+	})
+	// The chain reorganizes below the range the backfill folded, so its
+	// buckets go and its cursor starts over.
+	rpc.fork(990, "z")
+	if _, err := f.rewindToAncestor(ctx, 999); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := f.loadCursor(ctx); err != nil || c.Done || c.Top != 0 {
+		t.Fatalf("the rewind must reset the cursor: %+v %v", c, err)
+	}
+	// The fast loop stores the canonical head again, which is what the
+	// backfill needs before it can pick a segment.
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	waitFor(t, "the backfill to run again", func() bool {
+		c, err := f.loadCursor(ctx)
+		return err == nil && c.Done && c.Top != 0 && c.Top != 1000
+	})
+	cancel()
+	<-done
+}

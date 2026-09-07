@@ -105,11 +105,12 @@ export type BlockPoint = {
   backlogs: number[];
   /**
    * Start-of-block per-constraint exponent, the values that priced this block;
-   * sums to exponentBips. Null only for rows written before migration 000006.
+   * sums to exponentBips. Null only for pricing version 0 rows, history recorded before the breakdown existed.
    */
   constraintBips: number[] | null;
   exponentBips: number;
-  minBaseFee: string;
+  /** Floor in force at this block; null for pricing version 0 (history without the breakdown). */
+  minBaseFee: string | null;
   anchored: boolean;
 };
 
@@ -131,13 +132,13 @@ export type SeriesPoint = {
   baseFeeAvg: string;
   baseFeeMax: string;
   exponentBips: number;
-  /** Start-of-block values of the bucket's last block; null for history written before migration 000006. */
+  /** Start-of-block values of the bucket's last block; null for pricing version 0 history. */
   constraintBips: number[] | null;
   backlogs: number[];
   backlogsMax: number[];
-  /** Floor in force at the bucket's last block. */
-  minBaseFee: string;
-  /** Sum of gasUsed times minBaseFee per block, exact; null for history written before migration 000006. */
+  /** Floor in force at the bucket's last block; null when any block in the bucket has pricing version 0. */
+  minBaseFee: string | null;
+  /** Sum of gasUsed times minBaseFee per block, exact; null for pricing version 0 history. */
   floorFeesWei: string | null;
   /** feesWei minus floorFeesWei, exact; null whenever floorFeesWei is. */
   surplusFeesWei: string | null;

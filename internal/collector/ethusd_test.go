@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -404,5 +405,40 @@ func TestSharedEthUsdCache(t *testing.T) {
 	}
 	if f.cfg.EthUsdMaxAge != defaultEthUsdMaxAge {
 		t.Fatalf("eth_usd_max_age default = %v", f.cfg.EthUsdMaxAge)
+	}
+}
+
+// TestEthUsdPublishedAfterItsCheckpoint: the quote a tick publishes and the
+// one /live reads are the same row, so a checkpoint write that fails must
+// leave the in-memory quote alone. Publishing first would put a quote in
+// the snapshots and the WebSocket that /live cannot see.
+func TestEthUsdPublishedAfterItsCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	clock := &testClock{t: baseTime}
+	fetch := &fakeFetcher{price: "4523.40", at: baseTime}
+	store := dbtest.New()
+	f := ethUsdFollower(t, store, 4663, newEthUsdCache(fetch, time.Minute), clock.now, logger.Nop())
+	store.FailOn["SetState"] = true
+	if err := f.sampleEthUsd(ctx); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("a checkpoint failure must surface: %v", err)
+	}
+	f.mu.Lock()
+	published := f.ethUsdPrice
+	f.mu.Unlock()
+	if published != nil {
+		t.Fatalf("no quote may be published before its checkpoint: %+v", published)
+	}
+	// Once the write succeeds the quote is published and the two agree.
+	store.FailOn["SetState"] = false
+	clock.advance(time.Minute)
+	if err := f.sampleEthUsd(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	published = f.ethUsdPrice
+	f.mu.Unlock()
+	recorded, ok := stateEthUsd(t, store, 4663)
+	if !ok || published == nil || published.Price != recorded.Price {
+		t.Fatalf("the published quote and the checkpoint must agree: %+v %+v", published, recorded)
 	}
 }

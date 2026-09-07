@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { cloneElement, isValidElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createFrameStore, targetValues } from "@/lib/smoothing";
+import { assignPlaces, createFrameStore, NO_PLACES, targetValues } from "@/lib/smoothing";
 import { CHART_VIEWS, DETAIL_FRAME_CLASS } from "@/lib/chartViews";
 import type { BatchSeries, BlockPoint, LiveSnapshot, Network, Series } from "@/types";
 
@@ -135,15 +135,19 @@ vi.mock("@/hooks/useSeries", () => ({
   },
 }));
 
-const frame = createFrameStore({ blocks, values: targetValues(snapshot, blocks, 0), nowMs: Date.parse(snapshot.sampledAt) });
+const frame = createFrameStore({ blocks, places: assignPlaces(NO_PLACES, blocks), values: targetValues(snapshot, blocks, 0), nowMs: Date.parse(snapshot.sampledAt) });
+const liveEnabled: boolean[] = [];
 vi.mock("@/hooks/useNetworkLive", () => ({
-  useNetworkLive: () => ({
+  useNetworkLive: (_network: string, enabled = true) => {
+    liveEnabled.push(enabled);
+    return {
     live: { snapshot, recentBlocks: blocks, status: "open", networkInfo: networks[0], ownerActions: [], reorgs: 0, resyncing: false, error: null },
     smooth: { display: snapshot, frame, resyncing: false },
-    snapshot,
-    status: "open",
-    networkInfo: networks[0],
-  }),
+      snapshot,
+      status: "open",
+      networkInfo: networks[0],
+    };
+  },
 }));
 
 import { ChartDetail } from "./ChartDetail";
@@ -160,6 +164,31 @@ describe("a chart on a page of its own", () => {
     replaceMock.mockReset();
     seriesCalls.length = 0;
     apiKeys.length = 0;
+    liveEnabled.length = 0;
+  });
+
+  it("opens the feed only for the charts that draw it, and names the chain from REST for the rest", () => {
+    for (const view of CHART_VIEWS) {
+      liveEnabled.length = 0;
+      const { unmount } = render(<ChartDetail network="robinhood" chart={view.id} />);
+      expect(liveEnabled.every((on) => on === view.live)).toBe(true);
+      // Every page still names its chain, live or not: the REST network list
+      // is asked for on all of them.
+      expect(apiKeys).toContain("networks");
+      expect(screen.getByText("Robinhood Chain · chain 4663")).toBeInTheDocument();
+      unmount();
+    }
+    // A chart id that names nothing needs no feed either.
+    liveEnabled.length = 0;
+    render(<ChartDetail network="robinhood" chart="nonsense" />);
+    expect(liveEnabled.every((on) => on === false)).toBe(true);
+  });
+
+  it("reads the enlarged base fee out without a pointer, as the page does", async () => {
+    render(<ChartDetail network="robinhood" chart="base-fee" />);
+    expect(screen.getByRole("slider", { name: "Select a block to read its values" })).toBeInTheDocument();
+    await userEvent.click(screen.getByText(/Base fee per block, as a table/));
+    expect(screen.getByRole("table", { name: /Every block of the live base fee chart/ })).toBeInTheDocument();
   });
 
   it("draws every registered chart at the enlarged height, under its own name", () => {
@@ -195,7 +224,7 @@ describe("a chart on a page of its own", () => {
   it("takes the range from the URL, and puts it on the controls, the tabs and the request", () => {
     query = "range=30d";
     render(<ChartDetail network="robinhood" chart="contribution" />);
-    expect(within(screen.getByRole("tablist", { name: "History range" })).getByRole("tab", { name: "30d" })).toHaveAttribute("aria-selected", "true");
+    expect(within(screen.getByRole("group", { name: "History range" })).getByRole("button", { name: "30d" })).toHaveAttribute("aria-pressed", "true");
     // The throughput chart takes the hero's ranges, and 30d is one of them.
     expect(screen.getByRole("link", { name: "Gas/s" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=30d");
     expect(seriesCalls.at(-1)).toEqual(["robinhood", "30d"]);
@@ -204,7 +233,7 @@ describe("a chart on a page of its own", () => {
   it("writes a range change back to the URL rather than keeping it in the page", async () => {
     query = "range=24h";
     render(<ChartDetail network="robinhood" chart="fee-flows" />);
-    await userEvent.click(within(screen.getByRole("tablist", { name: "History range" })).getByRole("tab", { name: "1h" }));
+    await userEvent.click(within(screen.getByRole("group", { name: "History range" })).getByRole("button", { name: "1h" }));
     expect(replaceMock).toHaveBeenCalledWith("/robinhood/charts/base-fee?range=1h", { scroll: false });
   });
 
@@ -224,12 +253,12 @@ describe("a chart on a page of its own", () => {
 
   it("switches between the short windows the sawtooth can draw, and defaults to the first", async () => {
     render(<ChartDetail network="robinhood" chart="backlog-sawtooth" />);
-    const control = screen.getByRole("tablist", { name: "Constraint" });
+    const control = screen.getByRole("group", { name: "Constraint" });
     // Two short windows in the set; the 24 h one is not on offer.
-    expect(within(control).getAllByRole("tab").map((t) => t.textContent)).toEqual(["C1", "C2"]);
-    expect(within(control).getByRole("tab", { name: "C1" })).toHaveAttribute("aria-selected", "true");
+    expect(within(control).getAllByRole("button").map((t) => t.textContent)).toEqual(["C1", "C2"]);
+    expect(within(control).getByRole("button", { name: "C1" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("figure", { name: /^Constraint 1 backlog per block/ })).toBeInTheDocument();
-    await userEvent.click(within(control).getByRole("tab", { name: "C2" }));
+    await userEvent.click(within(control).getByRole("button", { name: "C2" }));
     expect(replaceMock).toHaveBeenCalledWith("/robinhood/charts/base-fee?constraint=1", { scroll: false });
   });
 
@@ -245,10 +274,10 @@ describe("a chart on a page of its own", () => {
   it("gives the backlog chart one slot at a time, named as the history names it", () => {
     query = "range=24h&constraint=2";
     render(<ChartDetail network="robinhood" chart="backlogs" />);
-    const control = screen.getByRole("tablist", { name: "Constraint" });
+    const control = screen.getByRole("group", { name: "Constraint" });
     // Slot numbers on the control, so it fits a phone, with the slot it picked out named beside it.
-    expect(within(control).getAllByRole("tab").map((t) => t.textContent)).toEqual(["C1", "C2", "C3"]);
-    expect(within(control).getByRole("tab", { name: "C3" })).toHaveAttribute("aria-selected", "true");
+    expect(within(control).getAllByRole("button").map((t) => t.textContent)).toEqual(["C1", "C2", "C3"]);
+    expect(within(control).getByRole("button", { name: "C3" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("C3 · 40 Mgas/s · 24 h (set 6)")).toBeInTheDocument();
     expect(screen.getByRole("figure", { name: /^Backlog of C3 · 40 Mgas\/s · 24 h/ })).toBeInTheDocument();
   });

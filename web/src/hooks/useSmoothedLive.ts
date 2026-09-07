@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { createFrameStore, DISPLAY_INTERVAL_MS, definitionOf, signatureOf, targetValues, tweenValues, type FrameStore, type LiveFrame, type LiveValues } from "@/lib/smoothing";
+import { latestConstraintBlock } from "@/lib/ownerActions";
+import { assignPlaces, createFrameStore, DISPLAY_INTERVAL_MS, definitionOf, NO_PLACES, signatureOf, targetValues, tweenValues, type BlockPlaces, type FrameStore, type LiveFrame, type LiveValues } from "@/lib/smoothing";
 import type { BlockPoint, LiveSnapshot } from "@/types";
 import { useDocumentVisible } from "./useDocumentVisible";
 import type { LiveState } from "./useLive";
@@ -43,6 +44,8 @@ type Loop = {
   /** The newest tick waiting for the cadence; a newer one replaces it (trailing edge). */
   pending: Pending | null;
   blocks: BlockPoint[];
+  /** Where each block of the ring sits, assigned once per block and evicted with it. */
+  places: BlockPlaces;
   lastCommit: number | null;
   lastFrame: number | null;
   values: LiveValues | null;
@@ -53,6 +56,12 @@ type Loop = {
   /** The constraint definition the committed snapshot was priced under, and the first block known to use it. */
   signature: string | null;
   signatureSince: number;
+  /**
+   * The block of an owner call that replaced the constraints, waiting for the
+   * next commit. A replacement that reinstalls identical targets and windows
+   * still resets the backlogs, so the signature alone does not see it.
+   */
+  pendingConstraintBlock: number | null;
 };
 
 function emptyLoop(): Loop {
@@ -61,6 +70,7 @@ function emptyLoop(): Loop {
     sampleAt: 0,
     pending: null,
     blocks: [],
+    places: NO_PLACES,
     lastCommit: null,
     lastFrame: null,
     values: null,
@@ -68,6 +78,7 @@ function emptyLoop(): Loop {
     seq: 0,
     signature: null,
     signatureSince: Number.NEGATIVE_INFINITY,
+    pendingConstraintBlock: null,
   };
 }
 
@@ -99,7 +110,10 @@ function emptyLoop(): Loop {
  * A cleared feed (network switch) clears the display at once rather than at
  * the next cadence, so a stale network is never shown under a new one.
  */
-export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks"> & Partial<Pick<LiveState, "reorgs" | "resyncing">>): SmoothedLive {
+export function useSmoothedLive(
+  live: Pick<LiveState, "snapshot" | "recentBlocks"> & Partial<Pick<LiveState, "reorgs" | "resyncing" | "ownerActions">>,
+  enabled = true,
+): SmoothedLive {
   const [committed, setCommitted] = useState<LiveSnapshot | null>(null);
   const [frame] = useState(() => createFrameStore({ nowMs: Date.now() }));
   const visible = useDocumentVisible();
@@ -107,6 +121,19 @@ export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks
   const reorgs = live.reorgs ?? 0;
   const seenReorgs = useRef(reorgs);
   const reduced = useRef(prefersReducedMotion());
+  // The newest owner call that replaced what prices a block. A replacement
+  // with identical targets and windows leaves the signature alone but still
+  // installs new starting backlogs, so it is tracked in its own right.
+  const ownerActions = live.ownerActions;
+  const constraintBlock = useMemo(() => (ownerActions ? latestConstraintBlock(ownerActions) : null), [ownerActions]);
+  const seenConstraintBlock = useRef<number | null>(constraintBlock);
+
+  useEffect(() => {
+    if (constraintBlock === seenConstraintBlock.current) return;
+    seenConstraintBlock.current = constraintBlock;
+    if (constraintBlock === null) return;
+    loop.current.pendingConstraintBlock = constraintBlock;
+  }, [constraintBlock]);
 
   useEffect(() => {
     if (reorgs === seenReorgs.current) return;
@@ -142,15 +169,22 @@ export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks
     s.lastCommit = null;
     s.signature = null;
     s.signatureSince = Number.NEGATIVE_INFINITY;
-    frame.set({ ...frame.get(), blocks: [], values: null });
+    s.pendingConstraintBlock = null;
+    frame.set({ ...frame.get(), blocks: [], places: NO_PLACES, values: null });
   }, [live.snapshot, frame]);
 
   useEffect(() => {
-    loop.current.blocks = live.recentBlocks;
+    const s = loop.current;
+    s.blocks = live.recentBlocks;
+    // A block is placed once, when it enters the ring, and loses its place
+    // when the ring evicts it. Every live chart reads the same map, so the
+    // fee chart and the throughput chart under it agree on where a block is
+    // and neither rebuilds the placement of its own.
+    s.places = assignPlaces(s.places, live.recentBlocks);
   }, [live.recentBlocks]);
 
   useEffect(() => {
-    if (!visible || typeof requestAnimationFrame !== "function") return;
+    if (!enabled || !visible || typeof requestAnimationFrame !== "function") return;
     const s = loop.current;
     let handle = 0;
     const step = (t: number) => {
@@ -160,6 +194,7 @@ export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks
       const forced = s.fresh && s.pending !== null && s.pending.seq === s.seq;
       const cadence = s.lastCommit === null || t - s.lastCommit >= DISPLAY_INTERVAL_MS || forced;
       let snapshotChanged = false;
+      let values = s.values;
       if (cadence) {
         s.lastCommit = t;
         if (s.pending) {
@@ -172,18 +207,28 @@ export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks
             // The first tick after a reorg: nothing to ease from.
             s.fresh = false;
             s.values = null;
+            values = null;
           }
           // A new constraint definition makes the old figures meaningless:
           // the tween snaps on the signature, and the short-window average
           // stops before the block that introduced it.
           const signature = signatureOf(definitionOf(committing.snapshot));
           if (s.signature !== null && s.signature !== signature) s.signatureSince = committing.snapshot.block.number;
+          // An owner call that replaced the constraints, parameter-identical
+          // or not: the backlogs it installed have nothing to do with the
+          // ones before it, so the figures snap and the short-window average
+          // stops at the block the call landed on.
+          if (s.pendingConstraintBlock !== null) {
+            s.signatureSince = s.pendingConstraintBlock;
+            s.pendingConstraintBlock = null;
+            s.values = null;
+            values = null;
+          }
           s.signature = signature;
           setCommitted(s.snapshot);
         }
       }
       const blocksChanged = s.blocks !== prev.blocks;
-      let values = s.values;
       const still = reduced.current;
       if (s.snapshot && (!still || snapshotChanged || blocksChanged || values === null)) {
         const elapsedS = still ? 0 : Math.max(0, t - s.sampleAt) / 1000;
@@ -193,7 +238,7 @@ export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks
       const valuesChanged = values !== s.values;
       s.values = values;
       if (cadence || blocksChanged || valuesChanged) {
-        frame.set({ blocks: s.blocks, values, nowMs: cadence ? Date.now() : prev.nowMs });
+        frame.set({ blocks: s.blocks, places: s.places, values, nowMs: cadence ? Date.now() : prev.nowMs });
       }
       handle = requestAnimationFrame(step);
     };
@@ -202,7 +247,7 @@ export function useSmoothedLive(live: Pick<LiveState, "snapshot" | "recentBlocks
       cancelAnimationFrame(handle);
       s.lastFrame = null;
     };
-  }, [visible, frame]);
+  }, [enabled, visible, frame]);
 
   // A cleared feed hides the committed snapshot at once, and a new network's
   // first tick is never preceded by the old network's last one.
