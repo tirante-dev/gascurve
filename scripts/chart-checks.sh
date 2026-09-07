@@ -181,6 +181,17 @@ reject "metrics_port above the maximum" "metrics_port" \
   --set database.existingSecret=my-db --set config.collector.metrics_port=70000
 reject "unknown field under metrics" "not_a_field" \
   --set database.existingSecret=my-db --set metrics.not_a_field=x
+# An alert whose expression compares against a threshold cannot render
+# without one: "> <nil>" is PromQL the operator rejects, and the alert would
+# then be missing rather than misconfigured.
+reject "threshold alert with its threshold removed" "threshold" \
+  --set database.existingSecret=my-db --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.alerts.apiErrorRate.threshold=null
+# And one that compares nothing takes no threshold, so a value put on the
+# wrong alert is a typo rather than a setting.
+reject "threshold on an alert that compares nothing" "threshold" \
+  --set database.existingSecret=my-db --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.alerts.apiDown.threshold=5
 
 echo "== metrics disabled by default"
 if render "metrics-default" "${work}/metrics-off.yaml" --values "${ci}/existing-secret-values.yaml"; then
@@ -211,10 +222,27 @@ if render "metrics" "${work}/metrics.yaml" --values "${ci}/metrics-values.yaml";
   has "${work}/metrics.yaml" 'alert: GascurveApiDown' "metrics: the api down alert is missing"
   has "${work}/metrics.yaml" 'alert: GascurveApiErrorRate' "metrics: the api error rate alert is missing"
   has "${work}/metrics.yaml" 'alert: GascurveDatabaseUnreachable' "metrics: the database alert is missing"
-  # Every rule names this release's job, so two releases in one cluster
-  # never alert on each other's metrics.
-  if ! awk '/^ *expr: /{ if ($0 !~ /job=/) { print "    " $0; bad = 1 } } END { exit bad }' "${work}/metrics.yaml"; then
-    fail "metrics: the rule above is not scoped to this release's job"
+  # Every rule names this release's job and namespace, so two releases
+  # never alert on each other's metrics, whether they share a cluster or
+  # only a name.
+  if ! awk '/^ *expr: /{ if ($0 !~ /job=/ || $0 !~ /namespace=/) { print "    " $0; bad = 1 } } END { exit bad }' "${work}/metrics.yaml"; then
+    fail "metrics: the rule above is not scoped to this release's job and namespace"
+  fi
+  # up == 0 matches only a target that still exists and failed; it goes
+  # quiet exactly when the target is removed, which is the outage the
+  # alert is for.
+  has "${work}/metrics.yaml" 'expr: "absent(up{job=..gascurve-api' "metrics: the api down alert does not use absent(up == 1)"
+  lacks "${work}/metrics.yaml" 'up{[^}]*} == 0' "metrics: an up == 0 alert cannot fire once its target is gone"
+  # absent() takes its labels from a bare selector and not from a
+  # comparison, and sum() and min by () drop them, so the job and the
+  # namespace are literal labels on every rule: without them two releases
+  # fire alerts Alertmanager cannot tell apart.
+  if ! awk '/^ *- alert: /{ rule = $0; job = 0; ns = 0 }
+    /^ *job: /{ job = 1 }
+    /^ *namespace: /{ ns = 1 }
+    /^ *description: /{ if (!job || !ns) { print "    " rule; bad = 1 } }
+    END { exit bad }' "${work}/metrics.yaml"; then
+    fail "metrics: the rule above does not label the alert with this release's job and namespace"
   fi
   # An alert switched off leaves no rule behind.
   lacks "${work}/metrics.yaml" 'alert: GascurveCollectorDown' "metrics: rendered an alert that was disabled"
@@ -228,6 +256,22 @@ if render "metrics-port-zero" "${work}/metrics-zero.yaml" --values "${ci}/existi
   lacks "${work}/metrics-zero.yaml" 'port: metrics' "metrics-port-zero: something still scrapes the collector"
   has "${work}/metrics-zero.yaml" 'port: http' "metrics-port-zero: the api ServiceMonitor went away with the collector's"
   ok "collector server, Service and ServiceMonitor all gone, api untouched"
+fi
+
+# absent(up == 1) fires when no target exists at all, so a rule kept for a
+# component this release does not scrape pages for ever. The groups are
+# gated on the same condition as the ServiceMonitors.
+echo "== no rules for a component this release does not scrape"
+if render "rules-port-zero" "${work}/rules-zero.yaml" --values "${ci}/metrics-values.yaml" \
+  --set config.collector.metrics_port=0; then
+  lacks "${work}/rules-zero.yaml" 'name: gascurve\.collector' "rules-port-zero: collector rules rendered although nothing scrapes the collector"
+  has "${work}/rules-zero.yaml" 'name: gascurve\.api' "rules-port-zero: the api rules went away with the collector's"
+  ok "collector group gone, api group untouched"
+fi
+if render "rules-web-only" "${work}/rules-web.yaml" --values "${ci}/metrics-values.yaml" \
+  --set api.enabled=false --set collector.enabled=false --set web.enabled=true; then
+  lacks "${work}/rules-web.yaml" 'kind: PrometheusRule' "rules-web-only: rendered rules for an api and a collector this release does not deploy"
+  ok "no PrometheusRule at all on a web-only install"
 fi
 
 echo "== an ingress with no backend is refused"

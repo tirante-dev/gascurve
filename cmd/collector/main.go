@@ -60,25 +60,33 @@ func run() error {
 
 	reg := metrics.NewRegistry()
 	collectorMetrics := metrics.NewCollector(reg)
+	// The metrics server lives exactly as long as the followers do: its own
+	// context is canceled when collector.Run returns, so a process with no
+	// enabled network still exits instead of waiting on a server nobody
+	// asked for.
+	mctx, stopMetrics := context.WithCancel(ctx)
+	defer stopMetrics()
 	var wg sync.WaitGroup
-	if cfg.Collector.MetricsEnabled() {
-		// Bound before the followers start, so a port already in use is a
-		// startup failure rather than a process nobody can scrape. The
-		// server reads the registry alone: a follower stuck on an RPC call
-		// or on the database still answers a scrape.
+	switch {
+	case !cfg.Collector.MetricsEnabled():
+		log.Info("metrics server disabled", "reason", "collector.metrics_port is 0")
+	default:
+		// A port that cannot be bound is loud but never fatal: following
+		// the chains is the collector's job, and losing the scrape must
+		// not stop it. The server reads the registry alone, so a follower
+		// stuck on an RPC call or on the database still answers a scrape.
 		srv, err := metrics.NewServer(ctx, metrics.Addr(cfg.Collector.MetricsPort), reg, log)
 		if err != nil {
-			return err
+			log.Error("metrics server not started, continuing without it", "port", cfg.Collector.MetricsPort, "err", err.Error())
+			break
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := srv.Run(ctx); err != nil {
+			if err := srv.Run(mctx); err != nil {
 				log.Error("metrics server stopped", "err", err.Error())
 			}
 		}()
-	} else {
-		log.Info("metrics server disabled", "reason", "collector.metrics_port is 0")
 	}
 
 	newRPC := func(n config.NetworkConfig) collector.RPC {
@@ -90,6 +98,7 @@ func run() error {
 		}, nitro.WithPoolLogger(log.With("network", n.Name)))
 	}
 	collector.Run(ctx, cfg, store, newRPC, log, collector.WithMetrics(collectorMetrics))
+	stopMetrics()
 	wg.Wait()
 	log.Info("collector stopped")
 	return nil

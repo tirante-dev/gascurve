@@ -52,7 +52,16 @@ func (f *Follower) Run(ctx context.Context) error {
 // capabilities are then routed among the usable endpoints.
 func (f *Follower) verifyChainID(ctx context.Context) error {
 	if f.pool != nil {
-		if err := f.pool.Verify(ctx); err != nil {
+		err := f.pool.Verify(ctx)
+		// Observed either way, and before the error is returned: a pool
+		// with no usable endpoint stops the follower before the slow loop
+		// ever runs, so this is the only place the endpoint gauges can
+		// come from when every endpoint fails at startup. Without it the
+		// worst case, a network that never had a working endpoint, is the
+		// one case the exhausted-endpoints alert cannot see.
+		status := f.pool.Status()
+		f.metrics.ObservePool(poolMetrics(f.rpc.Stats(), &status))
+		if err != nil {
 			return f.refuse(ctx, fmt.Errorf("%w: refusing to run", err))
 		}
 		f.bindPool()

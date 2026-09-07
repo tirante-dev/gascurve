@@ -161,7 +161,7 @@ kubectl get prometheus -A -o jsonpath='{range .items[*]}{.spec.serviceMonitorSel
 
 ### Alerts
 
-Each alert can be switched off on its own, and its window, threshold and severity changed, under `metrics.prometheusRule.alerts.<name>`. `enabled`, `for` and `severity` are required; `threshold` is ignored by the alerts that compare nothing.
+Each alert can be switched off on its own, and its window, threshold and severity changed, under `metrics.prometheusRule.alerts.<name>`. `enabled`, `for` and `severity` are always required. `threshold` is required by the alerts whose expression compares against a number — `collectorLagDedicated`, `collectorLagPublic`, `collectorSampleStale`, `collectorRateLimited` and `apiErrorRate` — because a rule rendered without one is PromQL the operator rejects, and the alert would then be missing rather than misconfigured. The other four compare nothing and refuse a `threshold` outright, so a number put on the wrong alert fails the install instead of being silently ignored.
 
 | Alert | Default | Fires when |
 |---|---|---|
@@ -170,14 +170,20 @@ Each alert can be switched off on its own, and its window, threshold and severit
 | `collectorSampleStale` | no sample for `300s`, held `2m`, critical | the fast loop is not sampling at all |
 | `collectorRateLimited` | `> 0.2` events/s for `15m`, warning | an endpoint keeps throttling the collector |
 | `collectorEndpointsExhausted` | `5m`, critical | every endpoint of a network is disabled |
-| `collectorDown` | `5m`, critical | the collector answers no scrape |
-| `apiDown` | `5m`, critical | the api answers no scrape |
+| `collectorDown` | `5m`, critical | no collector target is up, whether it failed or was removed |
+| `apiDown` | `5m`, critical | no api replica is up, whether they failed or were removed |
 | `apiErrorRate` | `> 5%` 5xx for `10m`, warning | the api is failing requests |
 | `databaseUnreachable` | `3m`, critical | `/ready` answers 503, which it does only when the database ping fails |
 
 Lag is the one figure that needs two rules. A network with a dedicated endpoint normally sits at 0 to 2 seconds; one followed over a public RPC at its documented 4 calls per second normally sits at 20 to 60 seconds, because a tick costs about five calls and the catch-up gets what is left. A single threshold would either page constantly on the public networks or never fire on the dedicated one. `metrics.prometheusRule.dedicatedNetworks` is a regular expression on the `network` label that splits the fleet; it defaults to `robinhood` and must be widened when more networks move onto dedicated nodes.
 
-Every rule is scoped to `job="<release>-collector"` or `job="<release>-api"`, the job label an operator derives from a ServiceMonitor (the Service name), so two releases in one cluster never alert on each other's metrics. Scraping through a hand-written `scrape_config` with a different job name therefore means no alert fires: either name the job after the Service, or set `metrics.prometheusRule.enabled: false` and write the rules yourself.
+Every rule is scoped to both the job and the namespace of this release's targets: `job="<release>-collector"` or `job="<release>-api"` (the job an operator derives from a ServiceMonitor is the Service name) and `namespace="<release namespace>"`. The namespace matters because the same release name in two namespaces produces the same job, and without it a healthy staging install would dilute prod's error rate and mask its endpoint exhaustion. Scraping through a hand-written `scrape_config` with a different job name therefore means no alert fires: either name the job after the Service, or set `metrics.prometheusRule.enabled: false` and write the rules yourself.
+
+Every alert also carries `job` and `namespace` as literal labels, because the expression cannot always be relied on for them: `absent()` takes labels from a bare selector and not from a comparison, `sum()` drops every label, and `min by (network, chain_id)` keeps only those two. Without them two releases would fire alerts Alertmanager cannot tell apart and would merge into one.
+
+The two "not being scraped" alerts are `absent(up{...} == 1)`, not `up{...} == 0`. `up == 0` matches only a target that still exists and failed its scrape, so it goes quiet exactly when service discovery removes the target altogether, which is the outage worth paging for. `absent(up == 1)` fires for both, and for the api it means what its description says: no replica is up, rather than any one replica being down. The same property is why each group is rendered only for a component this release actually scrapes, on the same condition as its ServiceMonitor: the collector group needs `collector.enabled` and a non-zero `config.collector.metrics_port`, the api group needs `api.enabled`. A rule kept for a component that was never deployed would page for ever, where `up == 0` was merely inert.
+
+`collectorDown` and `apiDown` are also the backstop for a component that never starts: an api that cannot reach PostgreSQL during a rollout never binds its port, so `databaseUnreachable`, which counts `/ready` answering 503, cannot see it and `apiDown` is what fires.
 
 ## Migrations
 

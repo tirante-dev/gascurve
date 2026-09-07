@@ -22,19 +22,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Install goimports
-        run: go install golang.org/x/tools/cmd/goimports@v0.49.0
+      - name: Install pinned goimports
+        run: make tool-goimports
       - name: Check formatting
-        run: |
-          set -euo pipefail
-          GOFMT_FILES="$(gofmt -l -s .)"
-          GOIMPORTS_FILES="$("$(go env GOPATH)/bin/goimports" -l -local github.com/tirante-dev/gascurve .)"
-          if [ -n "$GOFMT_FILES" ] || [ -n "$GOIMPORTS_FILES" ]; then
-            echo "::error::Formatting issues detected. Run 'make fmt' to fix them."
-            echo "gofmt:"; echo "$GOFMT_FILES"
-            echo "goimports:"; echo "$GOIMPORTS_FILES"
-            exit 1
-          fi
+        run: make fmt-check
+      - name: Test tooling preflight
+        run: make test-tooling
 
   go-lint:
     name: Go Lint
@@ -44,11 +37,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Install pinned golangci-lint
+        run: make tool-golangci-lint
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          version: v2.12.2
-          args: --timeout=5m
+        run: make lint
 
   go-vet:
     name: Go Vet
@@ -68,10 +60,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
-      - run: |
-          "$(go env GOPATH)/bin/staticcheck" ./...
+      - name: Install pinned staticcheck
+        run: make tool-staticcheck
+      - run: make staticcheck
 
   go-test:
     name: Go Test
@@ -144,9 +135,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
-      - run: govulncheck ./...
+      - name: Install pinned govulncheck
+        run: make tool-govulncheck
+      - run: make govulncheck
 
   go-mod:
     name: Module Verify and Tidy

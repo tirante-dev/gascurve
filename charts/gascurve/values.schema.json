@@ -223,14 +223,14 @@
             "alerts": {
               "type": "object",
               "properties": {
-                "collectorLagDedicated": { "$ref": "#/definitions/alert" },
-                "collectorLagPublic": { "$ref": "#/definitions/alert" },
-                "collectorSampleStale": { "$ref": "#/definitions/alert" },
-                "collectorRateLimited": { "$ref": "#/definitions/alert" },
+                "collectorLagDedicated": { "$ref": "#/definitions/thresholdAlert" },
+                "collectorLagPublic": { "$ref": "#/definitions/thresholdAlert" },
+                "collectorSampleStale": { "$ref": "#/definitions/thresholdAlert" },
+                "collectorRateLimited": { "$ref": "#/definitions/thresholdAlert" },
                 "collectorEndpointsExhausted": { "$ref": "#/definitions/alert" },
                 "collectorDown": { "$ref": "#/definitions/alert" },
                 "apiDown": { "$ref": "#/definitions/alert" },
-                "apiErrorRate": { "$ref": "#/definitions/alert" },
+                "apiErrorRate": { "$ref": "#/definitions/thresholdAlert" },
                 "databaseUnreachable": { "$ref": "#/definitions/alert" }
               },
               "additionalProperties": false
@@ -491,7 +491,19 @@
     },
     "alert": {
       "title": "alert rule",
-      "description": "One alert of the PrometheusRule. `for` is how long the condition must hold before it fires, `threshold` the number it compares against (ignored by the alerts that compare nothing), and `severity` the label Alertmanager routes on.",
+      "description": "One alert of the PrometheusRule whose condition compares nothing, so it takes no threshold. `for` is how long the condition must hold before it fires and `severity` the label Alertmanager routes on.",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "for": { "$ref": "#/definitions/promDuration" },
+        "severity": { "type": "string", "enum": ["info", "warning", "critical"] }
+      },
+      "required": ["enabled", "for", "severity"],
+      "additionalProperties": false
+    },
+    "thresholdAlert": {
+      "title": "alert rule with a threshold",
+      "description": "One alert of the PrometheusRule whose expression compares against `threshold`, which is therefore required: a rule rendered without it would be PromQL the operator rejects, and the alert would be silently missing rather than misconfigured.",
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
@@ -499,7 +511,7 @@
         "threshold": { "type": "number", "minimum": 0 },
         "severity": { "type": "string", "enum": ["info", "warning", "critical"] }
       },
-      "required": ["enabled", "for", "severity"],
+      "required": ["enabled", "for", "threshold", "severity"],
       "additionalProperties": false
     },
     "callsPerSecond": {
