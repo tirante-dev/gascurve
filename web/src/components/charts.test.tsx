@@ -21,7 +21,7 @@ import { DataFooter } from "./DataFooter";
 import { FeeFlows, feeFlowRows, feeTotals, incompleteTotalsNote, unsplitNote } from "./FeeFlows";
 import { L1Section } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
-import { describeSplit, SeriesCharts } from "./SeriesCharts";
+import { buildSeriesModel, describeSplit, GasPerSecondChart, SeriesCharts } from "./SeriesCharts";
 
 function point(overrides: Partial<SeriesPoint>): SeriesPoint {
   return {
@@ -116,6 +116,57 @@ describe("SeriesCharts", () => {
     const holed = { ...series, from: a.t, to: c.t + 3600, points: [a, b, { ...c, t: c.t + 3600 }] };
     render(<SeriesCharts network="robinhood" range="24h" series={holed} loading={false} model="constraints" />);
     expect(screen.getAllByText("Shaded: 1 gap with no buckets").length).toBeGreaterThan(0);
+  });
+
+  it("dots the buckets with no receipts behind them, which are whole buckets the gap and partial marks say nothing about", () => {
+    // The exact shape the api serves for repaired history it cannot repair:
+    // full coverage, complete, and a null compute gas rate because a source
+    // block was stored without receipts.
+    const [a, b, c] = series.points;
+    const holed = { ...series, points: [a, { ...b, computeGasPerSecond: null }, { ...c, computeGasPerSecond: null }] };
+    const m = buildSeriesModel(holed, "constraints");
+    expect(m.gasMissing).toEqual([{ from: b.t, to: c.t + 60, kind: "receipts", buckets: 2 }]);
+    render(<GasPerSecondChart m={m} />);
+    expect(screen.getByText("Dotted: no receipt data for 2 buckets")).toBeInTheDocument();
+    // The three marks stay apart: nothing was never indexed, and no bucket is partial.
+    expect(screen.queryByText(/^Shaded:/)).toBeNull();
+    expect(screen.queryByText(/^Hatched/)).toBeNull();
+    // The tooltip says the cause rather than leaving the reader with a break in the line.
+    expect(m.gasNote(m.points[2])).toBe("no receipt data for this bucket, so compute gas per second is not drawn");
+    expect(m.gasNote(m.points[0])).toBeNull();
+  });
+
+  it("claims nothing about receipts when the api never reports a compute rate at all", () => {
+    // An api older than the field sends no rate anywhere. The chart has
+    // nothing to draw, but that is the client meeting an older api and not a
+    // chain whose receipts are missing, so it must not say it is.
+    const omitRate = (p: SeriesPoint): SeriesPoint => {
+      const copy = { ...p };
+      delete copy.computeGasPerSecond;
+      return copy;
+    };
+    const legacy = { ...series, points: series.points.map(omitRate) };
+    const m = buildSeriesModel(legacy, "constraints");
+    expect(m.gasMissing).toEqual([]);
+    expect(m.gasNote(m.points[0])).toBeNull();
+    render(<GasPerSecondChart m={m} />);
+    expect(screen.queryByText(/^Dotted:/)).toBeNull();
+  });
+
+  it("says nothing about a slot a constraint set never defined, which is not a hole in the record", () => {
+    // One set with a single constraint, drawn beside a set with two: the
+    // second panel is empty over the first set's buckets because that
+    // constraint did not exist then.
+    const sets = [series.constraintSets[0], { ...series.constraintSets[1], constraints: [series.constraintSets[1].constraints[0]] }];
+    const [a, b] = series.points;
+    const short = {
+      ...series,
+      constraintSets: sets,
+      to: b.t + 60,
+      points: [a, { ...b, constraintBips: [32_425], backlogs: [3_111_506], backlogsMax: [3_111_506] }],
+    };
+    render(<SeriesCharts network="robinhood" range="24h" series={short} loading={false} model="constraints" />);
+    expect(screen.queryByText(/no backlog data/)).toBeNull();
   });
 
   it("exposes every bucket in a table and lets the keyboard inspect any point", () => {
@@ -316,8 +367,17 @@ describe("FeeFlows", () => {
     const { rerender } = render(<FeeFlows network="robinhood" range="24h" snapshot={priced} series={series} model="constraints" nowMs={now} />);
     // 5 ETH of fees, 2.2 to the infra account and 2.8 to the network account, at 4,200 dollars.
     expect(screen.getByText("$21,000.0")).toBeInTheDocument();
-    // Each dollar line hovers to the multiplication that produced it, quoting the ETH total drawn above it.
-    expect(screen.getByText("$21,000.0").closest("[title]")).toHaveAttribute("title", "5 ETH × $4,200.0/ETH = $21,000.0\ncoingecko, 5 min ago");
+    // Each dollar line opens a note with the multiplication that produced it,
+    // quoting the ETH total drawn above it, rather than a title the reader
+    // cannot see and has to wait on.
+    const usd = screen.getByText("$21,000.0");
+    expect(usd.closest("[title]")).toBeNull();
+    expect(screen.getByText("5 ETH × $4,200.0/ETH = $21,000.0")).toBeInTheDocument();
+    // All five totals name the quote they used, not just the one being read.
+    expect(screen.getAllByText("coingecko, 5 min ago")).toHaveLength(5);
+    // And the figure says it is inspectable rather than leaving the reader to guess.
+    const trigger = usd.closest(".cursor-help");
+    expect(trigger).toHaveAttribute("tabindex", "0");
     expect(screen.getByText("$9,240.0")).toBeInTheDocument();
     expect(screen.getByText("$11,760.0")).toBeInTheDocument();
     // Eleven minutes old: the same rule as the live tiles, so the totals go back to ETH alone.
@@ -327,6 +387,26 @@ describe("FeeFlows", () => {
     rerender(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={now} />);
     expect(screen.queryByText(/^\$/)).toBeNull();
     expect(screen.getByText("2.2")).toBeInTheDocument();
+  });
+  it("opens each note from the edge that keeps it inside the card at both column counts", () => {
+    const priced = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:15:00Z", source: "coingecko" } };
+    const { container } = render(<FeeFlows network="robinhood" range="24h" snapshot={priced} series={series} model="constraints" nowMs={NOW_MS} />);
+    // The stats grid is two columns narrow and five wide, so a stat's column
+    // changes with the breakpoint: the notes have to change edge with it, or a
+    // panel wider than one column leaves the card at one of the two widths.
+    const stats = container.querySelector(".sm\\:grid-cols-5") as HTMLElement;
+    const edges = [...stats.querySelectorAll(".cursor-help")].map((t) => {
+      const panel = t.nextElementSibling as HTMLElement;
+      return [panel.classList.contains("right-0") ? "end" : "start", panel.classList.contains("sm:right-0") ? "end" : "start"];
+    });
+    // Narrow, the odd stats are the right-hand column; wide, only the last two sit near the right edge.
+    expect(edges).toEqual([
+      ["start", "start"],
+      ["end", "start"],
+      ["start", "start"],
+      ["end", "end"],
+      ["start", "end"],
+    ]);
   });
   it("renders without a snapshot or history", () => {
     render(<FeeFlows network="robinhood" range="24h" snapshot={null} series={null} nowMs={NOW_MS} />);
@@ -465,8 +545,19 @@ describe("ConstraintCards", () => {
     expect(meter).toHaveAttribute("aria-valuenow", "100");
     // The far end says what it is, not what to multiply out.
     expect(screen.getByText("1,000,000,000 windows of target (1 Ggas)")).toBeInTheDocument();
-    expect(meter).toHaveAttribute("title", "one window = target × window = 1 gas; each full window adds 1.0 to x");
     expect(screen.getByRole("meter", { name: /1,000,000,000 windows/ })).toBeInTheDocument();
+    // And it opens as a note rather than a title the reader has to find on a
+    // 10 px bar and then wait on: the pricer's own divisor, multiplied out.
+    expect(meter).not.toHaveAttribute("title");
+    expect(screen.getByText("1 window of target = 1 gas/s × 1 s = 1 gas")).toBeInTheDocument();
+    // Twice over, in the panel and in the description that stands in for it:
+    // the panel is aria-hidden, so a reader without it still gets the working.
+    expect(screen.getAllByText(/A backlog of one window adds exactly 1.0 to x/)).toHaveLength(2);
+    // The scale is not a fixed ceiling, which is the part the count alone hides.
+    expect(screen.getAllByText(/the far end moves out as the backlog crosses one/)).toHaveLength(2);
+    // The figure says it is inspectable, and the panel is not announced twice.
+    const trigger = screen.getByText("1,000,000,000 windows of target (1 Ggas)").closest(".cursor-help");
+    expect(trigger).toHaveAttribute("tabindex", "0");
   });
 
   it("defines the legacy gauge for zero tolerance and for a zero denominator", () => {
@@ -474,6 +565,7 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("no free gas: every unit prices")).toBeInTheDocument();
     expect(screen.getByText("x = 1 at 714 Mgas")).toBeInTheDocument();
     expect(screen.getByText("2 units of x (1.43 Ggas)")).toBeInTheDocument();
+    expect(screen.getByText("1 unit of x = inertia × speed limit = 714 Mgas")).toBeInTheDocument();
     const meter = screen.getByRole("meter", { name: /units of inertia/ });
     expect(meter).toHaveAttribute("aria-valuenow", "70");
     expect(meter.querySelectorAll("span")).toHaveLength(1);
@@ -482,6 +574,8 @@ describe("ConstraintCards", () => {
     rerender(<ConstraintCardsView network="robinhood" snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 0, tolerance: 0, backlog: 5 } }} values={null} blocks={[]} />);
     expect(screen.getByText("no scale")).toBeInTheDocument();
     expect(screen.getByText("no scale (zero inertia or speed limit)")).toBeInTheDocument();
+    // The legacy far end opens the same way, and says why there is no scale.
+    expect(screen.getByText("no scale: the inertia or the speed limit is zero")).toBeInTheDocument();
     expect(screen.getByRole("meter")).toHaveAttribute("aria-valuenow", "0");
     expect(screen.getByText(/x = 0.0000/)).toBeInTheDocument();
   });

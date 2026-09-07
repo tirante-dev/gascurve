@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { LiveStatus } from "@/types";
 
 /** A titled section. The heading stands alone: sections carry no description line. */
@@ -47,6 +47,143 @@ export function Figure({ children, ch, className = "" }: { children: ReactNode; 
     <span className={`num inline-block text-left tabular-nums ${className}`} style={{ minWidth: `${ch}ch` }}>
       {children}
     </span>
+  );
+}
+
+/** Which edge of the tile a HoverNote panel lines up with, so it opens into the card rather than over its edge. */
+export type NoteAlign = "start" | "end";
+
+/**
+ * The edge classes for each alignment, and the `sm` overrides that let a note
+ * change edge at the breakpoint. A grid that reflows moves a tile between
+ * columns (`grid-cols-2 sm:grid-cols-5` puts the third stat on the left narrow
+ * and in the middle wide), and a panel wider than one column has to open from
+ * whichever edge keeps it inside the card at that width, so one static edge
+ * cannot serve both. Tailwind scans for whole class names, hence the table.
+ */
+const NOTE_ALIGN: Record<NoteAlign, string> = {
+  start: "left-0",
+  end: "right-0",
+};
+const NOTE_ALIGN_SM: Record<NoteAlign, string> = {
+  start: "sm:left-0 sm:right-auto",
+  end: "sm:right-0 sm:left-auto",
+};
+
+/**
+ * Whether the note anchors to a block of its own or sits inside a line of
+ * running text. A tile is a fixed-width grid cell, so `block` places the panel
+ * against the whole tile. A word mid-sentence cannot have a block wrapper
+ * without breaking the line around it, so `inline` leaves the wrapper
+ * unpositioned and the panel anchors to the nearest positioned ancestor
+ * instead: **the line element must be `relative`**. Anchoring to the word
+ * itself is what does not work. A panel is far wider than the word it explains,
+ * so at a phone's width it runs off whichever edge the word sits nearer, and
+ * neither `align` saves it.
+ */
+export type NoteFlow = "block" | "inline";
+
+/**
+ * A figure whose working is a hover away. The browser's own `title` tooltip
+ * was the obvious way to carry it and the wrong one: it gives the reader
+ * nothing to notice, waits about a second, and draws in the platform's chrome
+ * rather than the panel the charts already read out in. So the trigger says it
+ * is inspectable (a dotted rule and a help cursor) and the panel is the one
+ * from ChartTooltip.
+ *
+ * Focus opens it as hover does, so the working is not behind a pointer, and
+ * `description` states the same facts in the accessible name for a reader that
+ * gets neither. The panel is `aria-hidden` because that description already
+ * carries it: announcing both would say everything twice.
+ *
+ * WCAG 1.4.13 asks that content shown on hover or focus be hoverable and
+ * dismissable, so the panel takes the pointer (with the gap above the figure
+ * bridged, or crossing it would close the panel on the way in) and Escape
+ * closes it.
+ *
+ * Escape has to be caught twice over, because the two ways in leave the key
+ * somewhere different. A reader who focused the figure sends it to the figure;
+ * a reader who only hovered has never moved focus, so it goes to whatever holds
+ * it, usually the body. Hence a handler on the trigger and, while the pointer
+ * is over the note, one on the document. Dismissing has to work without moving
+ * the pointer, which is the whole point of the requirement.
+ *
+ * Escape is undone on the way in, by the pointer or the focus arriving, rather
+ * than on the way out. Both edges would do in the ordinary case; arriving is
+ * the one to hang it on because of how the two fail. A missed leave leaves the
+ * note permanently unopenable, which is worse than what it was fixing; a
+ * missed arrival costs nothing, because the next one clears it.
+ */
+export function HoverNote({ children, lines, description, align = "start", alignSm = align, flow = "block" }: { children: ReactNode; lines: readonly string[]; description: string; align?: NoteAlign; /** The edge to line up with from the `sm` breakpoint up; defaults to `align`, which is one edge at every width. */ alignSm?: NoteAlign; flow?: NoteFlow }) {
+  const [dismissed, setDismissed] = useState(false);
+  const [under, setUnder] = useState(false);
+  // Only while the pointer is on the note: a page of these should not each hold
+  // a document listener for a key that is not being pressed at them.
+  useEffect(() => {
+    if (!under) return;
+    const close = (e: KeyboardEvent) => e.key === "Escape" && setDismissed(true);
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [under]);
+  return (
+    /* The panel is placed against the tile, not against the figure: a note wider
+       than the digits it explains has the whole tile to open into, which is what
+       keeps the right-hand one of a pair on screen at a phone's width. An inline
+       note anchors to the line it sits in for the same reason, which is the
+       call site's `relative` and not this wrapper's. */
+    <span
+      className={flow === "inline" ? "group" : "group relative block"}
+      onMouseEnter={() => {
+        setUnder(true);
+        setDismissed(false);
+      }}
+      onMouseLeave={() => setUnder(false)}
+      onFocus={() => setDismissed(false)}
+    >
+      {/* A border, not `underline`: the figure inside is an inline-block, which
+          text-decoration does not reach, so an underline would rule the dollar
+          sign and stop there. */}
+      <span tabIndex={0} className="inline-block cursor-help border-b border-dotted border-ink-3 pb-0.5" onKeyDown={(e) => e.key === "Escape" && setDismissed(true)}>
+        <span aria-hidden="true">{children}</span>
+        <span className="sr-only">{description}</span>
+      </span>
+      {/* The outer box carries the gap as padding rather than margin, so the
+          pointer crosses live ground on its way from the figure to the panel. */}
+      <span aria-hidden="true" className={`absolute bottom-full z-20 hidden pb-2 ${dismissed ? "" : "group-focus-within:block group-hover:block"} ${NOTE_ALIGN[align]} ${NOTE_ALIGN_SM[alignSm]}`}>
+        {/* Never wider than the viewport leaves room for: at 320 px, or at 400%
+            zoom, the equation wraps rather than running off the card. */}
+        <span className="block w-max max-w-[min(42ch,calc(100vw_-_5rem))] rounded-md border border-hairline bg-surface px-3 py-2 text-left text-xs font-normal leading-snug shadow-lg">
+          {lines.map((line, i) => (
+            <span key={i} className={i === 0 ? "num block text-ink" : "block text-ink-2"}>
+              {line}
+            </span>
+          ))}
+        </span>
+      </span>
+    </span>
+  );
+}
+
+/** The definition of the unit, the half that does not depend on the figure in front of it. */
+const BIPS_NOTE = "basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.";
+
+/**
+ * A figure quoted in basis points, with the unit's definition and its own
+ * value in ordinary decimal a hover away. The pricer works in integer bips and
+ * the api hands them over unchanged, so the raw unit reaches the page; rather
+ * than translate it away (the integer is the thing the pricer actually holds)
+ * the word carries what it means.
+ */
+export function Bips({ value, align = "end" }: { value: number; align?: NoteAlign }) {
+  const bips = Math.round(value);
+  // Four places is what the constraint cards already print x to, so the note
+  // reads back as the figure above it rather than as a second rounding.
+  const decimal = (bips / 10_000).toFixed(4);
+  const figure = bips.toLocaleString("en-US");
+  return (
+    <HoverNote flow="inline" align={align} lines={[`${figure} bips = ${decimal}`, BIPS_NOTE]} description={`${figure} bips is ${decimal}. ${BIPS_NOTE}`}>
+      {figure} bips
+    </HoverNote>
   );
 }
 
