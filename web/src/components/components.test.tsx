@@ -88,6 +88,17 @@ const history: Series = {
   ],
 };
 
+
+/**
+ * The width a fixed figure reserves, read off the inline style rather than
+ * through toHaveStyle: jsdom resolves ch units in computed style (6ch reads
+ * back as 48px), so comparing the inline value is what keeps the assertion
+ * about the unit the layout actually depends on.
+ */
+function reservedWidth(el: HTMLElement): string {
+  return el.style.minWidth;
+}
+
 describe("LiveHero", () => {
   it("lays the figures out in the left four columns and the chart in the right eight", () => {
     const { container } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
@@ -100,18 +111,18 @@ describe("LiveHero", () => {
     render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     const hero = screen.getByText("0.3997");
     expect(hero).toHaveClass("tabular-nums");
-    expect(hero).toHaveStyle({ minWidth: "6ch" });
+    expect(reservedWidth(hero)).toBe("6ch");
     expect(hero.nextSibling).toHaveTextContent("gwei");
     // The hero figure steps down a size from the old strip, so the chart beside it is the taller mark.
     expect(hero.parentElement).toHaveClass("text-4xl");
     expect(hero.parentElement).toHaveClass("sm:text-5xl");
-    expect(screen.getByText("19.99")).toHaveStyle({ minWidth: "5ch" });
+    expect(reservedWidth(screen.getByText("19.99"))).toBe("5ch");
     expect(screen.getByText(/floor 0.02 gwei/)).toBeInTheDocument();
     expect(screen.getByText("55,812,345")).toBeInTheDocument();
     expect(screen.getByText("38.0")).toBeInTheDocument();
     expect(screen.getByText("40.5")).toBeInTheDocument();
     expect(screen.getByText("3.2425")).toBeInTheDocument();
-    expect(screen.getByText("0.00000839")).toHaveStyle({ minWidth: "10ch" });
+    expect(reservedWidth(screen.getByText("0.00000839"))).toBe("10ch");
     expect(screen.getByText("0.0000600")).toBeInTheDocument();
     expect(screen.getByText(/4.02 Mgas in block 55,812,345/)).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("live");
@@ -355,7 +366,7 @@ describe("LiveHero", () => {
     const priced = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:15:00Z", source: "coingecko" } };
     render(<LiveHeroView network="robinhood" snapshot={priced} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     // 21,000 gas at 0.3997 gwei is 0.0000084 ETH: about four cents.
-    expect(screen.getByText("0.04")).toHaveStyle({ minWidth: "6ch" });
+    expect(reservedWidth(screen.getByText("0.04"))).toBe("6ch");
     expect(screen.getByText("0.25")).toBeInTheDocument();
     // The dollar sign is outside the reserved box, so a changing digit cannot move it.
     expect(screen.getByText("0.04").previousSibling).toHaveTextContent("$");
@@ -368,7 +379,7 @@ describe("LiveHero", () => {
     // Eleven minutes old: past the ten minute cutoff, so the fee has moved on and the price has not.
     const stale = { ...snapshot, ethUsd: { price: "4200.00", at: "2026-09-06T07:09:00Z", source: "coingecko" } };
     const { rerender } = render(<LiveHeroView network="robinhood" snapshot={stale} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(screen.getByText("0.00000839")).toHaveStyle({ minWidth: "10ch" });
+    expect(reservedWidth(screen.getByText("0.00000839"))).toBe("10ch");
     expect(screen.queryByText("0.04")).toBeNull();
     // And with no quote the tiles are exactly what they were before there was one.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
