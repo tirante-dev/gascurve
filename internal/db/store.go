@@ -126,16 +126,46 @@ type StateSample struct {
 	Accounts    JSONB     `db:"accounts"`
 }
 
+// MissingRange is a durable interval the collector has not indexed yet.
+// Lifecycle is pending, retrying or blocked. Cursor is the first block still
+// missing, or zero before recovery starts. ReplayState describes Cursor-1 and
+// CursorAt is its timestamp, so recovery can resume after block retention and
+// the API can map the remaining suffix to time buckets without decoding the
+// replay state. PredecessorAt and SuccessorAt bound the original interval when
+// those neighboring blocks were observed. DetectedAt is the range's age
+// anchor. Retry fields survive restarts and make delayed work visible.
+type MissingRange struct {
+	ChainID       uint64         `db:"chain_id"`
+	From          uint64         `db:"from_block"`
+	To            uint64         `db:"to_block"`
+	DetectedAt    time.Time      `db:"detected_at"`
+	Lifecycle     string         `db:"lifecycle"`
+	Reason        string         `db:"reason"`
+	Cursor        uint64         `db:"cursor"`
+	ReplayState   JSONB          `db:"replay_state"`
+	Folded        uint64         `db:"folded"`
+	RetryCount    uint64         `db:"retry_count"`
+	LastAttemptAt sql.NullTime   `db:"last_attempt_at"`
+	NextRetryAt   sql.NullTime   `db:"next_retry_at"`
+	LastError     sql.NullString `db:"last_error"`
+	PredecessorAt sql.NullTime   `db:"predecessor_at"`
+	SuccessorAt   sql.NullTime   `db:"successor_at"`
+	CursorAt      sql.NullTime   `db:"cursor_at"`
+	CreatedAt     time.Time      `db:"created_at"`
+	UpdatedAt     time.Time      `db:"updated_at"`
+}
+
 // OwnerAction is a row of the owner_actions table.
 type OwnerAction struct {
-	ChainID     uint64    `db:"chain_id"`
-	BlockNumber uint64    `db:"block_number"`
-	TxHash      string    `db:"tx_hash"`
-	LogIndex    int64     `db:"log_index"`
-	TS          time.Time `db:"ts"`
-	Method      string    `db:"method"`
-	Selector    string    `db:"selector"`
-	Args        JSONB     `db:"args"`
+	ChainID     uint64        `db:"chain_id"`
+	BlockNumber uint64        `db:"block_number"`
+	TxHash      string        `db:"tx_hash"`
+	TxIndex     sql.NullInt64 `db:"tx_index"`
+	LogIndex    int64         `db:"log_index"`
+	TS          time.Time     `db:"ts"`
+	Method      string        `db:"method"`
+	Selector    string        `db:"selector"`
+	Args        JSONB         `db:"args"`
 }
 
 // ConstraintSet is a row of the constraint_sets table.
@@ -150,17 +180,22 @@ type ConstraintSet struct {
 
 // BatchReport is a row of the batch_reports table.
 type BatchReport struct {
-	ChainID         uint64    `db:"chain_id"`
-	BlockNumber     uint64    `db:"block_number"`
-	BatchNumber     uint64    `db:"batch_number"`
-	BatchTS         time.Time `db:"batch_ts"`
-	Poster          string    `db:"poster"`
-	CalldataLen     uint64    `db:"calldata_len"`
-	CalldataNonzero uint64    `db:"calldata_nonzero"`
-	ExtraGas        uint64    `db:"extra_gas"`
-	L1BaseFee       Wei       `db:"l1_base_fee"`
-	GasSpent        uint64    `db:"gas_spent"`
-	WeiSpent        Wei       `db:"wei_spent"`
+	ChainID                uint64    `db:"chain_id"`
+	BlockNumber            uint64    `db:"block_number"`
+	BatchNumber            uint64    `db:"batch_number"`
+	BatchTS                time.Time `db:"batch_ts"`
+	Poster                 string    `db:"poster"`
+	CalldataLen            uint64    `db:"calldata_len"`
+	CalldataNonzero        uint64    `db:"calldata_nonzero"`
+	ExtraGas               uint64    `db:"extra_gas"`
+	L1BaseFee              Wei       `db:"l1_base_fee"`
+	GasSpent               uint64    `db:"attributed_gas_spent"`
+	WeiSpent               Wei       `db:"attributed_wei_spent"`
+	ReportVersion          int       `db:"report_version"`
+	ArbOSVersion           uint64    `db:"arbos_version"`
+	PerBatchGasCharge      int64     `db:"per_batch_gas_charge"`
+	ParentGasFloorPerToken uint64    `db:"parent_gas_floor_per_token"`
+	CostCalculationVersion int       `db:"cost_calculation_version"`
 }
 
 // BatchBucket is an aggregate of batch reports over a time step.
@@ -252,6 +287,13 @@ type Store interface {
 	// DeleteStateSamplesAfter removes samples taken at blocks above block
 	// (a reorg rewind) and returns how many.
 	DeleteStateSamplesAfter(ctx context.Context, chainID, block uint64) (int64, error)
+
+	// MissingRanges lists every durable missing interval ordered by block.
+	MissingRanges(ctx context.Context, chainID uint64) ([]MissingRange, error)
+	// ReplaceMissingRanges replaces one chain's normalized set. Collector
+	// callers use the chain transaction so the delete and inserts are atomic
+	// and concurrent loops cannot erase a range another loop just recorded.
+	ReplaceMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error
 
 	// InsertOwnerActions inserts new actions, ignoring duplicates, and
 	// returns how many were new.

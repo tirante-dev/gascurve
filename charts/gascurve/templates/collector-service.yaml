@@ -15,6 +15,10 @@ metadata:
 spec:
   type: ClusterIP
   clusterIP: None
+  # The readiness probe drops on an RPC or database outage. Endpoints must
+  # keep the pod anyway, or the scrape stops exactly when the metrics that
+  # explain the outage are the ones being collected.
+  publishNotReadyAddresses: true
   ports:
     - port: {{ .Values.config.collector.metrics_port }}
       targetPort: metrics

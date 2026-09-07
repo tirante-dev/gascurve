@@ -409,6 +409,36 @@ func (a *ArchivePool) FastSampleAt(ctx context.Context, number uint64) (*Sample,
 	return nil, fmt.Errorf("%w: %w", ErrNoEndpoint, errors.Join(errs...))
 }
 
+// L1SampleAt reads the L1 pricer and batch-cost parameters at a block from
+// an archive endpoint, with the same capability failover as FastSampleAt.
+func (a *ArchivePool) L1SampleAt(ctx context.Context, number uint64) (*L1Sample, error) {
+	ctx = withCapability(ctx)
+	var errs []error
+	for range a.pool.endpoints {
+		e := a.Endpoint()
+		if e == nil {
+			break
+		}
+		err := a.pool.verify(ctx, e)
+		if err == nil {
+			var s *L1Sample
+			if s, err = e.L1SampleAt(ctx, number); err == nil {
+				return s, nil
+			}
+		}
+		if ctx.Err() != nil || !IsEndpointError(err) {
+			return nil, err
+		}
+		a.pool.log.Warn("archive endpoint failed, moving to the next one", "endpoint", e.index, "err", err.Error())
+		errs = append(errs, err)
+		a.failed(e)
+	}
+	if len(errs) == 0 {
+		return nil, ErrNoEndpoint
+	}
+	return nil, fmt.Errorf("%w: %w", ErrNoEndpoint, errors.Join(errs...))
+}
+
 // Verify checks every endpoint's eth_chainId against the configured chain
 // id. A mismatching endpoint is disabled for good and reported; one that
 // cannot be reached stays unverified and is checked again before its first
@@ -635,6 +665,11 @@ func (p *Pool) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, er
 	return call(ctx, p, func(e *Endpoint) ([]Block, error) { return e.BlocksWithTxs(ctx, numbers) })
 }
 
+// TransactionReceipts fetches receipts in batches of the endpoint's cap.
+func (p *Pool) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
+	return call(ctx, p, func(e *Endpoint) ([]Receipt, error) { return e.TransactionReceipts(ctx, hashes) })
+}
+
 // OwnerActsLogs fetches OwnerActs events over [from, to].
 func (p *Pool) OwnerActsLogs(ctx context.Context, from, to uint64) ([]Log, error) {
 	return call(ctx, p, func(e *Endpoint) ([]Log, error) { return e.OwnerActsLogs(ctx, from, to) })
@@ -660,6 +695,11 @@ func (p *Pool) L1Sample(ctx context.Context) (*L1Sample, error) {
 	return call(ctx, p, func(e *Endpoint) (*L1Sample, error) { return e.L1Sample(ctx) })
 }
 
+// L1SampleAt reads the L1 pricer getters at one block.
+func (p *Pool) L1SampleAt(ctx context.Context, number uint64) (*L1Sample, error) {
+	return call(ctx, p, func(e *Endpoint) (*L1Sample, error) { return e.L1SampleAt(ctx, number) })
+}
+
 // FeeAccounts reads the fee accounts and their balances.
 func (p *Pool) FeeAccounts(ctx context.Context) (*FeeAccounts, error) {
 	return call(ctx, p, func(e *Endpoint) (*FeeAccounts, error) { return e.FeeAccounts(ctx) })
@@ -678,6 +718,10 @@ func (p *Pool) Stats() Stats {
 	for i, e := range p.endpoints {
 		s := e.Stats()
 		out.CallsLast10s += s.CallsLast10s
+		out.Calls += s.Calls
+		out.Requests += s.Requests
+		out.Errors += s.Errors
+		out.TotalLatency += s.TotalLatency
 		out.RateLimitEvents += s.RateLimitEvents
 		out.FastCalls += s.FastCalls
 		out.BulkCalls += s.BulkCalls

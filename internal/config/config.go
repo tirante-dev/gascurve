@@ -132,9 +132,10 @@ type CollectorConfig struct {
 	// (default 10m). Environment: ETH_USD_MAX_AGE.
 	EthUsdMaxAge time.Duration `mapstructure:"eth_usd_max_age"`
 	// MetricsPort is the port the collector serves Prometheus metrics on
-	// (default 9090). It is the collector's only HTTP server and answers
-	// /metrics alone. Zero disables it. The api has an HTTP server already
-	// and serves /metrics on server.port. Environment: METRICS_PORT.
+	// (default 9090). Its only HTTP server also answers startup, liveness and
+	// readiness probes. Zero disables the server and those probes. The api
+	// has an HTTP server already and serves /metrics on server.port.
+	// Environment: METRICS_PORT.
 	MetricsPort int `mapstructure:"metrics_port"`
 }
 

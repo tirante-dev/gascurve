@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,6 +88,35 @@ func TestMetricsRegistryCanBeSupplied(t *testing.T) {
 	}
 }
 
+// TestMetricsBoundsTheMethodLabel: an HTTP method is an arbitrary token,
+// so a caller sending a fresh one per request must not be able to mint a
+// series each time.
+func TestMetricsBoundsTheMethodLabel(t *testing.T) {
+	ts := newServer(t, seed(t))
+	for _, method := range []string{"X000001", "X000002", "WHATEVER"} {
+		req, err := http.NewRequest(method, ts.URL+"/api/v1/status", http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	_, body := get(t, ts, metrics.Path)
+	text := string(body)
+	for _, method := range []string{"X000001", "X000002", "WHATEVER"} {
+		if strings.Contains(text, method) {
+			t.Fatalf("the method %q became a label value:\n%s", method, text)
+		}
+	}
+	// All three collapse onto one series, whatever the router answered.
+	if !strings.Contains(text, `method="other"`) {
+		t.Fatalf("unknown methods must collapse onto one label value:\n%s", text)
+	}
+}
+
 func TestRoutePatternFallsBackWithoutARouter(t *testing.T) {
 	// A request that never reached chi (a middleware ahead of the router,
 	// or a handler mounted on its own) has no pattern to report.
@@ -101,11 +131,14 @@ func TestMetricsEndpointServesWebSocketSeries(t *testing.T) {
 	if typ, _ := readMsg(t, conn); typ != "hello" {
 		t.Fatalf("first message = %q", typ)
 	}
-	// The hello has been written, so a client and a frame are both counted
-	// while the socket is up.
-	body := scrapeHarness(t, h)
-	hasSeries(t, body, "gascurve_api_ws_clients 1")
-	hasSeries(t, body, "gascurve_api_ws_frames_sent_total 1")
+	// The client is counted before the write loop starts, so reading the
+	// hello proves that gauge. The frame counter is incremented after
+	// conn.Write returns, which the client's read orders nothing against, so
+	// it has to be waited for rather than asserted outright.
+	hasSeries(t, scrapeHarness(t, h), "gascurve_api_ws_clients 1")
+	waitFor(t, func() bool {
+		return strings.Contains(scrapeHarness(t, h), "gascurve_api_ws_frames_sent_total 1")
+	}, "the hello frame must be counted")
 
 	_ = conn.Close(websocket.StatusNormalClosure, "bye")
 	waitFor(t, func() bool {
@@ -120,6 +153,74 @@ func TestMetricsCountsDroppedWebSocketClients(t *testing.T) {
 	// The second message overflows the queue: the peer is not reading, so
 	// the client is dropped rather than left to hold a connection slot.
 	slow.enqueue([]byte("b"))
+	hasSeries(t, scrapeHarness(t, h), "gascurve_api_ws_clients_dropped_total 1")
+}
+
+// TestMetricsCountsRefusedWebSocketHandshakes: a handshake the server
+// refused is an ordinary answer and must reach the error rate, while one
+// that upgraded is not a request at all.
+func TestMetricsCountsRefusedWebSocketHandshakes(t *testing.T) {
+	h := newWSHarness(t, seed(t), time.Hour)
+	// Refused before the upgrade: no network parameter is a 400.
+	resp, err := http.Get(h.ts.URL + "/api/v1/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	// And one that upgrades cleanly is not counted.
+	conn := h.dial(t, "robinhood")
+	if typ, _ := readMsg(t, conn); typ != "hello" {
+		t.Fatalf("first message = %q", typ)
+	}
+	body := scrapeHarness(t, h)
+	hasSeries(t, body, `gascurve_api_requests_total{method="GET",route="/api/v1/ws",status="400"} 1`)
+	if strings.Contains(body, `route="/api/v1/ws",status="101"`) || strings.Contains(body, `route="/api/v1/ws",status="200"`) {
+		t.Fatalf("an upgraded socket was counted as a request:\n%s", body)
+	}
+}
+
+// TestMetricsEndpointIsNotRateLimited: where a proxy makes ordinary
+// traffic and Prometheus share one address, a throttled scrape reads as a
+// dead api, so the endpoint is exempt from the per-IP budget.
+func TestMetricsEndpointIsNotRateLimited(t *testing.T) {
+	store := seed(t)
+	// One request per second, burst one: the second ordinary request is
+	// refused, and every scrape still succeeds.
+	cfg := config.ServerConfig{RateLimitPerSecond: 1, RateLimitBurst: 1}
+	s := New(store, cfg, nil, logger.Nop())
+	serve := func(path string) int {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		return rec.Code
+	}
+	if got := serve("/api/v1/status"); got != http.StatusOK {
+		t.Fatalf("first request = %d", got)
+	}
+	if got := serve("/api/v1/status"); got != http.StatusTooManyRequests {
+		t.Fatalf("the budget must still apply to ordinary traffic, got %d", got)
+	}
+	for i := range 5 {
+		if got := serve(metrics.Path); got != http.StatusOK {
+			t.Fatalf("scrape %d = %d, want 200", i, got)
+		}
+	}
+}
+
+// TestMetricsCountsAConcurrentDropOnce: two goroutines can find the queue
+// full at the same moment, and one connection going away is one drop.
+func TestMetricsCountsAConcurrentDropOnce(t *testing.T) {
+	h := newWSHarness(t, seed(t), time.Hour)
+	slow := &client{hub: h.hub, send: make(chan []byte, 1), closed: make(chan struct{})}
+	slow.enqueue([]byte("a")) // fills the queue
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			slow.enqueue([]byte("b"))
+		}()
+	}
+	wg.Wait()
 	hasSeries(t, scrapeHarness(t, h), "gascurve_api_ws_clients_dropped_total 1")
 }
 

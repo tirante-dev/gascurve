@@ -13,6 +13,7 @@ gascurve shows live and historical gas pricing for Arbitrum Nitro chains (Robinh
 ## Commands
 
 ```bash
+make tools              # install the hosted CI versions of required Go tools under .tools/bin
 make ci                 # the CI workflow locally: fmt-check, vet, lint, staticcheck, govulncheck, test-coverage, test-race, build, mod-verify, web-install, web-ci
 make ci-integration     # go-integration job, needs TEST_DB_URL (Postgres)
 make ci-docker          # docker job: build the three images and Trivy-scan them (needs docker, trivy)
@@ -42,7 +43,7 @@ After any Go change run at least `make fmt && make lint && make test-coverage`. 
 ## Web conventions
 
 - Next.js App Router, React 19, TypeScript strict, Tailwind, Recharts, Vitest with jsdom. `@/*` maps to `src/*`.
-- Network-aware routes: `/[network]`. API client in `src/lib/api/` (`core.ts` does timeout and retry). Live data via `useLive` (WebSocket with reconnect, polling fallback). Shapes in `src/types/` mirror `docs/ARCHITECTURE.md` exactly.
+- Network-aware routes: `/[network]`. API client in `src/lib/api/` (`core.ts` does timeout and retry). Live data via `useLive` (WebSocket with reconnect, polling fallback). Shapes in `src/types/` follow `docs/ARCHITECTURE.md`, narrowed to the fields the client reads: the operator-only parts of `/status` are deliberately absent.
 - Tailwind utility classes only, no CSS modules. Dark and light both supported.
 - Coverage gate (90% lines) covers `src/lib/**`, `src/hooks/**`, `src/utils/**`.
 

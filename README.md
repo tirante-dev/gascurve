@@ -1,6 +1,6 @@
 # gascurve
 
-Live and historical gas pricing for Arbitrum Nitro chains. gascurve explains the multi-constraint base fee pricer and shows it working: per-block backlogs, each constraint's share of the fee, owner parameter changes, where the fees go, and what the chain actually pays Ethereum, over the last hour, day, month, and all time.
+Live and historical gas pricing for Arbitrum Nitro chains. gascurve explains the multi-constraint base fee pricer and shows it working: per-block backlogs, each constraint's share of the fee, owner parameter changes, where the fees go, and the batch-posting cost ArbOS attributes to batch posters, over the last hour, day, month, and all time.
 
 Networks: Robinhood Chain, Robinhood Chain Testnet, Arbitrum One, Arbitrum Sepolia. Adding another Nitro chain is a config entry.
 
@@ -22,7 +22,7 @@ make run-api              # terminal 2
 make web-install && make web-dev   # terminal 3, http://localhost:3000
 ```
 
-`make ci` runs the CI workflow locally; `make ci-integration`, `make ci-docker` and `make ci-chart` cover the rest. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Run `make tools` once, then `make ci` to reproduce the CI workflow locally. `make ci-integration`, `make ci-docker` and `make ci-chart` cover the rest. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 

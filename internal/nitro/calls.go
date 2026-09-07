@@ -99,6 +99,12 @@ func (c *Client) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, 
 	return blocksByNumbers(ctx, numbers, true, c.chunk)
 }
 
+// TransactionReceipts fetches receipts in batches of at most MaxBatch, in
+// the same order as hashes.
+func (c *Client) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
+	return transactionReceipts(ctx, hashes, c.chunk)
+}
+
 // batcher sends a request list of any length, splitting it into HTTP
 // batches as it sees fit, and returns one Result per request in order.
 type batcher func(ctx context.Context, reqs []Request) ([]Result, error)
@@ -142,6 +148,32 @@ func blocksByNumbers(ctx context.Context, numbers []uint64, full bool, send batc
 			return nil, fmt.Errorf("block %d: %w", numbers[i], err)
 		}
 		out = append(out, *b)
+	}
+	return out, nil
+}
+
+func transactionReceipts(ctx context.Context, hashes []string, send batcher) ([]Receipt, error) {
+	reqs := make([]Request, len(hashes))
+	for i, hash := range hashes {
+		reqs[i] = Request{Method: "eth_getTransactionReceipt", Params: []any{hash}}
+	}
+	results, err := send(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != len(hashes) {
+		return nil, fmt.Errorf("receipts: got %d results for %d transactions", len(results), len(hashes))
+	}
+	out := make([]Receipt, 0, len(hashes))
+	for i, result := range results {
+		if result.Err != nil {
+			return nil, fmt.Errorf("receipt %s: %w", hashes[i], result.Err)
+		}
+		receipt, err := parseReceipt(result.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("receipt %s: %w", hashes[i], err)
+		}
+		out = append(out, *receipt)
 	}
 	return out, nil
 }
@@ -194,6 +226,10 @@ func (c *Client) ArbOSVersion(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	return decodeArbOSVersion(data)
+}
+
+func decodeArbOSVersion(data []byte) (uint64, error) {
 	v, err := DecodeUint64(data)
 	if err != nil {
 		return 0, err
@@ -324,50 +360,86 @@ func (c *Client) legacyParamsAt(ctx context.Context, tag string) (*LegacyParams,
 	return lp, nil
 }
 
-// L1Sample reads the L1 pricer getters in one batch.
+// L1Sample reads the L1 pricer getters at the latest block.
 func (c *Client) L1Sample(ctx context.Context) (*L1Sample, error) {
-	sigs := []string{
-		SigGetL1BaseFeeEstimate, SigGetL1PricingSurplus, SigGetL1FeesAvailable, SigGetL1PricingUnitsSinceUpdate,
-		SigGetLastL1PricingUpdateTime, SigGetL1PricingEquilibrationUnit, SigGetPerBatchGasCharge, SigGetL1RewardRate,
+	return c.l1SampleAt(ctx, latestTag)
+}
+
+// L1SampleAt reads the L1 pricer getters and batch-cost parameters at one
+// block. The historical parameter snapshot is used to anchor report-cost
+// reconstruction without making one state call per report.
+func (c *Client) L1SampleAt(ctx context.Context, number uint64) (*L1Sample, error) {
+	return c.l1SampleAt(ctx, blockTag(number))
+}
+
+func (c *Client) l1SampleAt(ctx context.Context, tag string) (*L1Sample, error) {
+	calls := []struct {
+		address string
+		sig     string
+	}{
+		{ArbGasInfoAddress, SigGetL1BaseFeeEstimate},
+		{ArbGasInfoAddress, SigGetL1PricingSurplus},
+		{ArbGasInfoAddress, SigGetL1FeesAvailable},
+		{ArbGasInfoAddress, SigGetL1PricingUnitsSinceUpdate},
+		{ArbGasInfoAddress, SigGetLastL1PricingUpdateTime},
+		{ArbGasInfoAddress, SigGetL1PricingEquilibrationUnit},
+		{ArbGasInfoAddress, SigGetPerBatchGasCharge},
+		{ArbGasInfoAddress, SigGetL1RewardRate},
+		{ArbSysAddress, SigArbOSVersion},
+		{ArbOwnerPublicAddress, SigGetParentGasFloorPerToken},
 	}
-	reqs := make([]Request, len(sigs))
-	for i, sig := range sigs {
-		reqs[i] = SelectorCall(ArbGasInfoAddress, sig)
+	reqs := make([]Request, len(calls))
+	for i, call := range calls {
+		reqs[i] = SelectorCallAt(call.address, call.sig, tag)
 	}
 	results, err := c.chunk(ctx, reqs)
 	if err != nil {
 		return nil, err
 	}
 	datas := make([][]byte, len(results))
-	for i, r := range results {
+	// The parent floor getter is unavailable before ArbOS 50. Decode every
+	// earlier result first, including the version that controls that gate.
+	for i, r := range results[:len(results)-1] {
 		if datas[i], err = callBytes(r); err != nil {
-			return nil, fmt.Errorf("%s: %w", sigs[i], err)
+			return nil, fmt.Errorf("%s: %w", calls[i].sig, err)
 		}
 	}
 	l := &L1Sample{}
 	if l.BaseFeeEstimate, err = DecodeUint256(datas[0]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[0], err)
+		return nil, fmt.Errorf("%s: %w", calls[0].sig, err)
 	}
 	if l.Surplus, err = DecodeInt256(datas[1]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[1], err)
+		return nil, fmt.Errorf("%s: %w", calls[1].sig, err)
 	}
 	if l.FeesAvailable, err = DecodeUint256(datas[2]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[2], err)
+		return nil, fmt.Errorf("%s: %w", calls[2].sig, err)
 	}
 	if l.UnitsSinceUpdate, err = DecodeUint64(datas[3]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[3], err)
+		return nil, fmt.Errorf("%s: %w", calls[3].sig, err)
 	}
 	if l.LastUpdateTime, err = DecodeUint64(datas[4]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[4], err)
+		return nil, fmt.Errorf("%s: %w", calls[4].sig, err)
 	}
 	if l.EquilibrationUnits, err = DecodeUint64(datas[5]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[5], err)
+		return nil, fmt.Errorf("%s: %w", calls[5].sig, err)
 	}
 	if l.PerBatchGasCharge, err = DecodeInt64(datas[6]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[6], err)
+		return nil, fmt.Errorf("%s: %w", calls[6].sig, err)
 	}
 	if l.RewardRate, err = DecodeUint64(datas[7]); err != nil {
-		return nil, fmt.Errorf("%s: %w", sigs[7], err)
+		return nil, fmt.Errorf("%s: %w", calls[7].sig, err)
+	}
+	if l.ArbOSVersion, err = decodeArbOSVersion(datas[8]); err != nil {
+		return nil, fmt.Errorf("%s: %w", calls[8].sig, err)
+	}
+	if l.ArbOSVersion >= arbOSVersionParentGasFloor {
+		floorData, err := callBytes(results[9])
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", calls[9].sig, err)
+		}
+		if l.ParentGasFloorPerToken, err = DecodeUint64(floorData); err != nil {
+			return nil, fmt.Errorf("%s: %w", calls[9].sig, err)
+		}
 	}
 	return l, nil
 }

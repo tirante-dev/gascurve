@@ -75,6 +75,7 @@ const series: Series = {
     gasUsed: 100,
     gasPerSecond: 1,
     coverage: 1,
+    completeness: "complete",
     feesWei: "1000000000000000000",
     baseFeeMin: "100000000",
     baseFeeAvg: "300000000",
@@ -137,7 +138,7 @@ describe("the enlarge control on every chart card", () => {
     expect(enlarge(/^Open the C2 .* backlog enlarged$/)).toHaveAttribute("href", "/robinhood/charts/backlogs?range=24h&constraint=1");
     expect(enlarge("Fees collected per bucket")).toHaveAttribute("href", "/robinhood/charts/fee-flows?range=24h");
 
-    expect(enlarge("L2 fees against L1 posting cost")).toHaveAttribute("href", "/robinhood/charts/l1?range=24h");
+    expect(enlarge("L2 fees against ArbOS-attributed batch cost")).toHaveAttribute("href", "/robinhood/charts/l1?range=24h");
 
     // Every control says what it does on hover as well as to a screen reader.
     for (const link of screen.getAllByRole("link", { name: /enlarged$/ })) expect(link).toHaveAttribute("title", "Enlarge chart");

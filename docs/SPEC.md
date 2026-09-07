@@ -115,13 +115,15 @@ Every L2 block's first transaction is an ArbOS internal tx (type `0x6a`, to `0x�
 - **`startBlock(l1BaseFee, l1BlockNumber, l2BlockNumber, timePassed)`**, selector `0x6bf6a42d`. `timePassed` is the `dt` the pricer uses, and it equals the header timestamp delta, so headers alone give exact replay inputs. `l1BaseFee` is reported as **0** by the sequencer on this chain (also visible in the sequencer feed), which is worth a footnote on the page.
 - **`batchPostingReportV2(batchTimestamp, batchPosterAddress, batchNumber, batchCalldataLength, batchCalldataNonZeros, batchExtraGas, l1BaseFeeWei)`**, selector `0x9998269e`. One per L1 batch, delivered through the delayed inbox ~10 minutes after the batch lands on Ethereum, in bursts of a dozen or so. Each lives in its own 2-transaction block (startBlock + report), which is how to find them cheaply: filter headers for blocks with exactly two tx hashes, then fetch only those with full transactions. Observed cadence: a batch every 12–24 s, ~5,700/day, batch numbers ~201,900 on 2026-09-06.
 
-What the report gives, none of which needs archive state:
+What the report and its effective ArbOS state give:
 
-- The chain's **actual Ethereum cost per batch**: ArbOS computes `gasSpent = calldata gas (4/16 per byte) + batchExtraGas` (blob gas expressed as L1 gas), applies the EIP-7623 floor, and charges `l1BaseFeeWei × gasSpent` (the pricer's 210 k `perBatchGasCharge` is added on top). Example decoded report: 137 calldata bytes, 113 non-zero, extra gas 27,132, L1 base fee 0.0735 gwei → about 2.1e-6 ETH per batch, ~0.1 ETH/day with the per-batch charge, which matches the "$396/day" figure reported by Bitquery.
+- The **batch-posting cost ArbOS attributes to the batch**, not the batch poster's Ethereum receipt total. V1 reports use signed saturating addition of `perBatchGasCharge` and the reported `batchDataGas`. V2 reports start with calldata gas (4/16 per byte), keccak overhead, and two storage writes, then add `batchExtraGas` and the nonnegative effective `perBatchGasCharge`. ArbOS 50+ takes the maximum of that amount and `parentGasFloorPerToken × (calldataLength + 3 × calldataNonZeros + 172) + 21,000`. `l1BaseFeeWei × gasSpent` is the attributed wei cost. Example: 137 calldata bytes, 113 non-zero, extra gas 27,132, a 210 k per-batch charge, parent floor 10, and L1 base fee 0.0735 gwei produce 279,096 gas and 0.000020513556 ETH per batch, about 0.117 ETH/day at 5,700 batches.
 - **Ethereum base fee history as seen by the chain**, batch cadence, blob usage proxy (`batchExtraGas`), and the batch poster address.
 - The trigger for every L1-pricer update (`UpdateForBatchPosterSpending`), so `getLastL1PricingUpdateTime` jumps can be tied to specific batches.
 
-Page use: a "what the chain pays Ethereum vs. what users pay" panel (per-day L2 fees from `Σ gasUsed × baseFee` against per-day L1 spend from reports), batch cadence sparkline, and the L1 base fee series. Backfill cost: all headers (already planned) plus ~5,700 full-block fetches per day of history.
+The collector takes the ArbOS version from each block header and persists the report version, effective per-batch charge, parent floor, and calculation version with the raw report fields. That is enough to recompute an attributed cost after future calculation fixes. A truncated owner scan uses an archive state snapshot at its origin when available. Without one, it uses a current pinned snapshot only across ranges with no intervening parameter setter and refuses to guess across a setter.
+
+Page use: an "L2 fees vs. ArbOS-attributed batch-posting cost" panel, batch cadence sparkline, and the L1 base fee series. Backfill cost: all headers (already planned) plus ~5,700 full-block fetches per day of history.
 
 ---
 
@@ -197,7 +199,7 @@ for block in order:
 Known error sources, all to be surfaced in the "Data & method" footer:
 
 1. Nitro grows backlogs by *compute* gas (gasUsed − gasUsedForL1), the replay uses header gasUsed. Today `gasUsedForL1 = 0`, so no error; earlier in the chain's life the L1 price was higher. Mitigation: the collector re-anchors to sampled backlogs every 5 s going forward; for backfilled history, report the replayed-vs-observed base fee error per bucket and, where it exceeds 2%, mark the decomposition as estimated.
-2. Owner actions inside a block: backlogs reset at that block; the replay applies the reset before processing the block.
+2. Owner actions inside a block: the replay uses the log's transaction index and the action transaction's receipt. Gas before the action transaction is added to the old backlogs, then the reset is applied, then the action transaction and later gas are added to the reset backlogs.
 3. Old headers without state: the decomposition before the collector's start is a pure replay validated only through base fee agreement. Because the two constraints have very different time constants, an alternative estimator exists: `x_24h ≈ rolling 60-s minimum of x` (the 15-s backlog drains to zero within seconds whenever demand < 60 M gas/s). Use it as a cross-check.
 4. Blocks with equal timestamps get `dt = 0`; that is how ArbOS behaves too (`startBlock.timePassed` is the timestamp delta), so no correction and no interpolation is needed as long as per-block headers are used.
 

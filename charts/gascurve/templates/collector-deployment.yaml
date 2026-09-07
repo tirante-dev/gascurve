@@ -48,6 +48,27 @@ spec:
             - name: metrics
               containerPort: {{ .Values.config.collector.metrics_port }}
               protocol: TCP
+          # Startup only waits for the collector loops to launch. Liveness is
+          # deliberately process-only, so an RPC or database outage removes
+          # readiness without putting the singleton into a restart loop.
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 2
           {{- end }}
           env:
             {{- include "gascurve.goEnv" (list . .Values.collector.extraEnv) | nindent 12 }}

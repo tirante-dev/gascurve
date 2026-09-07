@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"time"
 
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/metrics"
@@ -32,20 +33,6 @@ const (
 	FillNone
 )
 
-const (
-	// maxPendingHoles bounds the queued gap-filling work. Filling is best
-	// effort on a paced endpoint, so a network that keeps skipping can
-	// queue ranges faster than they are filled, and the whole queue lives
-	// in one JSON checkpoint. Past this many queued ranges the oldest
-	// leave the queue with reasonExpired: their blocks are still counted
-	// as not indexed in /status, but no filler will fetch them again.
-	maxPendingHoles = 64
-	// maxHoles bounds the checkpoint itself, unfillable and expired ranges
-	// included. Past this the oldest entries are forgotten entirely rather
-	// than growing a row without end.
-	maxHoles = 256
-)
-
 // holesState summarizes the recorded holes for the instruments, the same
 // way /status summarizes them.
 func holesState(holes []hole) metrics.HolesState {
@@ -53,41 +40,174 @@ func holesState(holes []hole) metrics.HolesState {
 	return metrics.HolesState{Pending: s.Pending, Blocks: s.Blocks, Unfillable: s.Unfillable}
 }
 
-// loadHoles reads the recorded holes. An unreadable checkpoint is reported
-// as none: it is a record of what is missing, never chain state, so it is
-// rewritten rather than made fatal.
+// loadHoles reads every durable missing range. A replay state or timestamp
+// that cannot be decoded is an error: the row remains in place and recovery
+// stops instead of silently treating incomplete history as complete.
 func (f *Follower) loadHoles(ctx context.Context, s db.Store) ([]hole, error) {
-	raw, ok, err := s.GetState(ctx, f.chainID, db.StateHoles)
-	if err != nil || !ok {
+	rows, err := s.MissingRanges(ctx, f.chainID)
+	if err != nil {
 		return nil, err
 	}
-	var holes []hole
-	if err := json.Unmarshal([]byte(raw), &holes); err != nil {
-		f.log.Warn("unreadable holes checkpoint, starting over", "err", err.Error())
-		return nil, nil
+	holes := make([]hole, len(rows))
+	for i, row := range rows {
+		h, err := holeFromRow(row)
+		if err != nil {
+			return nil, fmt.Errorf("missing range %d..%d: %w", row.From, row.To, err)
+		}
+		holes[i] = h
 	}
 	return holes, nil
 }
 
-// saveHoles writes the holes checkpoint normalized (see normalizeHoles),
-// dropping it when none are left. Every write goes through here, so the
-// stored list is always ordered, free of overlaps and bounded.
+// saveHoles writes normalized durable rows. Every field is encoded before the
+// replacement starts, so a malformed in-memory checkpoint cannot remove the
+// rows already committed. Collector callers hold the chain transaction.
 func (f *Follower) saveHoles(ctx context.Context, s db.Store, holes []hole) error {
 	holes = f.normalizeHoles(holes)
-	if len(holes) == 0 {
-		return s.DeleteState(ctx, f.chainID, db.StateHoles)
+	rows := make([]db.MissingRange, len(holes))
+	for i, h := range holes {
+		if h.At == "" {
+			h.At = f.now().UTC().Format(time.RFC3339)
+		}
+		row, err := f.rowFromHole(h)
+		if err != nil {
+			return fmt.Errorf("missing range %d..%d: %w", h.From, h.To, err)
+		}
+		rows[i] = row
 	}
-	b, err := json.Marshal(holes)
-	if err != nil {
-		return err
-	}
-	return s.SetState(ctx, f.chainID, db.StateHoles, string(b))
+	return s.ReplaceMissingRanges(ctx, f.chainID, rows)
 }
 
-// normalizeHoles orders the recorded ranges by start, merges the ones that
-// overlap or touch, and bounds the list. Only ranges of the same class are
-// merged (queued work with queued work, unfillable with unfillable), so a
-// range nothing can be replayed into never swallows fillable work. A reorg
+func holeFromRow(row db.MissingRange) (hole, error) {
+	h := hole{
+		From: row.From, To: row.To, At: row.DetectedAt.UTC().Format(time.RFC3339), Lifecycle: row.Lifecycle,
+		Next: row.Cursor, Folded: row.Folded, Reason: row.Reason, RetryCount: row.RetryCount,
+		LastAttemptAt: formatNullTime(row.LastAttemptAt), NextRetryAt: formatNullTime(row.NextRetryAt),
+		PredecessorAt: formatNullTime(row.PredecessorAt), SuccessorAt: formatNullTime(row.SuccessorAt),
+		CursorAt: formatNullTime(row.CursorAt),
+	}
+	if row.LastError.Valid {
+		h.LastError = row.LastError.String
+	}
+	if row.ReplayState != nil {
+		var state model.HoleState
+		if err := row.ReplayState.Unmarshal(&state); err != nil {
+			return hole{}, fmt.Errorf("replay state: %w", err)
+		}
+		h.State = &state
+	}
+	return h, nil
+}
+
+func (f *Follower) rowFromHole(h hole) (db.MissingRange, error) {
+	detected, err := requiredTime(h.At, "detected at")
+	if err != nil {
+		return db.MissingRange{}, err
+	}
+	var state db.JSONB
+	if h.State != nil {
+		state, err = db.MarshalJSONB(h.State)
+		if err != nil {
+			return db.MissingRange{}, fmt.Errorf("replay state: %w", err)
+		}
+	}
+	lastAttempt, err := optionalTime(h.LastAttemptAt, "last attempt at")
+	if err != nil {
+		return db.MissingRange{}, err
+	}
+	nextRetry, err := optionalTime(h.NextRetryAt, "next retry at")
+	if err != nil {
+		return db.MissingRange{}, err
+	}
+	predecessor, err := optionalTime(h.PredecessorAt, "predecessor at")
+	if err != nil {
+		return db.MissingRange{}, err
+	}
+	successor, err := optionalTime(h.SuccessorAt, "successor at")
+	if err != nil {
+		return db.MissingRange{}, err
+	}
+	cursorAt, err := optionalTime(h.CursorAt, "cursor at")
+	if err != nil {
+		return db.MissingRange{}, err
+	}
+	lifecycle := effectiveLifecycle(h)
+	return db.MissingRange{
+		ChainID: f.chainID, From: h.From, To: h.To, DetectedAt: detected, Lifecycle: lifecycle, Reason: h.Reason,
+		Cursor: h.Next, ReplayState: state, Folded: h.Folded, RetryCount: h.RetryCount,
+		LastAttemptAt: lastAttempt, NextRetryAt: nextRetry, LastError: sql.NullString{String: h.LastError, Valid: h.LastError != ""},
+		PredecessorAt: predecessor, SuccessorAt: successor, CursorAt: cursorAt, CreatedAt: detected,
+	}, nil
+}
+
+func requiredTime(raw, field string) (time.Time, error) {
+	v, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s %q: %w", field, raw, err)
+	}
+	return v.UTC(), nil
+}
+
+func optionalTime(raw, field string) (sql.NullTime, error) {
+	if raw == "" {
+		return sql.NullTime{}, nil
+	}
+	v, err := requiredTime(raw, field)
+	return sql.NullTime{Time: v, Valid: err == nil}, err
+}
+
+func formatNullTime(v sql.NullTime) string {
+	if !v.Valid {
+		return ""
+	}
+	return v.Time.UTC().Format(time.RFC3339)
+}
+
+// importLegacyHoles moves the old JSON checkpoint into durable rows under the
+// chain lock. The checkpoint is deleted only after every range and replay
+// state decoded and the replacement succeeded. An unreadable document is a
+// startup error and remains available for repair instead of being overwritten.
+func (f *Follower) importLegacyHoles(ctx context.Context) error {
+	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		raw, ok, err := s.GetState(ctx, f.chainID, db.StateHoles)
+		if err != nil || !ok {
+			return err
+		}
+		var legacy []hole
+		if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
+			return fmt.Errorf("decode legacy holes checkpoint: %w", err)
+		}
+		existing, err := f.loadHoles(ctx, s)
+		if err != nil {
+			return err
+		}
+		for i := range legacy {
+			if legacy[i].At == "" {
+				legacy[i].At = f.now().UTC().Format(time.RFC3339)
+			}
+			switch legacy[i].Reason {
+			case reasonNoState:
+				legacy[i].Lifecycle = rangeBlocked
+			case reasonExpired:
+				// The old queue cap made this range permanently unfillable even
+				// when it had an anchor. Durable storage restores it to work.
+				legacy[i].Lifecycle = rangePending
+				legacy[i].Reason = reasonCatchUpLimit
+			default:
+				legacy[i].Lifecycle = rangePending
+			}
+		}
+		if err := f.saveHoles(ctx, s, append(existing, legacy...)); err != nil {
+			return err
+		}
+		return s.DeleteState(ctx, f.chainID, db.StateHoles)
+	})
+}
+
+// normalizeHoles orders the recorded ranges by start and merges the ones that
+// overlap or touch. Only ranges in the same recovery class and with the same
+// reason are merged (fillable work with fillable work, blocked with blocked),
+// so a range nothing can be replayed into never swallows fillable work. A reorg
 // or a second skip that records a range overlapping one already queued
 // therefore merges into it instead of duplicating it, and the merged entry
 // keeps the progress of the range it starts at together with the highest
@@ -109,14 +229,31 @@ func (f *Follower) normalizeHoles(holes []hole) []hole {
 	for _, h := range out {
 		if n := len(merged); n > 0 {
 			prev := &merged[n-1]
-			if prev.Reason == h.Reason && prev.To < ^uint64(0) && h.From <= prev.To+1 {
+			if compatibleLifecycle(*prev, h) && prev.Reason == h.Reason && prev.To < ^uint64(0) && h.From <= prev.To+1 {
 				mergeHole(prev, h)
 				continue
 			}
 		}
 		merged = append(merged, h)
 	}
-	return f.capHoles(merged)
+	return merged
+}
+
+func effectiveLifecycle(h hole) string {
+	if h.Lifecycle != "" {
+		return h.Lifecycle
+	}
+	if h.Reason == reasonNoState {
+		return rangeBlocked
+	}
+	return rangePending
+}
+
+// compatibleLifecycle treats pending and retrying as the same recovery class.
+// A repeated skip can overlap a range whose last attempt failed, and those
+// intervals must still normalize into one row. Blocked work stays separate.
+func compatibleLifecycle(a, b hole) bool {
+	return (effectiveLifecycle(a) == rangeBlocked) == (effectiveLifecycle(b) == rangeBlocked)
 }
 
 // mergeHole folds h into the entry that starts at or before it. The cursor
@@ -125,41 +262,33 @@ func (f *Follower) normalizeHoles(holes []hole) []hole {
 // higher of the two, because a block folded into an additive bucket by
 // either entry must not be folded again.
 func mergeHole(into *hole, h hole) {
+	oldTo := into.To
 	into.To = max(into.To, h.To)
 	into.Folded = max(into.Folded, h.Folded)
+	if effectiveLifecycle(*into) == rangeRetrying || effectiveLifecycle(h) == rangeRetrying {
+		into.Lifecycle = rangeRetrying
+	} else {
+		into.Lifecycle = effectiveLifecycle(*into)
+	}
+	if h.From == into.From && h.Next > into.Next {
+		into.Next, into.State, into.CursorAt = h.Next, h.State, h.CursorAt
+	}
 	if into.At == "" || (h.At != "" && h.At < into.At) {
 		into.At = h.At
 	}
-}
-
-// capHoles bounds the queue and the checkpoint. The filler works newest
-// first, so the ranges dropped are the oldest ones, which are also the
-// least likely to still have a stored state to replay from.
-func (f *Follower) capHoles(holes []hole) []hole {
-	pending := 0
-	for _, h := range holes {
-		if h.Reason == "" {
-			pending++
-		}
+	// PredecessorAt describes the block below From. The merged entry starts at
+	// into.From, so the incoming bound only applies when both ranges start at
+	// the same block. Otherwise it names a block inside the merged interval.
+	if into.PredecessorAt == "" && h.From == into.From {
+		into.PredecessorAt = h.PredecessorAt
 	}
-	for i := range holes {
-		if pending <= maxPendingHoles {
-			break
-		}
-		if holes[i].Reason != "" {
-			continue
-		}
-		f.log.Warn("the gap fill queue is full, dropping the oldest range out of it",
-			"from", holes[i].From, "to", holes[i].To, "queued", pending)
-		holes[i].Reason, holes[i].Next, holes[i].State = reasonExpired, 0, nil
-		pending--
+	if h.To >= oldTo && h.SuccessorAt != "" {
+		into.SuccessorAt = h.SuccessorAt
 	}
-	if len(holes) <= maxHoles {
-		return holes
+	if h.LastAttemptAt > into.LastAttemptAt {
+		into.LastAttemptAt, into.NextRetryAt, into.LastError = h.LastAttemptAt, h.NextRetryAt, h.LastError
 	}
-	drop := len(holes) - maxHoles
-	f.log.Warn("the holes checkpoint is full, forgetting the oldest ranges", "dropped", drop)
-	return holes[drop:]
+	into.RetryCount = max(into.RetryCount, h.RetryCount)
 }
 
 // fillTarget is the hole the next fill step works on: the block the replay
@@ -230,11 +359,18 @@ func (f *Follower) fillStep(ctx context.Context) (FillStatus, error) {
 	if target == nil {
 		return FillNone, nil
 	}
-	if f.historyMustWait() {
+	if f.recoveryMustWait() {
 		// The fast loop needs the budget for the head: history waits.
 		return FillIdle, nil
 	}
-	return f.fillBatch(ctx, gen, target)
+	status, err := f.fillBatch(ctx, gen, target)
+	if err == nil || errors.Is(err, errStaleGeneration) {
+		return status, err
+	}
+	if retryErr := f.recordFillFailure(ctx, target.h, err); retryErr != nil {
+		return status, errors.Join(err, fmt.Errorf("record missing-range retry: %w", retryErr))
+	}
+	return status, err
 }
 
 // pickHole chooses the newest hole that can be filled: the state at the
@@ -263,18 +399,27 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 		return ha.From > hb.From
 	})
 	var reasons map[uint64]string
-	for _, unfillable := range []bool{false, true} {
+	for _, blocked := range []bool{false, true} {
 		for _, i := range order {
 			h := holes[i]
-			if (h.Reason != "") != unfillable {
+			if (effectiveLifecycle(h) == rangeBlocked) != blocked {
 				continue
+			}
+			if effectiveLifecycle(h) == rangeRetrying && h.NextRetryAt != "" {
+				next, err := requiredTime(h.NextRetryAt, "next retry at")
+				if err != nil {
+					return nil, reasons, err
+				}
+				if next.After(f.now()) {
+					continue
+				}
 			}
 			target, stranded, err := f.targetFor(ctx, h)
 			if err != nil {
 				return nil, reasons, err
 			}
 			if target == nil {
-				if stranded && h.Reason == "" {
+				if stranded && effectiveLifecycle(h) != rangeBlocked {
 					f.log.Warn("nothing is left to replay a queued range forward from, recording it as unfillable",
 						"from", h.From, "to", h.To)
 					if reasons == nil {
@@ -284,9 +429,10 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 				}
 				continue
 			}
-			if h.Reason != "" {
+			if effectiveLifecycle(h) == rangeBlocked {
 				f.log.Info("a hole recorded without state can be replayed now", "from", h.From, "to", h.To)
 				target.h.Reason = ""
+				target.h.Lifecycle = rangePending
 			}
 			return target, reasons, nil
 		}
@@ -308,12 +454,53 @@ func (f *Follower) markHoles(ctx context.Context, s db.Store, reasons map[uint64
 			continue
 		}
 		holes[i].Reason = reason
+		holes[i].Lifecycle = rangeBlocked
+		holes[i].NextRetryAt = ""
 		changed = true
 	}
 	if !changed {
 		return nil
 	}
 	return f.saveHoles(ctx, s, holes)
+}
+
+// recordFillFailure moves one range into a durable retry lifecycle. It matches
+// the interval that still contains the attempted range under the chain lock,
+// so a concurrent extension or merge cannot resurrect stale cursor state. The
+// backoff is bounded and survives restart with the count, time and RPC error.
+func (f *Follower) recordFillFailure(ctx context.Context, attempted hole, cause error) error {
+	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		holes, err := f.loadHoles(ctx, s)
+		if err != nil {
+			return err
+		}
+		changed := false
+		for i := range holes {
+			if holes[i].From > attempted.From || holes[i].To < attempted.To {
+				continue
+			}
+			holes[i].Lifecycle = rangeRetrying
+			holes[i].RetryCount++
+			now := f.now().UTC()
+			holes[i].LastAttemptAt = now.Format(time.RFC3339)
+			holes[i].NextRetryAt = now.Add(retryDelay(holes[i].RetryCount)).Format(time.RFC3339)
+			holes[i].LastError = cause.Error()
+			changed = true
+			break
+		}
+		if !changed {
+			return nil
+		}
+		return f.saveHoles(ctx, s, holes)
+	})
+}
+
+func retryDelay(count uint64) time.Duration {
+	delay := restartDelay
+	for i := uint64(1); i < count && delay < 5*time.Minute; i++ {
+		delay *= 2
+	}
+	return min(delay, 5*time.Minute)
 }
 
 // targetFor reports whether one hole can be filled now, returning the
@@ -517,8 +704,21 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 			return FillIdle, err
 		}
 	}
-	rows, filledTail, end := f.replayHole(t, headers, tail)
+	f.mu.Lock()
+	tl := f.timelineLocked(nil)
+	f.mu.Unlock()
+	actionHeaders := append([]nitro.Header(nil), headers...)
+	if tail != nil {
+		actionHeaders = append(actionHeaders, headerOf(*tail))
+	}
+	actions, err := f.resolveActionBlocks(ctx, actionHeaders, tl)
+	if err != nil {
+		return FillIdle, err
+	}
+	rows, filledTail, end := f.replayHole(t, headers, tail, tl, actions)
 	h.Next, h.State = from+n, end
+	h.CursorAt = time.Unix(int64(headers[len(headers)-1].Timestamp), 0).UTC().Format(time.RFC3339)
+	h.Lifecycle, h.NextRetryAt, h.LastError = rangePending, "", ""
 	return FillProgressed, f.commitFill(ctx, gen, h, rows, filledTail, h.Next > h.To)
 }
 
@@ -553,12 +753,9 @@ func (f *Follower) holeTail(ctx context.Context, h hole, prevHeader nitro.Header
 // a block whose state was really sampled. A stored block carrying another
 // pricer shape than the replay ends on cannot be joined to it: the range
 // is still written, its error simply stays unrecorded.
-func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Block) (rows []db.Block, filled *db.Block, end *model.HoleState) {
-	f.mu.Lock()
-	tl := f.timelineLocked(nil)
-	f.mu.Unlock()
+func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Block, tl *timeline, actions actionBlocks) (rows []db.Block, filled *db.Block, end *model.HoleState) {
 	st := t.state
-	rows, _ = replayForward(f.chainID, st, t.prevTs, headers, tl, nil)
+	rows, _ = replayForward(f.chainID, st, t.prevTs, headers, tl, nil, actions)
 	lastHeader := headers[len(headers)-1]
 	var setID int64
 	f.mu.Lock()
@@ -572,23 +769,27 @@ func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Bl
 	if tail == nil {
 		return rows, nil, end
 	}
-	if len(tail.Backlogs) != len(st.Backlogs()) {
+	backlogs := tail.Backlogs.Uint64s()
+	head := headerOf(*tail)
+	anchored, _ := replayForward(f.chainID, st, lastHeader.Timestamp, []nitro.Header{head}, tl,
+		func(uint64) ([]uint64, bool) { return backlogs, true }, actions)
+	if len(tail.Backlogs) != len(anchored[0].Backlogs) {
 		f.log.Warn("the block after the gap carries another pricer shape, leaving its replay error unrecorded",
-			"block", tail.Number, "backlogs", len(tail.Backlogs), "replay", len(st.Backlogs()))
+			"block", tail.Number, "backlogs", len(tail.Backlogs), "replay", len(anchored[0].Backlogs))
 		return rows, nil, end
 	}
-	backlogs := tail.Backlogs.Uint64s()
-	head := nitro.Header{
-		Number: tail.Number, Hash: tail.Hash, ParentHash: tail.ParentHash, Timestamp: uint64(tail.TS.Unix()),
-		GasUsed: tail.GasUsed, BaseFee: tail.BaseFee.BigInt(), L1BlockNumber: tail.L1Block, TxCount: tail.TxCount,
-	}
-	anchored, _ := replayForward(f.chainID, st, lastHeader.Timestamp, []nitro.Header{head}, tl,
-		func(uint64) ([]uint64, bool) { return backlogs, true })
 	merged := *tail
 	merged.PredictedBaseFee = anchored[0].PredictedBaseFee
 	merged.ExponentBips, merged.ConstraintBips = anchored[0].ExponentBips, anchored[0].ConstraintBips
 	f.log.Info("gap replay reached the sampled head", "block", merged.Number, "replayErrorBips", db.ReplayErrorBips(merged))
 	return rows, &merged, end
+}
+
+func headerOf(block db.Block) nitro.Header {
+	return nitro.Header{
+		Number: block.Number, Hash: block.Hash, ParentHash: block.ParentHash, Timestamp: uint64(block.TS.Unix()),
+		GasUsed: block.GasUsed, BaseFee: block.BaseFee.BigInt(), L1BlockNumber: block.L1Block, TxCount: block.TxCount,
+	}
 }
 
 // commitFill writes one batch of a hole and its progress in one chain
@@ -667,8 +868,8 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db
 // one meanwhile, and normalizing may have merged a newer range into it, so
 // it is matched by its start and may have grown), then updated with the
 // cursor, the replay state and the fold watermark, or removed when the
-// range it covers is complete. An entry that is no longer there was
-// dropped by a rewind and is not written back.
+// range it covers is complete. An entry another writer already completed
+// is not recreated.
 func (f *Follower) advanceHole(ctx context.Context, s db.Store, h hole, done bool) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil {
@@ -683,7 +884,9 @@ func (f *Follower) advanceHole(ctx context.Context, s db.Store, h hole, done boo
 		if done && cur.To == h.To {
 			continue
 		}
-		cur.Next, cur.State, cur.Reason = h.Next, h.State, h.Reason
+		cur.Next, cur.State, cur.Reason, cur.Lifecycle = h.Next, h.State, h.Reason, h.Lifecycle
+		cur.CursorAt, cur.NextRetryAt, cur.LastError = h.CursorAt, h.NextRetryAt, h.LastError
+		cur.RetryCount, cur.LastAttemptAt = max(cur.RetryCount, h.RetryCount), h.LastAttemptAt
 		cur.Folded = max(cur.Folded, h.Folded)
 		out = append(out, cur)
 	}
@@ -714,7 +917,7 @@ func (f *Follower) rewindHoles(ctx context.Context, s db.Store, ancestor uint64,
 			continue
 		}
 		f.log.Warn("reorg reaches into a hole being filled, restarting it", "from", h.From, "to", h.To, "ancestor", ancestor)
-		holes[i].Next, holes[i].State = 0, nil
+		holes[i].Next, holes[i].State, holes[i].CursorAt = 0, nil, ""
 		changed = true
 	}
 	if !changed {

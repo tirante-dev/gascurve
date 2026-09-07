@@ -46,13 +46,14 @@ const (
 
 // Server holds the handlers' dependencies.
 type Server struct {
-	store   db.Store
-	cfg     config.ServerConfig
-	log     *logger.Logger
-	hub     *Hub
-	version string
-	now     func() time.Time
-	router  chi.Router
+	store    db.Store
+	cfg      config.ServerConfig
+	log      *logger.Logger
+	hub      *Hub
+	listener db.ListenerStatusReporter
+	version  string
+	now      func() time.Time
+	router   chi.Router
 	// ethUsdMaxAge mirrors collector.eth_usd_max_age: a recorded spot older
 	// than this is served as null.
 	ethUsdMaxAge time.Duration
@@ -82,6 +83,10 @@ func WithMetrics(m *metrics.API, g prometheus.Gatherer) Option {
 		}
 	}
 }
+
+// WithListener exposes the notification listener through readiness and
+// status. It is optional for servers built without the live WebSocket feed.
+func WithListener(l db.ListenerStatusReporter) Option { return func(s *Server) { s.listener = l } }
 
 // WithEthUsdMaxAge sets how long a recorded ETH/USD spot is served before
 // /live reports null. It must match the collector's
@@ -193,13 +198,15 @@ func (s *Server) routes() chi.Router {
 // requestMetrics records one served request. The route label is the
 // router's pattern, resolved only once the handler has returned, so a
 // block number or a network name in the path never becomes a series of its
-// own. The WebSocket and the metrics endpoint are left out: one is a
-// long-lived connection whose duration says nothing about request latency,
-// the other is the scrape itself.
+// own. The scrape does not count itself, and a WebSocket that upgraded is
+// not a request: its duration is the life of the socket, which says
+// nothing about request latency. A handshake the server refused is an
+// ordinary answer and is counted like one, so sustained WebSocket errors
+// reach the error rate instead of disappearing.
 func requestMetrics(m *metrics.API) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == metrics.Path || r.URL.Path == wsPath {
+			if r.URL.Path == metrics.Path {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -210,6 +217,9 @@ func requestMetrics(m *metrics.API) func(http.Handler) http.Handler {
 			if status == 0 {
 				// A handler that wrote nothing at all still answered 200.
 				status = http.StatusOK
+			}
+			if r.URL.Path == wsPath && status < http.StatusBadRequest {
+				return
 			}
 			m.ObserveRequest(routePattern(r), r.Method, status, time.Since(start))
 		})
@@ -409,6 +419,15 @@ func clientIP(addr string) string {
 
 func (rl *rateLimiter) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The scrape is exempt: where a proxy or a mesh makes ordinary
+		// traffic and Prometheus share one peer address, a throttled
+		// /metrics reads as a dead api and pages for it. The endpoint is
+		// not routed by the chart's Ingress, so it is reachable from
+		// inside the cluster only.
+		if r.URL.Path == metrics.Path {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !rl.allow(clientIP(r.RemoteAddr)) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")

@@ -11,6 +11,8 @@ func TestSelectorsPinned(t *testing.T) {
 		SigGetGasPricingConstraints:           "0x232027d1",
 		SigGetPricesInWei:                     "0x41b247a8",
 		SigSetGasPricingConstraints:           "0xcc0d556a",
+		SigGetParentGasFloorPerToken:          "0x49ccdaff",
+		SigSetParentGasFloorPerToken:          "0x3a930b0b",
 		SigArbOSVersion:                       "0x051038f2",
 		SigStartBlock:                         "0x6bf6a42d",
 		SigBatchPostingReportV2:               "0x9998269e",

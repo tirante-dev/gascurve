@@ -41,3 +41,25 @@ func TestAPIRecordsWebSocketActivity(t *testing.T) {
 		hasSeries(t, body, want)
 	}
 }
+
+func TestAPIObservesListenerAtScrapeTime(t *testing.T) {
+	reg := NewRegistry()
+	a := NewAPI(reg)
+	ready, reconnects := false, uint64(0)
+	a.ObserveListener(func() (bool, uint64) { return ready, reconnects })
+	body := scrape(t, reg)
+	for _, want := range []string{
+		"gascurve_api_listener_ready 0",
+		"gascurve_api_listener_reconnects_total 0",
+	} {
+		hasSeries(t, body, want)
+	}
+	ready, reconnects = true, 3
+	body = scrape(t, reg)
+	for _, want := range []string{
+		"gascurve_api_listener_ready 1",
+		"gascurve_api_listener_reconnects_total 3",
+	} {
+		hasSeries(t, body, want)
+	}
+}

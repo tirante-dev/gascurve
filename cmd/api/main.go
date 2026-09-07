@@ -70,13 +70,23 @@ func run() error {
 	defer listener.Close()
 
 	hub := api.NewHub(store, log, api.WithOrigins(cfg.Server.CORSOrigins))
-	go hub.Run(ctx, listener)
+	hubErrC := make(chan error, 1)
+	go func() {
+		hubErrC <- hub.Run(ctx, listener)
+		close(hubErrC)
+	}()
 
 	reg := metrics.NewRegistry()
+	apiMetrics := metrics.NewAPI(reg)
+	apiMetrics.ObserveListener(func() (bool, uint64) {
+		st := listener.Status()
+		return st.Ready, st.Reconnects
+	})
 	server := api.New(store, cfg.Server, hub, log,
+		api.WithListener(listener),
 		api.WithVersion(version.Version),
 		api.WithEthUsdMaxAge(cfg.Collector.EthUsdMaxAge),
-		api.WithMetrics(metrics.NewAPI(reg), reg))
+		api.WithMetrics(apiMetrics, reg))
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Server.Port)),
 		Handler:           server.Handler(),
@@ -91,18 +101,24 @@ func run() error {
 		close(errc)
 	}()
 
+	var runErr error
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down")
 	case err := <-errc:
 		if err != nil {
-			return err
+			runErr = err
+		}
+	case err := <-hubErrC:
+		if err != nil {
+			runErr = fmt.Errorf("websocket hub: %w", err)
 		}
 	}
+	stop()
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := httpServer.Shutdown(sctx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
-	return nil
+	return runErr
 }

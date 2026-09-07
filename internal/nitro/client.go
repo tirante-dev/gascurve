@@ -160,6 +160,10 @@ type Result struct {
 // Stats is a point in time view of the client's request accounting.
 type Stats struct {
 	CallsLast10s    int
+	Calls           uint64
+	Requests        uint64
+	Errors          uint64
+	TotalLatency    time.Duration
 	RateLimitEvents uint64
 	Last429At       time.Time
 	Backoff         time.Duration
@@ -221,6 +225,10 @@ type Client struct {
 	// class, kept for observation only: nothing routes on them.
 	fastCalls       uint64
 	bulkCalls       uint64
+	calls           uint64
+	requests        uint64
+	errors          uint64
+	totalLatency    time.Duration
 	rateLimitEvents uint64
 	last429         time.Time
 	backoff         time.Duration
@@ -305,7 +313,8 @@ func (c *Client) Stats() Stats {
 	defer c.mu.Unlock()
 	c.trimCallsLocked(c.now())
 	return Stats{
-		CallsLast10s: len(c.callTimes), RateLimitEvents: c.rateLimitEvents, Last429At: c.last429, Backoff: c.backoff,
+		CallsLast10s: len(c.callTimes), Calls: c.calls, Requests: c.requests, Errors: c.errors,
+		TotalLatency: c.totalLatency, RateLimitEvents: c.rateLimitEvents, Last429At: c.last429, Backoff: c.backoff,
 		FastCalls: c.fastCalls, BulkCalls: c.bulkCalls,
 	}
 }
@@ -329,9 +338,20 @@ func (c *Client) recordCalls(class Class, n int) {
 	}
 	if class == Fast {
 		c.fastCalls += uint64(n)
-		return
+	} else {
+		c.bulkCalls += uint64(n)
 	}
-	c.bulkCalls += uint64(n)
+	c.calls += uint64(n)
+}
+
+func (c *Client) recordRequest(latency time.Duration, failed bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requests++
+	c.totalLatency += max(latency, 0)
+	if failed {
+		c.errors++
+	}
 }
 
 func (c *Client) ids(n int) []uint64 {
@@ -377,12 +397,28 @@ func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 			return nil, err
 		}
 		if !limited {
+			c.recordResultErrors(results)
 			return results, nil
 		}
 		if attempt >= c.maxAttempts {
 			return nil, throttled(attempt)
 		}
 	}
+}
+
+func (c *Client) recordResultErrors(results []Result) {
+	var failures uint64
+	for _, result := range results {
+		if result.Err != nil {
+			failures++
+		}
+	}
+	if failures == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.errors += failures
+	c.mu.Unlock()
 }
 
 // throttled is the error for a request that stayed rate limited after
@@ -469,6 +505,7 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 	c.recordCalls(ClassOf(ctx), calls)
 	sentAt = c.now()
 	responses, limited, err = c.post(ctx, payload)
+	c.recordRequest(c.now().Sub(sentAt), limited || err != nil)
 	if limited {
 		c.noteRateLimit()
 	}

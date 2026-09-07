@@ -4,13 +4,30 @@
 // docs/ARCHITECTURE.md section 6 exactly.
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Model names.
 const (
 	ModelConstraints = "constraints"
 	ModelLegacy      = "legacy"
 	ModelUnknown     = "unknown"
+)
+
+// Health status values used by /status.
+const (
+	StatusHealthy  = "healthy"
+	StatusDegraded = "degraded"
+	StatusDisabled = "disabled"
+)
+
+// Series bucket completeness states.
+const (
+	SeriesComplete = "complete"
+	SeriesPartial  = "partial"
+	SeriesUnknown  = "unknown"
 )
 
 // Constraint set sources.
@@ -180,12 +197,14 @@ type SeriesPoint struct {
 	T       int64  `json:"t"`
 	Blocks  int64  `json:"blocks"`
 	GasUsed uint64 `json:"gasUsed"`
-	// GasPerSecond is the rate over the covered span of the bucket, and
-	// Coverage the share of the bucket that span is (1 for a whole bucket,
-	// less for the bucket in progress or the first one after the collector
-	// started), so a chart never reads a partial bucket as a low rate.
+	// GasPerSecond is the rate over the covered span of the bucket. Coverage
+	// is the share of the bucket that span is after subtracting bounded missing
+	// intervals, or null when the missing-range time bounds cannot measure it.
+	// Completeness distinguishes a whole aggregate, a known partial aggregate
+	// and an aggregate whose completeness cannot be located in time.
 	GasPerSecond    uint64   `json:"gasPerSecond"`
-	Coverage        float64  `json:"coverage"`
+	Coverage        *float64 `json:"coverage"`
+	Completeness    string   `json:"completeness"`
 	FeesWei         string   `json:"feesWei"`
 	BaseFeeMin      string   `json:"baseFeeMin"`
 	BaseFeeAvg      string   `json:"baseFeeAvg"`
@@ -236,7 +255,8 @@ type OwnerAction struct {
 	Args     json.RawMessage `json:"args"`
 }
 
-// BatchPoint is one bucket of batch posting reports.
+// BatchPoint is one bucket of version-aware, ArbOS-attributed batch-poster
+// spending. WeiSpent is not an Ethereum receipt total.
 type BatchPoint struct {
 	T             int64  `json:"t"`
 	Batches       int64  `json:"batches"`
@@ -301,19 +321,29 @@ type EndpointsStatus struct {
 	Endpoints      []EndpointStatus `json:"endpoints"`
 }
 
-// Reasons a hole is not queued work. A hole with any reason is counted as
-// unfillable by /status; only HoleReasonNoState is re-examined and taken
-// up again when a state appears before the range.
+// Missing-range lifecycle states. Pending work is ready now, retrying work is
+// delayed until its durable retry time, and blocked work has no replay state
+// to continue from. Blocked ranges are re-examined because later backfill or a
+// newly configured archive endpoint can make them recoverable.
 const (
+	MissingRangePending  = "pending"
+	MissingRangeRetrying = "retrying"
+	MissingRangeBlocked  = "blocked"
+
+	// HoleReasonCatchUpLimit marks a range skipped because the endpoint's
+	// configured ingress capacity could not keep the live follower current.
+	HoleReasonCatchUpLimit = "catch up limit"
+	// HoleReasonReplayDiscontinuity marks a range skipped because the model
+	// changed without enough recorded state to replay through it safely.
+	HoleReasonReplayDiscontinuity = "replay discontinuity"
 	// HoleReasonNoState marks a hole no replay can fill right now: no
 	// block before it is stored with a pricing state and the hole carries
 	// no replay state of its own, so nothing can be replayed forward into
 	// it. The gap filler skips these and only looks at them again once
 	// something before the range appears.
 	HoleReasonNoState = "no state"
-	// HoleReasonExpired marks a hole dropped from the work queue because
-	// the queue was full. Its blocks stay counted as not indexed, but no
-	// filler will ever fetch them again.
+	// HoleReasonExpired is accepted only while importing the old bounded JSON
+	// checkpoint. Those ranges become pending again in durable storage.
 	HoleReasonExpired = "expired"
 )
 
@@ -337,24 +367,28 @@ type HoleState struct {
 	SetID       int64         `json:"setId,omitempty"`
 }
 
-// Hole is one block range the collector did not index, recorded in
-// collector_state under the holes key. Next is the gap filler's progress
-// cursor: blocks below it are filled, 0 means nothing yet. State is the
-// replay state at Next-1, written with every batch so the next one
-// continues from it. Folded is the first block of the range whose additive
-// bucket contribution has not been committed yet: it is not reset when a
-// rewind resets Next, so a refilled batch below it is replayed for its
-// state but folded only once. Reason is set only when the range is not
-// queued work (HoleReasonNoState, HoleReasonExpired); an empty Reason
-// means the range is queued for filling.
+// Hole is the collector's domain shape for one durable missing_ranges row and
+// the decoder for the legacy JSON checkpoint. Next is the first block still
+// missing, State describes Next-1, and Folded prevents additive bucket work
+// from being counted twice after a rewind. Lifecycle, reason and retry fields
+// describe recovery. The three time bounds let the API map the remaining
+// interval without decoding State.
 type Hole struct {
-	From   uint64     `json:"from"`
-	To     uint64     `json:"to"`
-	At     string     `json:"at"`
-	Next   uint64     `json:"next,omitempty"`
-	State  *HoleState `json:"state,omitempty"`
-	Folded uint64     `json:"folded,omitempty"`
-	Reason string     `json:"reason,omitempty"`
+	From          uint64     `json:"from"`
+	To            uint64     `json:"to"`
+	At            string     `json:"at"`
+	Lifecycle     string     `json:"lifecycle,omitempty"`
+	Next          uint64     `json:"next,omitempty"`
+	State         *HoleState `json:"state,omitempty"`
+	Folded        uint64     `json:"folded,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
+	RetryCount    uint64     `json:"retryCount,omitempty"`
+	LastAttemptAt string     `json:"lastAttemptAt,omitempty"`
+	NextRetryAt   string     `json:"nextRetryAt,omitempty"`
+	LastError     string     `json:"lastError,omitempty"`
+	PredecessorAt string     `json:"predecessorAt,omitempty"`
+	SuccessorAt   string     `json:"successorAt,omitempty"`
+	CursorAt      string     `json:"cursorAt,omitempty"`
 }
 
 // Start is the first block still to fill: the cursor when it has moved
@@ -374,52 +408,179 @@ func (h Hole) Blocks() uint64 {
 	return h.To - h.Start() + 1
 }
 
-// HolesStatus summarizes a network's holes for /status: how many ranges
-// wait for the gap filler, how many blocks they still cover in total
-// (unfillable ones included, since those blocks are missing too) and how
-// many ranges can never be filled.
+// HolesStatus summarizes a network's missing ranges for /status.
 type HolesStatus struct {
-	Pending    int    `json:"pending"`
-	Blocks     uint64 `json:"blocks"`
-	Unfillable int    `json:"unfillable"`
+	Pending                 int     `json:"pending"`
+	Blocks                  uint64  `json:"blocks"`
+	Unfillable              int     `json:"unfillable"`
+	Retrying                int     `json:"retrying"`
+	OldestAgeSeconds        uint64  `json:"oldestAgeSeconds"`
+	CheckpointError         bool    `json:"checkpointError"`
+	PendingBlocks           uint64  `json:"pendingBlocks"`
+	OldestPendingAt         *string `json:"oldestPendingAt"`
+	OldestPendingAgeSeconds *int64  `json:"oldestPendingAgeSeconds"`
+}
+
+// RPCCapacity is the latest estimate of the calls per second required to
+// sample the head and fetch intervening headers compared with the active
+// endpoint's configured budget. A configured value of zero is unlimited.
+// Saturated means observed ingress demand exceeded that finite budget.
+type RPCCapacity struct {
+	ConfiguredCallsPerSecond float64  `json:"configuredCallsPerSecond"`
+	RequiredCallsPerSecond   float64  `json:"requiredCallsPerSecond"`
+	ObservedCallsPerSecond   float64  `json:"observedCallsPerSecond"`
+	HeadroomCallsPerSecond   *float64 `json:"headroomCallsPerSecond"`
+	Saturated                bool     `json:"saturated"`
+	At                       *string  `json:"at"`
+	CheckpointError          bool     `json:"checkpointError"`
 }
 
 // SummarizeHoles counts the recorded holes for /status.
 func SummarizeHoles(holes []Hole) HolesStatus {
+	return SummarizeHolesAt(holes, time.Time{})
+}
+
+// SummarizeHolesAt counts recorded holes and, when now is non-zero, reports
+// the age of the oldest queued range. Unfillable history is still included
+// in Blocks for compatibility, but not in PendingBlocks or pending age.
+func SummarizeHolesAt(holes []Hole, now time.Time) HolesStatus {
 	out := HolesStatus{}
+	var oldest time.Time
 	for _, h := range holes {
-		if h.Reason == "" {
+		pending := false
+		switch h.Lifecycle {
+		case MissingRangeRetrying:
 			out.Pending++
-		} else {
+			out.Retrying++
+			pending = true
+		case MissingRangeBlocked:
 			out.Unfillable++
+		case MissingRangePending:
+			out.Pending++
+			pending = true
+		default:
+			// Compatibility with the legacy checkpoint, where an empty reason
+			// was pending and any reason meant unfillable.
+			if h.Reason == "" || h.Reason == HoleReasonExpired {
+				out.Pending++
+				pending = true
+			} else {
+				out.Unfillable++
+			}
+		}
+		if pending {
+			out.PendingBlocks += h.Blocks()
+			if at, err := time.Parse(time.RFC3339, h.At); err == nil && (oldest.IsZero() || at.Before(oldest)) {
+				oldest = at
+			}
 		}
 		out.Blocks += h.Blocks()
 	}
+	if !oldest.IsZero() {
+		at := oldest.UTC().Format(time.RFC3339)
+		out.OldestPendingAt = &at
+		if !now.IsZero() {
+			age := max(int64(now.Sub(oldest).Seconds()), 0)
+			out.OldestPendingAgeSeconds = &age
+		}
+	}
 	return out
+}
+
+// LoopStatus is the latest outcome of one collector loop. Both success and
+// error timestamps are retained so a recovered error remains diagnosable
+// without continuing to mark the network degraded.
+type LoopStatus struct {
+	LastSuccessAt  *string `json:"lastSuccessAt"`
+	LastErrorAt    *string `json:"lastErrorAt"`
+	LastError      *string `json:"lastError"`
+	LastDurationMS int64   `json:"lastDurationMs"`
+	StaleAfterSecs int64   `json:"staleAfterSeconds"`
+}
+
+// CollectorLoops reports the fast, slow and history loops separately.
+type CollectorLoops struct {
+	Fast    LoopStatus `json:"fast"`
+	Slow    LoopStatus `json:"slow"`
+	History LoopStatus `json:"history"`
+}
+
+// RPCMetrics is cumulative request accounting from the collector process.
+// AverageLatencyMS measures HTTP round trips and excludes pacer waits.
+type RPCMetrics struct {
+	Calls              uint64  `json:"calls"`
+	Requests           uint64  `json:"requests"`
+	Errors             uint64  `json:"errors"`
+	CallsLast10Seconds int     `json:"callsLast10Seconds"`
+	RateLimitEvents    uint64  `json:"rateLimitEvents"`
+	Last429At          *string `json:"last429At"`
+	AverageLatencyMS   float64 `json:"averageLatencyMs"`
+}
+
+// DatabaseMetrics is process-wide PostgreSQL operation accounting. It is
+// repeated in each network's durable collector checkpoint because
+// collector_state is keyed by chain.
+type DatabaseMetrics struct {
+	Operations       uint64  `json:"operations"`
+	Errors           uint64  `json:"errors"`
+	AverageLatencyMS float64 `json:"averageLatencyMs"`
+	LastLatencyMS    float64 `json:"lastLatencyMs"`
+}
+
+// CollectorTelemetry is the collector's durable heartbeat and in-process
+// progress snapshot. HeartbeatAgeSeconds is derived by the API at serve time
+// and is omitted from the stored checkpoint.
+type CollectorTelemetry struct {
+	HeartbeatAt                *string         `json:"heartbeatAt"`
+	HeartbeatAgeSeconds        *int64          `json:"heartbeatAgeSeconds,omitempty"`
+	HeartbeatStaleAfterSeconds int64           `json:"heartbeatStaleAfterSeconds"`
+	ObservedHead               uint64          `json:"observedHead"`
+	IndexedHead                uint64          `json:"indexedHead"`
+	HeadLagBlocks              uint64          `json:"headLagBlocks"`
+	Loops                      CollectorLoops  `json:"loops"`
+	RPC                        RPCMetrics      `json:"rpc"`
+	Database                   DatabaseMetrics `json:"database"`
 }
 
 // NetworkStatus is the collector status of one network. HeadAt,
 // LagSeconds and LastSampleAt are null before the first head.
 type NetworkStatus struct {
-	Name            string      `json:"name"`
-	ChainID         uint64      `json:"chainId"`
-	Enabled         bool        `json:"enabled"`
-	HeadBlock       uint64      `json:"headBlock"`
-	HeadAt          *string     `json:"headAt"`
-	LagSeconds      *int64      `json:"lagSeconds"`
-	LastSampleAt    *string     `json:"lastSampleAt"`
-	LastError       *string     `json:"lastError"`
-	RateLimitEvents uint64      `json:"rateLimitEvents"`
-	Last429At       *string     `json:"last429At"`
-	BackfillCursor  *string     `json:"backfillCursor"`
-	ArbOSVersion    *string     `json:"arbosVersion"`
-	Holes           HolesStatus `json:"holes"`
+	Name            string              `json:"name"`
+	ChainID         uint64              `json:"chainId"`
+	Enabled         bool                `json:"enabled"`
+	HeadBlock       uint64              `json:"headBlock"`
+	HeadAt          *string             `json:"headAt"`
+	LagSeconds      *int64              `json:"lagSeconds"`
+	LastSampleAt    *string             `json:"lastSampleAt"`
+	LastError       *string             `json:"lastError"`
+	RateLimitEvents uint64              `json:"rateLimitEvents"`
+	Last429At       *string             `json:"last429At"`
+	BackfillCursor  *string             `json:"backfillCursor"`
+	ArbOSVersion    *string             `json:"arbosVersion"`
+	Degraded        bool                `json:"degraded"`
+	Capacity        RPCCapacity         `json:"capacity"`
+	Holes           HolesStatus         `json:"holes"`
+	Status          string              `json:"status"`
+	DegradedReasons []string            `json:"degradedReasons"`
+	Collector       *CollectorTelemetry `json:"collector"`
 	EndpointsStatus
 }
 
-// Status is the /status response.
+// ListenerStatus is the API's PostgreSQL notification feed status. LastError
+// is null while the listener is ready.
+type ListenerStatus struct {
+	Ready      bool    `json:"ready"`
+	Reconnects uint64  `json:"reconnects"`
+	LastError  *string `json:"lastError"`
+}
+
+// Status is the /status response. Status degrades when the notification
+// listener or any enabled collector network is degraded. Listener is omitted
+// only for an API server built without a live WebSocket feed.
 type Status struct {
 	Version  string          `json:"version"`
+	Status   string          `json:"status"`
+	Listener *ListenerStatus `json:"listener,omitempty"`
 	Networks []NetworkStatus `json:"networks"`
 }
 

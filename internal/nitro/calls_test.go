@@ -66,8 +66,18 @@ func setupChain(f *fakeRPC) {
 				"0xa0188cdb00000000000000000000000000000000000000000000000000000000",
 				"0x0000000000000000000000002a153c6a1b66dbc930a8d7017230ab0253005c09",
 			},
-			"data": "0x00", "blockNumber": "0x10", "transactionHash": "0xtx", "logIndex": "0x1", "blockTimestamp": "0x5",
+			"data": "0x00", "blockNumber": "0x10", "transactionHash": "0xtx", "transactionIndex": "0x2", "logIndex": "0x1", "blockTimestamp": "0x5",
 		}}
+	}
+	f.handlers["eth_getTransactionReceipt"] = func(params []json.RawMessage) any {
+		hash := paramString(params[0])
+		if hash == "0xmissing" {
+			return nil
+		}
+		return map[string]any{
+			"transactionHash": hash, "blockNumber": "0x140", "transactionIndex": "0x1",
+			"gasUsed": "0x3", "cumulativeGasUsed": "0x5",
+		}
 	}
 	f.handlers["eth_getBalance"] = func(params []json.RawMessage) any {
 		switch paramString(params[0]) {
@@ -101,6 +111,7 @@ func setupChain(f *fakeRPC) {
 	f.setCall(SigGetInfraFeeAccount, addrWord("0x5a2b80a9b7effc06129bd5462d77bc20a8a59be7"))
 	f.setCall(SigGetNetworkFeeAccount, addrWord("0xbc5c3a7adecf54d34169fd90dbd1b7d3142df067"))
 	f.setCall(SigArbOSVersion, wordsOf(116))
+	f.setCall(SigGetParentGasFloorPerToken, wordsOf(10))
 }
 
 func TestTypedCalls(t *testing.T) {
@@ -144,8 +155,15 @@ func TestTypedCalls(t *testing.T) {
 	if _, err := c.BlocksWithTxs(ctx, []uint64{5}); err == nil {
 		t.Fatal("missing full block should error")
 	}
+	receipts, err := c.TransactionReceipts(ctx, []string{"0x01", "0x02"})
+	if err != nil || len(receipts) != 2 || receipts[1].TxHash != "0x02" || receipts[1].BlockNumber != 320 || receipts[1].TxIndex != 1 || receipts[1].GasUsed != 3 || receipts[1].CumulativeGasUsed != 5 {
+		t.Fatalf("TransactionReceipts: %+v %v", receipts, err)
+	}
+	if _, err := c.TransactionReceipts(ctx, []string{"0xmissing"}); err == nil {
+		t.Fatal("missing receipt should error")
+	}
 	logs, err := c.OwnerActsLogs(ctx, 0, 100)
-	if err != nil || len(logs) != 1 || logs[0].BlockNumber != 16 || logs[0].LogIndex != 1 || logs[0].BlockTimestamp != 5 {
+	if err != nil || len(logs) != 1 || logs[0].BlockNumber != 16 || logs[0].TxIndex != 2 || logs[0].LogIndex != 1 || logs[0].BlockTimestamp != 5 {
 		t.Fatalf("Logs: %+v %v", logs, err)
 	}
 	if logs, err := c.Logs(ctx, 0, 1, "0x1", nil); err != nil || len(logs) != 0 {
@@ -335,9 +353,27 @@ func TestL1SampleAndFeeAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if l1.BaseFeeEstimate.Int64() != 2_369_608 || l1.Surplus.Int64() != -1 || l1.FeesAvailable.Int64() != 190_000_000_000_000 ||
-		l1.UnitsSinceUpdate != 1234 || l1.LastUpdateTime != 1_700_000_000 || l1.EquilibrationUnits != 160_000_000 || l1.PerBatchGasCharge != 210_000 || l1.RewardRate != 10 {
+		l1.UnitsSinceUpdate != 1234 || l1.LastUpdateTime != 1_700_000_000 || l1.EquilibrationUnits != 160_000_000 || l1.PerBatchGasCharge != 210_000 || l1.RewardRate != 10 ||
+		l1.ArbOSVersion != 61 || l1.ParentGasFloorPerToken != 10 {
 		t.Fatalf("l1: %+v", l1)
 	}
+	f.callTags = nil
+	if _, err := c.L1SampleAt(ctx, 123); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range f.callTags {
+		if tag != blockTag(123) {
+			t.Fatalf("L1SampleAt call tag = %q", tag)
+		}
+	}
+	f.setCall(SigArbOSVersion, wordsOf(104))
+	f.setCallErr(SigGetParentGasFloorPerToken, &RPCError{Code: -32601, Message: "not available"})
+	pre50, err := c.L1Sample(ctx)
+	if err != nil || pre50.ArbOSVersion != 49 || pre50.ParentGasFloorPerToken != 0 {
+		t.Fatalf("pre-50 L1 sample: %+v %v", pre50, err)
+	}
+	delete(f.callErrs, SelectorHex(SigGetParentGasFloorPerToken))
+	f.setCall(SigArbOSVersion, wordsOf(116))
 	acc, err := c.FeeAccounts(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +384,7 @@ func TestL1SampleAndFeeAccounts(t *testing.T) {
 
 	sigs := []string{
 		SigGetL1BaseFeeEstimate, SigGetL1PricingSurplus, SigGetL1FeesAvailable, SigGetL1PricingUnitsSinceUpdate,
-		SigGetLastL1PricingUpdateTime, SigGetL1PricingEquilibrationUnit, SigGetPerBatchGasCharge, SigGetL1RewardRate,
+		SigGetLastL1PricingUpdateTime, SigGetL1PricingEquilibrationUnit, SigGetPerBatchGasCharge, SigGetL1RewardRate, SigArbOSVersion, SigGetParentGasFloorPerToken,
 	}
 	for _, sig := range sigs {
 		f.setCallErr(sig, &RPCError{Code: 1, Message: "x"})
@@ -408,6 +444,9 @@ func TestL1SampleAndFeeAccounts(t *testing.T) {
 	if _, err := c.BlocksWithTxs(ctx, []uint64{1}); err == nil {
 		t.Fatal("transport")
 	}
+	if _, err := c.TransactionReceipts(ctx, []string{"0x1"}); err == nil {
+		t.Fatal("transport")
+	}
 	if _, err := c.ArbOSVersion(ctx); err == nil {
 		t.Fatal("transport")
 	}
@@ -462,20 +501,40 @@ func TestParseHeaderErrors(t *testing.T) {
 	if err != nil || b.BaseFee.Sign() != 0 || b.TxCount != 0 {
 		t.Fatalf("minimal header: %+v %v", b, err)
 	}
+	b, err = parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1","mixHash":"0x00000000000000000000000000000000000000000000003d0000000000000000"}`))
+	if err != nil || b.ArbOSVersion != 61 {
+		t.Fatalf("ArbOS version from mixHash: %+v %v", b, err)
+	}
+	if _, err := parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1","mixHash":"0x01"}`)); err == nil {
+		t.Fatal("short mixHash")
+	}
 	for _, c := range []string{
 		`[{"data":"0xzz"}]`,
 		`[{"data":"0x","blockNumber":"zz"}]`,
 		`[{"data":"0x","blockNumber":"0x1","logIndex":"zz"}]`,
-		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1","blockTimestamp":"zz"}]`,
+		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1","transactionIndex":"zz"}]`,
+		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1"}]`,
+		`[{"data":"0x","blockNumber":"0x1","logIndex":"0x1","transactionIndex":"0x1","blockTimestamp":"zz"}]`,
 	} {
 		if _, err := parseLogs(json.RawMessage(c)); err == nil {
 			t.Errorf("expected log error for %s", c)
 		}
 	}
+	for _, c := range []string{
+		`null`, `"str"`,
+		`{"blockNumber":"zz"}`,
+		`{"blockNumber":"0x1","transactionIndex":"zz"}`,
+		`{"blockNumber":"0x1","transactionIndex":"0x1","gasUsed":"zz"}`,
+		`{"blockNumber":"0x1","transactionIndex":"0x1","gasUsed":"0x1","cumulativeGasUsed":"zz"}`,
+	} {
+		if _, err := parseReceipt(json.RawMessage(c)); err == nil {
+			t.Errorf("expected receipt error for %s", c)
+		}
+	}
 }
 
 // TestTypedBatchesAreChunked: every typed request list goes through the
-// endpoint's chunker, not straight to Batch, so an eight-call L1 sample on
+// endpoint's chunker, not straight to Batch, so a ten-call L1 sample on
 // a four calls per second budget is split into what the bulk share holds
 // rather than overdrawing the bucket and eating the fast reserve.
 func TestTypedBatchesAreChunked(t *testing.T) {
@@ -502,10 +561,10 @@ func TestTypedBatchesAreChunked(t *testing.T) {
 	if _, err := p.L1Sample(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Eight getters, seven of which the bulk share holds: two requests, no
+	// Ten getters, seven of which the bulk share holds: two requests, no
 	// throttling, and the fast reserve untouched.
 	if n := f.requestCount() - before; n != 2 {
-		t.Fatalf("the eight L1 getters must be split: %d requests", n)
+		t.Fatalf("the ten L1 getters must be split: %d requests", n)
 	}
 	if p.Stats().RateLimitEvents != 0 {
 		t.Fatalf("chunked batches must not be refused: %+v", p.Stats())

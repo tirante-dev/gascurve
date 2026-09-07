@@ -39,8 +39,9 @@ type RPC interface {
 	HeadersByNumbers(ctx context.Context, numbers []uint64) ([]nitro.Header, error)
 	HeaderByNumber(ctx context.Context, number uint64) (*nitro.Header, error)
 	BlocksWithTxs(ctx context.Context, numbers []uint64) ([]nitro.Block, error)
+	TransactionReceipts(ctx context.Context, hashes []string) ([]nitro.Receipt, error)
 	OwnerActsLogs(ctx context.Context, from, to uint64) ([]nitro.Log, error)
-	L1Sample(ctx context.Context) (*nitro.L1Sample, error)
+	L1SampleAt(ctx context.Context, number uint64) (*nitro.L1Sample, error)
 	FeeAccounts(ctx context.Context) (*nitro.FeeAccounts, error)
 	ArbOSVersion(ctx context.Context) (uint64, error)
 	BlockNumber(ctx context.Context) (uint64, error)
@@ -56,6 +57,7 @@ var _ RPC = (*nitro.Client)(nil)
 // samples go through it.
 type ArchiveRPC interface {
 	FastSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
+	L1SampleAt(ctx context.Context, number uint64) (*nitro.L1Sample, error)
 }
 
 // EndpointPool is what a nitro.Pool adds to RPC: chain id verification of
@@ -125,6 +127,11 @@ const (
 	// boundaryWidth is the widest bucket: buckets from the hour of the
 	// first live block on are rebuilt from block rows.
 	boundaryWidth = time.Hour
+	// maxRecoveryDeferrals preserves the live path's priority while bounding
+	// how many history-loop turns sustained lag may take away from a missing
+	// range. The fast pacer reserve still protects head sampling on the turn
+	// recovery is allowed to use the bulk lane.
+	maxRecoveryDeferrals = 30
 )
 
 // Owner methods that change the pricer.
@@ -160,6 +167,9 @@ type Options struct {
 	// a registry of its own, so the instrument calls are always live and
 	// never have to be guarded at the call site.
 	Metrics *metrics.Collector
+	// Monitor records loop freshness, head progress and RPC accounting for
+	// health endpoints and the durable API status checkpoint.
+	Monitor *Monitor
 }
 
 // Follower drives one network.
@@ -174,6 +184,7 @@ type Follower struct {
 	now     func() time.Time
 	sleep   func(context.Context, time.Duration) error
 	heads   HeadSource
+	monitor *Monitor
 	chainID uint64
 	// ethUsd is the process-wide ETH/USD cache, nil when the source is
 	// disabled or unusable.
@@ -192,31 +203,37 @@ type Follower struct {
 	// while it exceeds a header batch: on a small budget their batches
 	// queue ahead of the catch-up's and turn a lag into a skipped gap.
 	behind atomic.Uint64
+	// recoveryDeferrals counts consecutive missing-range turns yielded to a
+	// persistently lagging fast loop. It is reset after one recovery turn.
+	recoveryDeferrals atomic.Uint64
 
 	mu          sync.Mutex
 	initialized bool
 	// head, headHash, prevTs, state, lastSample and lastResult describe
 	// the last committed tick; they are only published after the
 	// transaction that wrote it committed.
-	head          uint64
-	headHash      string
-	prevTs        uint64
-	state         *pricer.State
-	lastSample    *nitro.Sample
-	lastResult    *pricer.Result
-	sets          []db.ConstraintSet
-	minFeeChanges []minFeeChange
-	legacyChanges []legacyChange
-	liveStart     *liveStart
+	head             uint64
+	headHash         string
+	prevTs           uint64
+	state            *pricer.State
+	lastSample       *nitro.Sample
+	lastResult       *pricer.Result
+	sets             []db.ConstraintSet
+	setChanges       []setChange
+	minFeeChanges    []minFeeChange
+	legacyChanges    []legacyChange
+	batchCostChanges []batchCostChange
+	liveStart        *liveStart
 	// ownerScanThrough is the owner_scan_through checkpoint: the block
 	// through which the recorded owner-action timeline is complete, 0 until
 	// a scan pass has reached its head.
 	ownerScanThrough uint64
 	// scanOrigin is the owner_scan_origin checkpoint, nil for a chain
 	// scanned from genesis.
-	scanOrigin *scanOrigin
-	l1         *model.L1
-	accounts   *model.Accounts
+	scanOrigin      *scanOrigin
+	l1              *model.L1
+	batchCostAnchor *batchCostAnchor
+	accounts        *model.Accounts
 	// ethUsdPrice is the last quote the slow loop obtained, published in a
 	// tick only while it is younger than cfg.EthUsdMaxAge.
 	ethUsdPrice *prices.Price
@@ -231,9 +248,17 @@ type Follower struct {
 }
 
 // minFeeChange is a recorded setMinimumL2BaseFee.
+type actionPosition struct {
+	txHash       string
+	txIndex      uint64
+	txIndexKnown bool
+	logIndex     int64
+}
+
 type minFeeChange struct {
 	block uint64
 	fee   *big.Int
+	pos   actionPosition
 }
 
 // legacyChange is a recorded legacy pricer parameter change: the method
@@ -242,6 +267,18 @@ type legacyChange struct {
 	block  uint64
 	method string
 	value  uint64
+	pos    actionPosition
+}
+
+type batchCostChange struct {
+	block       uint64
+	perBatchGas *int64
+	parentFloor *uint64
+}
+
+type batchCostAnchor struct {
+	block  uint64
+	params nitro.BatchPostingCostParams
 }
 
 // setChange is a constraint set taking effect at a block; a set with the
@@ -250,6 +287,7 @@ type legacyChange struct {
 type setChange struct {
 	block   uint64
 	entries []model.ConstraintSetEntry
+	pos     actionPosition
 }
 
 // liveStart is the first block the live loop stored (collector_state
@@ -260,19 +298,22 @@ type liveStart struct {
 	TS    int64  `json:"ts"`
 }
 
-// hole is a block range the collector did not index (collector_state
-// holes). A hole without a reason is queued work: the gap filler replays
-// it forward from the state at the block before it, tracking its progress
-// in Next and carrying the replay state in State. A hole with
-// reasonNoState has nothing to replay from and is only re-examined when a
-// stored state appears before it; one with reasonExpired left the queue
-// because it was full.
+// hole is a block range the collector did not index. It is stored as one
+// durable missing_ranges row with its lifecycle, cursor, replay state, retry
+// information and time bounds. The model shape is also the legacy JSON shape
+// imported during the forward migration rollout.
 type hole = model.Hole
 
-// Reasons a hole is not queued work.
+// Missing-range lifecycle states and reasons.
 const (
-	reasonNoState = model.HoleReasonNoState
-	reasonExpired = model.HoleReasonExpired
+	rangePending  = model.MissingRangePending
+	rangeRetrying = model.MissingRangeRetrying
+	rangeBlocked  = model.MissingRangeBlocked
+
+	reasonCatchUpLimit        = model.HoleReasonCatchUpLimit
+	reasonReplayDiscontinuity = model.HoleReasonReplayDiscontinuity
+	reasonNoState             = model.HoleReasonNoState
+	reasonExpired             = model.HoleReasonExpired
 )
 
 // scanOrigin is where a deliberately truncated owner scan began
@@ -290,6 +331,8 @@ type scanOrigin struct {
 	// (parameters and backlog), nil on a constraints chain or without an
 	// archive endpoint.
 	Legacy *model.LegacyParams `json:"legacy,omitempty"`
+	// BatchCost is the batch-poster accounting state at the end of Block.
+	BatchCost *nitro.BatchPostingCostParams `json:"batchCost,omitempty"`
 }
 
 // replayFrom is the first block a replay may start at: the origin sample
@@ -331,6 +374,7 @@ func NewFollower(o Options) *Follower {
 		now:     o.Now,
 		sleep:   o.Sleep,
 		heads:   o.Heads,
+		monitor: o.Monitor,
 		chainID: o.Network.ChainID,
 	}
 	if f.log == nil {
@@ -374,6 +418,9 @@ func NewFollower(o Options) *Follower {
 		o.Metrics = metrics.NewCollector(prometheus.NewRegistry())
 	}
 	f.metrics = o.Metrics.Network(o.Network.Name, o.Network.ChainID)
+	if f.monitor != nil {
+		f.monitor.register(o.Network, f.cfg, f.rpc, f.metrics)
+	}
 	return f
 }
 
@@ -431,7 +478,10 @@ func endpointsStatus(st nitro.PoolStatus) model.EndpointsStatus {
 // URL: a URL is a credential, which is why internal/nitro scrubs one from
 // every error it returns.
 func poolMetrics(st nitro.Stats, status *nitro.PoolStatus) metrics.PoolState {
-	out := metrics.PoolState{RateLimitEvents: st.RateLimitEvents, FastCalls: st.FastCalls, BulkCalls: st.BulkCalls}
+	out := metrics.PoolState{
+		RateLimitEvents: st.RateLimitEvents, FastCalls: st.FastCalls, BulkCalls: st.BulkCalls,
+		Requests: st.Requests, Errors: st.Errors, TotalLatency: st.TotalLatency,
+	}
 	if status == nil {
 		return out
 	}
@@ -540,6 +590,9 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 		ChainID: f.chainID, Name: f.net.Name, DisplayName: f.net.DisplayName, ExplorerURL: f.net.ExplorerURL, Enabled: f.net.Enabled,
 	}); err != nil {
 		return fmt.Errorf("register network: %w", err)
+	}
+	if err := f.importLegacyHoles(ctx); err != nil {
+		return fmt.Errorf("import missing ranges: %w", err)
 	}
 	if err := f.reloadHeadLocked(ctx); err != nil {
 		return err
@@ -698,17 +751,17 @@ func (f *Follower) boundaryLocked() (time.Time, bool) {
 	return time.Unix(f.liveStart.TS, 0).UTC().Truncate(boundaryWidth), true
 }
 
-// recordHole appends an un-indexed range to collector_state holes, where
-// saveHoles merges it into any queued range it overlaps or touches rather
-// than duplicating it. A hole without a reason is queued for the gap
-// filler; one recorded with reasonNoState is only work if a state ever
-// appears before it.
+// recordHole appends a durable un-indexed range. saveHoles merges it into
+// compatible work it overlaps or touches rather than duplicating it. A range
+// without an explicit lifecycle is pending, except reasonNoState, which is
+// blocked until a replay state appears before it.
 func (f *Follower) recordHole(ctx context.Context, s db.Store, h hole) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil {
 		return err
 	}
 	h.At = f.now().UTC().Format(time.RFC3339)
+	h.Lifecycle = effectiveLifecycle(h)
 	return f.saveHoles(ctx, s, append(holes, h))
 }
 
@@ -724,18 +777,72 @@ func (f *Follower) reloadSetsLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("owner actions: %w", err)
 	}
+	f.setChanges = f.setChanges[:0]
 	f.minFeeChanges = f.minFeeChanges[:0]
 	f.legacyChanges = f.legacyChanges[:0]
+	f.batchCostChanges = f.batchCostChanges[:0]
 	for i := len(actions) - 1; i >= 0; i-- { // ascending by block
 		a := actions[i]
+		pos := actionPositionOf(a)
+		if c, ok := setChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			c.pos = pos
+			f.setChanges = append(f.setChanges, c)
+		}
 		if c, ok := minFeeChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			c.pos = pos
 			f.minFeeChanges = append(f.minFeeChanges, c)
 		}
 		if c, ok := legacyChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			c.pos = pos
 			f.legacyChanges = append(f.legacyChanges, c)
+		}
+		if c, ok := batchCostChangeOf(a.BlockNumber, a.Method, a.Args); ok {
+			f.batchCostChanges = append(f.batchCostChanges, c)
 		}
 	}
 	return nil
+}
+
+func actionPositionOf(a db.OwnerAction) actionPosition {
+	return actionPosition{txHash: a.TxHash, txIndex: uint64(max(a.TxIndex.Int64, 0)), txIndexKnown: a.TxIndex.Valid, logIndex: a.LogIndex}
+}
+
+func pendingPositionOf(a *nitro.OwnerAction) actionPosition {
+	return actionPosition{txHash: a.TxHash, txIndex: a.TxIndex, txIndexKnown: true, logIndex: int64(a.LogIndex)}
+}
+
+// setChangeOf decodes a recorded setGasPricingConstraints action.
+func setChangeOf(block uint64, method string, args db.JSONB) (setChange, bool) {
+	if method != "setGasPricingConstraints" {
+		return setChange{}, false
+	}
+	var a struct {
+		Constraints []nitro.ConstraintParam `json:"constraints"`
+	}
+	if err := args.Unmarshal(&a); err != nil || a.Constraints == nil {
+		return setChange{}, false
+	}
+	return setChange{block: block, entries: entriesOf(a.Constraints)}, true
+}
+
+func batchCostChangeOf(block uint64, method string, args db.JSONB) (batchCostChange, bool) {
+	switch method {
+	case "setPerBatchGasCharge":
+		var a struct {
+			Cost *int64 `json:"cost"`
+		}
+		if err := args.Unmarshal(&a); err == nil && a.Cost != nil {
+			return batchCostChange{block: block, perBatchGas: a.Cost}, true
+		}
+	case "setParentGasFloorPerToken":
+		var a struct {
+			GasFloorPerToken *uint64 `json:"gasFloorPerToken"`
+		}
+		if err := args.Unmarshal(&a); err == nil && a.GasFloorPerToken != nil {
+			return batchCostChange{block: block, parentFloor: a.GasFloorPerToken}, true
+		}
+	}
+	return batchCostChange{}, false
 }
 
 // minFeeChangeOf decodes a recorded setMinimumL2BaseFee.
@@ -797,6 +904,7 @@ type timeline struct {
 func (f *Follower) timelineLocked(pending []*nitro.OwnerAction) *timeline {
 	tl := &timeline{
 		origin: f.scanOrigin,
+		sets:   append([]setChange(nil), f.setChanges...),
 		fees:   append([]minFeeChange(nil), f.minFeeChanges...),
 		legacy: append([]legacyChange(nil), f.legacyChanges...),
 	}
@@ -805,31 +913,106 @@ func (f *Follower) timelineLocked(pending []*nitro.OwnerAction) *timeline {
 		if err != nil {
 			continue
 		}
-		tl.sets = append(tl.sets, setChange{block: cs.EffectiveBlock, entries: entries})
+		matched := false
+		for _, change := range tl.sets {
+			if change.block == cs.EffectiveBlock && sameSets(change.entries, entries) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			// An observed set has no action position. Keep the historical
+			// block-start fallback until an OwnerActs log explains it.
+			tl.sets = append(tl.sets, setChange{block: cs.EffectiveBlock, entries: entries})
+		}
 	}
 	for _, a := range pending {
+		pos := pendingPositionOf(a)
+		if tl.hasAction(pos) {
+			continue
+		}
 		if a.Constraints != nil {
-			tl.sets = append(tl.sets, setChange{block: a.BlockNumber, entries: entriesOf(a.Constraints)})
+			tl.sets = append(tl.sets, setChange{block: a.BlockNumber, entries: entriesOf(a.Constraints), pos: pos})
 		}
 		args, _ := db.MarshalJSONB(a.Args)
 		if c, ok := minFeeChangeOf(a.BlockNumber, a.Method, args); ok {
+			c.pos = pos
 			tl.fees = append(tl.fees, c)
 		}
 		if c, ok := legacyChangeOf(a.BlockNumber, a.Method, args); ok {
+			c.pos = pos
 			tl.legacy = append(tl.legacy, c)
 		}
 	}
-	sort.SliceStable(tl.sets, func(i, j int) bool { return tl.sets[i].block < tl.sets[j].block })
-	sort.SliceStable(tl.fees, func(i, j int) bool { return tl.fees[i].block < tl.fees[j].block })
-	sort.SliceStable(tl.legacy, func(i, j int) bool { return tl.legacy[i].block < tl.legacy[j].block })
+	sort.SliceStable(tl.sets, func(i, j int) bool {
+		return changeLess(tl.sets[i].block, tl.sets[i].pos, tl.sets[j].block, tl.sets[j].pos)
+	})
+	sort.SliceStable(tl.fees, func(i, j int) bool {
+		return changeLess(tl.fees[i].block, tl.fees[i].pos, tl.fees[j].block, tl.fees[j].pos)
+	})
+	sort.SliceStable(tl.legacy, func(i, j int) bool {
+		return changeLess(tl.legacy[i].block, tl.legacy[i].pos, tl.legacy[j].block, tl.legacy[j].pos)
+	})
 	return tl
+}
+
+func changeLess(aBlock uint64, a actionPosition, bBlock uint64, b actionPosition) bool {
+	if aBlock != bBlock {
+		return aBlock < bBlock
+	}
+	if (a.txHash == "") != (b.txHash == "") {
+		return a.txHash == ""
+	}
+	if a.txIndex != b.txIndex {
+		return a.txIndex < b.txIndex
+	}
+	return a.logIndex < b.logIndex
+}
+
+func sameAction(a, b actionPosition) bool {
+	return a.txHash != "" && a.txHash == b.txHash && a.logIndex == b.logIndex
+}
+
+func (tl *timeline) hasAction(pos actionPosition) bool {
+	for _, c := range tl.sets {
+		if sameAction(c.pos, pos) {
+			return true
+		}
+	}
+	for _, c := range tl.fees {
+		if sameAction(c.pos, pos) {
+			return true
+		}
+	}
+	for _, c := range tl.legacy {
+		if sameAction(c.pos, pos) {
+			return true
+		}
+	}
+	return false
 }
 
 // minFeeAt returns the minimum base fee in force at a block from the
 // recorded setMinimumL2BaseFee actions, with the scan origin's sampled fee
-// from the origin block on and nitro's genesis default before the first
-// recorded change. It never uses the live value.
+// and nitro's genesis default before the first recorded change. A
+// transaction action changes the state after its block has already been
+// priced. It never uses the live value.
 func (tl *timeline) minFeeAt(number uint64) *big.Int {
+	fee := big.NewInt(pricer.InitialMinimumBaseFeeWei)
+	if of := tl.origin.fee(); of != nil && number >= tl.origin.Block {
+		fee = of
+	}
+	for _, c := range tl.fees {
+		if c.block < number || c.block == number && c.pos.txHash == "" {
+			fee = c.fee
+		}
+	}
+	return new(big.Int).Set(fee)
+}
+
+// minFeeAfter returns the minimum base fee in the state at the end of a
+// block, after every transaction action in that block.
+func (tl *timeline) minFeeAfter(number uint64) *big.Int {
 	fee := big.NewInt(pricer.InitialMinimumBaseFeeWei)
 	if of := tl.origin.fee(); of != nil && number >= tl.origin.Block {
 		fee = of
@@ -842,7 +1025,16 @@ func (tl *timeline) minFeeAt(number uint64) *big.Int {
 	return new(big.Int).Set(fee)
 }
 
-// minFeeChangeBlock returns the block of the last fee change at or before
+func (tl *timeline) feeChangesInBlock(number uint64) bool {
+	for _, c := range tl.fees {
+		if c.block == number && c.pos.txHash != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// minFeeChangeBlock returns the block of the last fee change that priced
 // number (the origin counts as one; 0 when none).
 func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
 	var block uint64
@@ -850,7 +1042,7 @@ func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
 		block = tl.origin.Block
 	}
 	for _, c := range tl.fees {
-		if c.block <= number {
+		if c.block < number || c.block == number && c.pos.txHash == "" {
 			block = c.block
 		}
 	}
@@ -863,6 +1055,16 @@ func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
 // the caller's, so history is replayed from what was really in force
 // rather than from the current parameters.
 func (tl *timeline) legacyAt(number uint64, base *pricer.Legacy) *pricer.Legacy {
+	return tl.legacyThrough(number, base, true)
+}
+
+// legacyBefore returns the parameters that priced a block, excluding
+// transaction actions inside that block.
+func (tl *timeline) legacyBefore(number uint64, base *pricer.Legacy) *pricer.Legacy {
+	return tl.legacyThrough(number, base, false)
+}
+
+func (tl *timeline) legacyThrough(number uint64, base *pricer.Legacy, includeBlock bool) *pricer.Legacy {
 	if base == nil {
 		return nil
 	}
@@ -871,11 +1073,55 @@ func (tl *timeline) legacyAt(number uint64, base *pricer.Legacy) *pricer.Legacy 
 		out.SpeedLimit, out.Inertia, out.Tolerance = o.Legacy.SpeedLimit, o.Legacy.Inertia, o.Legacy.Tolerance
 	}
 	for _, c := range tl.legacy {
-		if c.block <= number {
+		if c.block < number || c.block == number && (includeBlock || c.pos.txHash == "") {
 			applyLegacy(&out, c)
 		}
 	}
 	return &out
+}
+
+type pricingChange struct {
+	pos    actionPosition
+	set    *setChange
+	fee    *minFeeChange
+	legacy *legacyChange
+}
+
+func (tl *timeline) changesAt(number uint64, transaction bool) []pricingChange {
+	var out []pricingChange
+	for i := range tl.sets {
+		c := &tl.sets[i]
+		if c.block == number && (c.pos.txHash != "") == transaction {
+			out = append(out, pricingChange{pos: c.pos, set: c})
+		}
+	}
+	for i := range tl.fees {
+		c := &tl.fees[i]
+		if c.block == number && (c.pos.txHash != "") == transaction {
+			out = append(out, pricingChange{pos: c.pos, fee: c})
+		}
+	}
+	for i := range tl.legacy {
+		c := &tl.legacy[i]
+		if c.block == number && (c.pos.txHash != "") == transaction {
+			out = append(out, pricingChange{pos: c.pos, legacy: c})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return changeLess(number, out[i].pos, number, out[j].pos)
+	})
+	return out
+}
+
+func applyPricingChange(st *pricer.State, change pricingChange) {
+	switch {
+	case change.set != nil && !st.IsLegacy():
+		st.Constraints = stateFromEntries(change.set.entries, st.MinBaseFee).Constraints
+	case change.fee != nil:
+		st.MinBaseFee = new(big.Int).Set(change.fee.fee)
+	case change.legacy != nil && st.Legacy != nil:
+		applyLegacy(st.Legacy, *change.legacy)
+	}
 }
 
 func applyLegacy(l *pricer.Legacy, c legacyChange) {
@@ -914,21 +1160,9 @@ func (tl *timeline) boundaryAt(number uint64) bool {
 // constraints model only), a fee change replaces the floor, a legacy change
 // replaces its parameter.
 func (tl *timeline) applyAt(st *pricer.State, number uint64) {
-	for _, s := range tl.sets {
-		if s.block == number && !st.IsLegacy() {
-			st.Constraints = stateFromEntries(s.entries, st.MinBaseFee).Constraints
-		}
-	}
-	for _, c := range tl.fees {
-		if c.block == number {
-			st.MinBaseFee = new(big.Int).Set(c.fee)
-		}
-	}
-	if st.Legacy != nil {
-		for _, c := range tl.legacy {
-			if c.block == number {
-				applyLegacy(st.Legacy, c)
-			}
+	for _, transaction := range []bool{false, true} {
+		for _, change := range tl.changesAt(number, transaction) {
+			applyPricingChange(st, change)
 		}
 	}
 }
@@ -1135,4 +1369,23 @@ func (f *Follower) withGeneration(ctx context.Context, gen uint64, fn func(db.St
 // spare call belongs to the live path until it has caught up.
 func (f *Follower) historyMustWait() bool {
 	return f.catchingUp.Load() || f.behind.Load() > uint64(f.cfg.HeaderBatchSize)
+}
+
+// recoveryMustWait gives the active catch-up absolute priority, and gives a
+// lagging fast loop all but one of every maxRecoveryDeferrals history turns.
+// This keeps the live reserve and dominant share while guaranteeing that a
+// durable missing range is retried eventually under sustained ingress load.
+func (f *Follower) recoveryMustWait() bool {
+	if f.catchingUp.Load() {
+		return true
+	}
+	if f.behind.Load() <= uint64(f.cfg.HeaderBatchSize) {
+		f.recoveryDeferrals.Store(0)
+		return false
+	}
+	if f.recoveryDeferrals.Add(1) < maxRecoveryDeferrals {
+		return true
+	}
+	f.recoveryDeferrals.Store(0)
+	return false
 }

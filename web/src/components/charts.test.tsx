@@ -18,7 +18,7 @@ import { HATCH_SPACING, HATCH_STROKE, HatchPattern } from "./primitives";
 import { targetValues } from "@/lib/smoothing";
 import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
-import { FeeFlows, feeFlowRows, feeTotals, unsplitNote } from "./FeeFlows";
+import { FeeFlows, feeFlowRows, feeTotals, incompleteTotalsNote, unsplitNote } from "./FeeFlows";
 import { L1Section } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
 import { describeSplit, SeriesCharts } from "./SeriesCharts";
@@ -30,6 +30,7 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     gasUsed: 0,
     gasPerSecond: 0,
     coverage: 1,
+    completeness: "complete",
     feesWei: "0",
     baseFeeMin: "1",
     baseFeeAvg: "1",
@@ -292,6 +293,9 @@ describe("FeeFlows", () => {
     expect(totals.total).toBeCloseTo(5);
     expect(totals.floorEth).toBeCloseTo(2.2);
     expect(totals.surplusEth).toBeCloseTo(2.8);
+    expect(totals.completeness).toBe("complete");
+    expect(totals.perDay).not.toBeNull();
+    expect(incompleteTotalsNote(totals)).toBeNull();
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText("2.2")).toBeInTheDocument();
     expect(screen.getByText("2.8")).toBeInTheDocument();
@@ -378,16 +382,41 @@ describe("FeeFlows", () => {
   });
 
   it("hatches the bucket the collector is still filling rather than stacking a total it has not finished collecting", () => {
-    const filling: Series = { ...series, points: [...series.points.slice(0, 2), { ...series.points[2], coverage: 0.4 }] };
+    const filling: Series = { ...series, to: series.points[2].t + 25, points: [...series.points.slice(0, 2), { ...series.points[2], coverage: 0.4, completeness: "partial" }] };
+    const totals = feeTotals(filling);
+    expect(totals.completeness).toBe("partial");
+    expect(totals.perDay).toBeNull();
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={filling} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText("Hatched and left out: bucket in progress, 40% elapsed")).toBeInTheDocument();
-    expect(screen.getByRole("figure", { name: /or the bucket is still filling/ })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /or the bucket is incomplete/ })).toBeInTheDocument();
     // Only the stack leaves it out: the bucket keeps every figure it has.
     const details = screen.getByText(/Data table \(3 buckets\)/).closest("details") as HTMLDetailsElement;
     details.open = true;
     fireEvent(details, new Event("toggle"));
     expect(within(details).getAllByRole("row")).toHaveLength(4);
     expect(within(within(details).getAllByRole("row")[3]).queryByText("n/a")).toBeNull();
+  });
+
+  it("treats a populated bucket with a bounded block hole as incomplete", () => {
+    const holed: Series = { ...series, points: [series.points[0], { ...series.points[1], gasPerSecond: 25, coverage: 0.8, completeness: "partial" }, series.points[2]] };
+    const rows = buildChartPoints(holed, "constraints");
+    expect(rows[1].gps).toBe(25);
+    const totals = feeTotals(holed);
+    expect(totals).toMatchObject({ total: 5, completeness: "partial", partialBuckets: 1, unknownBuckets: 0, emptyIntervals: 0, perDay: null });
+    expect(incompleteTotalsNote(totals)).toBe("Indexed-block sums are lower bounds: 1 partially indexed bucket. The per-day estimate waits for complete coverage.");
+
+    render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={holed} model="constraints" nowMs={NOW_MS} />);
+    expect(screen.getByText("Hatched and left out: partially indexed, 80% of the bucket")).toBeInTheDocument();
+    expect(screen.getByText("Indexed fees in last 24h")).toBeInTheDocument();
+    expect(screen.getByText("n/a")).toBeInTheDocument();
+    expect(screen.getByText(/Indexed-block sums are lower bounds/)).toBeInTheDocument();
+  });
+
+  it("keeps unknown bucket completeness distinct in the totals", () => {
+    const unknown: Series = { ...series, points: [series.points[0], { ...series.points[1], coverage: null, completeness: "unknown" }, series.points[2]] };
+    const totals = feeTotals(unknown);
+    expect(totals).toMatchObject({ completeness: "unknown", partialBuckets: 0, unknownBuckets: 1, perDay: null });
+    expect(incompleteTotalsNote(totals)).toContain("1 bucket has unknown completeness");
   });
 
   it("reads a bucket in progress out as what it has collected so far, not as what the bucket holds", () => {
@@ -492,7 +521,53 @@ describe("DataFooter", () => {
         series={series}
         networkInfo={{ name: "robinhood", displayName: "Robinhood Chain", chainId: 4663, explorerUrl: "", model: "constraints", headBlock: 0, headAt: null, lagSeconds: null, enabled: true }}
         status="open"
-        apiStatus={{ version: "1", networks: [{ name: "robinhood", chainId: 4663, headBlock: 0, headAt: null, lagSeconds: null, lastSampleAt: null, lastError: null, rateLimitEvents: 0 }] }}
+        apiStatus={{
+          version: "1",
+          status: "degraded",
+          networks: [
+            {
+              name: "robinhood",
+              chainId: 4663,
+              enabled: true,
+              headBlock: 0,
+              headAt: null,
+              lagSeconds: null,
+              lastSampleAt: null,
+              lastError: null,
+              rateLimitEvents: 0,
+              last429At: null,
+              backfillCursor: null,
+              arbosVersion: null,
+              degraded: false,
+              capacity: {
+                configuredCallsPerSecond: 0,
+                requiredCallsPerSecond: 0,
+                observedCallsPerSecond: 0,
+                headroomCallsPerSecond: null,
+                saturated: false,
+                at: null,
+                checkpointError: false,
+              },
+              holes: {
+                pending: 0,
+                blocks: 0,
+                unfillable: 0,
+                retrying: 0,
+                oldestAgeSeconds: 0,
+                checkpointError: false,
+                pendingBlocks: 0,
+                oldestPendingAt: null,
+                oldestPendingAgeSeconds: null,
+              },
+              status: "degraded",
+              degradedReasons: ["collector heartbeat missing"],
+              collector: null,
+              activeEndpoint: 0,
+              failovers: 0,
+              endpoints: [],
+            },
+          ],
+        }}
         now={Date.parse("2026-09-06T07:20:03Z")}
       />,
     );
@@ -528,12 +603,12 @@ describe("L1Section", () => {
     getBatchesMock.mockResolvedValue(batches);
     getL1Mock.mockResolvedValue(l1);
     render(<L1Section network="robinhood" range="1h" snapshot={l1Snapshot} series={costSeries} />);
-    const details = screen.getByText(/L1 pricer and posting costs/).closest("details") as HTMLDetailsElement;
+    const details = screen.getByText(/L1 pricer and attributed batch costs/).closest("details") as HTMLDetailsElement;
     details.open = true;
     fireEvent(details, new Event("toggle"));
     // Two reports share the first 15 s bucket: 0.25 ETH of L2 fees is counted once, not twice.
     expect(await screen.findByText(/L2 fees 0.25 ETH/)).toBeInTheDocument();
-    expect(screen.getByText(/L1 posting 0.0000105 ETH/)).toBeInTheDocument();
+    expect(screen.getByText(/ArbOS batch cost 0.0000105 ETH/)).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
     const summary = screen.getByText(/Data table \(2 buckets\)/);
     const table = summary.closest("details") as HTMLDetailsElement;

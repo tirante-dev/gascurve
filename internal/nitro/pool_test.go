@@ -402,6 +402,9 @@ func TestPoolArchiveFailover(t *testing.T) {
 	if s, err := ar.FastSampleAt(ctx, 200); err != nil || s.Header.Number != 200 {
 		t.Fatalf("archive sample: %+v %v", s, err)
 	}
+	if l1, err := ar.L1SampleAt(ctx, 200); err != nil || l1.PerBatchGasCharge != 210_000 || l1.ParentGasFloorPerToken != 10 {
+		t.Fatalf("archive L1 sample: %+v %v", l1, err)
+	}
 	// Ordinary calls stay on the primary while the archive path uses its
 	// own endpoint: a capability is routed by capability.
 	if p.ActiveEndpoint() != 0 {
@@ -410,8 +413,11 @@ func TestPoolArchiveFailover(t *testing.T) {
 	// The archive endpoint goes down: the path moves to the next one and
 	// rebinds there.
 	first.server.Close()
+	if l1, err := ar.L1SampleAt(ctx, 201); err != nil || l1.ArbOSVersion != 61 {
+		t.Fatalf("archive L1 failover: %+v %v", l1, err)
+	}
 	if s, err := ar.FastSampleAt(ctx, 201); err != nil || s.Header.Number != 201 {
-		t.Fatalf("archive failover: %+v %v", s, err)
+		t.Fatalf("archive sample after failover: %+v %v", s, err)
 	}
 	if ar.Endpoint().Index() != 3 || p.Failovers() != 0 {
 		t.Fatalf("rebinding: endpoint=%d failovers=%d", ar.Endpoint().Index(), p.Failovers())
@@ -618,11 +624,17 @@ func TestPoolTypedCalls(t *testing.T) {
 	if logs, err := p.OwnerActsLogs(ctx, 0, 100); err != nil || len(logs) != 1 {
 		t.Fatalf("OwnerActsLogs: %v %v", logs, err)
 	}
+	if receipts, err := p.TransactionReceipts(ctx, []string{"0x01"}); err != nil || len(receipts) != 1 || receipts[0].GasUsed != 3 {
+		t.Fatalf("TransactionReceipts: %v %v", receipts, err)
+	}
 	if bal, err := p.Balance(ctx, "0x1"); err != nil || bal.Int64() != 100 {
 		t.Fatalf("Balance: %s %v", bal, err)
 	}
 	if l1, err := p.L1Sample(ctx); err != nil || l1.RewardRate != 10 {
 		t.Fatalf("L1Sample: %+v %v", l1, err)
+	}
+	if l1, err := p.L1SampleAt(ctx, 100); err != nil || l1.ArbOSVersion != 61 {
+		t.Fatalf("L1SampleAt: %+v %v", l1, err)
 	}
 	if acc, err := p.FeeAccounts(ctx); err != nil || acc.Network.Balance.Int64() != 100 {
 		t.Fatalf("FeeAccounts: %+v %v", acc, err)

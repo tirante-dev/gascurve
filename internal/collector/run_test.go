@@ -161,6 +161,30 @@ func TestRunManager(t *testing.T) {
 	}
 }
 
+func TestRunManagerStartsMonitorWithoutNetworks(t *testing.T) {
+	store := dbtest.New()
+	monitor := NewMonitor(store, nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var rpcConstructions atomic.Int64
+	go func() {
+		Run(ctx, &config.Config{}, store, func(config.NetworkConfig) RPC {
+			rpcConstructions.Add(1)
+			return newFakeRPC(1)
+		}, logger.Nop(), func(o *Options) { o.Monitor = monitor })
+		close(done)
+	}()
+	waitFor(t, "collector monitor startup", monitor.started.Load)
+	if rpcConstructions.Load() != 0 {
+		t.Fatal("RPC constructed without an enabled network")
+	}
+	if status, _ := monitorRequest(t, monitor.Handler("test"), "/startup"); status != http.StatusOK {
+		t.Fatalf("startup = %d", status)
+	}
+	cancel()
+	<-done
+}
+
 // TestFollowerTickInterval: a network's tick_interval overrides the
 // collector-wide one for the polling timer and for the safety timer of a
 // head-following follower; without one the collector-wide value applies.
@@ -413,14 +437,19 @@ func TestRunHistoryFillsGaps(t *testing.T) {
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
 	seedSets(t, store)
+	var logicalNanos atomic.Int64
+	logicalNanos.Store(baseTime.Add(100 * time.Second).UnixNano())
 	f := NewFollower(Options{
 		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, CallsPerSecond: 4, Enabled: true},
 		Collector: fastConfig(),
 		RPC:       rpc,
 		Store:     store,
 		Log:       logger.Nop(),
-		Now:       func() time.Time { return baseTime.Add(100 * time.Second) },
-		Sleep:     quickSleep,
+		Now:       func() time.Time { return time.Unix(0, logicalNanos.Load()).UTC() },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			logicalNanos.Add(int64(d))
+			return quickSleep(ctx, d)
+		},
 	})
 	// Every header fetch fails at first, so both error paths of the loop
 	// run: the gap fill's and the backfill's.

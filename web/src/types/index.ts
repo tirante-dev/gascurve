@@ -7,6 +7,9 @@ export type SeriesRange = "1h" | "24h" | "30d" | "all";
 
 export type SeriesResolution = "block" | "5s" | "1m" | "15m" | "1h";
 
+/** Whether a series bucket's aggregates include every block in its span. */
+export type SeriesCompleteness = "complete" | "partial" | "unknown";
+
 export type ConstraintSetSource = "genesis" | "owner_action" | "observed";
 
 export type Network = {
@@ -120,13 +123,12 @@ export type SeriesPoint = {
   gasUsed: number;
   gasPerSecond: number;
   /**
-   * The share of the bucket the collector indexed: 1 for a whole one, less for
-   * the bucket in progress at the right edge and for the first bucket after
-   * the collector started. `gasPerSecond` is the rate over that covered span,
-   * so rates and averages read normally; the sums below are sums over the
-   * covered span alone.
+   * The share of the bucket the collector indexed when it can be measured.
+   * Bounded missing intervals reduce it. Insufficient time bounds make it null.
    */
-  coverage: number;
+  coverage: number | null;
+  /** Complete when all blocks are present, partial when an omission is known, and unknown when the available time bounds cannot locate a missing range. */
+  completeness: SeriesCompleteness;
   feesWei: string;
   baseFeeMin: string;
   baseFeeAvg: string;
@@ -197,22 +199,92 @@ export type L1Point = {
 /** `from` and `to` are the requested window, as on Series. */
 export type L1Series = { range: string; from: number; to: number; points: L1Point[] };
 
+export type HealthStatus = "healthy" | "degraded" | "disabled";
+
+export type RPCCapacity = {
+  configuredCallsPerSecond: number;
+  requiredCallsPerSecond: number;
+  observedCallsPerSecond: number;
+  headroomCallsPerSecond: number | null;
+  saturated: boolean;
+  at: string | null;
+  checkpointError: boolean;
+};
+
+export type MissingRangesStatus = {
+  pending: number;
+  blocks: number;
+  unfillable: number;
+  retrying: number;
+  oldestAgeSeconds: number;
+  checkpointError: boolean;
+  pendingBlocks: number;
+  oldestPendingAt: string | null;
+  oldestPendingAgeSeconds: number | null;
+};
+
+export type CollectorLoopStatus = {
+  lastSuccessAt: string | null;
+  lastErrorAt: string | null;
+  lastError: string | null;
+  lastDurationMs: number;
+  staleAfterSeconds: number;
+};
+
+export type CollectorTelemetry = {
+  heartbeatAt: string | null;
+  heartbeatAgeSeconds?: number;
+  heartbeatStaleAfterSeconds: number;
+  observedHead: number;
+  indexedHead: number;
+  headLagBlocks: number;
+  loops: { fast: CollectorLoopStatus; slow: CollectorLoopStatus; history: CollectorLoopStatus };
+  rpc: { calls: number; requests: number; errors: number; callsLast10Seconds: number; rateLimitEvents: number; last429At: string | null; averageLatencyMs: number };
+  database: { operations: number; errors: number; averageLatencyMs: number; lastLatencyMs: number };
+};
+
+export type EndpointStatus = {
+  index: number;
+  ws: boolean;
+  archive: boolean;
+  disabled: boolean;
+  error: string | null;
+  wsCooling: boolean;
+  wsError: string | null;
+};
+
+export type ListenerStatus = { ready: boolean; reconnects: number; lastError: string | null };
+
 export type NetworkStatus = {
   name: string;
   chainId: number;
+  enabled: boolean;
   headBlock: number;
   headAt: string | null;
   lagSeconds: number | null;
   lastSampleAt: string | null;
   lastError: string | null;
   rateLimitEvents: number;
-  enabled?: boolean;
-  last429At?: string | null;
-  backfillCursor?: number | null;
-  arbosVersion?: number | null;
+  last429At: string | null;
+  backfillCursor: string | null;
+  arbosVersion: string | null;
+  degraded: boolean;
+  capacity: RPCCapacity;
+  holes: MissingRangesStatus;
+  status: HealthStatus;
+  degradedReasons: string[];
+  collector: CollectorTelemetry | null;
+  activeEndpoint: number;
+  failovers: number;
+  endpoints: EndpointStatus[];
 };
 
-export type StatusResponse = { version: string; networks: NetworkStatus[] };
+export type StatusResponse = {
+  version: string;
+  status: Exclude<HealthStatus, "disabled">;
+  listener?: ListenerStatus;
+  networks: NetworkStatus[];
+};
 
 export type ApiErrorBody = { error: { code: string; message: string } };
 

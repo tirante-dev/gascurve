@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -17,12 +18,29 @@ import (
 
 // Postgres implements Store on sqlx.
 type Postgres struct {
-	db *sqlx.DB
-	q  sqlx.ExtContext
+	db    *sqlx.DB
+	q     sqlx.ExtContext
+	stats *stats
 	// tx describes the open transaction this store is bound to, nil when it
 	// is the pool. Nested calls read it to tell whether they can reuse the
 	// transaction, must add a lock to it, or are incompatible with it.
 	tx *txMode
+}
+
+// Stats is cumulative database operation accounting for health and metrics.
+// Latency measures driver calls, including connection pool waits.
+type Stats struct {
+	Operations   uint64
+	Errors       uint64
+	TotalLatency time.Duration
+	LastLatency  time.Duration
+}
+
+type stats struct {
+	operations   atomic.Uint64
+	errors       atomic.Uint64
+	totalLatency atomic.Int64
+	lastLatency  atomic.Int64
 }
 
 // txMode is the metadata of an open transaction: the chain locks it holds,
@@ -53,15 +71,36 @@ var (
 
 // NewPostgres wraps an open connection pool.
 func NewPostgres(d *sqlx.DB) *Postgres {
-	return &Postgres{db: d, q: d}
+	return &Postgres{db: d, q: d, stats: &stats{}}
 }
 
 // DB exposes the underlying pool (for migrations and shutdown).
 func (p *Postgres) DB() *sqlx.DB { return p.db }
 
+// Stats returns a concurrency-safe snapshot of database operation accounting.
+func (p *Postgres) Stats() Stats {
+	return Stats{
+		Operations: p.stats.operations.Load(), Errors: p.stats.errors.Load(),
+		TotalLatency: time.Duration(p.stats.totalLatency.Load()), LastLatency: time.Duration(p.stats.lastLatency.Load()),
+	}
+}
+
+func (p *Postgres) observe(start time.Time, err error) {
+	d := time.Since(start)
+	p.stats.operations.Add(1)
+	p.stats.totalLatency.Add(int64(d))
+	p.stats.lastLatency.Store(int64(d))
+	if err != nil {
+		p.stats.errors.Add(1)
+	}
+}
+
 // Ping checks connectivity.
 func (p *Postgres) Ping(ctx context.Context) error {
-	return p.db.PingContext(ctx)
+	start := time.Now()
+	err := p.db.PingContext(ctx)
+	p.observe(start, err)
+	return err
 }
 
 // WithTx runs fn in a transaction. Nested inside any open transaction it
@@ -134,11 +173,13 @@ func (p *Postgres) WithSnapshotTx(ctx context.Context, fn func(Store) error) err
 // store so nested calls can check compatibility, runs setup and then fn on
 // it, and commits unless either failed.
 func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, mode *txMode, setup func(*Postgres) error, fn func(Store) error) error {
+	start := time.Now()
 	tx, err := p.db.BeginTxx(ctx, opts)
+	p.observe(start, err)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	bound := &Postgres{db: p.db, q: tx, tx: mode}
+	bound := &Postgres{db: p.db, q: tx, stats: p.stats, tx: mode}
 	if setup != nil {
 		err = setup(bound)
 	}
@@ -146,17 +187,24 @@ func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, mode *txMo
 		err = fn(bound)
 	}
 	if err != nil {
-		_ = tx.Rollback()
+		start = time.Now()
+		rollbackErr := tx.Rollback()
+		p.observe(start, rollbackErr)
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	start = time.Now()
+	err = tx.Commit()
+	p.observe(start, err)
+	if err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
 
 func (p *Postgres) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	start := time.Now()
 	res, err := p.q.ExecContext(ctx, query, args...)
+	p.observe(start, err)
 	if err != nil {
 		return nil, fmt.Errorf("exec: %w", err)
 	}
@@ -165,7 +213,10 @@ func (p *Postgres) exec(ctx context.Context, query string, args ...any) (sql.Res
 
 func selectAll[T any](ctx context.Context, p *Postgres, query string, args ...any) ([]T, error) {
 	var out []T
-	if err := sqlx.SelectContext(ctx, p.q, &out, query, args...); err != nil {
+	start := time.Now()
+	err := sqlx.SelectContext(ctx, p.q, &out, query, args...)
+	p.observe(start, err)
+	if err != nil {
 		return nil, fmt.Errorf("select: %w", err)
 	}
 	return out, nil
@@ -173,7 +224,14 @@ func selectAll[T any](ctx context.Context, p *Postgres, query string, args ...an
 
 func getOne[T any](ctx context.Context, p *Postgres, query string, args ...any) (*T, error) {
 	var out T
-	if err := sqlx.GetContext(ctx, p.q, &out, query, args...); err != nil {
+	start := time.Now()
+	err := sqlx.GetContext(ctx, p.q, &out, query, args...)
+	observed := err
+	if errors.Is(err, sql.ErrNoRows) {
+		observed = nil
+	}
+	p.observe(start, observed)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -401,7 +459,10 @@ func (p *Postgres) BlocksBetween(ctx context.Context, chainID uint64, from, to t
 // GasUsedBetween sums gas over (from, to].
 func (p *Postgres) GasUsedBetween(ctx context.Context, chainID uint64, from, to time.Time) (uint64, error) {
 	var total int64
-	if err := sqlx.GetContext(ctx, p.q, &total, `SELECT COALESCE(SUM(gas_used), 0)::BIGINT FROM blocks WHERE chain_id = $1 AND ts > $2 AND ts <= $3`, chainID, from, to); err != nil {
+	start := time.Now()
+	err := sqlx.GetContext(ctx, p.q, &total, `SELECT COALESCE(SUM(gas_used), 0)::BIGINT FROM blocks WHERE chain_id = $1 AND ts > $2 AND ts <= $3`, chainID, from, to)
+	p.observe(start, err)
+	if err != nil {
 		return 0, fmt.Errorf("gas used: %w", err)
 	}
 	return uint64(max(total, 0)), nil
@@ -410,7 +471,10 @@ func (p *Postgres) GasUsedBetween(ctx context.Context, chainID uint64, from, to 
 // TwoTxBlocks lists candidate batch-report blocks.
 func (p *Postgres) TwoTxBlocks(ctx context.Context, chainID, after uint64, limit int) ([]uint64, error) {
 	var nums []int64
-	if err := sqlx.SelectContext(ctx, p.q, &nums, `SELECT number FROM blocks WHERE chain_id = $1 AND tx_count = 2 AND number > $2 ORDER BY number ASC LIMIT $3`, chainID, after, limit); err != nil {
+	start := time.Now()
+	err := sqlx.SelectContext(ctx, p.q, &nums, `SELECT number FROM blocks WHERE chain_id = $1 AND tx_count = 2 AND number > $2 ORDER BY number ASC LIMIT $3`, chainID, after, limit)
+	p.observe(start, err)
+	if err != nil {
 		return nil, fmt.Errorf("two tx blocks: %w", err)
 	}
 	return Uint64s(nums), nil
@@ -650,7 +714,70 @@ func (p *Postgres) DeleteStateSamplesAfter(ctx context.Context, chainID, block u
 	return res.RowsAffected()
 }
 
-const ownerActionColumns = `chain_id, block_number, tx_hash, log_index, ts, method, selector, args`
+const missingRangeColumns = `chain_id, from_block, to_block, detected_at, lifecycle, reason, cursor, replay_state, folded, retry_count, last_attempt_at, next_retry_at, last_error, predecessor_at, successor_at, cursor_at, created_at, updated_at`
+
+// MissingRanges lists every durable missing interval in block order.
+func (p *Postgres) MissingRanges(ctx context.Context, chainID uint64) ([]MissingRange, error) {
+	return selectAll[MissingRange](ctx, p, `SELECT `+missingRangeColumns+` FROM missing_ranges WHERE chain_id = $1 ORDER BY from_block`, chainID)
+}
+
+// missingRangeBindings is the number of bound values per inserted row, one
+// short of missingRangeColumns because updated_at is always now().
+const missingRangeBindings = 17
+
+// missingRangeBatch keeps one insert well inside the 65535 bound parameters a
+// statement can carry.
+const missingRangeBatch = 1000
+
+// ReplaceMissingRanges replaces one chain's normalized intervals. Collector
+// callers hold the chain transaction, so the delete and inserts commit as one
+// durable lifecycle update. Normalization can reshape the whole set, so the
+// rewrite stays a replace, but the rows go in batched statements: a per row
+// round trip would hold the chain lock in proportion to the set size.
+func (p *Postgres) ReplaceMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error {
+	if _, err := p.exec(ctx, `DELETE FROM missing_ranges WHERE chain_id = $1`, chainID); err != nil {
+		return err
+	}
+	for chunk := range slices.Chunk(ranges, missingRangeBatch) {
+		if err := p.insertMissingRanges(ctx, chainID, chunk); err != nil {
+			return fmt.Errorf("missing ranges %d..%d: %w", chunk[0].From, chunk[len(chunk)-1].To, err)
+		}
+	}
+	return nil
+}
+
+func (p *Postgres) insertMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error {
+	var values strings.Builder
+	args := make([]any, 0, len(ranges)*missingRangeBindings)
+	for _, r := range ranges {
+		if len(args) > 0 {
+			values.WriteString(", ")
+		}
+		values.WriteByte('(')
+		for i := 1; i <= missingRangeBindings; i++ {
+			if i > 1 {
+				values.WriteString(", ")
+			}
+			if i == missingRangeBindings {
+				fmt.Fprintf(&values, "COALESCE($%d, now())", len(args)+i)
+				continue
+			}
+			fmt.Fprintf(&values, "$%d", len(args)+i)
+		}
+		values.WriteString(", now())")
+		args = append(args, chainID, r.From, r.To, r.DetectedAt, r.Lifecycle, r.Reason, r.Cursor, r.ReplayState,
+			r.Folded, r.RetryCount, r.LastAttemptAt, r.NextRetryAt, r.LastError, r.PredecessorAt, r.SuccessorAt,
+			r.CursorAt, nullTime(r.CreatedAt))
+	}
+	_, err := p.exec(ctx, `INSERT INTO missing_ranges (`+missingRangeColumns+`) VALUES `+values.String(), args...)
+	return err
+}
+
+func nullTime(t time.Time) sql.NullTime {
+	return sql.NullTime{Time: t, Valid: !t.IsZero()}
+}
+
+const ownerActionColumns = `chain_id, block_number, tx_hash, tx_index, log_index, ts, method, selector, args`
 
 // InsertOwnerActions inserts new actions and returns the number added.
 func (p *Postgres) InsertOwnerActions(ctx context.Context, actions []OwnerAction) (int, error) {
@@ -658,14 +785,20 @@ func (p *Postgres) InsertOwnerActions(ctx context.Context, actions []OwnerAction
 	for _, a := range actions {
 		res, err := p.exec(ctx, `
 			INSERT INTO owner_actions (`+ownerActionColumns+`)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (chain_id, tx_hash, log_index) DO NOTHING`,
-			a.ChainID, a.BlockNumber, a.TxHash, a.LogIndex, a.TS, a.Method, a.Selector, a.Args)
+			a.ChainID, a.BlockNumber, a.TxHash, a.TxIndex, a.LogIndex, a.TS, a.Method, a.Selector, a.Args)
 		if err != nil {
 			return inserted, fmt.Errorf("owner action %s/%d: %w", a.TxHash, a.LogIndex, err)
 		}
 		n, _ := res.RowsAffected()
 		inserted += int(n)
+		if n == 0 && a.TxIndex.Valid {
+			if _, err := p.exec(ctx, `UPDATE owner_actions SET tx_index = $4 WHERE chain_id = $1 AND tx_hash = $2 AND log_index = $3 AND tx_index IS NULL`,
+				a.ChainID, a.TxHash, a.LogIndex, a.TxIndex); err != nil {
+				return inserted, fmt.Errorf("owner action %s/%d transaction index: %w", a.TxHash, a.LogIndex, err)
+			}
+		}
 	}
 	return inserted, nil
 }
@@ -713,12 +846,15 @@ func (p *Postgres) RewindAfter(ctx context.Context, chainID, block uint64) error
 // InsertConstraintSet upserts a set and returns its id.
 func (p *Postgres) InsertConstraintSet(ctx context.Context, cs ConstraintSet) (int64, error) {
 	var id int64
-	if err := sqlx.GetContext(ctx, p.q, &id, `
+	start := time.Now()
+	err := sqlx.GetContext(ctx, p.q, &id, `
 		INSERT INTO constraint_sets (chain_id, effective_block, effective_at, constraints, source)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (chain_id, effective_block, source) DO UPDATE SET constraints = EXCLUDED.constraints, effective_at = EXCLUDED.effective_at
 		RETURNING id`,
-		cs.ChainID, cs.EffectiveBlock, cs.EffectiveAt, cs.Constraints, cs.Source); err != nil {
+		cs.ChainID, cs.EffectiveBlock, cs.EffectiveAt, cs.Constraints, cs.Source)
+	p.observe(start, err)
+	if err != nil {
 		return 0, fmt.Errorf("constraint set: %w", err)
 	}
 	return id, nil
@@ -740,24 +876,31 @@ func (p *Postgres) ConstraintSets(ctx context.Context, chainID uint64) ([]Constr
 func (p *Postgres) UpsertBatchReports(ctx context.Context, reports []BatchReport) error {
 	for _, r := range reports {
 		if _, err := p.exec(ctx, `
-			INSERT INTO batch_reports (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			INSERT INTO batch_reports (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent,
+				report_version, arbos_version, per_batch_gas_charge, parent_gas_floor_per_token, cost_calculation_version, attributed_gas_spent, attributed_wei_spent)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			ON CONFLICT (chain_id, block_number) DO UPDATE SET
 				batch_number = EXCLUDED.batch_number, batch_ts = EXCLUDED.batch_ts, poster = EXCLUDED.poster,
 				calldata_len = EXCLUDED.calldata_len, calldata_nonzero = EXCLUDED.calldata_nonzero, extra_gas = EXCLUDED.extra_gas,
-				l1_base_fee = EXCLUDED.l1_base_fee, gas_spent = EXCLUDED.gas_spent, wei_spent = EXCLUDED.wei_spent`,
-			r.ChainID, r.BlockNumber, r.BatchNumber, r.BatchTS, r.Poster, r.CalldataLen, r.CalldataNonzero, r.ExtraGas, r.L1BaseFee, r.GasSpent, r.WeiSpent); err != nil {
+				l1_base_fee = EXCLUDED.l1_base_fee, gas_spent = EXCLUDED.gas_spent, wei_spent = EXCLUDED.wei_spent,
+				report_version = EXCLUDED.report_version, arbos_version = EXCLUDED.arbos_version,
+				per_batch_gas_charge = EXCLUDED.per_batch_gas_charge, parent_gas_floor_per_token = EXCLUDED.parent_gas_floor_per_token,
+				cost_calculation_version = EXCLUDED.cost_calculation_version,
+				attributed_gas_spent = EXCLUDED.attributed_gas_spent, attributed_wei_spent = EXCLUDED.attributed_wei_spent`,
+			r.ChainID, r.BlockNumber, r.BatchNumber, r.BatchTS, r.Poster, r.CalldataLen, r.CalldataNonzero, r.ExtraGas, r.L1BaseFee, r.GasSpent, r.WeiSpent,
+			r.ReportVersion, r.ArbOSVersion, r.PerBatchGasCharge, r.ParentGasFloorPerToken, r.CostCalculationVersion, r.GasSpent, r.WeiSpent); err != nil {
 			return fmt.Errorf("batch report %d: %w", r.BlockNumber, err)
 		}
 	}
 	return nil
 }
 
-const batchReportColumns = `chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee, gas_spent, wei_spent`
+const batchReportColumns = `chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero, extra_gas, l1_base_fee,
+	attributed_gas_spent, attributed_wei_spent, report_version, arbos_version, per_batch_gas_charge, parent_gas_floor_per_token, cost_calculation_version`
 
 // BatchReports lists reports in a time range, one row per report.
 func (p *Postgres) BatchReports(ctx context.Context, chainID uint64, from, to time.Time) ([]BatchReport, error) {
-	return selectAll[BatchReport](ctx, p, `SELECT `+batchReportColumns+` FROM batch_reports WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 ORDER BY batch_ts ASC, block_number ASC`, chainID, from, to)
+	return selectAll[BatchReport](ctx, p, `SELECT `+batchReportColumns+` FROM batch_reports WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 AND cost_calculation_version = 1 ORDER BY batch_ts ASC, block_number ASC`, chainID, from, to)
 }
 
 // BatchBuckets aggregates reports per step.
@@ -766,19 +909,25 @@ func (p *Postgres) BatchBuckets(ctx context.Context, chainID uint64, from, to ti
 	return selectAll[BatchBucket](ctx, p, `
 		SELECT to_timestamp(floor(extract(epoch FROM batch_ts) / $4) * $4) AS t,
 			count(*)::BIGINT AS batches,
-			COALESCE(sum(gas_spent), 0)::BIGINT AS gas_spent,
-			COALESCE(sum(wei_spent), 0) AS wei_spent,
+			COALESCE(sum(attributed_gas_spent), 0)::BIGINT AS gas_spent,
+			COALESCE(sum(attributed_wei_spent), 0) AS wei_spent,
 			COALESCE(floor(avg(l1_base_fee)), 0) AS l1_base_fee_avg,
 			COALESCE(sum(calldata_len), 0)::BIGINT AS calldata_bytes
 		FROM batch_reports
-		WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3
+		WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 AND cost_calculation_version = 1
 		GROUP BY 1 ORDER BY 1 ASC`,
 		chainID, from, to, secs)
 }
 
 // GetState reads a checkpoint.
 func (p *Postgres) GetState(ctx context.Context, chainID uint64, key string) (value string, found bool, err error) {
+	start := time.Now()
 	err = sqlx.GetContext(ctx, p.q, &value, `SELECT value FROM collector_state WHERE chain_id = $1 AND key = $2`, chainID, key)
+	observed := err
+	if errors.Is(err, sql.ErrNoRows) {
+		observed = nil
+	}
+	p.observe(start, observed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}

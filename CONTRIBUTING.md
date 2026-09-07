@@ -4,7 +4,13 @@ Thanks for helping out. The short version: run `make ci` before you push, keep P
 
 ## Development setup
 
-Prerequisites: Go 1.26+, Node 22+, PostgreSQL 16 (Docker is fine), Make, `golangci-lint`, `staticcheck`, `goimports`.
+Prerequisites: Go 1.26+, Node 22+, PostgreSQL 16 (Docker is fine), and Make. Install the non-standard Go commands at the hosted CI versions into the ignored `.tools/bin` directory before running checks:
+
+```bash
+make tools
+```
+
+`make ci` checks the toolchain before starting any work. If a command is missing or has the wrong version, it stops with the bootstrap command to run. The pinned versions have one source of truth in `scripts/tool-versions.env`, which is shared by local and hosted CI.
 
 ```bash
 cp .env.example .env            # edit DB_URL and RPC URLs if needed
@@ -17,7 +23,7 @@ make web-dev                    # http://localhost:3000
 
 ## Checks
 
-`make ci` runs the CI workflow locally: Go format check, vet, lint, staticcheck, govulncheck, tests with the coverage gate, race tests, build, module verify, then the web install, lint, typecheck, tests with coverage gate, and build. `make ci-integration` (needs `TEST_DB_URL`), `make ci-docker` and `make ci-chart` cover the remaining jobs. Individual targets are listed in the Makefile and in `CLAUDE.md`.
+After `make tools`, `make ci` runs the CI workflow locally: Go format check, vet, lint, staticcheck, govulncheck, tests with the coverage gate, race tests, build, module verify, then the web install, lint, typecheck, tests with coverage gate, and build. `make ci-integration` (needs `TEST_DB_URL`), `make ci-docker` and `make ci-chart` cover the remaining jobs. Individual targets are listed in the Makefile and in `CLAUDE.md`.
 
 ## Pull requests
 
@@ -29,3 +35,5 @@ make web-dev                    # http://localhost:3000
 ## Releases
 
 release-please maintains a release PR on `main`. Merging it tags a release and publishes the Docker images.
+
+Database migrations have an additional release contract. Never edit a migration already on `main`; add a new, sequential forward migration and coordinate its number with other schema pull requests. The complete authoring, checksum, upgrade-test, rollout, and rollback process is in [docs/MIGRATIONS.md](docs/MIGRATIONS.md).

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -89,18 +90,21 @@ func seed(t *testing.T) *dbtest.MemStore {
 	})
 	must(err)
 	must(s.UpsertBatchReports(ctx, []db.BatchReport{
-		{ChainID: robinhood, BlockNumber: 1005, BatchNumber: 1, BatchTS: now.Add(-10 * time.Minute), Poster: "0xp", CalldataLen: 100, GasSpent: 1000, WeiSpent: db.WeiFromUint64(5000), L1BaseFee: db.WeiFromUint64(5)},
-		{ChainID: robinhood, BlockNumber: 1015, BatchNumber: 2, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 50, GasSpent: 500, WeiSpent: db.WeiFromUint64(1500), L1BaseFee: db.WeiFromUint64(3)},
-		{ChainID: robinhood, BlockNumber: 1016, BatchNumber: 3, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 8, GasSpent: 7, WeiSpent: db.WeiFromUint64(77), L1BaseFee: db.WeiFromUint64(9)},
+		{ChainID: robinhood, BlockNumber: 1005, BatchNumber: 1, BatchTS: now.Add(-10 * time.Minute), Poster: "0xp", CalldataLen: 100, GasSpent: 1000, WeiSpent: db.WeiFromUint64(5000), L1BaseFee: db.WeiFromUint64(5), CostCalculationVersion: 1},
+		{ChainID: robinhood, BlockNumber: 1015, BatchNumber: 2, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 50, GasSpent: 500, WeiSpent: db.WeiFromUint64(1500), L1BaseFee: db.WeiFromUint64(3), CostCalculationVersion: 1},
+		{ChainID: robinhood, BlockNumber: 1016, BatchNumber: 3, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 8, GasSpent: 7, WeiSpent: db.WeiFromUint64(77), L1BaseFee: db.WeiFromUint64(9), CostCalculationVersion: 1},
 	}))
 	must(s.SetState(ctx, robinhood, db.StateRateLimitEvents, "4"))
 	must(s.SetState(ctx, robinhood, db.StateLast429At, "2026-09-06T07:00:00Z"))
 	must(s.SetState(ctx, robinhood, db.StateArbOSVersion, "61"))
 	must(s.SetState(ctx, robinhood, db.StateBackfillCursor, `{"done":true}`))
+	must(s.SetState(ctx, robinhood, db.StateRPCCapacity, `{"configuredCallsPerSecond":4,"requiredCallsPerSecond":7.5,"observedCallsPerSecond":4,"headroomCallsPerSecond":-3.5,"saturated":true,"at":"2026-09-06T07:19:59Z","checkpointError":false}`))
 	must(s.SetState(ctx, robinhood, db.StateEndpoints, `{"activeEndpoint":1,"failovers":3,"endpoints":[{"index":0,"ws":false,"archive":false,"disabled":true,"error":"reports chain id 1, configured 4663"},{"index":1,"ws":true,"archive":true,"disabled":false,"error":null}]}`))
 	must(s.SetState(ctx, testnet, db.StateEndpoints, `not json`))
 	must(s.SetState(ctx, robinhood, db.StateHoles, `[{"from":1001,"to":1100,"at":"2026-09-06T07:00:00Z","next":1051},{"from":0,"to":499,"at":"2026-09-06T07:00:00Z","reason":"no state"}]`))
 	must(s.SetState(ctx, testnet, db.StateHoles, `not json`))
+	must(s.SetState(ctx, robinhood, db.StateTelemetry, `{"heartbeatAt":"2026-09-06T07:19:58Z","heartbeatStaleAfterSeconds":30,"observedHead":1030,"indexedHead":1030,"headLagBlocks":0,"loops":{"fast":{"lastSuccessAt":"2026-09-06T07:19:59Z","lastErrorAt":null,"lastError":null,"lastDurationMs":20,"staleAfterSeconds":30},"slow":{"lastSuccessAt":"2026-09-06T07:19:30Z","lastErrorAt":null,"lastError":null,"lastDurationMs":40,"staleAfterSeconds":180},"history":{"lastSuccessAt":"2026-09-06T07:19:59Z","lastErrorAt":null,"lastError":null,"lastDurationMs":10,"staleAfterSeconds":180}},"rpc":{"calls":100,"requests":20,"errors":2,"callsLast10Seconds":7,"rateLimitEvents":4,"last429At":"2026-09-06T07:00:00Z","averageLatencyMs":12.5},"database":{"operations":80,"errors":1,"averageLatencyMs":3.5,"lastLatencyMs":2}}`))
+	must(s.SetState(ctx, testnet, db.StateTelemetry, `{"heartbeatAt":"2026-09-06T07:19:58Z","heartbeatStaleAfterSeconds":30,"observedHead":502,"indexedHead":500,"headLagBlocks":2,"loops":{"fast":{"lastSuccessAt":"2026-09-06T07:19:40Z","lastErrorAt":"2026-09-06T07:19:59Z","lastError":"sample failed","lastDurationMs":20,"staleAfterSeconds":30},"slow":{"lastSuccessAt":"2026-09-06T07:19:30Z","lastErrorAt":null,"lastError":null,"lastDurationMs":40,"staleAfterSeconds":180},"history":{"lastSuccessAt":"2026-09-06T07:19:59Z","lastErrorAt":null,"lastError":null,"lastDurationMs":10,"staleAfterSeconds":180}},"rpc":{"calls":10,"requests":5,"errors":1,"callsLast10Seconds":2,"rateLimitEvents":1,"last429At":null,"averageLatencyMs":8},"database":{"operations":80,"errors":1,"averageLatencyMs":3.5,"lastLatencyMs":2}}`))
 	// The ETH/USD spot the collector recorded: fresh for robinhood, older
 	// than the default max age for the testnet.
 	must(s.SetState(ctx, robinhood, db.StateEthUsd, `{"price":"4523.40","at":"2026-09-06T07:18:00Z","source":"coinbase"}`))
@@ -112,7 +116,8 @@ func newServer(t *testing.T, store db.Store) *httptest.Server {
 	t.Helper()
 	cfg := config.ServerConfig{CORSOrigins: []string{"http://localhost:3000"}, RateLimitPerSecond: 1000, RateLimitBurst: 1000}
 	hub := NewHub(store, logger.Nop(), WithPingInterval(50*time.Millisecond), WithOrigins(nil))
-	s := New(store, cfg, hub, logger.Nop(), WithClock(func() time.Time { return now }), WithVersion("test"))
+	listener := &fakeListener{ch: make(chan db.Notification), status: db.ListenerStatus{Ready: true}}
+	s := New(store, cfg, hub, logger.Nop(), WithListener(listener), WithClock(func() time.Time { return now }), WithVersion("test"))
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -383,12 +388,15 @@ func TestEndpoints(t *testing.T) {
 		{"/api/v1/status", 200, cacheNone, func(t *testing.T, b []byte) {
 			var s model.Status
 			decode(t, b, &s)
-			if s.Version != "test" || len(s.Networks) != 3 {
+			if s.Version != "test" || s.Status != model.StatusDegraded || s.Listener == nil || !s.Listener.Ready || s.Listener.Reconnects != 0 || s.Listener.LastError != nil || len(s.Networks) != 3 {
 				t.Fatalf("status: %+v", s)
 			}
 			rh := s.Networks[0]
 			if rh.RateLimitEvents != 4 || rh.Last429At == nil || *rh.Last429At != "2026-09-06T07:00:00Z" || rh.ArbOSVersion == nil || rh.BackfillCursor == nil || rh.LagSeconds == nil || *rh.LagSeconds != 1 || rh.LastSampleAt == nil {
 				t.Fatalf("status robinhood: %+v", rh)
+			}
+			if !rh.Capacity.Saturated || rh.Capacity.RequiredCallsPerSecond != 7.5 || rh.Capacity.HeadroomCallsPerSecond == nil || *rh.Capacity.HeadroomCallsPerSecond != -3.5 {
+				t.Fatalf("status capacity: %+v", rh.Capacity)
 			}
 			if arb := s.Networks[1]; arb.LastError == nil || *arb.LastError != "rpc down" || arb.Enabled || arb.Last429At != nil || arb.HeadAt != nil || arb.LagSeconds != nil || arb.LastSampleAt != nil {
 				t.Fatalf("status arbitrum: %+v", arb)
@@ -401,13 +409,26 @@ func TestEndpoints(t *testing.T) {
 			if rh.Holes.Pending != 1 || rh.Holes.Unfillable != 1 || rh.Holes.Blocks != 50+500 {
 				t.Fatalf("status holes: %+v", rh.Holes)
 			}
-			// A network without a checkpoint, or with an unreadable one,
-			// reports zeros rather than failing the whole status.
-			if s.Networks[1].Holes != (model.HolesStatus{}) || s.Networks[2].Holes != (model.HolesStatus{}) {
+			if rh.Holes.PendingBlocks != 50 || rh.Holes.OldestPendingAgeSeconds == nil || *rh.Holes.OldestPendingAgeSeconds != 1200 {
+				t.Fatalf("status pending hole age: %+v", rh.Holes)
+			}
+			// A network without ranges reports zeros. An unreadable legacy
+			// checkpoint is an explicit degradation instead of looking empty.
+			if s.Networks[1].Holes != (model.HolesStatus{}) || !s.Networks[2].Holes.CheckpointError || !s.Networks[2].Degraded {
 				t.Fatalf("status holes default: %+v %+v", s.Networks[1].Holes, s.Networks[2].Holes)
 			}
-			if !strings.Contains(string(b), `"holes":{"pending":1,"blocks":550,"unfillable":1}`) {
+			if !rh.Degraded || rh.Holes.OldestAgeSeconds != 20*60 || !strings.Contains(string(b), `"holes":{"pending":1,"blocks":550,"unfillable":1,"retrying":0,"oldestAgeSeconds":1200,"checkpointError":false,"pendingBlocks":50`) {
 				t.Fatalf("holes json: %s", b)
+			}
+			if rh.Collector == nil || rh.Collector.HeartbeatAgeSeconds == nil || *rh.Collector.HeartbeatAgeSeconds != 2 || rh.Collector.RPC.AverageLatencyMS != 12.5 || rh.Collector.Database.LastLatencyMS != 2 {
+				t.Fatalf("collector telemetry: %+v", rh.Collector)
+			}
+			if rh.Status != model.StatusDegraded || !slices.Contains(rh.DegradedReasons, "pending gaps are stale") {
+				t.Fatalf("robinhood degradation: %+v", rh)
+			}
+			tn := s.Networks[2]
+			if tn.Status != model.StatusDegraded || !slices.Contains(tn.DegradedReasons, "fast loop failing") || !slices.Contains(tn.DegradedReasons, "collector behind observed head") {
+				t.Fatalf("testnet degradation: %+v", tn)
 			}
 			if rh.ActiveEndpoint != 1 || rh.Failovers != 3 || len(rh.Endpoints) != 2 || !rh.Endpoints[0].Disabled || rh.Endpoints[0].Index != 0 || !rh.Endpoints[1].WS || !rh.Endpoints[1].Archive {
 				t.Fatalf("status endpoints: %+v", rh.EndpointsStatus)
@@ -449,6 +470,88 @@ func TestEndpoints(t *testing.T) {
 				tc.check(t, body)
 			}
 		})
+	}
+}
+
+func TestHolesStatusReportsMalformedDurableReplayState(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	rangeRow := db.MissingRange{
+		ChainID: robinhood, From: 100, To: 109, DetectedAt: now.Add(-time.Minute),
+		Lifecycle: model.MissingRangePending, ReplayState: db.JSONB(`[]`),
+	}
+	if err := store.ReplaceMissingRanges(ctx, robinhood, []db.MissingRange{rangeRow}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(store, config.ServerConfig{}, nil, logger.Nop(), WithClock(func() time.Time { return now }))
+	status, err := s.holesStatus(ctx, robinhood, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.CheckpointError || status.Pending != 1 || status.Blocks != 10 || status.OldestAgeSeconds != 60 {
+		t.Fatalf("durable range status: %+v", status)
+	}
+	rows, err := store.MissingRanges(ctx, robinhood)
+	if err != nil || len(rows) != 1 || string(rows[0].ReplayState) != `[]` {
+		t.Fatalf("durable range must remain visible: %+v %v", rows, err)
+	}
+}
+
+func TestReadyAndStatusExposeListenerFailure(t *testing.T) {
+	store := dbtest.New()
+	cfg := config.ServerConfig{RateLimitPerSecond: 1000, RateLimitBurst: 1000}
+	listener := &fakeListener{ch: make(chan db.Notification), status: db.ListenerStatus{
+		Reconnects: 2,
+		Error:      "connection lost",
+	}}
+	s := New(store, cfg, nil, logger.Nop(), WithListener(listener), WithVersion("test"))
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, body := get(t, ts, "/ready")
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "notification listener unavailable") {
+		t.Fatalf("readiness during listener outage: %d %s", resp.StatusCode, body)
+	}
+	resp, body = get(t, ts, "/api/v1/status")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status during listener outage: %d %s", resp.StatusCode, body)
+	}
+	var status model.Status
+	decode(t, body, &status)
+	if status.Status != model.StatusDegraded || status.Listener == nil || status.Listener.Ready || status.Listener.Reconnects != 2 || status.Listener.LastError == nil || *status.Listener.LastError != "connection lost" {
+		t.Fatalf("listener status: %+v", status.Listener)
+	}
+}
+
+func TestStatusHealthyAfterRecovery(t *testing.T) {
+	store := seed(t)
+	ctx := context.Background()
+	if err := store.SetState(ctx, robinhood, db.StateHoles, `[]`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetState(ctx, robinhood, db.StateRPCCapacity, `{"configuredCallsPerSecond":12,"requiredCallsPerSecond":7.5,"observedCallsPerSecond":4,"headroomCallsPerSecond":4.5,"saturated":false,"at":"2026-09-06T07:19:59Z","checkpointError":false}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetState(ctx, robinhood, db.StateEndpoints, `{"activeEndpoint":0,"failovers":0,"endpoints":[{"index":0,"ws":false,"archive":false,"disabled":false,"error":null,"wsCooling":false,"wsError":null}]}`); err != nil {
+		t.Fatal(err)
+	}
+	testnetRow, err := store.NetworkByRef(ctx, "robinhood-testnet")
+	if err != nil || testnetRow == nil {
+		t.Fatalf("testnet row: %+v %v", testnetRow, err)
+	}
+	testnetRow.Enabled = false
+	if err := store.UpsertNetwork(ctx, *testnetRow); err != nil {
+		t.Fatal(err)
+	}
+	ts := newServer(t, store)
+	resp, body := get(t, ts, "/api/v1/status")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	}
+	var status model.Status
+	decode(t, body, &status)
+	if status.Status != model.StatusHealthy || status.Networks[0].Status != model.StatusHealthy || len(status.Networks[0].DegradedReasons) != 0 {
+		t.Fatalf("healthy status: %+v", status)
 	}
 }
 
@@ -651,17 +754,24 @@ func TestEthUsdMaxAgeOption(t *testing.T) {
 	}
 }
 
-// TestLiveIsOneSnapshot: /live reads the sample, its block, the slow
-// sample and the gas rates inside one snapshot transaction.
-func TestLiveIsOneSnapshot(t *testing.T) {
+// TestLiveAndSeriesUseSnapshots: /live reads the sample, its block, the slow
+// sample and gas rates in one database moment. /series likewise reads buckets
+// and their completeness evidence together.
+func TestLiveAndSeriesUseSnapshots(t *testing.T) {
 	store := seed(t)
 	ts := newServer(t, store)
 	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/live"); resp.StatusCode != 200 {
 		t.Fatalf("live: %d", resp.StatusCode)
 	}
+	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/series?range=24h"); resp.StatusCode != 200 {
+		t.Fatalf("series: %d", resp.StatusCode)
+	}
 	store.SetFailure("WithSnapshotTx", true)
 	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/live"); resp.StatusCode != 500 {
 		t.Fatalf("live must run inside the snapshot transaction: %d", resp.StatusCode)
+	}
+	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/series?range=24h"); resp.StatusCode != 500 {
+		t.Fatalf("series must run inside the snapshot transaction: %d", resp.StatusCode)
 	}
 }
 
@@ -671,7 +781,7 @@ func TestStoreFailures(t *testing.T) {
 		"/api/v1/networks/robinhood/series", "/api/v1/networks/robinhood/series?range=24h", "/api/v1/networks/robinhood/constraints",
 		"/api/v1/networks/robinhood/owner-actions", "/api/v1/networks/robinhood/batches", "/api/v1/networks/robinhood/l1", "/api/v1/status",
 	}
-	methods := []string{"Networks", "NetworkByRef", "LatestStateSample", "RecentBlocks", "BlocksBetween", "Buckets", "ConstraintSets", "OwnerActions", "BatchBuckets", "BatchReports", "L1Samples", "States", "BlockByNumber", "GasUsedBetween"}
+	methods := []string{"Networks", "NetworkByRef", "LatestStateSample", "RecentBlocks", "BlocksBetween", "Buckets", "ConstraintSets", "OwnerActions", "MissingRanges", "BatchBuckets", "BatchReports", "L1Samples", "States", "BlockByNumber", "GasUsedBetween"}
 	for _, m := range methods {
 		store := seed(t)
 		store.SetFailure(m, true)
@@ -977,6 +1087,23 @@ func TestRealIPTrustedProxies(t *testing.T) {
 			t.Fatalf("request %d: %d want %d", i, resp.StatusCode, want)
 		}
 	}
+	// The same forwarded addresses are not identities when the direct peer
+	// is untrusted. This is the secure default for a direct deployment.
+	direct := New(seed(t), config.ServerConfig{RateLimitPerSecond: 1, RateLimitBurst: 1}, nil, nil)
+	directTS := httptest.NewServer(direct.Handler())
+	defer directTS.Close()
+	for i, want := range []int{200, 429} {
+		req, _ := http.NewRequest(http.MethodGet, directTS.URL+"/health", http.NoBody)
+		req.Header.Set("X-Forwarded-For", []string{"198.51.100.10", "198.51.100.11"}[i])
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("untrusted request %d: %d want %d", i, resp.StatusCode, want)
+		}
+	}
 }
 
 func TestHelpers(t *testing.T) {
@@ -1094,19 +1221,19 @@ func TestSeriesCoverage(t *testing.T) {
 	// A bucket that ends before the live start is backfilled history, and
 	// whole: the live start must not trim it to a single second, which
 	// would multiply its rate by the width.
-	if p := out.Points[0]; p.GasPerSecond != 5 || p.Coverage != 1 {
+	if p := out.Points[0]; p.GasPerSecond != 5 || p.Coverage == nil || *p.Coverage != 1 || p.Completeness != model.SeriesComplete {
 		t.Fatalf("backfilled bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// The bucket the live start falls inside: fifteen seconds of sixty.
-	if p := out.Points[1]; p.GasPerSecond != 20 || p.Coverage != 0.25 {
+	if p := out.Points[1]; p.GasPerSecond != 20 || p.Coverage == nil || *p.Coverage != 0.25 || p.Completeness != model.SeriesPartial {
 		t.Fatalf("first live bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// A whole bucket.
-	if p := out.Points[2]; p.GasPerSecond != 5 || p.Coverage != 1 {
+	if p := out.Points[2]; p.GasPerSecond != 5 || p.Coverage == nil || *p.Coverage != 1 || p.Completeness != model.SeriesComplete {
 		t.Fatalf("full bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// The bucket in progress: twenty seconds covered.
-	if p := out.Points[3]; p.GasPerSecond != 15 || p.Coverage < 0.33 || p.Coverage > 0.34 {
+	if p := out.Points[3]; p.GasPerSecond != 15 || p.Coverage == nil || *p.Coverage < 0.33 || *p.Coverage > 0.34 || p.Completeness != model.SeriesPartial {
 		t.Fatalf("bucket in progress: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
 	}
 	// An unreadable live_start is ignored, not an error.
@@ -1146,8 +1273,140 @@ func TestSeriesCoverage(t *testing.T) {
 		t.Fatalf("live start before the bucket: %v", span)
 	}
 	// Per-block points are whole by definition.
-	if p := blockPoints([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull}}, nil); p[0].Coverage != 1 {
+	if p := blockPoints([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull}}, nil); p[0].Coverage == nil || *p[0].Coverage != 1 || p[0].Completeness != model.SeriesComplete {
 		t.Fatalf("block coverage: %v", p[0].Coverage)
+	}
+}
+
+// TestSeriesCoverageIncludesHoleInsidePopulatedBucket is the regression for a
+// durable block gap hidden inside a bucket that still has aggregate rows. Its
+// time envelope reduces coverage and the rate divisor, while the neighboring
+// populated bucket remains complete.
+func TestSeriesCoverageIncludesHoleInsidePopulatedBucket(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+		t.Fatal(err)
+	}
+	start := now.Add(-2 * time.Minute)
+	bucket := func(at time.Time) db.Bucket {
+		return db.Bucket{
+			ChainID: robinhood, Resolution: db.Resolution1m, BucketStart: at, Blocks: 3, GasUsed: 300,
+			FeesWei: db.WeiFromUint64(90), BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1),
+			BacklogsEnd: db.Uint64Array{}, BacklogsMax: db.Uint64Array{}, PricingVersion: db.PricingFull,
+		}
+	}
+	if err := store.FoldBuckets(ctx, []db.Bucket{bucket(start), bucket(start.Add(time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceMissingRanges(ctx, robinhood, []db.MissingRange{{
+		ChainID: robinhood, From: 100, To: 109, Lifecycle: model.MissingRangePending,
+		PredecessorAt: sql.NullTime{Time: start.Add(20 * time.Second), Valid: true},
+		SuccessorAt:   sql.NullTime{Time: start.Add(30 * time.Second), Valid: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(store, config.ServerConfig{RateLimitPerSecond: 1000, RateLimitBurst: 1000}, nil, logger.Nop(), WithClock(func() time.Time { return now }))
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	resp, body := get(t, ts, "/api/v1/networks/robinhood/series?range=24h")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	var out model.Series
+	decode(t, body, &out)
+	if len(out.Points) != 2 {
+		t.Fatalf("points: %+v", out.Points)
+	}
+	holed := out.Points[0]
+	if holed.Completeness != model.SeriesPartial || holed.Coverage == nil || *holed.Coverage < 0.833 || *holed.Coverage > 0.834 || holed.GasPerSecond != 6 {
+		t.Fatalf("populated bucket with internal hole: %+v", holed)
+	}
+	whole := out.Points[1]
+	if whole.Completeness != model.SeriesComplete || whole.Coverage == nil || *whole.Coverage != 1 || whole.GasPerSecond != 5 {
+		t.Fatalf("neighboring whole bucket: %+v", whole)
+	}
+}
+
+func TestMissingTimelineUnknownAndCursorBounds(t *testing.T) {
+	start := now.Add(-time.Minute)
+	point := func(at time.Time) model.SeriesPoint {
+		coverage := 1.0
+		return model.SeriesPoint{T: at.Unix(), GasUsed: 60, GasPerSecond: 1, Coverage: &coverage, Completeness: model.SeriesComplete}
+	}
+
+	unknown := []model.SeriesPoint{point(start)}
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 2}}).apply(unknown, time.Minute)
+	if unknown[0].Completeness != model.SeriesUnknown || unknown[0].Coverage != nil {
+		t.Fatalf("unbounded range: %+v", unknown[0])
+	}
+
+	// Equal timestamps consume no wall-clock coverage but still prove blocks
+	// are absent, which is why completeness is separate from coverage.
+	equal := []model.SeriesPoint{point(start)}
+	at := sql.NullTime{Time: start.Add(20 * time.Second), Valid: true}
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 2, PredecessorAt: at, SuccessorAt: at}}).apply(equal, time.Minute)
+	if equal[0].Completeness != model.SeriesPartial || equal[0].Coverage == nil || *equal[0].Coverage != 1 {
+		t.Fatalf("equal-time range: %+v", equal[0])
+	}
+
+	points := []model.SeriesPoint{point(start), point(start.Add(time.Minute))}
+	newMissingTimeline([]db.MissingRange{{
+		From: 1, To: 10, Cursor: 6,
+		PredecessorAt: sql.NullTime{Time: start.Add(10 * time.Second), Valid: true},
+		CursorAt:      sql.NullTime{Time: start.Add(70 * time.Second), Valid: true},
+		SuccessorAt:   sql.NullTime{Time: start.Add(90 * time.Second), Valid: true},
+	}}).apply(points, time.Minute)
+	if points[0].Completeness != model.SeriesComplete || points[1].Completeness != model.SeriesPartial || points[1].Coverage == nil || *points[1].Coverage < 0.666 || *points[1].Coverage > 0.667 {
+		t.Fatalf("advanced cursor must qualify only the remaining suffix: %+v", points)
+	}
+
+	done := []model.SeriesPoint{point(start)}
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 2, Cursor: 3}}).apply(done, time.Minute)
+	if done[0].Completeness != model.SeriesComplete || done[0].Coverage == nil || *done[0].Coverage != 1 {
+		t.Fatalf("completed range: %+v", done[0])
+	}
+}
+
+// TestMissingTimelineKeepsBlockPointRates is the regression for applying
+// bucket coverage arithmetic to per-block points. The block before a gap is
+// itself indexed, so it keeps a whole coverage and the gas rate of its second
+// while reporting that the series around it is not whole.
+func TestMissingTimelineKeepsBlockPointRates(t *testing.T) {
+	base := now.Truncate(time.Second)
+	block := func(number uint64, at time.Time, gas uint64) db.Block {
+		return db.Block{
+			Number: number, TS: at, GasUsed: gas, BaseFee: db.WeiFromUint64(1),
+			PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull,
+		}
+	}
+	points := blockPoints([]db.Block{
+		block(98, base, 100), block(99, base, 100), block(110, base.Add(5*time.Second), 200),
+	}, nil)
+	newMissingTimeline([]db.MissingRange{{
+		From: 100, To: 109, Lifecycle: model.MissingRangePending,
+		PredecessorAt: sql.NullTime{Time: base, Valid: true},
+		SuccessorAt:   sql.NullTime{Time: base.Add(5 * time.Second), Valid: true},
+	}}).mark(points, time.Second)
+	for i, p := range points[:2] {
+		// gasPerSecond stays the gas of every block in the second, not the
+		// point's own gas divided by a gap-shortened divisor.
+		if p.Completeness != model.SeriesPartial || p.Coverage == nil || *p.Coverage != 1 || p.GasPerSecond != 200 {
+			t.Fatalf("block %d beside a gap: %+v", i, p)
+		}
+	}
+	if p := points[2]; p.Completeness != model.SeriesPartial || p.Coverage == nil || *p.Coverage != 1 || p.GasPerSecond != 200 {
+		t.Fatalf("block after a gap: %+v", p)
+	}
+
+	away := blockPoints([]db.Block{block(200, base.Add(time.Minute), 300)}, nil)
+	newMissingTimeline([]db.MissingRange{{
+		From: 100, To: 109, Lifecycle: model.MissingRangePending,
+		PredecessorAt: sql.NullTime{Time: base, Valid: true},
+		SuccessorAt:   sql.NullTime{Time: base.Add(5 * time.Second), Valid: true},
+	}}).mark(away, time.Second)
+	if p := away[0]; p.Completeness != model.SeriesComplete || p.Coverage == nil || *p.Coverage != 1 || p.GasPerSecond != 300 {
+		t.Fatalf("block clear of every gap: %+v", p)
 	}
 }
 
@@ -1176,7 +1435,7 @@ func TestBatchesOneHourBounds(t *testing.T) {
 		t.Fatalf("empty one hour window: %d..%d %+v", s.From, s.To, s.Points)
 	}
 	if err := store.UpsertBatchReports(ctx, []db.BatchReport{{ChainID: robinhood, BlockNumber: 10, BatchNumber: 1, BatchTS: now.Add(-time.Minute),
-		Poster: "0x1", CalldataLen: 8, L1BaseFee: db.WeiFromUint64(9), GasSpent: 3, WeiSpent: db.WeiFromUint64(77)}}); err != nil {
+		Poster: "0x1", CalldataLen: 8, L1BaseFee: db.WeiFromUint64(9), GasSpent: 3, WeiSpent: db.WeiFromUint64(77), CostCalculationVersion: 1}}); err != nil {
 		t.Fatal(err)
 	}
 	if s := batches(t); len(s.Points) != 1 || s.From != from || s.To != to {

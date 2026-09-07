@@ -17,14 +17,18 @@ import (
 const (
 	// serverReadHeaderTimeout bounds a slow request line and headers.
 	serverReadHeaderTimeout = 10 * time.Second
+	// serverWriteTimeout bounds a scrape whose client stops reading, so a
+	// stalled reader cannot pin a handler goroutine for the life of the
+	// process.
+	serverWriteTimeout = 30 * time.Second
 	// serverShutdownTimeout bounds the graceful stop.
 	serverShutdownTimeout = 5 * time.Second
 )
 
-// Server serves the exposition format and nothing else. The collector has
-// no HTTP server of its own, and this one deliberately shares nothing with
-// the follower goroutines: it reads the registry, so a follower stuck on an
-// RPC call or on the database still scrapes.
+// Server serves the exposition format and optional health routes. It
+// deliberately shares nothing with the follower goroutines: metrics read the
+// registry and health reads the collector monitor, so a follower stuck on an
+// RPC call or on the database still gets an answer.
 type Server struct {
 	ln  net.Listener
 	srv *http.Server
@@ -32,10 +36,10 @@ type Server struct {
 }
 
 // NewServer binds addr and prepares the handler. Binding here rather than
-// in Run means a port already in use is reported at startup instead of
-// leaving the process running unscraped. ctx bounds the bind alone; Run
-// takes the context the server lives by.
-func NewServer(ctx context.Context, addr string, g prometheus.Gatherer, log *logger.Logger) (*Server, error) {
+// in Run means a port already in use is reported before Run is ever
+// reached, and the caller decides whether that is fatal. ctx bounds the
+// bind alone; Run takes the context the server lives by.
+func NewServer(ctx context.Context, addr string, g prometheus.Gatherer, log *logger.Logger, extra ...http.Handler) (*Server, error) {
 	if log == nil {
 		log = logger.Nop()
 	}
@@ -46,12 +50,16 @@ func NewServer(ctx context.Context, addr string, g prometheus.Gatherer, log *log
 	}
 	mux := http.NewServeMux()
 	mux.Handle(Path, Handler(g))
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	})
+	if len(extra) > 0 && extra[0] != nil {
+		mux.Handle("/", extra[0])
+	} else {
+		mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "not found", http.StatusNotFound)
+		})
+	}
 	return &Server{
 		ln:  ln,
-		srv: &http.Server{Handler: mux, ReadHeaderTimeout: serverReadHeaderTimeout},
+		srv: &http.Server{Handler: mux, ReadHeaderTimeout: serverReadHeaderTimeout, WriteTimeout: serverWriteTimeout},
 		log: log,
 	}, nil
 }
@@ -79,6 +87,11 @@ func (s *Server) Run(ctx context.Context) error {
 	sctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
 	defer cancel()
 	if err := s.srv.Shutdown(sctx); err != nil {
+		// The graceful stop ran out of time, so a connection is still
+		// being served. Close it rather than returning while its goroutine
+		// runs on.
+		_ = s.srv.Close()
+		<-errc
 		return fmt.Errorf("metrics shutdown: %w", err)
 	}
 	return <-errc

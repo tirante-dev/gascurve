@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -24,10 +25,13 @@ func WithMetrics(m *metrics.Collector) func(*Options) {
 // reports a different chain id than the one configured: nothing from the
 // wrong chain may be written under this network's identity.
 func (f *Follower) Run(ctx context.Context) error {
+	start := f.now()
 	if err := f.ensureInit(ctx); err != nil {
+		f.observeLoop(loopFast, start, err)
 		return err
 	}
 	if err := f.verifyChainID(ctx); err != nil {
+		f.observeLoop(loopFast, start, err)
 		return err
 	}
 	var wg sync.WaitGroup
@@ -52,7 +56,16 @@ func (f *Follower) Run(ctx context.Context) error {
 // capabilities are then routed among the usable endpoints.
 func (f *Follower) verifyChainID(ctx context.Context) error {
 	if f.pool != nil {
-		if err := f.pool.Verify(ctx); err != nil {
+		err := f.pool.Verify(ctx)
+		// Observed either way, and before the error is returned: a pool
+		// with no usable endpoint stops the follower before the slow loop
+		// ever runs, so this is the only place the endpoint gauges can
+		// come from when every endpoint fails at startup. Without it the
+		// worst case, a network that never had a working endpoint, is the
+		// one case the exhausted-endpoints alert cannot see.
+		status := f.pool.Status()
+		f.metrics.ObservePool(poolMetrics(f.rpc.Stats(), &status))
+		if err != nil {
 			return f.refuse(ctx, fmt.Errorf("%w: refusing to run", err))
 		}
 		f.bindPool()
@@ -92,7 +105,9 @@ func (f *Follower) runFast(ctx context.Context) {
 func (f *Follower) runPolling(ctx context.Context) {
 	for ctx.Err() == nil {
 		start := f.now()
-		if err := f.Tick(ctx); err != nil && ctx.Err() == nil {
+		err := f.Tick(ctx)
+		f.observeLoop(loopFast, start, err)
+		if err != nil && ctx.Err() == nil {
 			f.log.Debug("tick error", "err", err.Error())
 		}
 		wait := f.tickInterval - f.now().Sub(start)
@@ -145,7 +160,10 @@ func (f *Follower) runOnHeads(ctx context.Context) {
 				f.log.Info("following newHeads, timer polling paused")
 			}
 			retry = false
-			if err := f.TickAt(ctx, n); err != nil && ctx.Err() == nil {
+			start := f.now()
+			err := f.TickAt(ctx, n)
+			f.observeLoop(loopFast, start, err)
+			if err != nil && ctx.Err() == nil {
 				f.log.Debug("tick error", "head", n, "err", err.Error())
 				retry = true
 			}
@@ -163,7 +181,10 @@ func (f *Follower) runOnHeads(ctx context.Context) {
 				f.log.Warn("newHeads subscription down, polling on the timer")
 			}
 			retry = false
-			if err := f.Tick(ctx); err != nil && ctx.Err() == nil {
+			start := f.now()
+			err := f.Tick(ctx)
+			f.observeLoop(loopFast, start, err)
+			if err != nil && ctx.Err() == nil {
 				f.log.Debug("tick error", "err", err.Error())
 			}
 		}
@@ -172,7 +193,10 @@ func (f *Follower) runOnHeads(ctx context.Context) {
 
 func (f *Follower) runSlow(ctx context.Context) {
 	for ctx.Err() == nil {
-		if err := f.SlowTick(ctx); err != nil && ctx.Err() == nil {
+		start := f.now()
+		err := f.SlowTick(ctx)
+		f.observeLoop(loopSlow, start, err)
+		if err != nil && ctx.Err() == nil {
 			f.log.Debug("slow tick error", "err", err.Error())
 		}
 		if err := f.sleep(ctx, f.cfg.SlowInterval); err != nil {
@@ -191,8 +215,13 @@ func (f *Follower) runSlow(ctx context.Context) {
 // deleted history unrebuilt for the life of the process.
 func (f *Follower) runHistory(ctx context.Context) {
 	for ctx.Err() == nil {
+		start := f.now()
 		status, err := f.FillStep(ctx)
-		if err != nil && ctx.Err() == nil {
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			f.observeLoop(loopHistory, start, err)
 			f.log.Warn("gap fill error", "err", err.Error())
 			if err := f.sleep(ctx, restartDelay); err != nil {
 				return
@@ -201,8 +230,10 @@ func (f *Follower) runHistory(ctx context.Context) {
 		}
 		switch status {
 		case FillProgressed:
+			f.observeLoop(loopHistory, start, nil)
 			continue
 		case FillIdle:
+			f.observeLoop(loopHistory, start, nil)
 			if err := f.sleep(ctx, backfillIdle); err != nil {
 				return
 			}
@@ -210,13 +241,18 @@ func (f *Follower) runHistory(ctx context.Context) {
 		case FillNone:
 		}
 		back, err := f.BackfillStep(ctx)
-		if err != nil && ctx.Err() == nil {
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			f.observeLoop(loopHistory, start, err)
 			f.log.Warn("backfill error", "err", err.Error())
 			if err := f.sleep(ctx, restartDelay); err != nil {
 				return
 			}
 			continue
 		}
+		f.observeLoop(loopHistory, start, err)
 		switch back {
 		case BackfillDone, BackfillIdle:
 			// A finished backfill is polled at the idle cadence: the
@@ -230,18 +266,56 @@ func (f *Follower) runHistory(ctx context.Context) {
 	}
 }
 
+func (f *Follower) observeLoop(loop string, start time.Time, err error) {
+	if f.monitor == nil || (err != nil && errors.Is(err, context.Canceled)) {
+		return
+	}
+	f.monitor.observeLoop(f.chainID, loop, start, err)
+	if loop == loopFast {
+		f.monitor.observeHead(f.chainID, 0, f.Head())
+	}
+}
+
 // Run starts one follower per enabled network and blocks until ctx ends.
 // A follower that fails to initialize is restarted after restartDelay.
 func Run(ctx context.Context, cfg *config.Config, store db.Store, newRPC func(config.NetworkConfig) RPC, log *logger.Logger, opts ...func(*Options)) {
-	var wg sync.WaitGroup
-	for _, n := range cfg.EnabledNetworks() {
+	enabled := cfg.EnabledNetworks()
+	followers := make([]*Follower, 0, len(enabled))
+	monitors := map[*Monitor]bool{}
+	for _, n := range enabled {
 		o := Options{Network: n, Collector: cfg.Collector, RPC: newRPC(n), Store: store, Log: log}
 		for _, apply := range opts {
 			apply(&o)
 		}
 		f := NewFollower(o)
+		followers = append(followers, f)
+		if f.monitor != nil {
+			monitors[f.monitor] = true
+		}
+	}
+	// A collector configured with no enabled networks still has a live
+	// health server. Discover its monitor from the process option so startup
+	// can complete instead of entering a probe restart loop.
+	if len(followers) == 0 {
+		o := Options{}
+		for _, apply := range opts {
+			apply(&o)
+		}
+		if o.Monitor != nil {
+			monitors[o.Monitor] = true
+		}
+	}
+	var wg sync.WaitGroup
+	for monitor := range monitors {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			monitor.Run(ctx)
+		}()
+	}
+	for _, f := range followers {
+		wg.Add(1)
+		go func(f *Follower) {
 			defer wg.Done()
 			for ctx.Err() == nil {
 				if err := f.Run(ctx); err != nil && ctx.Err() == nil {
@@ -251,7 +325,7 @@ func Run(ctx context.Context, cfg *config.Config, store db.Store, newRPC func(co
 					}
 				}
 			}
-		}()
+		}(f)
 	}
 	wg.Wait()
 }

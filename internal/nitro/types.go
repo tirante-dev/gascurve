@@ -1,10 +1,13 @@
 package nitro
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
 )
+
+const nullJSON = "null"
 
 // Header is the subset of an L2 block header the collector needs.
 type Header struct {
@@ -16,6 +19,7 @@ type Header struct {
 	GasLimit      uint64
 	BaseFee       *big.Int
 	L1BlockNumber uint64
+	ArbOSVersion  uint64
 	TxCount       int
 	TxHashes      []string
 }
@@ -43,7 +47,18 @@ type Log struct {
 	BlockNumber    uint64
 	BlockTimestamp uint64
 	TxHash         string
+	TxIndex        uint64
 	LogIndex       uint64
+}
+
+// Receipt is the transaction-ordering and gas-accounting subset of an
+// eth_getTransactionReceipt response.
+type Receipt struct {
+	TxHash            string
+	BlockNumber       uint64
+	TxIndex           uint64
+	GasUsed           uint64
+	CumulativeGasUsed uint64
 }
 
 type rawTx struct {
@@ -63,6 +78,7 @@ type rawBlock struct {
 	GasLimit      string            `json:"gasLimit"`
 	BaseFee       string            `json:"baseFeePerGas"`
 	L1BlockNumber string            `json:"l1BlockNumber"`
+	MixHash       string            `json:"mixHash"`
 	Transactions  []json.RawMessage `json:"transactions"`
 }
 
@@ -73,11 +89,20 @@ type rawLog struct {
 	BlockNumber    string   `json:"blockNumber"`
 	BlockTimestamp string   `json:"blockTimestamp"`
 	TxHash         string   `json:"transactionHash"`
+	TxIndex        string   `json:"transactionIndex"`
 	LogIndex       string   `json:"logIndex"`
 }
 
+type rawReceipt struct {
+	TxHash            string `json:"transactionHash"`
+	BlockNumber       string `json:"blockNumber"`
+	TxIndex           string `json:"transactionIndex"`
+	GasUsed           string `json:"gasUsed"`
+	CumulativeGasUsed string `json:"cumulativeGasUsed"`
+}
+
 func parseHeader(raw json.RawMessage) (*Block, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if len(raw) == 0 || string(raw) == nullJSON {
 		return nil, fmt.Errorf("block not found")
 	}
 	var rb rawBlock
@@ -109,6 +134,15 @@ func parseHeader(raw json.RawMessage) (*Block, error) {
 		if b.L1BlockNumber, err = HexUint64(rb.L1BlockNumber); err != nil {
 			return nil, fmt.Errorf("block %d l1BlockNumber: %w", b.Number, err)
 		}
+	}
+	if rb.MixHash != "" {
+		mixHash, err := DecodeHex(rb.MixHash)
+		if err != nil || len(mixHash) != 32 {
+			return nil, fmt.Errorf("block %d mixHash: expected 32 bytes", b.Number)
+		}
+		// Nitro HeaderInfo stores ArbOSFormatVersion in bytes 16 through 23
+		// of the mix digest. This is the version used to process the block.
+		b.ArbOSVersion = binary.BigEndian.Uint64(mixHash[16:24])
 	}
 	b.TxCount = len(rb.Transactions)
 	b.TxHashes = make([]string, 0, len(rb.Transactions))
@@ -160,6 +194,9 @@ func parseLogs(raw json.RawMessage) ([]Log, error) {
 		if l.LogIndex, err = HexUint64(rl.LogIndex); err != nil {
 			return nil, fmt.Errorf("log logIndex: %w", err)
 		}
+		if l.TxIndex, err = HexUint64(rl.TxIndex); err != nil {
+			return nil, fmt.Errorf("log transactionIndex: %w", err)
+		}
 		if rl.BlockTimestamp != "" {
 			if l.BlockTimestamp, err = HexUint64(rl.BlockTimestamp); err != nil {
 				return nil, fmt.Errorf("log blockTimestamp: %w", err)
@@ -168,4 +205,29 @@ func parseLogs(raw json.RawMessage) ([]Log, error) {
 		out = append(out, l)
 	}
 	return out, nil
+}
+
+func parseReceipt(raw json.RawMessage) (*Receipt, error) {
+	if len(raw) == 0 || string(raw) == nullJSON {
+		return nil, fmt.Errorf("receipt not found")
+	}
+	var rr rawReceipt
+	if err := json.Unmarshal(raw, &rr); err != nil {
+		return nil, fmt.Errorf("decode receipt: %w", err)
+	}
+	r := &Receipt{TxHash: rr.TxHash}
+	var err error
+	if r.BlockNumber, err = HexUint64(rr.BlockNumber); err != nil {
+		return nil, fmt.Errorf("receipt %s blockNumber: %w", rr.TxHash, err)
+	}
+	if r.TxIndex, err = HexUint64(rr.TxIndex); err != nil {
+		return nil, fmt.Errorf("receipt %s transactionIndex: %w", rr.TxHash, err)
+	}
+	if r.GasUsed, err = HexUint64(rr.GasUsed); err != nil {
+		return nil, fmt.Errorf("receipt %s gasUsed: %w", rr.TxHash, err)
+	}
+	if r.CumulativeGasUsed, err = HexUint64(rr.CumulativeGasUsed); err != nil {
+		return nil, fmt.Errorf("receipt %s cumulativeGasUsed: %w", rr.TxHash, err)
+	}
+	return r, nil
 }

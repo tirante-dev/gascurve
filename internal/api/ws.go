@@ -183,15 +183,22 @@ func (h *Hub) setLimits(perIP, total int) {
 	}
 }
 
-// Run consumes notifications until ctx ends or the listener closes.
-func (h *Hub) Run(ctx context.Context, l db.Listener) {
+// Run consumes notifications until ctx ends. A listener closure without
+// cancellation is fatal because otherwise connected clients would keep getting
+// pings from a hub that can never deliver another chain update.
+func (h *Hub) Run(ctx context.Context, l db.Listener) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case n, ok := <-l.Notifications():
 			if !ok {
-				return
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					return errors.New("notification listener closed")
+				}
 			}
 			h.Handle(ctx, n)
 		}
@@ -862,8 +869,11 @@ func (c *client) close() {
 // writing to the peer that caused the overflow; CloseNow does not wait for
 // a close handshake, so it never blocks the hub lock the caller holds.
 func (c *client) drop() {
-	c.hub.metrics.WSClientDropped()
-	c.dropped.Store(true)
+	// Two goroutines can find the queue full at once, so the counter moves
+	// on the transition alone; everything after it is idempotent already.
+	if c.dropped.CompareAndSwap(false, true) {
+		c.hub.metrics.WSClientDropped()
+	}
 	c.close()
 	if c.conn != nil {
 		_ = c.conn.CloseNow()

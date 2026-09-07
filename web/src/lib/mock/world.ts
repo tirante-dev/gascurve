@@ -577,15 +577,58 @@ export class MockWorld {
   }
 
   status(now: number): NetworkStatus {
+    const at = unixToIso(this.time - 1);
+    const loop = { lastSuccessAt: at, lastErrorAt: null, lastError: null, lastDurationMs: 1, staleAfterSeconds: 30 };
     return {
       name: this.def.name,
       chainId: this.def.chainId,
+      enabled: true,
       headBlock: this.headBlock,
-      headAt: unixToIso(this.time - 1),
+      headAt: at,
       lagSeconds: Math.max(0, now - (this.time - 1)),
-      lastSampleAt: unixToIso(this.time - 1),
+      lastSampleAt: at,
       lastError: null,
       rateLimitEvents: 0,
+      last429At: null,
+      backfillCursor: null,
+      arbosVersion: "61",
+      degraded: false,
+      capacity: {
+        configuredCallsPerSecond: 0,
+        requiredCallsPerSecond: 0,
+        observedCallsPerSecond: 0,
+        headroomCallsPerSecond: null,
+        saturated: false,
+        at: null,
+        checkpointError: false,
+      },
+      holes: {
+        pending: 0,
+        blocks: 0,
+        unfillable: 0,
+        retrying: 0,
+        oldestAgeSeconds: 0,
+        checkpointError: false,
+        pendingBlocks: 0,
+        oldestPendingAt: null,
+        oldestPendingAgeSeconds: null,
+      },
+      status: "healthy",
+      degradedReasons: [],
+      collector: {
+        heartbeatAt: at,
+        heartbeatAgeSeconds: Math.max(0, now - (this.time - 1)),
+        heartbeatStaleAfterSeconds: 30,
+        observedHead: this.headBlock,
+        indexedHead: this.headBlock,
+        headLagBlocks: 0,
+        loops: { fast: loop, slow: { ...loop, staleAfterSeconds: 180 }, history: { ...loop, staleAfterSeconds: 180 } },
+        rpc: { calls: 0, requests: 0, errors: 0, callsLast10Seconds: 0, rateLimitEvents: 0, last429At: null, averageLatencyMs: 0 },
+        database: { operations: 0, errors: 0, averageLatencyMs: 0, lastLatencyMs: 0 },
+      },
+      activeEndpoint: 0,
+      failovers: 0,
+      endpoints: [],
     };
   }
 
@@ -836,6 +879,7 @@ export class MockWorld {
       .sort((a, b) => a.t - b.t)
       .map((b) => {
         const recorded = b.t >= recordedFrom;
+        const coverage = Math.min(1, b.duration / spec.seconds);
         return {
           t: b.t,
           blocks: b.blocks,
@@ -844,7 +888,8 @@ export class MockWorld {
           // What the collector has of the bucket: a whole one everywhere but
           // at the two ends, where the bucket in progress and the first one
           // after the world began hold only part of their span.
-          coverage: Math.min(1, b.duration / spec.seconds),
+          coverage,
+          completeness: coverage < 1 ? "partial" : "complete",
           feesWei: b.feesWei.toString(),
           baseFeeMin: b.feeMin.toString(),
           baseFeeAvg: (b.blocks > 0 ? b.feeSum / BigInt(b.blocks) : b.feeMin).toString(),

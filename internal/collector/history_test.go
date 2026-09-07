@@ -209,10 +209,10 @@ func TestHistoryEpochUnreadableCheckpoint(t *testing.T) {
 	}
 }
 
-// TestHistoryEpochResetsHoles: an unfillable range is dropped so the
-// re-established origin can make it fillable, a range that folded into the
-// deleted buckets restarts, and a range whose blocks are row-backed keeps
-// the progress its filler made.
+// TestHistoryEpochResetsHoles: a blocked range becomes pending so the
+// re-established origin can make it fillable without losing its record, a
+// range that folded into deleted buckets restarts, and a row-backed range
+// keeps the progress its filler made.
 func TestHistoryEpochResetsHoles(t *testing.T) {
 	ctx := context.Background()
 	store := historyStore(t)
@@ -232,14 +232,17 @@ func TestHistoryEpochResetsHoles(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := holesOf(t, store)
-	if len(got) != 2 {
-		t.Fatalf("the unfillable range is dropped for re-examination: %+v", got)
+	if len(got) != 3 {
+		t.Fatalf("every missing range must stay recorded: %+v", got)
 	}
-	if got[0].From != 200 || got[0].Next != 0 || got[0].Folded != 0 || got[0].State != nil {
-		t.Fatalf("a range folded into deleted buckets restarts: %+v", got[0])
+	if got[0].From != 10 || got[0].Lifecycle != rangePending || got[0].Reason != "" {
+		t.Fatalf("the blocked range is requeued without being erased: %+v", got[0])
 	}
-	if got[1].From != 1100 || got[1].Next != 1150 || got[1].State == nil {
-		t.Fatalf("a row-backed range keeps its progress: %+v", got[1])
+	if got[1].From != 200 || got[1].Next != 0 || got[1].Folded != 0 || got[1].State != nil || got[1].CursorAt != "" {
+		t.Fatalf("a range folded into deleted buckets restarts: %+v", got[1])
+	}
+	if got[2].From != 1100 || got[2].Next != 1150 || got[2].State == nil {
+		t.Fatalf("a row-backed range keeps its progress: %+v", got[2])
 	}
 }
 

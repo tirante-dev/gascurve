@@ -207,7 +207,7 @@ describe("mock world", () => {
     // in progress at the right edge and the one the range's start cuts into
     // carry the share that was indexed, and every sum in them is a sum over
     // that share alone.
-    expect(hour.points.every((p) => p.coverage > 0 && p.coverage <= 1)).toBe(true);
+    expect(hour.points.every((p) => p.coverage !== null && p.coverage > 0 && p.coverage <= 1)).toBe(true);
     expect(month.points[0].coverage).toBeCloseTo(2 / 3, 6);
     expect(month.points[month.points.length - 1].coverage).toBeCloseTo(1 / 3, 6);
     expect(month.points.slice(1, -1).every((p) => p.coverage === 1)).toBe(true);
@@ -258,7 +258,12 @@ describe("mock world", () => {
     expect(Number(l1.points[0].baseFeeEstimate)).toBeGreaterThan(2_000_000);
     expect(world.network(now).headBlock).toBe(world.headBlock);
     expect(world.network(now + 5).lagSeconds).toBe(6);
-    expect(world.status(now).lastError).toBeNull();
+    expect(world.status(now)).toMatchObject({
+      lastError: null,
+      degraded: false,
+      capacity: { saturated: false, at: null },
+      holes: { pending: 0, blocks: 0 },
+    });
   });
 
   it("models the six-constraint Arbitrum One set", () => {
