@@ -66,6 +66,9 @@ func (f *Follower) tickWith(ctx context.Context, sampleFn func(context.Context) 
 	f.mu.Lock()
 	stored, storedHash := f.head, f.headHash
 	f.mu.Unlock()
+	if f.monitor != nil {
+		f.monitor.observeHead(f.chainID, head, stored)
+	}
 	if head >= stored {
 		f.behind.Store(head - stored)
 	}

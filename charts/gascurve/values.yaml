@@ -198,8 +198,8 @@ config:
     max_idle: 10
     run_migrations: false
   collector:
-    # The collector's own HTTP server, serving /metrics and nothing else.
-    # 0 switches it off; the ServiceMonitor then has no port to scrape.
+    # The collector's own HTTP server, serving metrics and health probes.
+    # 0 switches it and the chart-managed probes and scraping off.
     metrics_port: 9090
     tick_interval: 3s
     slow_interval: 60s

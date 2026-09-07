@@ -4,13 +4,23 @@
 // docs/ARCHITECTURE.md section 6 exactly.
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Model names.
 const (
 	ModelConstraints = "constraints"
 	ModelLegacy      = "legacy"
 	ModelUnknown     = "unknown"
+)
+
+// Health status values used by /status.
+const (
+	StatusHealthy  = "healthy"
+	StatusDegraded = "degraded"
+	StatusDisabled = "disabled"
 )
 
 // Constraint set sources.
@@ -379,41 +389,122 @@ func (h Hole) Blocks() uint64 {
 // (unfillable ones included, since those blocks are missing too) and how
 // many ranges can never be filled.
 type HolesStatus struct {
-	Pending    int    `json:"pending"`
-	Blocks     uint64 `json:"blocks"`
-	Unfillable int    `json:"unfillable"`
+	Pending                 int     `json:"pending"`
+	Blocks                  uint64  `json:"blocks"`
+	Unfillable              int     `json:"unfillable"`
+	PendingBlocks           uint64  `json:"pendingBlocks"`
+	OldestPendingAt         *string `json:"oldestPendingAt"`
+	OldestPendingAgeSeconds *int64  `json:"oldestPendingAgeSeconds"`
 }
 
 // SummarizeHoles counts the recorded holes for /status.
 func SummarizeHoles(holes []Hole) HolesStatus {
+	return SummarizeHolesAt(holes, time.Time{})
+}
+
+// SummarizeHolesAt counts recorded holes and, when now is non-zero, reports
+// the age of the oldest queued range. Unfillable history is still included
+// in Blocks for compatibility, but not in PendingBlocks or pending age.
+func SummarizeHolesAt(holes []Hole, now time.Time) HolesStatus {
 	out := HolesStatus{}
+	var oldest time.Time
 	for _, h := range holes {
 		if h.Reason == "" {
 			out.Pending++
+			out.PendingBlocks += h.Blocks()
+			if at, err := time.Parse(time.RFC3339, h.At); err == nil && (oldest.IsZero() || at.Before(oldest)) {
+				oldest = at
+			}
 		} else {
 			out.Unfillable++
 		}
 		out.Blocks += h.Blocks()
 	}
+	if !oldest.IsZero() {
+		at := oldest.UTC().Format(time.RFC3339)
+		out.OldestPendingAt = &at
+		if !now.IsZero() {
+			age := max(int64(now.Sub(oldest).Seconds()), 0)
+			out.OldestPendingAgeSeconds = &age
+		}
+	}
 	return out
+}
+
+// LoopStatus is the latest outcome of one collector loop. Both success and
+// error timestamps are retained so a recovered error remains diagnosable
+// without continuing to mark the network degraded.
+type LoopStatus struct {
+	LastSuccessAt  *string `json:"lastSuccessAt"`
+	LastErrorAt    *string `json:"lastErrorAt"`
+	LastError      *string `json:"lastError"`
+	LastDurationMS int64   `json:"lastDurationMs"`
+	StaleAfterSecs int64   `json:"staleAfterSeconds"`
+}
+
+// CollectorLoops reports the fast, slow and history loops separately.
+type CollectorLoops struct {
+	Fast    LoopStatus `json:"fast"`
+	Slow    LoopStatus `json:"slow"`
+	History LoopStatus `json:"history"`
+}
+
+// RPCMetrics is cumulative request accounting from the collector process.
+// AverageLatencyMS measures HTTP round trips and excludes pacer waits.
+type RPCMetrics struct {
+	Calls              uint64  `json:"calls"`
+	Requests           uint64  `json:"requests"`
+	Errors             uint64  `json:"errors"`
+	CallsLast10Seconds int     `json:"callsLast10Seconds"`
+	RateLimitEvents    uint64  `json:"rateLimitEvents"`
+	Last429At          *string `json:"last429At"`
+	AverageLatencyMS   float64 `json:"averageLatencyMs"`
+}
+
+// DatabaseMetrics is process-wide PostgreSQL operation accounting. It is
+// repeated in each network's durable collector checkpoint because
+// collector_state is keyed by chain.
+type DatabaseMetrics struct {
+	Operations       uint64  `json:"operations"`
+	Errors           uint64  `json:"errors"`
+	AverageLatencyMS float64 `json:"averageLatencyMs"`
+	LastLatencyMS    float64 `json:"lastLatencyMs"`
+}
+
+// CollectorTelemetry is the collector's durable heartbeat and in-process
+// progress snapshot. HeartbeatAgeSeconds is derived by the API at serve time
+// and is omitted from the stored checkpoint.
+type CollectorTelemetry struct {
+	HeartbeatAt                *string         `json:"heartbeatAt"`
+	HeartbeatAgeSeconds        *int64          `json:"heartbeatAgeSeconds,omitempty"`
+	HeartbeatStaleAfterSeconds int64           `json:"heartbeatStaleAfterSeconds"`
+	ObservedHead               uint64          `json:"observedHead"`
+	IndexedHead                uint64          `json:"indexedHead"`
+	HeadLagBlocks              uint64          `json:"headLagBlocks"`
+	Loops                      CollectorLoops  `json:"loops"`
+	RPC                        RPCMetrics      `json:"rpc"`
+	Database                   DatabaseMetrics `json:"database"`
 }
 
 // NetworkStatus is the collector status of one network. HeadAt,
 // LagSeconds and LastSampleAt are null before the first head.
 type NetworkStatus struct {
-	Name            string      `json:"name"`
-	ChainID         uint64      `json:"chainId"`
-	Enabled         bool        `json:"enabled"`
-	HeadBlock       uint64      `json:"headBlock"`
-	HeadAt          *string     `json:"headAt"`
-	LagSeconds      *int64      `json:"lagSeconds"`
-	LastSampleAt    *string     `json:"lastSampleAt"`
-	LastError       *string     `json:"lastError"`
-	RateLimitEvents uint64      `json:"rateLimitEvents"`
-	Last429At       *string     `json:"last429At"`
-	BackfillCursor  *string     `json:"backfillCursor"`
-	ArbOSVersion    *string     `json:"arbosVersion"`
-	Holes           HolesStatus `json:"holes"`
+	Name            string              `json:"name"`
+	ChainID         uint64              `json:"chainId"`
+	Enabled         bool                `json:"enabled"`
+	HeadBlock       uint64              `json:"headBlock"`
+	HeadAt          *string             `json:"headAt"`
+	LagSeconds      *int64              `json:"lagSeconds"`
+	LastSampleAt    *string             `json:"lastSampleAt"`
+	LastError       *string             `json:"lastError"`
+	RateLimitEvents uint64              `json:"rateLimitEvents"`
+	Last429At       *string             `json:"last429At"`
+	BackfillCursor  *string             `json:"backfillCursor"`
+	ArbOSVersion    *string             `json:"arbosVersion"`
+	Holes           HolesStatus         `json:"holes"`
+	Status          string              `json:"status"`
+	DegradedReasons []string            `json:"degradedReasons"`
+	Collector       *CollectorTelemetry `json:"collector"`
 	EndpointsStatus
 }
 
@@ -425,10 +516,12 @@ type ListenerStatus struct {
 	LastError  *string `json:"lastError"`
 }
 
-// Status is the /status response. Listener is omitted only for an API server
-// built without a live WebSocket feed.
+// Status is the /status response. Status degrades when the notification
+// listener or any enabled collector network is degraded. Listener is omitted
+// only for an API server built without a live WebSocket feed.
 type Status struct {
 	Version  string          `json:"version"`
+	Status   string          `json:"status"`
 	Listener *ListenerStatus `json:"listener,omitempty"`
 	Networks []NetworkStatus `json:"networks"`
 }

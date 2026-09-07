@@ -8,6 +8,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -15,12 +16,29 @@ import (
 
 // Postgres implements Store on sqlx.
 type Postgres struct {
-	db *sqlx.DB
-	q  sqlx.ExtContext
+	db    *sqlx.DB
+	q     sqlx.ExtContext
+	stats *stats
 	// tx describes the open transaction this store is bound to, nil when it
 	// is the pool. Nested calls read it to tell whether they can reuse the
 	// transaction, must add a lock to it, or are incompatible with it.
 	tx *txMode
+}
+
+// Stats is cumulative database operation accounting for health and metrics.
+// Latency measures driver calls, including connection pool waits.
+type Stats struct {
+	Operations   uint64
+	Errors       uint64
+	TotalLatency time.Duration
+	LastLatency  time.Duration
+}
+
+type stats struct {
+	operations   atomic.Uint64
+	errors       atomic.Uint64
+	totalLatency atomic.Int64
+	lastLatency  atomic.Int64
 }
 
 // txMode is the metadata of an open transaction: the chain locks it holds,
@@ -51,15 +69,36 @@ var (
 
 // NewPostgres wraps an open connection pool.
 func NewPostgres(d *sqlx.DB) *Postgres {
-	return &Postgres{db: d, q: d}
+	return &Postgres{db: d, q: d, stats: &stats{}}
 }
 
 // DB exposes the underlying pool (for migrations and shutdown).
 func (p *Postgres) DB() *sqlx.DB { return p.db }
 
+// Stats returns a concurrency-safe snapshot of database operation accounting.
+func (p *Postgres) Stats() Stats {
+	return Stats{
+		Operations: p.stats.operations.Load(), Errors: p.stats.errors.Load(),
+		TotalLatency: time.Duration(p.stats.totalLatency.Load()), LastLatency: time.Duration(p.stats.lastLatency.Load()),
+	}
+}
+
+func (p *Postgres) observe(start time.Time, err error) {
+	d := time.Since(start)
+	p.stats.operations.Add(1)
+	p.stats.totalLatency.Add(int64(d))
+	p.stats.lastLatency.Store(int64(d))
+	if err != nil {
+		p.stats.errors.Add(1)
+	}
+}
+
 // Ping checks connectivity.
 func (p *Postgres) Ping(ctx context.Context) error {
-	return p.db.PingContext(ctx)
+	start := time.Now()
+	err := p.db.PingContext(ctx)
+	p.observe(start, err)
+	return err
 }
 
 // WithTx runs fn in a transaction. Nested inside any open transaction it
@@ -132,11 +171,13 @@ func (p *Postgres) WithSnapshotTx(ctx context.Context, fn func(Store) error) err
 // store so nested calls can check compatibility, runs setup and then fn on
 // it, and commits unless either failed.
 func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, mode *txMode, setup func(*Postgres) error, fn func(Store) error) error {
+	start := time.Now()
 	tx, err := p.db.BeginTxx(ctx, opts)
+	p.observe(start, err)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	bound := &Postgres{db: p.db, q: tx, tx: mode}
+	bound := &Postgres{db: p.db, q: tx, stats: p.stats, tx: mode}
 	if setup != nil {
 		err = setup(bound)
 	}
@@ -144,17 +185,24 @@ func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, mode *txMo
 		err = fn(bound)
 	}
 	if err != nil {
-		_ = tx.Rollback()
+		start = time.Now()
+		rollbackErr := tx.Rollback()
+		p.observe(start, rollbackErr)
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	start = time.Now()
+	err = tx.Commit()
+	p.observe(start, err)
+	if err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
 
 func (p *Postgres) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	start := time.Now()
 	res, err := p.q.ExecContext(ctx, query, args...)
+	p.observe(start, err)
 	if err != nil {
 		return nil, fmt.Errorf("exec: %w", err)
 	}
@@ -163,7 +211,10 @@ func (p *Postgres) exec(ctx context.Context, query string, args ...any) (sql.Res
 
 func selectAll[T any](ctx context.Context, p *Postgres, query string, args ...any) ([]T, error) {
 	var out []T
-	if err := sqlx.SelectContext(ctx, p.q, &out, query, args...); err != nil {
+	start := time.Now()
+	err := sqlx.SelectContext(ctx, p.q, &out, query, args...)
+	p.observe(start, err)
+	if err != nil {
 		return nil, fmt.Errorf("select: %w", err)
 	}
 	return out, nil
@@ -171,7 +222,14 @@ func selectAll[T any](ctx context.Context, p *Postgres, query string, args ...an
 
 func getOne[T any](ctx context.Context, p *Postgres, query string, args ...any) (*T, error) {
 	var out T
-	if err := sqlx.GetContext(ctx, p.q, &out, query, args...); err != nil {
+	start := time.Now()
+	err := sqlx.GetContext(ctx, p.q, &out, query, args...)
+	observed := err
+	if errors.Is(err, sql.ErrNoRows) {
+		observed = nil
+	}
+	p.observe(start, observed)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -317,7 +375,10 @@ func (p *Postgres) BlocksBetween(ctx context.Context, chainID uint64, from, to t
 // GasUsedBetween sums gas over (from, to].
 func (p *Postgres) GasUsedBetween(ctx context.Context, chainID uint64, from, to time.Time) (uint64, error) {
 	var total int64
-	if err := sqlx.GetContext(ctx, p.q, &total, `SELECT COALESCE(SUM(gas_used), 0)::BIGINT FROM blocks WHERE chain_id = $1 AND ts > $2 AND ts <= $3`, chainID, from, to); err != nil {
+	start := time.Now()
+	err := sqlx.GetContext(ctx, p.q, &total, `SELECT COALESCE(SUM(gas_used), 0)::BIGINT FROM blocks WHERE chain_id = $1 AND ts > $2 AND ts <= $3`, chainID, from, to)
+	p.observe(start, err)
+	if err != nil {
 		return 0, fmt.Errorf("gas used: %w", err)
 	}
 	return uint64(max(total, 0)), nil
@@ -326,7 +387,10 @@ func (p *Postgres) GasUsedBetween(ctx context.Context, chainID uint64, from, to 
 // TwoTxBlocks lists candidate batch-report blocks.
 func (p *Postgres) TwoTxBlocks(ctx context.Context, chainID, after uint64, limit int) ([]uint64, error) {
 	var nums []int64
-	if err := sqlx.SelectContext(ctx, p.q, &nums, `SELECT number FROM blocks WHERE chain_id = $1 AND tx_count = 2 AND number > $2 ORDER BY number ASC LIMIT $3`, chainID, after, limit); err != nil {
+	start := time.Now()
+	err := sqlx.SelectContext(ctx, p.q, &nums, `SELECT number FROM blocks WHERE chain_id = $1 AND tx_count = 2 AND number > $2 ORDER BY number ASC LIMIT $3`, chainID, after, limit)
+	p.observe(start, err)
+	if err != nil {
 		return nil, fmt.Errorf("two tx blocks: %w", err)
 	}
 	return Uint64s(nums), nil
@@ -600,12 +664,15 @@ func (p *Postgres) RewindAfter(ctx context.Context, chainID, block uint64) error
 // InsertConstraintSet upserts a set and returns its id.
 func (p *Postgres) InsertConstraintSet(ctx context.Context, cs ConstraintSet) (int64, error) {
 	var id int64
-	if err := sqlx.GetContext(ctx, p.q, &id, `
+	start := time.Now()
+	err := sqlx.GetContext(ctx, p.q, &id, `
 		INSERT INTO constraint_sets (chain_id, effective_block, effective_at, constraints, source)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (chain_id, effective_block, source) DO UPDATE SET constraints = EXCLUDED.constraints, effective_at = EXCLUDED.effective_at
 		RETURNING id`,
-		cs.ChainID, cs.EffectiveBlock, cs.EffectiveAt, cs.Constraints, cs.Source); err != nil {
+		cs.ChainID, cs.EffectiveBlock, cs.EffectiveAt, cs.Constraints, cs.Source)
+	p.observe(start, err)
+	if err != nil {
 		return 0, fmt.Errorf("constraint set: %w", err)
 	}
 	return id, nil
@@ -665,7 +732,13 @@ func (p *Postgres) BatchBuckets(ctx context.Context, chainID uint64, from, to ti
 
 // GetState reads a checkpoint.
 func (p *Postgres) GetState(ctx context.Context, chainID uint64, key string) (value string, found bool, err error) {
+	start := time.Now()
 	err = sqlx.GetContext(ctx, p.q, &value, `SELECT value FROM collector_state WHERE chain_id = $1 AND key = $2`, chainID, key)
+	observed := err
+	if errors.Is(err, sql.ErrNoRows) {
+		observed = nil
+	}
+	p.observe(start, observed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}

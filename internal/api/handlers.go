@@ -463,7 +463,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, err)
 		return
 	}
-	out := model.Status{Version: s.version, Networks: make([]model.NetworkStatus, 0, len(rows))}
+	out := model.Status{Version: s.version, Status: model.StatusHealthy, Networks: make([]model.NetworkStatus, 0, len(rows))}
 	if s.listener != nil {
 		status := s.listener.Status()
 		listener := &model.ListenerStatus{Ready: status.Ready, Reconnects: status.Reconnects}
@@ -471,6 +471,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			listener.LastError = &status.Error
 		}
 		out.Listener = listener
+		if !status.Ready {
+			out.Status = model.StatusDegraded
+		}
 	}
 	for _, n := range rows {
 		st, err := s.store.States(r.Context(), n.ChainID)
@@ -478,7 +481,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			s.internal(w, err)
 			return
 		}
-		ns := model.NetworkStatus{Name: n.Name, ChainID: n.ChainID, Enabled: n.Enabled}
+		ns := model.NetworkStatus{Name: n.Name, ChainID: n.ChainID, Enabled: n.Enabled, Status: model.StatusHealthy, DegradedReasons: []string{}}
 		if n.HeadBlock.Valid {
 			ns.HeadBlock = uint64(max(n.HeadBlock.Int64, 0))
 		}
@@ -497,8 +500,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ns.Last429At = optString(st, db.StateLast429At)
 		ns.BackfillCursor = optString(st, db.StateBackfillCursor)
 		ns.ArbOSVersion = optString(st, db.StateArbOSVersion)
-		ns.Holes = holesStatus(st)
+		ns.Holes = holesStatus(st, s.now())
 		ns.EndpointsStatus = endpointsStatus(st)
+		ns.Collector = collectorTelemetry(st, s.now())
+		if ns.Collector != nil {
+			ns.RateLimitEvents = ns.Collector.RPC.RateLimitEvents
+			ns.Last429At = ns.Collector.RPC.Last429At
+		}
+		ns.Status, ns.DegradedReasons = networkHealth(ns, s.now())
+		if ns.Status == model.StatusDegraded {
+			out.Status = model.StatusDegraded
+		}
 		out.Networks = append(out.Networks, ns)
 	}
 	writeJSON(w, http.StatusOK, cacheNone, out)
@@ -509,7 +521,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // and how many can never be filled (nothing before them is stored with a
 // pricing state). A network without a checkpoint, or with an unreadable
 // one, reports zeros.
-func holesStatus(st map[string]string) model.HolesStatus {
+func holesStatus(st map[string]string, now time.Time) model.HolesStatus {
 	raw, ok := st[db.StateHoles]
 	if !ok {
 		return model.HolesStatus{}
@@ -518,7 +530,87 @@ func holesStatus(st map[string]string) model.HolesStatus {
 	if err := json.Unmarshal([]byte(raw), &holes); err != nil {
 		return model.HolesStatus{}
 	}
-	return model.SummarizeHoles(holes)
+	return model.SummarizeHolesAt(holes, now)
+}
+
+func collectorTelemetry(st map[string]string, now time.Time) *model.CollectorTelemetry {
+	raw, ok := st[db.StateTelemetry]
+	if !ok {
+		return nil
+	}
+	var out model.CollectorTelemetry
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	if out.HeartbeatAt != nil {
+		if at, err := time.Parse(time.RFC3339, *out.HeartbeatAt); err == nil {
+			age := max(int64(now.Sub(at).Seconds()), 0)
+			out.HeartbeatAgeSeconds = &age
+		}
+	}
+	return &out
+}
+
+func networkHealth(n model.NetworkStatus, now time.Time) (status string, reasons []string) {
+	if !n.Enabled {
+		return model.StatusDisabled, []string{}
+	}
+	telemetry := n.Collector
+	if telemetry == nil || telemetry.HeartbeatAt == nil || telemetry.HeartbeatAgeSeconds == nil {
+		reasons = append(reasons, "collector heartbeat missing")
+	} else if *telemetry.HeartbeatAgeSeconds > telemetry.HeartbeatStaleAfterSeconds {
+		reasons = append(reasons, "collector heartbeat stale")
+	}
+	if telemetry != nil {
+		for _, item := range []struct {
+			name string
+			loop model.LoopStatus
+		}{
+			{name: "fast", loop: telemetry.Loops.Fast},
+			{name: "slow", loop: telemetry.Loops.Slow},
+			{name: "history", loop: telemetry.Loops.History},
+		} {
+			name, loop := item.name, item.loop
+			success := parseStatusTime(loop.LastSuccessAt)
+			failure := parseStatusTime(loop.LastErrorAt)
+			switch {
+			case success.IsZero():
+				reasons = append(reasons, name+" loop has not succeeded")
+			case failure.After(success):
+				reasons = append(reasons, name+" loop failing")
+			case loop.StaleAfterSecs > 0 && now.Sub(success) > time.Duration(loop.StaleAfterSecs)*time.Second:
+				reasons = append(reasons, name+" loop stale")
+			}
+		}
+		if telemetry.HeadLagBlocks > 0 {
+			reasons = append(reasons, "collector behind observed head")
+		}
+		if n.LagSeconds != nil && telemetry.Loops.Fast.StaleAfterSecs > 0 && *n.LagSeconds > telemetry.Loops.Fast.StaleAfterSecs {
+			reasons = append(reasons, "chain head stale")
+		}
+	}
+	for _, endpoint := range n.Endpoints {
+		if endpoint.Disabled {
+			reasons = append(reasons, "RPC endpoint disabled")
+			break
+		}
+	}
+	if n.Holes.OldestPendingAgeSeconds != nil && telemetry != nil && telemetry.Loops.History.StaleAfterSecs > 0 &&
+		*n.Holes.OldestPendingAgeSeconds > telemetry.Loops.History.StaleAfterSecs {
+		reasons = append(reasons, "pending gaps are stale")
+	}
+	if len(reasons) > 0 {
+		return model.StatusDegraded, reasons
+	}
+	return model.StatusHealthy, []string{}
+}
+
+func parseStatusTime(raw *string) time.Time {
+	if raw == nil {
+		return time.Time{}
+	}
+	at, _ := time.Parse(time.RFC3339, *raw)
+	return at
 }
 
 // endpointsStatus decodes the collector's endpoint routing state; a

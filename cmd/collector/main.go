@@ -1,7 +1,7 @@
 // Command collector follows the configured Arbitrum Nitro chains, replays
 // the pricer, writes PostgreSQL and publishes live snapshots with NOTIFY.
-// It also serves Prometheus metrics on collector.metrics_port, from a
-// server of its own that shares nothing with the followers.
+// It also serves health endpoints and Prometheus metrics on
+// collector.metrics_port, from a server of its own.
 package main
 
 import (
@@ -60,6 +60,7 @@ func run() error {
 
 	reg := metrics.NewRegistry()
 	collectorMetrics := metrics.NewCollector(reg)
+	monitor := collector.NewMonitor(store, store, collectorMetrics, log)
 	// The metrics server lives exactly as long as the followers do: its own
 	// context is canceled when collector.Run returns, so a process with no
 	// enabled network still exits instead of waiting on a server nobody
@@ -71,20 +72,18 @@ func run() error {
 	case !cfg.Collector.MetricsEnabled():
 		log.Info("metrics server disabled", "reason", "collector.metrics_port is 0")
 	default:
-		// A port that cannot be bound is loud but never fatal: following
-		// the chains is the collector's job, and losing the scrape must
-		// not stop it. The server reads the registry alone, so a follower
-		// stuck on an RPC call or on the database still answers a scrape.
-		srv, err := metrics.NewServer(ctx, metrics.Addr(cfg.Collector.MetricsPort), reg, log)
+		// A bind failure is a process configuration error now that Kubernetes
+		// probes this listener. Dependency failures are handled by readiness
+		// and never make the shallow liveness route fail.
+		srv, err := metrics.NewServer(ctx, metrics.Addr(cfg.Collector.MetricsPort), reg, log, monitor.Handler(version.Version))
 		if err != nil {
-			log.Error("metrics server not started, continuing without it", "port", cfg.Collector.MetricsPort, "err", err.Error())
-			break
+			return fmt.Errorf("collector observability: %w", err)
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := srv.Run(mctx); err != nil {
-				log.Error("metrics server stopped", "err", err.Error())
+			if err := srv.Run(mctx); err != nil && ctx.Err() == nil {
+				log.Error("collector observability server stopped", "err", err.Error())
 			}
 		}()
 	}
@@ -97,7 +96,7 @@ func run() error {
 			Cooldown:  cfg.Collector.FailoverCooldown,
 		}, nitro.WithPoolLogger(log.With("network", n.Name)))
 	}
-	collector.Run(ctx, cfg, store, newRPC, log, collector.WithMetrics(collectorMetrics))
+	collector.Run(ctx, cfg, store, newRPC, log, collector.WithMetrics(collectorMetrics), func(o *collector.Options) { o.Monitor = monitor })
 	stopMetrics()
 	wg.Wait()
 	log.Info("collector stopped")

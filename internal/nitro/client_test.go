@@ -56,6 +56,9 @@ func TestBatchOrderingAndUserAgent(t *testing.T) {
 	if c.Pacer() == nil {
 		t.Fatal("pacer")
 	}
+	if st := c.Stats(); st.Calls != 5 || st.Requests != 3 || st.Errors != 2 || st.TotalLatency < 0 {
+		t.Fatalf("request stats = %+v", st)
+	}
 }
 
 func TestRateLimitBackoff(t *testing.T) {
@@ -76,7 +79,7 @@ func TestRateLimitBackoff(t *testing.T) {
 		t.Fatalf("backoff sleeps = %v", sleeps)
 	}
 	st := c.Stats()
-	if st.RateLimitEvents != 3 || st.Last429At.IsZero() || st.Backoff != minBackoff || st.CallsLast10s != 2 {
+	if st.RateLimitEvents != 3 || st.Last429At.IsZero() || st.Backoff != minBackoff || st.CallsLast10s != 2 || st.Calls != 4 || st.Requests != 4 || st.Errors != 3 {
 		t.Fatalf("stats = %+v", st)
 	}
 	// Exhausting attempts returns ErrRateLimited; the back-off is capped.

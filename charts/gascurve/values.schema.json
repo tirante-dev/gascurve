@@ -160,7 +160,7 @@
           "type": "object",
           "properties": {
             "metrics_port": {
-              "description": "Port for the collector's own HTTP server, which serves /metrics and nothing else. 0 disables it, and the collector's Service and ServiceMonitor are then not rendered. Overridden by METRICS_PORT.",
+              "description": "Port for the collector's own observability server. 0 disables it, its probes, Service and ServiceMonitor. Overridden by METRICS_PORT.",
               "type": "integer",
               "minimum": 0,
               "maximum": 65535

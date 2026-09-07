@@ -25,10 +25,10 @@ const (
 	serverShutdownTimeout = 5 * time.Second
 )
 
-// Server serves the exposition format and nothing else. The collector has
-// no HTTP server of its own, and this one deliberately shares nothing with
-// the follower goroutines: it reads the registry, so a follower stuck on an
-// RPC call or on the database still scrapes.
+// Server serves the exposition format and optional health routes. It
+// deliberately shares nothing with the follower goroutines: metrics read the
+// registry and health reads the collector monitor, so a follower stuck on an
+// RPC call or on the database still gets an answer.
 type Server struct {
 	ln  net.Listener
 	srv *http.Server
@@ -37,10 +37,9 @@ type Server struct {
 
 // NewServer binds addr and prepares the handler. Binding here rather than
 // in Run means a port already in use is reported before Run is ever
-// reached, and the caller decides what that is worth: the collector logs
-// it and follows the chains unscraped rather than exiting. ctx bounds the
+// reached, and the caller decides whether that is fatal. ctx bounds the
 // bind alone; Run takes the context the server lives by.
-func NewServer(ctx context.Context, addr string, g prometheus.Gatherer, log *logger.Logger) (*Server, error) {
+func NewServer(ctx context.Context, addr string, g prometheus.Gatherer, log *logger.Logger, extra ...http.Handler) (*Server, error) {
 	if log == nil {
 		log = logger.Nop()
 	}
@@ -51,9 +50,13 @@ func NewServer(ctx context.Context, addr string, g prometheus.Gatherer, log *log
 	}
 	mux := http.NewServeMux()
 	mux.Handle(Path, Handler(g))
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	})
+	if len(extra) > 0 && extra[0] != nil {
+		mux.Handle("/", extra[0])
+	} else {
+		mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "not found", http.StatusNotFound)
+		})
+	}
 	return &Server{
 		ln:  ln,
 		srv: &http.Server{Handler: mux, ReadHeaderTimeout: serverReadHeaderTimeout, WriteTimeout: serverWriteTimeout},

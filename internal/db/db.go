@@ -69,6 +69,9 @@ const (
 	// checkpoints once and records the new value, so the rebuild runs on
 	// a raised setting rather than on every restart.
 	StateHistoryEpoch = "history_epoch"
+	// StateTelemetry is the collector's heartbeat, per-loop outcomes and
+	// cumulative RPC and database accounting for /status.
+	StateTelemetry = "telemetry"
 )
 
 // Open connects to Postgres and applies pool limits.

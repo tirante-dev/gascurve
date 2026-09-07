@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -101,6 +102,8 @@ func seed(t *testing.T) *dbtest.MemStore {
 	must(s.SetState(ctx, testnet, db.StateEndpoints, `not json`))
 	must(s.SetState(ctx, robinhood, db.StateHoles, `[{"from":1001,"to":1100,"at":"2026-09-06T07:00:00Z","next":1051},{"from":0,"to":499,"at":"2026-09-06T07:00:00Z","reason":"no state"}]`))
 	must(s.SetState(ctx, testnet, db.StateHoles, `not json`))
+	must(s.SetState(ctx, robinhood, db.StateTelemetry, `{"heartbeatAt":"2026-09-06T07:19:58Z","heartbeatStaleAfterSeconds":30,"observedHead":1030,"indexedHead":1030,"headLagBlocks":0,"loops":{"fast":{"lastSuccessAt":"2026-09-06T07:19:59Z","lastErrorAt":null,"lastError":null,"lastDurationMs":20,"staleAfterSeconds":30},"slow":{"lastSuccessAt":"2026-09-06T07:19:30Z","lastErrorAt":null,"lastError":null,"lastDurationMs":40,"staleAfterSeconds":180},"history":{"lastSuccessAt":"2026-09-06T07:19:59Z","lastErrorAt":null,"lastError":null,"lastDurationMs":10,"staleAfterSeconds":180}},"rpc":{"calls":100,"requests":20,"errors":2,"callsLast10Seconds":7,"rateLimitEvents":4,"last429At":"2026-09-06T07:00:00Z","averageLatencyMs":12.5},"database":{"operations":80,"errors":1,"averageLatencyMs":3.5,"lastLatencyMs":2}}`))
+	must(s.SetState(ctx, testnet, db.StateTelemetry, `{"heartbeatAt":"2026-09-06T07:19:58Z","heartbeatStaleAfterSeconds":30,"observedHead":502,"indexedHead":500,"headLagBlocks":2,"loops":{"fast":{"lastSuccessAt":"2026-09-06T07:19:40Z","lastErrorAt":"2026-09-06T07:19:59Z","lastError":"sample failed","lastDurationMs":20,"staleAfterSeconds":30},"slow":{"lastSuccessAt":"2026-09-06T07:19:30Z","lastErrorAt":null,"lastError":null,"lastDurationMs":40,"staleAfterSeconds":180},"history":{"lastSuccessAt":"2026-09-06T07:19:59Z","lastErrorAt":null,"lastError":null,"lastDurationMs":10,"staleAfterSeconds":180}},"rpc":{"calls":10,"requests":5,"errors":1,"callsLast10Seconds":2,"rateLimitEvents":1,"last429At":null,"averageLatencyMs":8},"database":{"operations":80,"errors":1,"averageLatencyMs":3.5,"lastLatencyMs":2}}`))
 	// The ETH/USD spot the collector recorded: fresh for robinhood, older
 	// than the default max age for the testnet.
 	must(s.SetState(ctx, robinhood, db.StateEthUsd, `{"price":"4523.40","at":"2026-09-06T07:18:00Z","source":"coinbase"}`))
@@ -384,7 +387,7 @@ func TestEndpoints(t *testing.T) {
 		{"/api/v1/status", 200, cacheNone, func(t *testing.T, b []byte) {
 			var s model.Status
 			decode(t, b, &s)
-			if s.Version != "test" || s.Listener == nil || !s.Listener.Ready || s.Listener.Reconnects != 0 || s.Listener.LastError != nil || len(s.Networks) != 3 {
+			if s.Version != "test" || s.Status != model.StatusDegraded || s.Listener == nil || !s.Listener.Ready || s.Listener.Reconnects != 0 || s.Listener.LastError != nil || len(s.Networks) != 3 {
 				t.Fatalf("status: %+v", s)
 			}
 			rh := s.Networks[0]
@@ -402,13 +405,26 @@ func TestEndpoints(t *testing.T) {
 			if rh.Holes.Pending != 1 || rh.Holes.Unfillable != 1 || rh.Holes.Blocks != 50+500 {
 				t.Fatalf("status holes: %+v", rh.Holes)
 			}
+			if rh.Holes.PendingBlocks != 50 || rh.Holes.OldestPendingAgeSeconds == nil || *rh.Holes.OldestPendingAgeSeconds != 1200 {
+				t.Fatalf("status pending hole age: %+v", rh.Holes)
+			}
 			// A network without a checkpoint, or with an unreadable one,
 			// reports zeros rather than failing the whole status.
 			if s.Networks[1].Holes != (model.HolesStatus{}) || s.Networks[2].Holes != (model.HolesStatus{}) {
 				t.Fatalf("status holes default: %+v %+v", s.Networks[1].Holes, s.Networks[2].Holes)
 			}
-			if !strings.Contains(string(b), `"holes":{"pending":1,"blocks":550,"unfillable":1}`) {
+			if !strings.Contains(string(b), `"holes":{"pending":1,"blocks":550,"unfillable":1,"pendingBlocks":50`) {
 				t.Fatalf("holes json: %s", b)
+			}
+			if rh.Collector == nil || rh.Collector.HeartbeatAgeSeconds == nil || *rh.Collector.HeartbeatAgeSeconds != 2 || rh.Collector.RPC.AverageLatencyMS != 12.5 || rh.Collector.Database.LastLatencyMS != 2 {
+				t.Fatalf("collector telemetry: %+v", rh.Collector)
+			}
+			if rh.Status != model.StatusDegraded || !slices.Contains(rh.DegradedReasons, "pending gaps are stale") {
+				t.Fatalf("robinhood degradation: %+v", rh)
+			}
+			tn := s.Networks[2]
+			if tn.Status != model.StatusDegraded || !slices.Contains(tn.DegradedReasons, "fast loop failing") || !slices.Contains(tn.DegradedReasons, "collector behind observed head") {
+				t.Fatalf("testnet degradation: %+v", tn)
 			}
 			if rh.ActiveEndpoint != 1 || rh.Failovers != 3 || len(rh.Endpoints) != 2 || !rh.Endpoints[0].Disabled || rh.Endpoints[0].Index != 0 || !rh.Endpoints[1].WS || !rh.Endpoints[1].Archive {
 				t.Fatalf("status endpoints: %+v", rh.EndpointsStatus)
@@ -454,7 +470,7 @@ func TestEndpoints(t *testing.T) {
 }
 
 func TestReadyAndStatusExposeListenerFailure(t *testing.T) {
-	store := seed(t)
+	store := dbtest.New()
 	cfg := config.ServerConfig{RateLimitPerSecond: 1000, RateLimitBurst: 1000}
 	listener := &fakeListener{ch: make(chan db.Notification), status: db.ListenerStatus{
 		Reconnects: 2,
@@ -474,8 +490,37 @@ func TestReadyAndStatusExposeListenerFailure(t *testing.T) {
 	}
 	var status model.Status
 	decode(t, body, &status)
-	if status.Listener == nil || status.Listener.Ready || status.Listener.Reconnects != 2 || status.Listener.LastError == nil || *status.Listener.LastError != "connection lost" {
+	if status.Status != model.StatusDegraded || status.Listener == nil || status.Listener.Ready || status.Listener.Reconnects != 2 || status.Listener.LastError == nil || *status.Listener.LastError != "connection lost" {
 		t.Fatalf("listener status: %+v", status.Listener)
+	}
+}
+
+func TestStatusHealthyAfterRecovery(t *testing.T) {
+	store := seed(t)
+	ctx := context.Background()
+	if err := store.SetState(ctx, robinhood, db.StateHoles, `[]`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetState(ctx, robinhood, db.StateEndpoints, `{"activeEndpoint":0,"failovers":0,"endpoints":[{"index":0,"ws":false,"archive":false,"disabled":false,"error":null,"wsCooling":false,"wsError":null}]}`); err != nil {
+		t.Fatal(err)
+	}
+	testnetRow, err := store.NetworkByRef(ctx, "robinhood-testnet")
+	if err != nil || testnetRow == nil {
+		t.Fatalf("testnet row: %+v %v", testnetRow, err)
+	}
+	testnetRow.Enabled = false
+	if err := store.UpsertNetwork(ctx, *testnetRow); err != nil {
+		t.Fatal(err)
+	}
+	ts := newServer(t, store)
+	resp, body := get(t, ts, "/api/v1/status")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	}
+	var status model.Status
+	decode(t, body, &status)
+	if status.Status != model.StatusHealthy || status.Networks[0].Status != model.StatusHealthy || len(status.Networks[0].DegradedReasons) != 0 {
+		t.Fatalf("healthy status: %+v", status)
 	}
 }
 
