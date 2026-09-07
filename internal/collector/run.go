@@ -206,13 +206,16 @@ func (f *Follower) runSlow(ctx context.Context) {
 }
 
 // runHistory is the loop that rebuilds history: every iteration fills one
-// batch of the newest fillable hole, and only when nothing is fillable
-// does it spend the iteration on the backfill. Gap filling outlives the
-// backfill, because a paced network keeps skipping ranges as it follows
-// the head. Completion is never cached here: BackfillStep answers Done
-// from the durable cursor without a call, so a rewind that resets that
-// cursor is picked up by the next iteration instead of leaving the
-// deleted history unrebuilt for the life of the process.
+// batch of the newest fillable hole, then one batch of the poster-gas repair,
+// and only when neither has work does it spend the iteration on the backfill.
+// Gap filling outlives the backfill, because a paced network keeps skipping
+// ranges as it follows the head. The repair comes before the backfill because
+// it is the only one of the three with a deadline: it reads and rebuilds from
+// block rows, which retention removes, while the backfill can be resumed at
+// any time. Completion is never cached here: BackfillStep answers Done from
+// the durable cursor without a call, so a rewind that resets that cursor is
+// picked up by the next iteration instead of leaving the deleted history
+// unrebuilt for the life of the process.
 func (f *Follower) runHistory(ctx context.Context) {
 	for ctx.Err() == nil {
 		start := f.now()
@@ -239,6 +242,30 @@ func (f *Follower) runHistory(ctx context.Context) {
 			}
 			continue
 		case FillNone:
+		}
+		repair, err := f.RepairStep(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			f.observeLoop(loopHistory, start, err)
+			f.log.Warn("poster gas repair error", "err", err.Error())
+			if err := f.sleep(ctx, restartDelay); err != nil {
+				return
+			}
+			continue
+		}
+		switch repair {
+		case RepairProgressed:
+			f.observeLoop(loopHistory, start, nil)
+			continue
+		case RepairIdle:
+			f.observeLoop(loopHistory, start, nil)
+			if err := f.sleep(ctx, backfillIdle); err != nil {
+				return
+			}
+			continue
+		case RepairNone:
 		}
 		back, err := f.BackfillStep(ctx)
 		if err != nil {

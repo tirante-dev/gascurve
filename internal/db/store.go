@@ -269,6 +269,15 @@ type Store interface {
 	// DeleteBlocksAfter removes blocks with number > after (a reorg rewind)
 	// and returns the removed rows, ascending.
 	DeleteBlocksAfter(ctx context.Context, chainID, after uint64) ([]Block, error)
+	// BlocksMissingPosterGas returns up to limit blocks with number >= from
+	// and no recorded poster gas, ascending. These are rows stored before the
+	// collector read receipts; everything written since carries the value.
+	BlocksMissingPosterGas(ctx context.Context, chainID, from uint64, limit int) ([]Block, error)
+	// SetPosterGas records receipt-backed poster gas on stored blocks by
+	// number, leaving every other column alone. A number no longer stored (a
+	// rewind or retention removed it) is skipped rather than inserted, and so
+	// is a value the row's own gas total cannot hold.
+	SetPosterGas(ctx context.Context, chainID uint64, gas map[uint64]uint64) error
 
 	// FoldBuckets adds partial buckets into the stored rows.
 	FoldBuckets(ctx context.Context, buckets []Bucket) error

@@ -71,6 +71,9 @@ type fakeRPC struct {
 	noHeaders   bool
 	headerShift uint64
 	sampledAt   time.Time
+	// posterGasCalls records the block numbers of each PosterGasByNumbers
+	// batch, so a test can see how the repair sized and narrowed its reads.
+	posterGasCalls [][]uint64
 }
 
 func newFakeRPC(head uint64) *fakeRPC {
@@ -272,6 +275,34 @@ func (f *fakeRPC) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]nit
 		}
 		out = append(out, f.header(n+f.headerShift))
 	}
+	return out, nil
+}
+
+// PosterGasByNumbers answers the repair pass the way an endpoint does: the
+// poster gas the fake chain reports for each block, checked against the
+// target's own gas total so a test that scripts an impossible value sees the
+// same rejection the real validator gives.
+func (f *fakeRPC) PosterGasByNumbers(ctx context.Context, targets []nitro.ReceiptTarget) (map[uint64]uint64, error) {
+	f.note(ctx, "PosterGasByNumbers")
+	if err := f.fail("PosterGasByNumbers"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	numbers := make([]uint64, 0, len(targets))
+	out := make(map[uint64]uint64, len(targets))
+	for _, t := range targets {
+		numbers = append(numbers, t.Number)
+		if t.Number > f.head {
+			return nil, fmt.Errorf("block %d not found", t.Number)
+		}
+		gas := f.posterGas(t.Number)
+		if gas > t.GasUsed {
+			return nil, fmt.Errorf("block %d poster gas %d exceeds total gas %d", t.Number, gas, t.GasUsed)
+		}
+		out[t.Number] = gas
+	}
+	f.posterGasCalls = append(f.posterGasCalls, numbers)
 	return out, nil
 }
 

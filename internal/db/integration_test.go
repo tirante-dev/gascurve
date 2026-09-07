@@ -1069,3 +1069,85 @@ func TestIntegrationNotifyListen(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegrationPosterGasRepair covers the two queries the poster-gas repair
+// runs: finding the rows stored without receipts, and writing the value onto
+// them under the guards that make the write safe to repeat.
+func TestIntegrationPosterGasRepair(t *testing.T) {
+	ctx := context.Background()
+	p := openIntegration(t)
+	base := time.Now().UTC().Truncate(time.Second)
+	if err := p.UpsertNetwork(ctx, Network{ChainID: testChain, Name: "repair", DisplayName: "Repair", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	blocks := make([]Block, 0, 5)
+	for i := uint64(0); i < 5; i++ {
+		blocks = append(blocks, Block{
+			ChainID: testChain, Number: 200 + i, Hash: fmt.Sprintf("0x%x", 200+i), ParentHash: fmt.Sprintf("0x%x", 199+i),
+			TS: base.Add(time.Duration(i) * time.Second), GasUsed: 1_000, BaseFee: WeiFromUint64(20_000_000),
+			L1Block: 50, TxCount: 1, Backlogs: Uint64Array{i}, ConstraintBips: pq.Int64Array{int64(i)},
+			MinBaseFee: NullWeiFromUint64(10_000_000), PricingVersion: PricingFull, PredictedBaseFee: WeiFromUint64(20_000_000),
+		})
+	}
+	// One row already has the value, so it must not come back as work.
+	blocks[2].PosterGas = sql.NullInt64{Int64: 40, Valid: true}
+	if err := p.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+
+	missing, err := p.BlocksMissingPosterGas(ctx, testChain, 200, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 4 || missing[0].Number != 200 || missing[3].Number != 204 {
+		t.Fatalf("missing rows: %v %v", numbersOf(missing), err)
+	}
+	// The cursor bound and the limit both narrow the scan.
+	if from, err := p.BlocksMissingPosterGas(ctx, testChain, 203, 10); err != nil || len(from) != 2 {
+		t.Fatalf("from 203: %v %v", numbersOf(from), err)
+	}
+	if capped, err := p.BlocksMissingPosterGas(ctx, testChain, 200, 2); err != nil || len(capped) != 2 {
+		t.Fatalf("limit 2: %v %v", numbersOf(capped), err)
+	}
+
+	// 203 carries more gas than its row used and 999 is not stored: both are
+	// skipped instead of failing the batch or inserting a row.
+	if err := p.SetPosterGas(ctx, testChain, map[uint64]uint64{200: 10, 201: 20, 202: 99, 203: 5_000, 999: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for number, want := range map[uint64]sql.NullInt64{
+		200: {Int64: 10, Valid: true},
+		201: {Int64: 20, Valid: true},
+		202: {Int64: 40, Valid: true}, // already recorded, left alone
+		203: {},                       // rejected by the gas guard
+	} {
+		b, err := p.BlockByNumber(ctx, testChain, number)
+		if err != nil || b == nil {
+			t.Fatalf("block %d: %v", number, err)
+		}
+		if b.PosterGas != want {
+			t.Fatalf("block %d poster gas %+v, want %+v", number, b.PosterGas, want)
+		}
+	}
+	if b, err := p.BlockByNumber(ctx, testChain, 999); err != nil || b != nil {
+		t.Fatalf("a number that was not stored was inserted: %+v %v", b, err)
+	}
+	// Repeating the write changes nothing: every row that has a value keeps it.
+	if err := p.SetPosterGas(ctx, testChain, map[uint64]uint64{200: 777}); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := p.BlockByNumber(ctx, testChain, 200); err != nil || b.PosterGas.Int64 != 10 {
+		t.Fatalf("a recorded value was overwritten: %+v %v", b.PosterGas, err)
+	}
+	if err := p.SetPosterGas(ctx, testChain, nil); err != nil {
+		t.Fatalf("an empty write: %v", err)
+	}
+}
+
+func numbersOf(blocks []Block) []uint64 {
+	out := make([]uint64, len(blocks))
+	for i, b := range blocks {
+		out[i] = b.Number
+	}
+	return out
+}

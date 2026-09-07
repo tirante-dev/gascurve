@@ -690,6 +690,12 @@ func (p *Pool) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header
 	return call(ctx, p, func(e *Endpoint) ([]Header, error) { return e.HeadersByNumbers(ctx, numbers) })
 }
 
+// PosterGasByNumbers reads receipt-backed poster gas for blocks the caller
+// already holds, in batches of the endpoint's cap.
+func (p *Pool) PosterGasByNumbers(ctx context.Context, targets []ReceiptTarget) (map[uint64]uint64, error) {
+	return call(ctx, p, func(e *Endpoint) (map[uint64]uint64, error) { return e.PosterGasByNumbers(ctx, targets) })
+}
+
 // BlocksWithTxs fetches full blocks in batches of the endpoint's cap.
 func (p *Pool) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, error) {
 	return call(ctx, p, func(e *Endpoint) ([]Block, error) { return e.BlocksWithTxs(ctx, numbers) })

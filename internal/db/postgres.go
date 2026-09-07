@@ -431,6 +431,46 @@ func (p *Postgres) DeleteBlocksAfter(ctx context.Context, chainID, after uint64)
 	return selectAll[Block](ctx, p, `DELETE FROM blocks WHERE chain_id = $1 AND number > $2 RETURNING `+blockColumns+``, chainID, after)
 }
 
+// BlocksMissingPosterGas returns blocks stored without receipt-backed poster
+// gas, ascending from a number. The scan rides the (chain_id, number) primary
+// key, so a caller that advances its cursor past what it has repaired keeps
+// each pass short.
+func (p *Postgres) BlocksMissingPosterGas(ctx context.Context, chainID, from uint64, limit int) ([]Block, error) {
+	return selectAll[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks
+		WHERE chain_id = $1 AND number >= $2 AND poster_gas IS NULL
+		ORDER BY number ASC LIMIT $3`, chainID, from, limit)
+}
+
+// SetPosterGas writes poster gas onto stored rows in one statement. The join
+// carries the guards the column's own CHECK enforces, so a row that has since
+// been rewritten, pruned or rewound is left alone instead of failing the
+// batch, and only a row that still lacks the value is touched: the repair is
+// then idempotent against a live collector writing the same blocks.
+func (p *Postgres) SetPosterGas(ctx context.Context, chainID uint64, gas map[uint64]uint64) error {
+	if len(gas) == 0 {
+		return nil
+	}
+	numbers := make([]int64, 0, len(gas))
+	for n := range gas {
+		numbers = append(numbers, int64(n))
+	}
+	slices.Sort(numbers)
+	values := make([]int64, len(numbers))
+	for i, n := range numbers {
+		values[i] = int64(gas[uint64(n)])
+	}
+	if _, err := p.exec(ctx, `
+		UPDATE blocks SET poster_gas = v.gas
+		FROM (SELECT unnest($2::bigint[]) AS number, unnest($3::bigint[]) AS gas) v
+		WHERE blocks.chain_id = $1 AND blocks.number = v.number
+			AND blocks.poster_gas IS NULL
+			AND v.gas >= 0 AND v.gas <= blocks.gas_used`,
+		chainID, pq.Array(numbers), pq.Array(values)); err != nil {
+		return fmt.Errorf("set poster gas on %d blocks %d..%d: %w", len(numbers), numbers[0], numbers[len(numbers)-1], err)
+	}
+	return nil
+}
+
 // LatestBlock returns the highest stored block.
 func (p *Postgres) LatestBlock(ctx context.Context, chainID uint64) (*Block, error) {
 	return getOne[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 ORDER BY number DESC LIMIT 1`, chainID)

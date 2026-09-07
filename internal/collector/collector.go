@@ -39,6 +39,7 @@ type RPC interface {
 	PricingSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
 	HeadersByNumbers(ctx context.Context, numbers []uint64) ([]nitro.Header, error)
 	HeaderByNumber(ctx context.Context, number uint64) (*nitro.Header, error)
+	PosterGasByNumbers(ctx context.Context, targets []nitro.ReceiptTarget) (map[uint64]uint64, error)
 	BlocksWithTxs(ctx context.Context, numbers []uint64) ([]nitro.Block, error)
 	TransactionReceipts(ctx context.Context, hashes []string) ([]nitro.Receipt, error)
 	OwnerActsLogs(ctx context.Context, from, to uint64) ([]nitro.Log, error)
@@ -225,6 +226,10 @@ type Follower struct {
 	legacyChanges    []legacyChange
 	batchCostChanges []batchCostChange
 	liveStart        *liveStart
+	// repairNarrow is the batch the poster-gas repair has narrowed itself to
+	// after a failed read, 0 while it is running at full size. It is in
+	// memory only: a restart starts wide again and narrows if it must.
+	repairNarrow int
 	// ownerScanThrough is the owner_scan_through checkpoint: the block
 	// through which the recorded owner-action timeline is complete, 0 until
 	// a scan pass has reached its head.

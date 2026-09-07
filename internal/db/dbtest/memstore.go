@@ -446,6 +446,42 @@ func (m *MemStore) BlocksAfter(_ context.Context, chainID, after uint64, limit i
 	return out, nil
 }
 
+// BlocksMissingPosterGas returns blocks from a number up that carry no
+// poster gas, ascending.
+func (m *MemStore) BlocksMissingPosterGas(_ context.Context, chainID, from uint64, limit int) ([]db.Block, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("BlocksMissingPosterGas"); err != nil {
+		return nil, err
+	}
+	var out []db.Block
+	for _, b := range m.sortedBlocks(chainID) {
+		if b.Number >= from && !b.PosterGas.Valid && len(out) < limit {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+// SetPosterGas records poster gas on stored rows, skipping a number that is
+// no longer stored, already has one, or carries more gas than the row used.
+func (m *MemStore) SetPosterGas(_ context.Context, chainID uint64, gas map[uint64]uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("SetPosterGas"); err != nil {
+		return err
+	}
+	for number, g := range gas {
+		b, ok := m.BlockRows[chainID][number]
+		if !ok || b.PosterGas.Valid || g > b.GasUsed {
+			continue
+		}
+		b.PosterGas = sql.NullInt64{Int64: int64(g), Valid: true}
+		m.BlockRows[chainID][number] = b
+	}
+	return nil
+}
+
 // BlocksBetween returns blocks in [from, to).
 func (m *MemStore) BlocksBetween(_ context.Context, chainID uint64, from, to time.Time) ([]db.Block, error) {
 	m.mu.Lock()

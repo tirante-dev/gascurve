@@ -78,6 +78,12 @@ const (
 	// StateTelemetry is the collector's heartbeat, per-loop outcomes and
 	// cumulative RPC and database accounting for /status.
 	StateTelemetry = "telemetry"
+	// StatePosterGasRepair is the poster-gas repair's cursor
+	// ({"next":n,"done":bool}): the next block it will examine among the rows
+	// stored before receipts were read, and whether it has run out of work.
+	// Blocks written from that change on always carry poster gas, so the pass
+	// finishes once and stays finished.
+	StatePosterGasRepair = "poster_gas_repair"
 )
 
 // Open connects to Postgres and applies pool limits.
