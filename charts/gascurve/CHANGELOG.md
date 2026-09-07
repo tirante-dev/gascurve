@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.2.0...gascurve-chart-v0.2.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 1.0.1 ([#22](https://github.com/tirante-dev/gascurve/issues/22)) ([e0f32da](https://github.com/tirante-dev/gascurve/commit/e0f32da52656d0518084992412d77f54847e3e3c))
+
 ## [0.2.0](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.1.0...gascurve-chart-v0.2.0) (2026-09-07)
 
 
