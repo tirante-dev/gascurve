@@ -18,7 +18,17 @@ export const SITE_NAME = "gascurve";
  */
 export const DEFAULT_SITE_URL = "https://gascurve.com";
 
-/** `value` as an origin with no trailing slash, or null when it is not an absolute http(s) URL. */
+/**
+ * `value` as a bare origin, or null when it is not an absolute http(s) URL.
+ *
+ * Any path is dropped rather than kept. Next joins `metadataBase`'s pathname
+ * onto every relative metadata URL, so an origin of `https://example.com/gas`
+ * would emit canonicals and sitemap entries under `/gas/...` while the app,
+ * which sets no `basePath`, still serves those routes at the origin root: the
+ * metadata would point search engines at URLs that 404. Serving under a
+ * sub-path is a `basePath` change in next.config.ts first, and this should
+ * read that rather than a path smuggled in through the origin.
+ */
 export function normalizeSiteUrl(value: string | undefined): string | null {
   if (value === undefined || value.trim() === "") return null;
   let url: URL;
@@ -28,7 +38,7 @@ export function normalizeSiteUrl(value: string | undefined): string | null {
     return null;
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  return `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+  return url.origin;
 }
 
 export const SITE_URL = normalizeSiteUrl(process.env.NEXT_PUBLIC_SITE_URL) ?? DEFAULT_SITE_URL;

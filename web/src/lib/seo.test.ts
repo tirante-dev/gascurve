@@ -9,8 +9,17 @@ describe("normalizeSiteUrl", () => {
     expect(normalizeSiteUrl("  http://localhost:3000/  ")).toBe("http://localhost:3000");
   });
 
-  it("keeps a sub-path, which is what a site served under one needs", () => {
-    expect(normalizeSiteUrl("https://example.com/gas/")).toBe("https://example.com/gas");
+  it("drops a path, because the app serves every route at the origin root", () => {
+    // Next joins metadataBase's pathname onto relative metadata URLs, so a
+    // sub-path origin would emit canonicals under it while the routes stay at
+    // the root: metadata pointing at URLs that 404. Serving under a sub-path
+    // is a basePath change first.
+    expect(normalizeSiteUrl("https://example.com/gas/")).toBe("https://example.com");
+    expect(normalizeSiteUrl("https://example.com/gas/deep")).toBe("https://example.com");
+  });
+
+  it("keeps an explicit port, which a preview deployment needs", () => {
+    expect(normalizeSiteUrl("http://localhost:3000")).toBe("http://localhost:3000");
   });
 
   it("rejects anything that is not an absolute http(s) URL", () => {
