@@ -49,7 +49,7 @@ func Handler(g prometheus.Gatherer) http.Handler {
 // has already passed the last value read is indistinguishable from ordinary
 // growth, and the difference is lost. Nothing here is exposed to that,
 // because the counters it mirrors live as long as the process that owns
-// this registry: an nitro.Pool builds its endpoints once, and a restarted
+// this registry: a nitro.Pool builds its endpoints once, and a restarted
 // collector starts from an empty registry too.
 type monotonic struct {
 	c    prometheus.Counter
