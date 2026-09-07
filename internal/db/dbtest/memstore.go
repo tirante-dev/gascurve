@@ -462,20 +462,30 @@ func (m *MemStore) BlocksBetween(_ context.Context, chainID uint64, from, to tim
 	return out, nil
 }
 
-// GasUsedBetween sums gas over (from, to].
-func (m *MemStore) GasUsedBetween(_ context.Context, chainID uint64, from, to time.Time) (uint64, error) {
+// GasBetween sums total gas and, with complete receipt coverage, compute gas
+// over (from, to].
+func (m *MemStore) GasBetween(_ context.Context, chainID uint64, from, to time.Time) (total uint64, compute *uint64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.fail("GasUsedBetween"); err != nil {
-		return 0, err
+	if err := m.fail("GasBetween"); err != nil {
+		return 0, nil, err
 	}
-	var total uint64
+	var computeTotal uint64
+	known := true
 	for _, b := range m.BlockRows[chainID] {
 		if b.TS.After(from) && !b.TS.After(to) {
 			total += b.GasUsed
+			if !b.PosterGas.Valid || b.PosterGas.Int64 < 0 || uint64(b.PosterGas.Int64) > b.GasUsed {
+				known = false
+				continue
+			}
+			computeTotal += b.GasUsed - uint64(b.PosterGas.Int64)
 		}
 	}
-	return total, nil
+	if !known {
+		return total, nil, nil
+	}
+	return total, &computeTotal, nil
 }
 
 // TwoTxBlocks lists two-transaction blocks above a number.

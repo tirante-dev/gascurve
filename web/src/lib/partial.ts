@@ -176,14 +176,14 @@ export function partialCaption(bands: readonly PartialBand[]): string | null {
 
 /**
  * The fee destination stack, as a chart draws it. The keys are separate from
- * the bucket's own `floorFeesEth` and `surplusFeesEth` so a bucket in
- * progress can be left out of the stack while its tooltip and the data table
- * still read out what it has collected so far.
+ * the bucket's own infrastructure, network, and poster fee fields so a bucket
+ * in progress can be left out of the stack while its tooltip and the data
+ * table still read out what it has collected so far.
  */
-export type FeeStack = { stackFloorEth: number | null; stackSurplusEth: number | null; stackUnsplitEth: number | null };
+export type FeeStack = { stackFloorEth: number | null; stackSurplusEth: number | null; stackPosterEth: number | null; stackUnsplitEth: number | null };
 
 /** The fields of a row the fee stack is drawn from. */
-export type FeeSums = PartialRow & { floorFeesEth: number | null; surplusFeesEth: number | null; unsplitFeesEth: number | null };
+export type FeeSums = PartialRow & { floorFeesEth: number | null; surplusFeesEth: number | null; posterFeesEth?: number | null; unsplitFeesEth: number | null };
 
 /**
  * `rows` with the stack keys added: the bucket's own parts on a whole bucket,
@@ -194,7 +194,7 @@ export type FeeSums = PartialRow & { floorFeesEth: number | null; surplusFeesEth
 export function withFeeStack<T extends FeeSums>(rows: readonly T[]): (T & FeeStack)[] {
   return rows.map((row) =>
     row.partial === null
-      ? { ...row, stackFloorEth: row.floorFeesEth, stackSurplusEth: row.surplusFeesEth, stackUnsplitEth: row.unsplitFeesEth }
-      : { ...row, stackFloorEth: null, stackSurplusEth: null, stackUnsplitEth: null },
+      ? { ...row, stackFloorEth: row.floorFeesEth, stackSurplusEth: row.surplusFeesEth, stackPosterEth: row.posterFeesEth ?? null, stackUnsplitEth: row.unsplitFeesEth }
+      : { ...row, stackFloorEth: null, stackSurplusEth: null, stackPosterEth: null, stackUnsplitEth: null },
   );
 }

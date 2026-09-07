@@ -45,6 +45,7 @@ type Block struct {
 	ParentHash       string        `db:"parent_hash"`
 	TS               time.Time     `db:"ts"`
 	GasUsed          uint64        `db:"gas_used"`
+	PosterGas        sql.NullInt64 `db:"poster_gas"`
 	BaseFee          Wei           `db:"base_fee"`
 	L1Block          uint64        `db:"l1_block"`
 	TxCount          int           `db:"tx_count"`
@@ -60,6 +61,12 @@ type Block struct {
 // Known reports whether the block carries the full pricing breakdown, so
 // its floor and fee split are exact rather than unknown history.
 func (b Block) Known() bool { return b.PricingVersion >= PricingFull && b.MinBaseFee.Valid }
+
+// DestinationsKnown reports whether the block has both the pricing floor
+// and authoritative receipt poster gas needed for an exact fee allocation.
+func (b Block) DestinationsKnown() bool {
+	return b.Known() && b.PosterGas.Valid && b.PosterGas.Int64 >= 0 && uint64(b.PosterGas.Int64) <= b.GasUsed
+}
 
 // Bucket resolutions.
 const (
@@ -79,17 +86,18 @@ var Resolutions = map[string]time.Duration{
 // the stored row: counters and sums add, min/max combine, the average is
 // derived from the exact sum, and the *_end fields are replaced.
 // RebuildBuckets instead recomputes a row from the block rows in its
-// window. BaseFeeSum, ConstraintBipsEnd, MinBaseFee, FloorFeesWei and
-// SurplusFeesWei are unknown (NULL, nil) for rows written before they were
-// recorded and for any window holding one such block; a fold into such a
-// row keeps them unknown.
+// window. Pricing fields are unknown for rows written before they were
+// recorded. PosterGas and all three destination sums are independently
+// unknown for any window whose source blocks lack authoritative receipts.
 type Bucket struct {
 	ChainID           uint64        `db:"chain_id"`
 	Resolution        string        `db:"resolution"`
 	BucketStart       time.Time     `db:"bucket_start"`
 	Blocks            int64         `db:"blocks"`
 	GasUsed           uint64        `db:"gas_used"`
+	PosterGas         sql.NullInt64 `db:"poster_gas"`
 	FeesWei           Wei           `db:"fees_wei"`
+	PosterFeesWei     NullWei       `db:"poster_fees_wei"`
 	BaseFeeMin        Wei           `db:"base_fee_min"`
 	BaseFeeAvg        Wei           `db:"base_fee_avg"`
 	BaseFeeMax        Wei           `db:"base_fee_max"`
@@ -107,8 +115,7 @@ type Bucket struct {
 	// and the constraint set are only replaced by folds with a higher one.
 	LastBlock uint64 `db:"last_block"`
 	// PricingVersion is the lowest version of the blocks folded in:
-	// PricingUnknown as soon as one of them lacks the breakdown, which is
-	// what makes the fee split unknown for the whole bucket.
+	// PricingUnknown as soon as one of them lacks the pricing breakdown.
 	PricingVersion int16 `db:"pricing_version"`
 }
 
@@ -253,8 +260,9 @@ type Store interface {
 	BlocksAfter(ctx context.Context, chainID, after uint64, limit int) ([]Block, error)
 	// BlocksBetween returns blocks with from <= ts < to, ascending.
 	BlocksBetween(ctx context.Context, chainID uint64, from, to time.Time) ([]Block, error)
-	// GasUsedBetween sums gas_used over from < ts <= to.
-	GasUsedBetween(ctx context.Context, chainID uint64, from, to time.Time) (uint64, error)
+	// GasBetween sums total gas over from < ts <= to and returns the compute
+	// gas sum only when every source block has authoritative poster gas.
+	GasBetween(ctx context.Context, chainID uint64, from, to time.Time) (uint64, *uint64, error)
 	// TwoTxBlocks lists block numbers > after with exactly two transactions.
 	TwoTxBlocks(ctx context.Context, chainID, after uint64, limit int) ([]uint64, error)
 	PruneBlocks(ctx context.Context, chainID uint64, before time.Time) (int64, error)

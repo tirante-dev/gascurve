@@ -46,12 +46,29 @@ func setupChain(f *fakeRPC) {
 			return nil
 		}
 		if full {
-			b = blockJSON(320, 1_700_000_032, 5, "0x1312d00", []any{
-				map[string]any{"hash": "0x01", "type": "0x6a", "from": ArbosAddress, "to": ArbosAddress, "input": EncodeHex(EncodeStartBlock(StartBlock{L1BaseFee: big.NewInt(0), L1BlockNumber: 7, L2BlockNumber: 320, TimePassed: 1}))},
+			n, _ := HexUint64(tag)
+			b = blockJSON(n, 1_700_000_000+n/10, 5, "0x1312d00", []any{
+				map[string]any{"hash": "0x01", "type": "0x6a", "from": ArbosAddress, "to": ArbosAddress, "input": EncodeHex(EncodeStartBlock(StartBlock{L1BaseFee: big.NewInt(0), L1BlockNumber: 7, L2BlockNumber: n, TimePassed: 1}))},
 				map[string]any{"hash": "0x02", "type": "0x2", "to": "0xdead", "input": "0x"},
 			}, 50)
 		}
 		return b
+	}
+	f.handlers["eth_getBlockReceipts"] = func(params []json.RawMessage) any {
+		tag := paramString(params[0])
+		if tag == "latest" {
+			tag = blockTag(320)
+		}
+		n, err := HexUint64(tag)
+		if err != nil || n < 100 || n > 320 {
+			return nil
+		}
+		gas := 1_000_000 * n
+		first := gas / 3
+		return []any{
+			map[string]any{"blockHash": "0xabc", "blockNumber": tag, "transactionHash": "0xaa", "transactionIndex": "0x0", "gasUsed": blockTag(first), "cumulativeGasUsed": blockTag(first), "gasUsedForL1": "0x1e9"},
+			map[string]any{"blockHash": "0xabc", "blockNumber": tag, "transactionHash": "0xbb", "transactionIndex": "0x1", "gasUsed": blockTag(gas - first), "cumulativeGasUsed": blockTag(gas), "gasUsedForL1": "0x116"},
+		}
 	}
 	f.handlers["eth_getLogs"] = func(params []json.RawMessage) any {
 		var filter map[string]any
@@ -139,11 +156,11 @@ func TestTypedCalls(t *testing.T) {
 	}
 	before := f.requests
 	hs, err := c.HeadersByNumbers(ctx, nums)
-	if err != nil || len(hs) != 150 || hs[149].Number != 249 {
+	if err != nil || len(hs) != 150 || hs[149].Number != 249 || hs[0].PosterGas == nil || *hs[0].PosterGas != 767 || hs[0].ComputeGas() != 99_999_233 {
 		t.Fatalf("HeadersByNumbers: %d %v", len(hs), err)
 	}
-	if f.requests-before != 2 {
-		t.Fatalf("expected 2 batches, got %d", f.requests-before)
+	if f.requests-before != 3 {
+		t.Fatalf("expected 3 batches, got %d", f.requests-before)
 	}
 	if _, err := c.HeadersByNumbers(ctx, []uint64{100, 5}); err == nil {
 		t.Fatal("missing block in batch should error")
@@ -191,6 +208,28 @@ func TestTypedCalls(t *testing.T) {
 	}
 }
 
+func TestNumberedBlockCallsRejectAnotherBlock(t *testing.T) {
+	f := newFakeRPC(t)
+	setupChain(f)
+	f.handlers["eth_getBlockByNumber"] = func(params []json.RawMessage) any {
+		full := false
+		_ = json.Unmarshal(params[1], &full)
+		txs := []any{"0xaa", "0xbb"}
+		if full {
+			txs = []any{}
+		}
+		return blockJSON(101, 1_700_000_010, 101_000_000, "0x1312d00", txs, 50)
+	}
+	c, _ := newTestClient(t, f, 1000)
+	ctx := context.Background()
+	if _, err := c.HeadersByNumbers(ctx, []uint64{100}); err == nil {
+		t.Fatal("header response for another block must fail")
+	}
+	if _, err := c.BlocksWithTxs(ctx, []uint64{100}); err == nil {
+		t.Fatal("full block response for another block must fail")
+	}
+}
+
 func TestFastSample(t *testing.T) {
 	f := newFakeRPC(t)
 	setupChain(f)
@@ -201,7 +240,7 @@ func TestFastSample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Header.Number != 320 || len(s.Constraints) != 2 || s.Constraints[1].Backlog != 11_194_391_810_886 || s.IsLegacy() {
+	if s.Header.Number != 320 || s.Header.PosterGas == nil || *s.Header.PosterGas != 767 || len(s.Constraints) != 2 || s.Constraints[1].Backlog != 11_194_391_810_886 || s.IsLegacy() {
 		t.Fatalf("sample: %+v", s)
 	}
 	if s.Prices.PerArbGasTotal.Int64() != 6 || s.Prices.PerL1CalldataByte.Int64() != 2 || s.MinBaseFee.Int64() != 20_000_000 || s.Legacy != nil {
@@ -302,8 +341,19 @@ func TestFastSampleAt(t *testing.T) {
 	if s.Header.Number != 200 || len(s.Constraints) != 2 || s.MinBaseFee.Int64() != 20_000_000 {
 		t.Fatalf("sample at 200: %+v", s)
 	}
-	// Every state call in the batch carries the head's block tag.
-	if len(f.callTags) != 3 {
+	receiptCalls := 0
+	receipts := f.handlers["eth_getBlockReceipts"]
+	f.handlers["eth_getBlockReceipts"] = func(params []json.RawMessage) any {
+		receiptCalls++
+		return receipts(params)
+	}
+	pricing, err := c.PricingSampleAt(ctx, 200)
+	if err != nil || pricing.Header.Number != 200 || len(pricing.Constraints) != 2 || receiptCalls != 0 {
+		t.Fatalf("pricing-only sample: %+v receipts=%d err=%v", pricing, receiptCalls, err)
+	}
+	// Every state call in the full and pricing-only batches carries the
+	// requested block tag.
+	if len(f.callTags) != 5 {
 		t.Fatalf("call tags = %v", f.callTags)
 	}
 	for _, tag := range f.callTags {
@@ -533,6 +583,39 @@ func TestParseHeaderErrors(t *testing.T) {
 	}
 }
 
+func TestParsePosterGas(t *testing.T) {
+	h := Header{Number: 1_000_000, Hash: "0xac00", GasUsed: 422_716, TxCount: 2, TxHashes: []string{"0xaaa", "0xbbb"}}
+	raw := json.RawMessage(`[
+		{"blockHash":"0xAC00","blockNumber":"0xf4240","transactionHash":"0xAAA","transactionIndex":"0x0","gasUsed":"0x222e0","cumulativeGasUsed":"0x222e0","gasUsedForL1":"0x1e9"},
+		{"blockHash":"0xac00","blockNumber":"0xf4240","transactionHash":"0xbbb","transactionIndex":"0x1","gasUsed":"0x4505c","cumulativeGasUsed":"0x6733c","gasUsedForL1":"0x116"}
+	]`)
+	poster, err := parsePosterGas(raw, h)
+	if err != nil || poster != 767 {
+		t.Fatalf("poster gas: %d %v", poster, err)
+	}
+	tooMuch := uint64(11)
+	if got := (Header{GasUsed: 10, PosterGas: &tooMuch}).ComputeGas(); got != 0 {
+		t.Fatalf("saturating compute gas: %d", got)
+	}
+	for _, tc := range []json.RawMessage{
+		json.RawMessage(`null`),
+		json.RawMessage(`[]`),
+		json.RawMessage(`[{} , {}]`),
+		json.RawMessage(`[{"blockHash":"0xnope"},{}]`),
+		json.RawMessage(`[{"blockHash":"0xac00","blockNumber":"zz"},{}]`),
+		json.RawMessage(`[{"blockHash":"0xac00","blockNumber":"0x1","transactionHash":"0xnope"},{}]`),
+		json.RawMessage(`[{"blockHash":"0xac00","blockNumber":"0xf4240","transactionHash":"0xaaa","transactionIndex":"0x1"},{}]`),
+		json.RawMessage(`[
+			{"blockHash":"0xac00","blockNumber":"0xf4240","transactionHash":"0xaaa","transactionIndex":"0x0","gasUsed":"0x222e0","cumulativeGasUsed":"0x222e0"},
+			{"blockHash":"0xac00","blockNumber":"0xf4240","transactionHash":"0xbbb","transactionIndex":"0x1","gasUsed":"0x4505c","cumulativeGasUsed":"0x6733c","gasUsedForL1":"0x116"}
+		]`),
+	} {
+		if _, err := parsePosterGas(tc, h); err == nil {
+			t.Fatalf("expected receipt validation error for %s", tc)
+		}
+	}
+}
+
 // TestTypedBatchesAreChunked: every typed request list goes through the
 // endpoint's chunker, not straight to Batch, so a ten-call L1 sample on
 // a four calls per second budget is split into what the bulk share holds
@@ -583,7 +666,7 @@ func TestTypedBatchesAreChunked(t *testing.T) {
 		t.Fatalf("fee accounts: %d requests", n)
 	}
 	// A fast sample may carry the reserve more than a bulk batch, so its
-	// four calls still go in one request under bulk pressure.
+	// five batched calls still go in one request under bulk pressure.
 	clock.Advance(time.Hour)
 	before = f.requestCount()
 	if _, err := p.FastSampleAt(WithClass(ctx, Fast), 200); err != nil {

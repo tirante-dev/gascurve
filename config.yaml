@@ -22,7 +22,7 @@ collector:
   metrics_port: 9090         # the collector's own HTTP server, serving /metrics and nothing else; 0 disables it.
                              # The api has an HTTP server already and serves /metrics on server.port.
                              # Environment: METRICS_PORT.
-  tick_interval: 3s          # live sample cadence on a polled network: a sample costs five calls, so at the
+  tick_interval: 3s          # live sample cadence on a polled network: a sample costs six calls, so at the
                              # public budget of four per second a 1 s tick starved the header catch-up and
                              # skipped gaps; dedicated endpoints override this per network (500ms with newHeads)
   slow_interval: 60s         # L1 pricer, balances, owner-action log scan
@@ -73,7 +73,7 @@ collector:
 #            polling cadence, and the safety timer while a newHeads
 #            subscription is down). A dedicated endpoint can run at 500ms;
 #            a public one should stay at 1s, since every tick costs about
-#            five calls and a 250ms tick would want most of a 4/s budget.
+#            six calls and a 250ms tick would exceed a 4/s budget.
 #            Environment: NETWORK_<NAME>_TICK_INTERVAL.
 #   ws_url:  wss endpoint; the collector subscribes to newHeads and samples
 #            state at each head instead of polling every tick_interval.

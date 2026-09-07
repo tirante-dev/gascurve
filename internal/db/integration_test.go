@@ -95,9 +95,35 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 		t.Fatalf("version = %d dirty=%v err=%v", v, dirty, err)
 	}
 	headVersion := v
-	// A nullable column means unknown, and pricing_version says which rows
-	// carry the full pricing breakdown.
+	// The poster-gas migration preserves deployed history and marks its
+	// destination split unknown until receipt-backed poster gas is recomputed.
 	ctx := context.Background()
+	if err := m.Down(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.DB().ExecContext(ctx, `INSERT INTO blocks
+		(chain_id, number, ts, gas_used, base_fee, backlogs, constraint_bips, min_base_fee, pricing_version)
+		VALUES (2, 1, now(), 10, 7, '{5}', '{3}', 4, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.DB().ExecContext(ctx, `INSERT INTO buckets
+		(chain_id, resolution, bucket_start, blocks, gas_used, fees_wei, base_fee_avg, backlogs_end, backlogs_max,
+		 constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, pricing_version)
+		VALUES (2, '1m', now(), 1, 10, 70, 7, '{5}', '{5}', '{3}', 4, 40, 30, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(); err != nil {
+		t.Fatal(err)
+	}
+	var poster sql.NullInt64
+	var minFee, fees, floor, surplus, posterFees sql.NullString
+	var pricing int16
+	if err := p.DB().QueryRowContext(ctx, `SELECT poster_gas, min_base_fee, pricing_version FROM blocks WHERE chain_id = 2`).Scan(&poster, &minFee, &pricing); err != nil || poster.Valid || minFee.String != "4" || pricing != PricingFull {
+		t.Fatalf("pre-poster block after migration: poster=%+v min=%+v pricing=%d err=%v", poster, minFee, pricing, err)
+	}
+	if err := p.DB().QueryRowContext(ctx, `SELECT poster_gas, fees_wei, floor_fees_wei, surplus_fees_wei, poster_fees_wei FROM buckets WHERE chain_id = 2`).Scan(&poster, &fees, &floor, &surplus, &posterFees); err != nil || poster.Valid || fees.String != "70" || floor.Valid || surplus.Valid || posterFees.Valid {
+		t.Fatalf("pre-poster bucket after migration: poster=%+v fees=%+v floor=%+v surplus=%+v poster fees=%+v err=%v", poster, fees, floor, surplus, posterFees, err)
+	}
 	if _, err := p.DB().ExecContext(ctx, `INSERT INTO blocks (chain_id, number, ts, gas_used, base_fee, backlogs, pricing_version) VALUES (1, 1, now(), 0, 0, '{18446744073709551615,5}', 0)`); err != nil {
 		t.Fatal(err)
 	}
@@ -134,15 +160,14 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if bk[0].Blocks != 4 || bk[0].BaseFeeAvg.Int64() != 8 || bk[0].BaseFeeSum.Valid || bk[0].FloorFeesWei.Valid || bk[0].SurplusFeesWei.Valid || bk[0].FeesWei.Int64() != 913 {
 		t.Fatalf("fold into an unknown bucket: %+v", bk[0])
 	}
-	// A row written with the breakdown is version 1 by default.
+	// Folding does not promote history whose pricing inputs remain unknown.
 	one, _ := p.Buckets(ctx, 1, Resolution1m, time.Unix(0, 0), time.Now().Add(time.Hour))
 	if len(one) != 1 || one[0].PricingVersion != PricingUnknown {
 		t.Fatalf("folding must not re-authorize unknown history: %+v", one)
 	}
 	// Migration 2 has the exact index order needed by block-based sample
-	// lookup and deletion. Migration 4 adds nullable batch cost metadata.
-	// Rolling each back keeps the pre-existing table data. Reapplying
-	// migration 4 restores empty metadata columns for the collector to refill.
+	// lookup and deletion. Later migrations add durable missing ranges, nullable
+	// batch cost metadata, and receipt-backed poster-gas accounting.
 	var indexDef string
 	if err := p.DB().QueryRowContext(ctx, `SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'state_samples_chain_block'`).Scan(&indexDef); err != nil {
 		t.Fatal(err)
@@ -159,14 +184,32 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(0); err == nil {
 		t.Fatal("Down(0) should fail")
 	}
+	// Rolling back the poster-gas migration removes only its columns and makes
+	// the old two-way destination view unknown. Total user fees remain intact.
+	if err := m.Down(1); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != headVersion-1 {
+		t.Fatalf("after poster-gas down: %d %v", v, err)
+	}
+	var posterColumns int
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND ((table_name = 'blocks' AND column_name = 'poster_gas') OR (table_name = 'buckets' AND column_name IN ('poster_gas', 'poster_fees_wei')))`).Scan(&posterColumns); err != nil || posterColumns != 0 {
+		t.Fatalf("poster-gas columns after down: %d %v", posterColumns, err)
+	}
+	if err := p.DB().QueryRowContext(ctx, `SELECT min_base_fee, pricing_version FROM blocks WHERE chain_id = 2`).Scan(&minFee, &pricing); err != nil || minFee.Valid || pricing != PricingUnknown {
+		t.Fatalf("poster-gas down must make the old two-way view unknown: min=%+v pricing=%d err=%v", minFee, pricing, err)
+	}
+	if err := p.DB().QueryRowContext(ctx, `SELECT fees_wei, floor_fees_wei, surplus_fees_wei FROM buckets WHERE chain_id = 2`).Scan(&fees, &floor, &surplus); err != nil || fees.String != "70" || floor.Valid || surplus.Valid {
+		t.Fatalf("poster-gas down must preserve only total fees: fees=%+v floor=%+v surplus=%+v err=%v", fees, floor, surplus, err)
+	}
 	// Rolling back the attributed-cost migration drops only its nullable
 	// columns, and the step below it preserves the basic missing range in
 	// the legacy JSON checkpoint before that table is removed.
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-1 {
-		t.Fatalf("after migration down: %d %v", v, err)
+	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
+		t.Fatalf("after attributed-cost down: %d %v", v, err)
 	}
 	var batchCostColumns int
 	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'batch_reports' AND column_name IN ('report_version', 'arbos_version', 'per_batch_gas_charge', 'parent_gas_floor_per_token', 'cost_calculation_version', 'attributed_gas_spent', 'attributed_wei_spent')`).Scan(&batchCostColumns); err != nil || batchCostColumns != 0 {
@@ -175,8 +218,8 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
-		t.Fatalf("after second down: %d %v", v, err)
+	if v, _, err := m.Version(); err != nil || v != headVersion-3 {
+		t.Fatalf("after missing-ranges down: %d %v", v, err)
 	}
 	if raw, ok, err := p.GetState(ctx, 1, StateHoles); err != nil || !ok || !strings.Contains(raw, `"from": 10`) {
 		t.Fatalf("rollback checkpoint: %q %v %v", raw, ok, err)
@@ -190,10 +233,10 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	// Stepping back past the owner-action transaction index removes the
 	// column, and the step below that removes the state-sample index. Both
 	// keep the original schema and the sample rows.
-	if err := m.Down(3); err != nil {
+	if err := m.Down(4); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-3 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-4 {
 		t.Fatalf("after down: %d %v", v, err)
 	}
 	var txIndexes int
@@ -203,7 +246,7 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-4 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-5 {
 		t.Fatalf("after index down: %d %v", v, err)
 	}
 	var indexes int
@@ -379,12 +422,13 @@ func TestIntegrationStore(t *testing.T) {
 		}
 		blocks = append(blocks, Block{
 			ChainID: testChain, Number: 100 + i, Hash: fmt.Sprintf("0x%x", 100+i), ParentHash: fmt.Sprintf("0x%x", 99+i),
-			TS: base.Add(time.Duration(i) * time.Second), GasUsed: 1_000_000 * (i + 1),
+			TS: base.Add(time.Duration(i) * time.Second), GasUsed: 1_000_000 * (i + 1), PosterGas: sql.NullInt64{Valid: true},
 			BaseFee: WeiFromUint64(20_000_000 + i), L1Block: 50, TxCount: txs, Backlogs: Uint64Array{i, math.MaxUint64 - i},
 			ConstraintBips: pq.Int64Array{int64(i), 1}, MinBaseFee: NullWeiFromUint64(10_000_000), PricingVersion: PricingFull,
 			ExponentBips: int64(i), PredictedBaseFee: WeiFromUint64(20_000_000), Anchored: i == 10,
 		})
 	}
+	blocks[1].PosterGas.Int64 = 767
 	if err := p.UpsertBlocks(ctx, blocks); err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +440,7 @@ func TestIntegrationStore(t *testing.T) {
 	if err != nil || latest.Number != 110 || latest.GasUsed != 99 || !latest.Anchored || latest.Backlogs[1] != math.MaxUint64-10 {
 		t.Fatalf("LatestBlock: %+v %v", latest, err)
 	}
-	if latest.Hash != "0x6e" || latest.ParentHash != "0x6d" || latest.ConstraintBips[0] != 10 || latest.MinBaseFee.Wei.Int64() != 10_000_000 {
+	if latest.Hash != "0x6e" || latest.ParentHash != "0x6d" || !latest.PosterGas.Valid || latest.ConstraintBips[0] != 10 || latest.MinBaseFee.Wei.Int64() != 10_000_000 {
 		t.Fatalf("LatestBlock new columns: %+v", latest)
 	}
 	if b, err := p.BlockByNumber(ctx, testChain, 105); err != nil || b == nil || b.Number != 105 || b.Backlogs[1] != math.MaxUint64-5 {
@@ -417,9 +461,9 @@ func TestIntegrationStore(t *testing.T) {
 	if bs, err := p.BlocksBetween(ctx, testChain, base.Add(2*time.Second), base.Add(4*time.Second)); err != nil || len(bs) != 2 || bs[0].Number != 102 {
 		t.Fatalf("BlocksBetween: %+v %v", bs, err)
 	}
-	// (base+0, base+2] covers blocks 101 and 102: 2M + 3M gas.
-	if g, err := p.GasUsedBetween(ctx, testChain, base, base.Add(2*time.Second)); err != nil || g != 5_000_000 {
-		t.Fatalf("GasUsedBetween: %d %v", g, err)
+	// (base+0, base+2] covers blocks 101 and 102. Block 101 has 767 poster gas.
+	if total, compute, err := p.GasBetween(ctx, testChain, base, base.Add(2*time.Second)); err != nil || total != 5_000_000 || compute == nil || *compute != 4_999_233 {
+		t.Fatalf("GasBetween: %d %v %v", total, compute, err)
 	}
 	if nums, err := p.TwoTxBlocks(ctx, testChain, 100, 10); err != nil || len(nums) != 2 || nums[0] != 102 || nums[1] != 107 {
 		t.Fatalf("TwoTxBlocks: %v %v", nums, err)
@@ -430,7 +474,7 @@ func TestIntegrationStore(t *testing.T) {
 	// The window is far from the block rows so RebuildBuckets below does
 	// not touch it.
 	fstart := base.Add(-24 * time.Hour)
-	b1 := Bucket{ChainID: testChain, Resolution: Resolution1m, BucketStart: fstart, Blocks: 2, GasUsed: 100, FeesWei: WeiFromUint64(1000),
+	b1 := Bucket{ChainID: testChain, Resolution: Resolution1m, BucketStart: fstart, Blocks: 2, GasUsed: 100, PosterGas: sql.NullInt64{Valid: true}, FeesWei: WeiFromUint64(1000), PosterFeesWei: NullWeiFromUint64(0),
 		BaseFeeMin: WeiFromUint64(10), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(30), BaseFeeSum: NullWeiFromUint64(3), ExponentEndBips: 5,
 		BacklogsEnd: Uint64Array{1, math.MaxUint64}, BacklogsMax: Uint64Array{5, math.MaxUint64}, ConstraintBipsEnd: pq.Int64Array{5, 0}, MinBaseFee: NullWeiFromUint64(2), PricingVersion: PricingFull,
 		FloorFeesWei: NullWeiFromUint64(200), SurplusFeesWei: NullWeiFromUint64(800), ReplayErrorBips: 10, LastBlock: 200}
@@ -440,6 +484,7 @@ func TestIntegrationStore(t *testing.T) {
 	b2 := b1
 	b2.Blocks = 1
 	b2.GasUsed = 50
+	b2.PosterGas = sql.NullInt64{Valid: true}
 	b2.FeesWei = WeiFromUint64(500)
 	b2.BaseFeeMin = WeiFromUint64(5)
 	b2.BaseFeeAvg = WeiFromUint64(3)
@@ -466,7 +511,7 @@ func TestIntegrationStore(t *testing.T) {
 	if got.Blocks != 3 || got.GasUsed != 150 || got.FeesWei.Int64() != 1500 || got.BaseFeeMin.Int64() != 5 || got.BaseFeeMax.Int64() != 30 || got.BaseFeeSum.Wei.Int64() != 6 || got.BaseFeeAvg.Int64() != 2 {
 		t.Fatalf("fold counters: %+v", got)
 	}
-	if got.FloorFeesWei.Wei.Int64() != 300 || got.SurplusFeesWei.Wei.Int64() != 1200 || got.MinBaseFee.Wei.Int64() != 2 || got.ConstraintBipsEnd[0] != 5 {
+	if got.FloorFeesWei.Wei.Int64() != 300 || got.SurplusFeesWei.Wei.Int64() != 1200 || !got.PosterGas.Valid || got.PosterFeesWei.Wei.Sign() != 0 || got.MinBaseFee.Wei.Int64() != 2 || got.ConstraintBipsEnd[0] != 5 {
 		t.Fatalf("fold fee split: %+v", got)
 	}
 	if got.ExponentEndBips != 5 || got.BacklogsEnd[0] != 1 || got.BacklogsEnd[1] != math.MaxUint64 || got.BacklogsMax[0] != 5 || got.BacklogsMax[1] != math.MaxUint64 || got.ReplayErrorBips != 10 || got.LastBlock != 200 {
@@ -518,7 +563,7 @@ func TestIntegrationStore(t *testing.T) {
 		r.BaseFeeAvg.String() != want.BaseFeeAvg.String() || r.BaseFeeMin.String() != want.BaseFeeMin.String() || r.BaseFeeMax.String() != want.BaseFeeMax.String() {
 		t.Fatalf("rebuilt counters: %+v\nwant %+v", r, want)
 	}
-	if r.FloorFeesWei.Wei.String() != want.FloorFeesWei.Wei.String() || r.SurplusFeesWei.Wei.String() != want.SurplusFeesWei.Wei.String() || !r.SurplusFeesWei.Valid || r.MinBaseFee.Wei.String() != want.MinBaseFee.Wei.String() {
+	if r.PosterGas.Int64 != 767 || r.PosterFeesWei.Wei.String() != want.PosterFeesWei.Wei.String() || r.FloorFeesWei.Wei.String() != want.FloorFeesWei.Wei.String() || r.SurplusFeesWei.Wei.String() != want.SurplusFeesWei.Wei.String() || !r.SurplusFeesWei.Valid || r.MinBaseFee.Wei.String() != want.MinBaseFee.Wei.String() {
 		t.Fatalf("rebuilt fee split: %+v\nwant %+v", r, want)
 	}
 	if r.LastBlock != 110 || r.ExponentEndBips != 10 || r.BacklogsEnd[1] != math.MaxUint64-10 || r.BacklogsMax[0] != 10 || r.BacklogsMax[1] != math.MaxUint64 ||
@@ -527,6 +572,21 @@ func TestIntegrationStore(t *testing.T) {
 	}
 	if r.PricingVersion != PricingFull || r.PricingVersion != want.PricingVersion {
 		t.Fatalf("rebuilt pricing version: %d want %d", r.PricingVersion, want.PricingVersion)
+	}
+	// A malformed version-1 row without a minimum fee must not let PostgreSQL
+	// LEAST fabricate a known floor from base_fee alone.
+	if _, err := p.DB().ExecContext(ctx, `UPDATE blocks SET min_base_fee = NULL WHERE chain_id = $1 AND number = $2`, testChain, 104); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RebuildBuckets(ctx, testChain, Resolution1m, []time.Time{base}); err != nil {
+		t.Fatal(err)
+	}
+	missingFloor, _ := p.Buckets(ctx, testChain, Resolution1m, base, base.Add(time.Minute))
+	if len(missingFloor) != 1 || missingFloor[0].FloorFeesWei.Valid || missingFloor[0].SurplusFeesWei.Valid {
+		t.Fatalf("missing minimum fee must make compute destinations unknown: %+v", missingFloor)
+	}
+	if _, err := p.DB().ExecContext(ctx, `UPDATE blocks SET min_base_fee = 10000000 WHERE chain_id = $1 AND number = $2`, testChain, 104); err != nil {
+		t.Fatal(err)
 	}
 	// One source block from before the breakdown existed makes the whole
 	// window unknown: the rebuild must not sum its placeholder zero floor
@@ -555,7 +615,7 @@ func TestIntegrationStore(t *testing.T) {
 	// A fold into that bucket keeps it unknown.
 	if err := p.FoldBuckets(ctx, []Bucket{{ChainID: testChain, Resolution: Resolution1m, BucketStart: base, Blocks: 1, GasUsed: 1, FeesWei: WeiFromUint64(1),
 		BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1), BaseFeeSum: NullWeiFromUint64(1),
-		BacklogsEnd: Uint64Array{1}, BacklogsMax: Uint64Array{1}, ConstraintBipsEnd: pq.Int64Array{1}, MinBaseFee: NullWeiFromUint64(1),
+		PosterGas: sql.NullInt64{Valid: true}, PosterFeesWei: NullWeiFromUint64(0), BacklogsEnd: Uint64Array{1}, BacklogsMax: Uint64Array{1}, ConstraintBipsEnd: pq.Int64Array{1}, MinBaseFee: NullWeiFromUint64(1),
 		FloorFeesWei: NullWeiFromUint64(1), SurplusFeesWei: NullWeiFromUint64(0), LastBlock: 999, PricingVersion: PricingFull}}); err != nil {
 		t.Fatal(err)
 	}
@@ -844,7 +904,9 @@ func TestIntegrationStore(t *testing.T) {
 // TestIntegrationSetBasedEquivalence exercises multi-row writes, existing
 // conflicts, duplicate input keys, nullable pricing history and several
 // rebuild windows in the same call. The assertions use the same sequential
-// merge model as the old per-row FoldBuckets implementation.
+// merge model as the old per-row FoldBuckets implementation. Only one of
+// the two rebuilt windows has poster gas, which pins that the grouped
+// rebuild decides receipt coverage per window rather than per statement.
 func TestIntegrationSetBasedEquivalence(t *testing.T) {
 	p := openIntegration(t)
 	ctx := context.Background()
@@ -859,7 +921,8 @@ func TestIntegrationSetBasedEquivalence(t *testing.T) {
 	update := seed
 	update.Hash, update.GasUsed, update.Backlogs = "update", 2, Uint64Array{3, math.MaxUint64}
 	other := Block{ChainID: testChain, Number: 2, Hash: "other", TS: base.Add(time.Minute), GasUsed: 3,
-		BaseFee: WeiFromUint64(20), Backlogs: Uint64Array{4, 5}, ConstraintBips: pq.Int64Array{6, 7},
+		PosterGas: sql.NullInt64{Int64: 1, Valid: true},
+		BaseFee:   WeiFromUint64(20), Backlogs: Uint64Array{4, 5}, ConstraintBips: pq.Int64Array{6, 7},
 		PredictedBaseFee: WeiFromUint64(19), MinBaseFee: NullWeiFromUint64(7), PricingVersion: PricingFull}
 	final := update
 	final.Hash, final.GasUsed, final.PricingVersion = "final", 4, PricingUnknown
@@ -874,7 +937,10 @@ func TestIntegrationSetBasedEquivalence(t *testing.T) {
 	if gotBlock.Hash != final.Hash || gotBlock.GasUsed != final.GasUsed || gotBlock.PricingVersion != PricingUnknown || gotBlock.MinBaseFee.Valid || gotBlock.ConstraintBips != nil || gotBlock.Backlogs[1] != math.MaxUint64 {
 		t.Fatalf("last duplicate block must win with nullability intact: %+v", gotBlock)
 	}
-	if gotOther, err := p.BlockByNumber(ctx, testChain, 2); err != nil || gotOther == nil || gotOther.Hash != other.Hash || !gotOther.MinBaseFee.Valid {
+	if gotBlock.PosterGas.Valid {
+		t.Fatalf("a null poster gas must survive the batch: %+v", gotBlock)
+	}
+	if gotOther, err := p.BlockByNumber(ctx, testChain, 2); err != nil || gotOther == nil || gotOther.Hash != other.Hash || !gotOther.MinBaseFee.Valid || gotOther.PosterGas != other.PosterGas {
 		t.Fatalf("second batched block: %+v %v", gotOther, err)
 	}
 
@@ -942,6 +1008,15 @@ func TestIntegrationSetBasedEquivalence(t *testing.T) {
 		if got.FloorFeesWei.Valid != expected.FloorFeesWei.Valid || got.MinBaseFee.Valid != expected.MinBaseFee.Valid || (got.ConstraintBipsEnd == nil) != (expected.ConstraintBipsEnd == nil) {
 			t.Fatalf("rebuilt nullability %d: %+v want %+v", i, got, expected)
 		}
+		if got.PosterGas != expected.PosterGas || got.PosterFeesWei.Valid != expected.PosterFeesWei.Valid ||
+			(expected.PosterFeesWei.Valid && got.PosterFeesWei.Wei.String() != expected.PosterFeesWei.Wei.String()) ||
+			(expected.FloorFeesWei.Valid && got.FloorFeesWei.Wei.String() != expected.FloorFeesWei.Wei.String()) ||
+			(expected.SurplusFeesWei.Valid && got.SurplusFeesWei.Wei.String() != expected.SurplusFeesWei.Wei.String()) {
+			t.Fatalf("rebuilt poster accounting %d: %+v want %+v", i, got, expected)
+		}
+	}
+	if rebuilt[0].PosterGas.Valid || !rebuilt[1].PosterGas.Valid || !rebuilt[1].PosterFeesWei.Valid || !rebuilt[1].SurplusFeesWei.Valid {
+		t.Fatalf("receipt coverage must be decided per window: %+v %+v", rebuilt[0], rebuilt[1])
 	}
 }
 

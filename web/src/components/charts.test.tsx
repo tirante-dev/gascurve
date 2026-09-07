@@ -28,7 +28,9 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     t: 0,
     blocks: 1,
     gasUsed: 0,
+    posterGas: 0,
     gasPerSecond: 0,
+    computeGasPerSecond: 0,
     coverage: 1,
     completeness: "complete",
     feesWei: "0",
@@ -42,6 +44,7 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     minBaseFee: "1",
     floorFeesWei: "0",
     surplusFeesWei: "0",
+    posterFeesWei: "0",
     constraintSetId: 0,
     replayErrorBips: 0,
     ...overrides,
@@ -80,6 +83,7 @@ const snapshot: LiveSnapshot = {
   ],
   prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "379726000", perArbGasTotal: "399726000" },
   gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
+  computeGasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
   replayErrorBips: 2,
   ethUsd: null,
 };
@@ -202,7 +206,7 @@ describe("SeriesCharts", () => {
     // The backlogs are still listed under the set; the fee parts are not known, the total is.
     expect(cells.slice(7, 9)).toEqual(["1 gas", "2 gas"]);
     expect(cells.slice(9, 12)).toEqual(["2", "n/a", "n/a"]);
-    expect(within(table).getAllByText("n/a")).toHaveLength(2);
+    expect(within(table).getAllByText("n/a")).toHaveLength(3);
     // The inspector reads the whole x out under the unrecorded split for that bucket, and under the set for a recorded one.
     const slider = screen.getByRole("slider", { name: /Select a bucket/ });
     fireEvent.change(slider, { target: { value: "0" } });
@@ -332,7 +336,7 @@ describe("FeeFlows", () => {
   });
   it("treats buckets that predate the fee split as unknown: hatched rather than zero, left out of the totals, footnoted", () => {
     const early = [
-      point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }),
+      point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, posterFeesWei: "500000000000000000", minBaseFee: "100000000" }),
       point({ t: 1788679140, feesWei: "2000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }),
     ];
     const mixed: Series = { ...series, points: [...early, ...series.points] };
@@ -340,28 +344,29 @@ describe("FeeFlows", () => {
     expect(totals.total).toBeCloseTo(11);
     expect(totals.floorEth).toBeCloseTo(2.2);
     expect(totals.surplusEth).toBeCloseTo(2.8);
+    expect(totals.posterEth).toBe(0);
     expect(totals.unsplit).toBe(2);
     expect(feeTotals(series).unsplit).toBe(0);
-    expect(unsplitNote(1)).toBe("1 bucket predates the fee split");
-    expect(unsplitNote(1200)).toBe("1,200 buckets predate the fee split");
+    expect(unsplitNote(1)).toBe("1 bucket has no recorded destination split");
+    expect(unsplitNote(1200)).toBe("1,200 buckets have no recorded destination split");
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
-    expect(screen.getByText(/^2 buckets predate the fee split/)).toBeInTheDocument();
-    expect(screen.getByText("unknown split (predates the fee split)")).toBeInTheDocument();
-    expect(screen.getByRole("figure", { name: /hatched where the split predates the record/ })).toBeInTheDocument();
+    expect(screen.getByText(/^2 buckets have no recorded destination split/)).toBeInTheDocument();
+    expect(screen.getByText("destination split unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /hatched where the split is unavailable/ })).toBeInTheDocument();
     const details = screen.getByText(/Data table \(5 buckets\)/).closest("details") as HTMLDetailsElement;
     details.open = true;
     fireEvent(details, new Event("toggle"));
     const rows = within(details).getAllByRole("row");
     expect(rows).toHaveLength(6);
-    expect(within(rows[1]).getAllByText("n/a")).toHaveLength(2);
+    expect(within(rows[1]).getAllByText("n/a")).toHaveLength(3);
     expect(within(rows[1]).getByText("4")).toBeInTheDocument();
     expect(within(rows[3]).queryByText("n/a")).toBeNull();
-    expect(within(details).getAllByText("n/a")).toHaveLength(4);
+    expect(within(details).getAllByText("n/a")).toHaveLength(6);
   });
   it("draws the unknown series as a hatch in the chart and the same hatch in its legend", () => {
     const mixed: Series = { ...series, points: [point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, minBaseFee: "100000000" }), ...series.points] };
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
-    const item = screen.getByText("unknown split (predates the fee split)", { selector: "li span" }).closest("li") as HTMLLIElement;
+    const item = screen.getByText("destination split unavailable", { selector: "li span" }).closest("li") as HTMLLIElement;
     const swatch = item.querySelector("span[aria-hidden]") as HTMLElement;
     // The legend carries the pattern, not a solid square: the association with
     // the hatched area does not depend on colour alone.
@@ -398,7 +403,7 @@ describe("FeeFlows", () => {
   });
 
   it("treats a populated bucket with a bounded block hole as incomplete", () => {
-    const holed: Series = { ...series, points: [series.points[0], { ...series.points[1], gasPerSecond: 25, coverage: 0.8, completeness: "partial" }, series.points[2]] };
+    const holed: Series = { ...series, points: [series.points[0], { ...series.points[1], gasPerSecond: 25, computeGasPerSecond: 25, coverage: 0.8, completeness: "partial" }, series.points[2]] };
     const rows = buildChartPoints(holed, "constraints");
     expect(rows[1].gps).toBe(25);
     const totals = feeTotals(holed);
@@ -421,16 +426,16 @@ describe("FeeFlows", () => {
 
   it("reads a bucket in progress out as what it has collected so far, not as what the bucket holds", () => {
     const rows = feeFlowRows(false);
-    expect(rows.map((r) => r.label)).toEqual(["fees in bucket", "fees so far", "floor to infra", "congestion to network", "floor in force"]);
-    const whole = { feesEth: 1, floorFeesEth: 1, surplusFeesEth: 0, unsplitFeesEth: null, floor: 0.02, partial: null, coverage: 1 };
-    expect(applicableRows(rows, whole).map((r) => r.label)).toEqual(["fees in bucket", "floor to infra", "congestion to network", "floor in force"]);
-    expect(applicableRows(rows, { ...whole, partial: "in-progress", coverage: 0.4 }).map((r) => r.label)).toEqual(["fees so far", "floor to infra", "congestion to network", "floor in force"]);
+    expect(rows.map((r) => r.label)).toEqual(["fees in bucket", "fees so far", "floor to infra", "congestion to network", "poster fee to L1 pricer", "floor in force"]);
+    const whole = { feesEth: 1, floorFeesEth: 1, surplusFeesEth: 0, posterFeesEth: 0, unsplitFeesEth: null, floor: 0.02, partial: null, coverage: 1 };
+    expect(applicableRows(rows, whole).map((r) => r.label)).toEqual(["fees in bucket", "floor to infra", "congestion to network", "poster fee to L1 pricer", "floor in force"]);
+    expect(applicableRows(rows, { ...whole, partial: "in-progress", coverage: 0.4 }).map((r) => r.label)).toEqual(["fees so far", "floor to infra", "congestion to network", "poster fee to L1 pricer", "floor in force"]);
   });
 
   it("shows no unknown-split legend or footnote when every bucket carries the split", () => {
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />);
     expect(screen.queryByText(/predate the fee split/)).toBeNull();
-    expect(screen.queryByText("unknown split (predates the fee split)")).toBeNull();
+    expect(screen.queryByText("destination split unavailable")).toBeNull();
     expect(screen.getByText("congestion to network", { selector: "li span" })).toBeInTheDocument();
   });
 });

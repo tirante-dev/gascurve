@@ -90,7 +90,7 @@ export const UNKNOWN_LABEL = "unknown split (total x, constraint set unknown)";
 /** The same series for points whose set is known but whose per-constraint split predates the record (a null `constraintBips`). */
 export const NULL_SPLIT_LABEL = "unknown split (total x, split not recorded)";
 /** Legend and tooltip label of the fee destination series for buckets whose floor and surplus predate the record. */
-export const UNSPLIT_FEES_LABEL = "unknown split (predates the fee split)";
+export const UNSPLIT_FEES_LABEL = "destination split unavailable";
 
 /** Backlog of slot `index` for points whose constraint set is unknown, keyed buI. */
 export function unknownBacklogKey(index: number): `bu${number}` {
@@ -250,12 +250,13 @@ export type ChartPoint = {
   /** Floor in force at the bucket's last block, gwei; drawn as a stepped line. Null when the bucket holds a block with pricing version 0, which recorded no floor. */
   floor: number | null;
   x: number;
-  /** Null when a missing block interval makes the rate's time divisor unknown. */
+  /** Receipt-backed compute gas per second. Null while poster gas or the rate's time divisor is unavailable. */
   gps: number | null;
   feesEth: number;
-  /** The floor and congestion parts of `feesEth`; null for buckets that predate the fee split, when `unsplitFeesEth` carries the whole. */
+  /** The compute-floor, compute-congestion, and poster parts of `feesEth`. */
   floorFeesEth: number | null;
   surplusFeesEth: number | null;
+  posterFeesEth: number | null;
   /** `feesEth` for buckets whose destination split is unknown, null otherwise. */
   unsplitFeesEth: number | null;
   blocks: number;
@@ -313,7 +314,8 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
     const feesEth = weiToEthNumber(p.feesWei);
     const floorWei = p.floorFeesWei;
     const surplusWei = p.surplusFeesWei;
-    const feeSplitKnown = floorWei !== null && surplusWei !== null;
+    const posterWei = p.posterFeesWei;
+    const feeSplitKnown = typeof floorWei === "string" && typeof surplusWei === "string" && typeof posterWei === "string";
     const pointCoverage = coverageOf(p);
     const row: ChartPoint = {
       t: p.t,
@@ -322,10 +324,12 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
       feeMax: weiToGweiNumber(p.baseFeeMax),
       floor: p.minBaseFee === null ? null : weiToGweiNumber(p.minBaseFee),
       x: bipsToXValue(p.exponentBips),
-      gps: pointCoverage === null || pointCoverage <= 0 ? null : p.gasPerSecond,
+      // Missing and null both mean that receipt-backed compute gas is unknown.
+      gps: pointCoverage === null || pointCoverage <= 0 ? null : (p.computeGasPerSecond ?? null),
       feesEth,
       floorFeesEth: feeSplitKnown ? weiToEthNumber(floorWei) : null,
       surplusFeesEth: feeSplitKnown ? weiToEthNumber(surplusWei) : null,
+      posterFeesEth: feeSplitKnown ? weiToEthNumber(posterWei) : null,
       unsplitFeesEth: feeSplitKnown ? null : feesEth,
       blocks: p.blocks,
       coverage: pointCoverage,
@@ -551,12 +555,12 @@ export function sumWeiEth<K extends string>(points: readonly Record<K, string>[]
 }
 
 /** Sum of a nullable wei-string field over the points that carry it, as ETH, and how many points were left out for lacking it. */
-export function sumKnownWeiEth<K extends string>(points: readonly Record<K, string | null>[], key: K): { eth: number; unknown: number } {
+export function sumKnownWeiEth<K extends string>(points: readonly { [P in K]?: string | null }[], key: K): { eth: number; unknown: number } {
   let total = 0n;
   let unknown = 0;
   for (const p of points) {
     const value = p[key];
-    if (value === null) unknown += 1;
+    if (typeof value !== "string") unknown += 1;
     else total += BigInt(value);
   }
   return { eth: weiToEthNumber(total), unknown };

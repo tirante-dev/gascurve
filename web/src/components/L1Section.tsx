@@ -149,7 +149,8 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
         <p className="mt-3 max-w-[65ch] text-sm text-ink-2">
           The L1 pricer adapts its per-unit price so collected L1 fees match the spending ArbOS attributes to batch posters. The attributed amount combines Nitro&apos;s calldata and storage
           accounting, batch extra gas, the effective per-batch charge, and the ArbOS 50+ parent calldata floor. It is not the batch poster&apos;s Ethereum receipt total. With blobs and compression
-          the cost per transaction is tiny, so <code className="rounded bg-surface-2 px-1 font-mono text-[0.9em] text-ink">gasUsedForL1</code> rounds to 0 on a normal transaction.
+          the cost per transaction is tiny, so <code className="rounded bg-surface-2 px-1 font-mono text-[0.9em] text-ink">gasUsedForL1</code> rounds to 0 on a normal transaction. Receipt{" "}
+          <code className="rounded bg-surface-2 px-1 font-mono text-[0.9em] text-ink">gasUsedForL1</code> is the authoritative poster-gas input for allocating user fees.
         </p>
         <div className="mt-4">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">

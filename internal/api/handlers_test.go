@@ -50,7 +50,7 @@ func seed(t *testing.T) *dbtest.MemStore {
 	var blocks []db.Block
 	for i := uint64(1); i <= 30; i++ {
 		blocks = append(blocks, db.Block{
-			ChainID: robinhood, Number: 1000 + i, TS: now.Add(-time.Duration(31-i) * time.Second), GasUsed: 1_000_000,
+			ChainID: robinhood, Number: 1000 + i, TS: now.Add(-time.Duration(31-i) * time.Second), GasUsed: 1_000_000, PosterGas: sql.NullInt64{Valid: true},
 			BaseFee: db.WeiFromUint64(20_000_000 + i), PredictedBaseFee: db.WeiFromUint64(19_970_000), L1Block: 5, TxCount: 3,
 			Backlogs: db.Uint64Array{i, 100}, ConstraintBips: pq.Int64Array{int64(i), 0}, MinBaseFee: db.NullWeiFromUint64(20_000_000), ExponentBips: int64(i), Anchored: i == 30, PricingVersion: db.PricingFull,
 		})
@@ -74,7 +74,7 @@ func seed(t *testing.T) *dbtest.MemStore {
 		width := db.Resolutions[res]
 		for i := 0; i < 3; i++ {
 			start := now.Add(-time.Duration(i+1) * width).Truncate(width)
-			must(s.FoldBuckets(ctx, []db.Bucket{{ChainID: robinhood, Resolution: res, BucketStart: start, Blocks: 10, GasUsed: 100, FeesWei: db.WeiFromUint64(1000),
+			must(s.FoldBuckets(ctx, []db.Bucket{{ChainID: robinhood, Resolution: res, BucketStart: start, Blocks: 10, GasUsed: 100, PosterGas: sql.NullInt64{Valid: true}, FeesWei: db.WeiFromUint64(1000), PosterFeesWei: db.NullWeiFromUint64(0),
 				BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(2), BaseFeeMax: db.WeiFromUint64(3), BaseFeeSum: db.NullWeiFromUint64(25), ExponentEndBips: 5,
 				BacklogsEnd: db.Uint64Array{1, 2}, BacklogsMax: db.Uint64Array{3, 4}, ConstraintBipsEnd: pq.Int64Array{5, 0}, MinBaseFee: db.NullWeiFromUint64(7), PricingVersion: db.PricingFull,
 				FloorFeesWei: db.NullWeiFromUint64(700), SurplusFeesWei: db.NullWeiFromUint64(300), ConstraintSetID: sql.NullInt64{Int64: 2, Valid: true}, ReplayErrorBips: 9, LastBlock: 10}}))
@@ -206,7 +206,7 @@ func TestEndpoints(t *testing.T) {
 			if s.L1 == nil || s.L1.BaseFeeEstimate != "2369608" || s.Accounts == nil || s.Accounts.Network.Balance != "10706" || s.Legacy != nil {
 				t.Fatalf("live slow data: %+v", s)
 			}
-			if s.GasPerSecond.S10 != 1_000_000 || s.GasPerSecond.S60 != 500_000 || s.ReplayErrorBips != 15 || s.Prices.PerArbGasTotal != "6" {
+			if s.GasPerSecond.S10 != 1_000_000 || s.GasPerSecond.S60 != 500_000 || s.ComputeGasPerSecond.S10 == nil || *s.ComputeGasPerSecond.S10 != 1_000_000 || s.ReplayErrorBips != 15 || s.Prices.PerArbGasTotal != "6" {
 				t.Fatalf("live gps/error: %+v", s)
 			}
 			if s.EthUsd == nil || s.EthUsd.Price != "4523.40" || s.EthUsd.Source != "coinbase" || s.EthUsd.At != "2026-09-06T07:18:00Z" {
@@ -555,6 +555,38 @@ func TestStatusHealthyAfterRecovery(t *testing.T) {
 	}
 }
 
+func TestLiveThroughputKeepsTotalAndMakesComputeNullable(t *testing.T) {
+	ctx := context.Background()
+	store := seed(t)
+	rows := make([]db.Block, 0, 30)
+	for _, block := range store.BlockRows[robinhood] {
+		block.PosterGas = sql.NullInt64{Int64: 100_000, Valid: true}
+		rows = append(rows, block)
+	}
+	if err := store.UpsertBlocks(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := buildLiveIn(ctx, store, robinhood, now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.GasPerSecond != (model.GasPerSecond{S10: 1_000_000, S60: 500_000}) || snap.ComputeGasPerSecond.S10 == nil || *snap.ComputeGasPerSecond.S10 != 900_000 || snap.ComputeGasPerSecond.S60 == nil || *snap.ComputeGasPerSecond.S60 != 450_000 {
+		t.Fatalf("known live rates: %+v", snap)
+	}
+	unknown := store.BlockRows[robinhood][1025]
+	unknown.PosterGas = sql.NullInt64{}
+	if err := store.UpsertBlocks(ctx, []db.Block{unknown}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err = buildLiveIn(ctx, store, robinhood, now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.GasPerSecond != (model.GasPerSecond{S10: 1_000_000, S60: 500_000}) || snap.ComputeGasPerSecond.S10 != nil || snap.ComputeGasPerSecond.S60 != nil {
+		t.Fatalf("unknown compute rates must not change total rates: %+v", snap)
+	}
+}
+
 func TestMethodNotAllowedAndCORS(t *testing.T) {
 	ts := newServer(t, seed(t))
 	resp, err := http.Post(ts.URL+"/api/v1/networks", "application/json", strings.NewReader("{}"))
@@ -586,7 +618,7 @@ func TestSeriesStepDown(t *testing.T) {
 	var blocks []db.Block
 	for i := uint64(0); i < 2500; i++ {
 		blocks = append(blocks, db.Block{ChainID: robinhood, Number: i, TS: now.Add(-time.Duration(2500-i) * 100 * time.Millisecond).Truncate(time.Second), GasUsed: 10,
-			BaseFee: db.WeiFromUint64(100 + i%3), PredictedBaseFee: db.WeiFromUint64(100), Backlogs: db.Uint64Array{i % 5, 9}, ConstraintBips: pq.Int64Array{int64(i), 0}, MinBaseFee: db.NullWeiFromUint64(50), ExponentBips: int64(i), PricingVersion: db.PricingFull})
+			PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(100 + i%3), PredictedBaseFee: db.WeiFromUint64(100), Backlogs: db.Uint64Array{i % 5, 9}, ConstraintBips: pq.Int64Array{int64(i), 0}, MinBaseFee: db.NullWeiFromUint64(50), ExponentBips: int64(i), PricingVersion: db.PricingFull})
 	}
 	if err := store.UpsertBlocks(ctx, blocks); err != nil {
 		t.Fatal(err)
@@ -610,6 +642,44 @@ func TestSeriesStepDown(t *testing.T) {
 	}
 }
 
+func TestSeriesPosterGasFeeDestinations(t *testing.T) {
+	b := db.Block{
+		TS:               now,
+		GasUsed:          422_716,
+		PosterGas:        sql.NullInt64{Int64: 767, Valid: true},
+		BaseFee:          db.WeiFromUint64(20_036_000),
+		PredictedBaseFee: db.WeiFromUint64(20_036_000),
+		MinBaseFee:       db.NullWeiFromUint64(20_000_000),
+		PricingVersion:   db.PricingFull,
+	}
+	points := blockPoints([]db.Block{b}, nil)
+	if len(points) != 1 {
+		t.Fatalf("points: %+v", points)
+	}
+	p := points[0]
+	if p.PosterGas == nil || *p.PosterGas != 767 || p.ComputeGasPerSecond == nil || *p.ComputeGasPerSecond != 421_949 || p.FeesWei != "8469537776000" || p.FloorFeesWei == nil || *p.FloorFeesWei != "8438980000000" || *p.SurplusFeesWei != "15190164000" || *p.PosterFeesWei != "15367612000" {
+		t.Fatalf("block destination split: %+v", p)
+	}
+	stepped := stepDown([]db.Block{b}, nil, 5*time.Second, now)[0]
+	if stepped.PosterGas == nil || *stepped.PosterGas != 767 || stepped.PosterFeesWei == nil || *stepped.PosterFeesWei != "15367612000" {
+		t.Fatalf("step destination split: %+v", stepped)
+	}
+
+	b.PosterGas = sql.NullInt64{}
+	unknown := blockPoints([]db.Block{b}, nil)[0]
+	if unknown.MinBaseFee == nil || unknown.ComputeGasPerSecond != nil || unknown.FloorFeesWei != nil || unknown.SurplusFeesWei != nil || unknown.PosterFeesWei != nil || unknown.PosterGas != nil {
+		t.Fatalf("receipt availability must be independent from pricing: %+v", unknown)
+	}
+	legacyBucket := db.Bucket{
+		BucketStart: now.Add(-time.Minute), Blocks: 1, GasUsed: 10, FeesWei: db.WeiFromUint64(70),
+		BaseFeeAvg: db.WeiFromUint64(7), FloorFeesWei: db.NullWeiFromUint64(40), SurplusFeesWei: db.NullWeiFromUint64(30),
+	}
+	bucket, ok := bucketPoint(legacyBucket, time.Minute, now, time.Time{})
+	if !ok || bucket.FloorFeesWei != nil || bucket.SurplusFeesWei != nil {
+		t.Fatalf("legacy two-way sums must be hidden without poster gas: %+v", bucket)
+	}
+}
+
 // TestUnknownHistoryIsNull: buckets and blocks written before the fee
 // split and the exponents were recorded (pricing version 0, whose unknown
 // columns are NULL) report them as null, never as fabricated zeros or
@@ -630,7 +700,7 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 	if err := store.UpsertBlocks(ctx, []db.Block{
 		{ChainID: robinhood, Number: 1, TS: now.Add(-30 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.WeiFromUint64(5), Backlogs: db.Uint64Array{1}},
 		{ChainID: robinhood, Number: 2, TS: now.Add(-29 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.WeiFromUint64(5), Backlogs: db.Uint64Array{1}},
-		{ChainID: robinhood, Number: 3, TS: now.Add(-20 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(6), PredictedBaseFee: db.WeiFromUint64(6), Backlogs: db.Uint64Array{1}, ConstraintBips: pq.Int64Array{}, MinBaseFee: db.NullWeiFromUint64(2), PricingVersion: db.PricingFull},
+		{ChainID: robinhood, Number: 3, TS: now.Add(-20 * time.Second), GasUsed: 10, PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(6), PredictedBaseFee: db.WeiFromUint64(6), Backlogs: db.Uint64Array{1}, ConstraintBips: pq.Int64Array{}, MinBaseFee: db.NullWeiFromUint64(2), PricingVersion: db.PricingFull},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -781,7 +851,7 @@ func TestStoreFailures(t *testing.T) {
 		"/api/v1/networks/robinhood/series", "/api/v1/networks/robinhood/series?range=24h", "/api/v1/networks/robinhood/constraints",
 		"/api/v1/networks/robinhood/owner-actions", "/api/v1/networks/robinhood/batches", "/api/v1/networks/robinhood/l1", "/api/v1/status",
 	}
-	methods := []string{"Networks", "NetworkByRef", "LatestStateSample", "RecentBlocks", "BlocksBetween", "Buckets", "ConstraintSets", "OwnerActions", "MissingRanges", "BatchBuckets", "BatchReports", "L1Samples", "States", "BlockByNumber", "GasUsedBetween"}
+	methods := []string{"Networks", "NetworkByRef", "LatestStateSample", "RecentBlocks", "BlocksBetween", "Buckets", "ConstraintSets", "OwnerActions", "MissingRanges", "BatchBuckets", "BatchReports", "L1Samples", "States", "BlockByNumber", "GasBetween"}
 	for _, m := range methods {
 		store := seed(t)
 		store.SetFailure(m, true)
@@ -1292,7 +1362,8 @@ func TestSeriesCoverageIncludesHoleInsidePopulatedBucket(t *testing.T) {
 	bucket := func(at time.Time) db.Bucket {
 		return db.Bucket{
 			ChainID: robinhood, Resolution: db.Resolution1m, BucketStart: at, Blocks: 3, GasUsed: 300,
-			FeesWei: db.WeiFromUint64(90), BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1),
+			PosterGas: sql.NullInt64{Int64: 50, Valid: true}, FeesWei: db.WeiFromUint64(90), PosterFeesWei: db.NullWeiFromUint64(50),
+			BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1),
 			BacklogsEnd: db.Uint64Array{}, BacklogsMax: db.Uint64Array{}, PricingVersion: db.PricingFull,
 		}
 	}
@@ -1319,11 +1390,11 @@ func TestSeriesCoverageIncludesHoleInsidePopulatedBucket(t *testing.T) {
 		t.Fatalf("points: %+v", out.Points)
 	}
 	holed := out.Points[0]
-	if holed.Completeness != model.SeriesPartial || holed.Coverage == nil || *holed.Coverage < 0.833 || *holed.Coverage > 0.834 || holed.GasPerSecond != 6 {
+	if holed.Completeness != model.SeriesPartial || holed.Coverage == nil || *holed.Coverage < 0.833 || *holed.Coverage > 0.834 || holed.GasPerSecond != 6 || holed.ComputeGasPerSecond == nil || *holed.ComputeGasPerSecond != 5 {
 		t.Fatalf("populated bucket with internal hole: %+v", holed)
 	}
 	whole := out.Points[1]
-	if whole.Completeness != model.SeriesComplete || whole.Coverage == nil || *whole.Coverage != 1 || whole.GasPerSecond != 5 {
+	if whole.Completeness != model.SeriesComplete || whole.Coverage == nil || *whole.Coverage != 1 || whole.GasPerSecond != 5 || whole.ComputeGasPerSecond == nil || *whole.ComputeGasPerSecond != 4 {
 		t.Fatalf("neighboring whole bucket: %+v", whole)
 	}
 }

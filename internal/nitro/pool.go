@@ -439,6 +439,36 @@ func (a *ArchivePool) L1SampleAt(ctx context.Context, number uint64) (*L1Sample,
 	return nil, fmt.Errorf("%w: %w", ErrNoEndpoint, errors.Join(errs...))
 }
 
+// PricingSampleAt reads state for a historical replay anchor without
+// fetching receipts a second time.
+func (a *ArchivePool) PricingSampleAt(ctx context.Context, number uint64) (*Sample, error) {
+	ctx = withCapability(ctx)
+	var errs []error
+	for range a.pool.endpoints {
+		e := a.Endpoint()
+		if e == nil {
+			break
+		}
+		err := a.pool.verify(ctx, e)
+		if err == nil {
+			var s *Sample
+			if s, err = e.PricingSampleAt(ctx, number); err == nil {
+				return s, nil
+			}
+		}
+		if ctx.Err() != nil || !IsEndpointError(err) {
+			return nil, err
+		}
+		a.pool.log.Warn("archive endpoint failed, moving to the next one", "endpoint", e.index, "err", err.Error())
+		errs = append(errs, err)
+		a.failed(e)
+	}
+	if len(errs) == 0 {
+		return nil, ErrNoEndpoint
+	}
+	return nil, fmt.Errorf("%w: %w", ErrNoEndpoint, errors.Join(errs...))
+}
+
 // Verify checks every endpoint's eth_chainId against the configured chain
 // id. A mismatching endpoint is disabled for good and reported; one that
 // cannot be reached stays unverified and is checked again before its first
@@ -688,6 +718,11 @@ func (p *Pool) FastSample(ctx context.Context) (*Sample, error) {
 // FastSampleAt performs the fast tick pinned to one block.
 func (p *Pool) FastSampleAt(ctx context.Context, number uint64) (*Sample, error) {
 	return call(ctx, p, func(e *Endpoint) (*Sample, error) { return e.FastSampleAt(ctx, number) })
+}
+
+// PricingSampleAt reads only the block and pricing state at one height.
+func (p *Pool) PricingSampleAt(ctx context.Context, number uint64) (*Sample, error) {
+	return call(ctx, p, func(e *Endpoint) (*Sample, error) { return e.PricingSampleAt(ctx, number) })
 }
 
 // L1Sample reads the L1 pricer getters.

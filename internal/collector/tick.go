@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -122,12 +123,12 @@ func (f *Follower) tickWith(ctx context.Context, pinned bool, sampleFn func(cont
 }
 
 // rpcCapacity estimates the sustained JSON-RPC rate this observed head
-// interval needed. A constraints sample costs four calls when pinned to a
-// newHeads block and five when polling must resolve eth_blockNumber first;
-// legacy sampling costs four more. Every intervening header is another call
-// because public endpoints meter batch items individually.
+// interval needed. A constraints sample costs five calls when pinned to a
+// newHeads block and six when polling must resolve eth_blockNumber first;
+// legacy sampling costs four more. Every intervening block costs a header
+// and receipt call because public endpoints meter batch items individually.
 func (f *Follower) rpcCapacity(sample *nitro.Sample, stored uint64, pinned bool) model.RPCCapacity {
-	sampleCalls := uint64(4)
+	sampleCalls := uint64(5)
 	if !pinned {
 		sampleCalls++
 	}
@@ -136,7 +137,7 @@ func (f *Follower) rpcCapacity(sample *nitro.Sample, stored uint64, pinned bool)
 	}
 	needed := sampleCalls
 	if stored > 0 && sample.Header.Number > stored+1 {
-		needed += sample.Header.Number - stored - 1
+		needed += 2 * (sample.Header.Number - stored - 1)
 	}
 	f.mu.Lock()
 	var previous time.Time
@@ -215,6 +216,9 @@ func hashMismatch(a, b string) bool {
 // reorg during the fetch is noticed instead of replayed.
 func verifyChain(headers []nitro.Header) error {
 	for i := 1; i < len(headers); i++ {
+		if headers[i].Number != headers[i-1].Number+1 {
+			return fmt.Errorf("headers %d and %d are not consecutive, retrying", headers[i-1].Number, headers[i].Number)
+		}
 		if hashMismatch(headers[i-1].Hash, headers[i].ParentHash) {
 			return fmt.Errorf("headers %d and %d do not link, retrying", headers[i-1].Number, headers[i].Number)
 		}
@@ -544,11 +548,11 @@ func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole, pend
 	start := st.Clone()
 	backlogs := start.Backlogs()
 	for i := range backlogs {
-		backlogs[i] = pricer.SaturatingUSub(backlogs[i], sample.Header.GasUsed)
+		backlogs[i] = pricer.SaturatingUSub(backlogs[i], sample.Header.ComputeGas())
 	}
 	start.SetBacklogs(backlogs)
 	hdr := sample.Header
-	results := pricer.Replay(start, 0, []pricer.Block{{Number: hdr.Number, Timestamp: hdr.Timestamp, GasUsed: hdr.GasUsed, BaseFee: hdr.BaseFee}},
+	results := pricer.Replay(start, 0, []pricer.Block{{Number: hdr.Number, Timestamp: hdr.Timestamp, GasUsed: hdr.ComputeGas(), BaseFee: hdr.BaseFee}},
 		func(uint64) ([]uint64, bool) { return sampleBacklogs(sample), true })
 	r := results[0]
 	// No known state preceded the seed, so it carries no prediction.
@@ -658,7 +662,16 @@ func replayForward(chainID uint64, st *pricer.State, prevTs uint64, headers []ni
 		}
 		prev = header.Timestamp
 		predicted, exponent, per := st.Step(dt)
-		applyActionGas(st, header.GasUsed, actions[header.Number])
+		boundaries := actions[header.Number]
+		if len(boundaries) > 0 {
+			boundaries = append([]actionBoundary(nil), boundaries...)
+			for i := range boundaries {
+				if gasBefore, ok := header.ComputeGasBeforeTx(boundaries[i].txIndex); ok {
+					boundaries[i].gasBefore = gasBefore
+				}
+			}
+		}
+		applyActionGas(st, header.ComputeGas(), boundaries)
 		result := pricer.Result{
 			Number: header.Number, Exponent: exponent, PerConstraint: per,
 			Predicted: predicted, ErrorBips: pricer.ErrorBips(predicted, header.BaseFee),
@@ -868,15 +881,18 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 				}
 			}
 		}
-		g10, err := s.GasUsedBetween(ctx, f.chainID, headAt.Add(-10*time.Second), headAt)
+		g10, c10, err := s.GasBetween(ctx, f.chainID, headAt.Add(-10*time.Second), headAt)
 		if err != nil {
 			return fmt.Errorf("gas per second: %w", err)
 		}
-		g60, err := s.GasUsedBetween(ctx, f.chainID, headAt.Add(-60*time.Second), headAt)
+		g60, c60, err := s.GasBetween(ctx, f.chainID, headAt.Add(-60*time.Second), headAt)
 		if err != nil {
 			return fmt.Errorf("gas per second: %w", err)
 		}
-		snap := buildSnapshot(f.chainID, sample, headResult, model.GasPerSecond{S10: g10 / 10, S60: g60 / 60}, l1, accounts, ethUsd)
+		snap := buildSnapshot(f.chainID, sample, headResult,
+			model.GasPerSecond{S10: g10 / 10, S60: g60 / 60},
+			model.NullableGasPerSecond{S10: dividedPtr(c10, 10), S60: dividedPtr(c60, 60)},
+			l1, accounts, ethUsd)
 		snapshot = &snap
 		row, err := sampleRow(f.chainID, sample, &snap, includeSlow)
 		if err != nil {
@@ -979,6 +995,10 @@ func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, 
 		for k, v := range r.PerConstraint {
 			bips[k] = int64(v)
 		}
+		posterGas := sql.NullInt64{}
+		if h.PosterGas != nil {
+			posterGas = sql.NullInt64{Int64: int64(*h.PosterGas), Valid: true}
+		}
 		rows[i] = db.Block{
 			ChainID:          chainID,
 			Number:           h.Number,
@@ -986,6 +1006,7 @@ func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, 
 			ParentHash:       h.ParentHash,
 			TS:               time.Unix(int64(h.Timestamp), 0).UTC(),
 			GasUsed:          h.GasUsed,
+			PosterGas:        posterGas,
 			BaseFee:          db.NewWei(h.BaseFee),
 			L1Block:          h.L1BlockNumber,
 			TxCount:          h.TxCount,
@@ -1003,7 +1024,7 @@ func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, 
 
 // buildSnapshot assembles the LiveSnapshot from a sample. ethUsd is the
 // spot the caller already checked for staleness, nil when there is none.
-func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Result, gps model.GasPerSecond, l1 *model.L1, accounts *model.Accounts, ethUsd *model.EthUsd) model.LiveSnapshot {
+func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Result, gps model.GasPerSecond, computeGPS model.NullableGasPerSecond, l1 *model.L1, accounts *model.Accounts, ethUsd *model.EthUsd) model.LiveSnapshot {
 	live := stateFromSample(sample)
 	_, exponent, per := live.Step(0)
 	h := sample.Header
@@ -1015,7 +1036,7 @@ func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Resu
 		ChainID:   chainID,
 		SampledAt: sample.SampledAt.UTC().Format(time.RFC3339),
 		Block: model.LiveBlock{
-			Number: h.Number, TS: h.Timestamp, GasUsed: h.GasUsed, BaseFee: weiString(h.BaseFee), TxCount: h.TxCount,
+			Number: h.Number, TS: h.Timestamp, GasUsed: h.GasUsed, PosterGas: h.PosterGas, BaseFee: weiString(h.BaseFee), TxCount: h.TxCount,
 		},
 		BaseFee:        weiString(h.BaseFee),
 		MinBaseFee:     minFee.String(),
@@ -1028,11 +1049,12 @@ func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Resu
 			PerL2Storage: weiString(sample.Prices.PerL2Storage), PerArbGasBase: weiString(sample.Prices.PerArbGasBase),
 			PerArbGasCongestion: weiString(sample.Prices.PerArbGasCongestion), PerArbGasTotal: weiString(sample.Prices.PerArbGasTotal),
 		},
-		GasPerSecond:    gps,
-		L1:              l1,
-		Accounts:        accounts,
-		ReplayErrorBips: headResult.ErrorBips,
-		EthUsd:          ethUsd,
+		GasPerSecond:        gps,
+		ComputeGasPerSecond: computeGPS,
+		L1:                  l1,
+		Accounts:            accounts,
+		ReplayErrorBips:     headResult.ErrorBips,
+		EthUsd:              ethUsd,
 	}
 	for i, c := range sample.Constraints {
 		snap.Constraints = append(snap.Constraints, model.Constraint{Target: c.Target, Window: c.Window, Backlog: c.Backlog, ExponentBips: int64(per[i])})
@@ -1044,6 +1066,14 @@ func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Resu
 		}
 	}
 	return snap
+}
+
+func dividedPtr(v *uint64, divisor uint64) *uint64 {
+	if v == nil {
+		return nil
+	}
+	result := *v / divisor
+	return &result
 }
 
 // sampleRow converts a snapshot into a state_samples row.
