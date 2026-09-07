@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { LiveStatus } from "@/types";
 
 /** A titled section. The heading stands alone: sections carry no description line. */
@@ -71,6 +71,13 @@ export type NoteAlign = "start" | "end";
  * bridged, or crossing it would close the panel on the way in) and Escape
  * closes it.
  *
+ * Escape has to be caught twice over, because the two ways in leave the key
+ * somewhere different. A reader who focused the figure sends it to the figure;
+ * a reader who only hovered has never moved focus, so it goes to whatever holds
+ * it, usually the body. Hence a handler on the trigger and, while the pointer
+ * is over the note, one on the document. Dismissing has to work without moving
+ * the pointer, which is the whole point of the requirement.
+ *
  * Escape is undone on the way in, by the pointer or the focus arriving, rather
  * than on the way out. Both edges would do in the ordinary case; arriving is
  * the one to hang it on because of how the two fail. A missed leave leaves the
@@ -79,11 +86,28 @@ export type NoteAlign = "start" | "end";
  */
 export function HoverNote({ children, lines, description, align = "start" }: { children: ReactNode; lines: readonly string[]; description: string; align?: NoteAlign }) {
   const [dismissed, setDismissed] = useState(false);
+  const [under, setUnder] = useState(false);
+  // Only while the pointer is on the note: a page of these should not each hold
+  // a document listener for a key that is not being pressed at them.
+  useEffect(() => {
+    if (!under) return;
+    const close = (e: KeyboardEvent) => e.key === "Escape" && setDismissed(true);
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [under]);
   return (
     /* The panel is placed against the tile, not against the figure: a note wider
        than the digits it explains has the whole tile to open into, which is what
        keeps the right-hand one of a pair on screen at a phone's width. */
-    <span className="group relative block" onMouseEnter={() => setDismissed(false)} onFocus={() => setDismissed(false)}>
+    <span
+      className="group relative block"
+      onMouseEnter={() => {
+        setUnder(true);
+        setDismissed(false);
+      }}
+      onMouseLeave={() => setUnder(false)}
+      onFocus={() => setDismissed(false)}
+    >
       {/* A border, not `underline`: the figure inside is an inline-block, which
           text-decoration does not reach, so an underline would rule the dollar
           sign and stop there. */}

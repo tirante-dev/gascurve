@@ -454,6 +454,23 @@ describe("LiveHero", () => {
     fireEvent.mouseEnter(trigger.parentElement as HTMLElement);
     expect(opens()).toBe(true);
   });
+  it("closes a note the pointer opened, where Escape never reaches the figure", async () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    render(<CostTile label="21k transfer" eth={0.0000084} ethUsd={{ price: "4200.00", at: "2026-09-06T07:19:26Z", source: "coinbase" }} nowMs={now} />);
+    const group = (screen.getByText("0.04").closest(".cursor-help") as HTMLElement).parentElement as HTMLElement;
+    const note = screen.getByText("0.00000840 ETH × $4,200.0/ETH = $0.04").parentElement?.parentElement as HTMLElement;
+    const opens = () => note.className.includes("group-hover:block");
+    // Hovering moves no focus, so the key goes to the body, not to the figure.
+    fireEvent.mouseEnter(group);
+    expect(opens()).toBe(true);
+    expect(document.body).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    expect(opens()).toBe(false);
+    // The pointer never moved, which is what the requirement is about.
+    fireEvent.mouseLeave(group);
+    fireEvent.mouseEnter(group);
+    expect(opens()).toBe(true);
+  });
   it("measures the sample age from the wall clock", () => {
     expect(COLLECTOR_LAG_S).toBe(5);
     expect(sampleAge("2026-09-06T07:20:00Z", Date.parse("2026-09-06T07:20:07.9Z"))).toBeCloseTo(7.9);
