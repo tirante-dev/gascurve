@@ -649,7 +649,7 @@ func TestRepairStepWillNotRebuildBelowThePruneFrontier(t *testing.T) {
 // a forward-only frontier recorded then could never be lowered once the live
 // start appeared, and every rebuild would be refused for good. Prune, like
 // the seed, records nothing without a live start.
-func TestPruneRecordsNoFrontierBeforeALiveStart(t *testing.T) {
+func TestPruneDoesNothingToBlocksBeforeALiveStart(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
 	f := newTestFollower(t, newFakeRPC(1000), store)
@@ -665,11 +665,26 @@ func TestPruneRecordsNoFrontierBeforeALiveStart(t *testing.T) {
 	if has {
 		t.Fatal("a live start exists on an empty store, so the test proves nothing")
 	}
+	// The race the guard is for: the first tick commits a row in the gap
+	// between prune's snapshot of the live start and its chain lock. On a
+	// stalled chain that row is older than the wall-clock cutoff.
+	stale := time.Unix(int64(tsFor(900)), 0).UTC().Add(-48 * time.Hour)
+	if err := store.UpsertBlocks(ctx, []db.Block{{
+		ChainID: 4663, Number: 1, Hash: "0x1", ParentHash: "0x0", TS: stale, GasUsed: 1,
+		BaseFee: db.NewWei(feeFor(1)), PredictedBaseFee: db.NewWei(feeFor(1)), TxCount: 1, PricingVersion: db.PricingFull,
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.prune(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := f.pruneFrontier(ctx); err != nil || !got.IsZero() {
 		t.Fatalf("prune recorded a frontier with no live start: %v %v", got, err)
+	}
+	// And it did not delete the row either: a live row deleted with no
+	// record of it is the state the frontier exists to rule out.
+	if b, err := store.BlockByNumber(ctx, 4663, 1); err != nil || b == nil {
+		t.Fatalf("prune deleted a live row with no live start: %v %v", b, err)
 	}
 }
 

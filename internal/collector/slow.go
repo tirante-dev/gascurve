@@ -857,25 +857,33 @@ func (f *Follower) prune(ctx context.Context) error {
 	}
 	var n, m int64
 	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
-		if n, err = s.PruneBlocks(ctx, f.chainID, before); err != nil {
-			return err
+		// Block rows are pruned, and the frontier recorded, only with a
+		// live start, and the two are decided together from this one view
+		// so they cannot disagree. A frontier is only meaningful relative to
+		// a live start, and without one the cutoff is the wall clock, which
+		// on a stalled or development chain sits past every block. The loops
+		// start together, so the first prune can run before the first tick
+		// sets the live start, and that tick can commit its first row in the
+		// gap before this transaction takes the chain lock: a row deleted
+		// then would be a live row, and deleted without a record of it,
+		// which is the exact state the frontier exists to rule out. Doing
+		// nothing is right, since with no live start there are meant to be
+		// no rows. The live start cannot be re-read here: ensureInit holds
+		// f.mu while it takes this lock for the seed, so taking f.mu inside
+		// it would invert that order. Samples carry no such record and are
+		// pruned regardless.
+		if hasBoundary {
+			if n, err = s.PruneBlocks(ctx, f.chainID, before); err != nil {
+				return err
+			}
+			// In the same transaction as the delete it describes, so the
+			// record can never claim rows are gone that are still there.
+			if err := f.recordPruneFrontier(ctx, s, before); err != nil {
+				return err
+			}
 		}
-		if m, err = s.PruneStateSamples(ctx, f.chainID, now.Add(-f.cfg.SampleRetention)); err != nil {
-			return err
-		}
-		// In the same transaction as the delete it describes, so the record
-		// can never claim rows are gone that are still there. Never without
-		// a live start: a frontier is only meaningful relative to one, and
-		// with none the cutoff is the wall clock, which on a stalled or
-		// development chain sits past every block. The loops start together,
-		// so the first prune can run before the first tick sets the live
-		// start, and a forward-only record made then could never be lowered
-		// once it was. The delete is a no-op in that state, since there are
-		// no rows yet, and the seed at startup declines for the same reason.
-		if !hasBoundary {
-			return nil
-		}
-		return f.recordPruneFrontier(ctx, s, before)
+		m, err = s.PruneStateSamples(ctx, f.chainID, now.Add(-f.cfg.SampleRetention))
+		return err
 	})
 	if err != nil {
 		return err
