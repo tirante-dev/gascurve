@@ -158,8 +158,8 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(0); err == nil {
 		t.Fatal("Down(0) should fail")
 	}
-	// Rolling back migration 3 preserves the basic range in the legacy JSON
-	// checkpoint before the table is removed.
+	// Rolling back the missing-ranges migration preserves the basic range in
+	// the legacy JSON checkpoint before the table is removed.
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
@@ -175,8 +175,9 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if v, _, err := m.Version(); err != nil || v != headVersion {
 		t.Fatalf("after migration up: %d %v", v, err)
 	}
-	// Rolling migrations 3 and 2 back keeps the original schema and sample
-	// rows but removes the state-sample index.
+	// Stepping back past the owner-action transaction index removes the
+	// column, and the step below that removes the state-sample index. Both
+	// keep the original schema and the sample rows.
 	if err := m.Down(2); err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +191,7 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-3 {
 		t.Fatalf("after index down: %d %v", v, err)
 	}
 	var indexes int
