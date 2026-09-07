@@ -635,6 +635,11 @@ func (p *Pool) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, er
 	return call(ctx, p, func(e *Endpoint) ([]Block, error) { return e.BlocksWithTxs(ctx, numbers) })
 }
 
+// TransactionReceipts fetches receipts in batches of the endpoint's cap.
+func (p *Pool) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
+	return call(ctx, p, func(e *Endpoint) ([]Receipt, error) { return e.TransactionReceipts(ctx, hashes) })
+}
+
 // OwnerActsLogs fetches OwnerActs events over [from, to].
 func (p *Pool) OwnerActsLogs(ctx context.Context, from, to uint64) ([]Log, error) {
 	return call(ctx, p, func(e *Endpoint) ([]Log, error) { return e.OwnerActsLogs(ctx, from, to) })

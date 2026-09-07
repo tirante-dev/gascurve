@@ -52,6 +52,9 @@ func TestSlowTickOwnerActions(t *testing.T) {
 		if a.TS.IsZero() || a.TS.Unix() != int64(tsFor(a.BlockNumber)) {
 			t.Fatalf("timestamp resolved via header: %+v", a)
 		}
+		if !a.TxIndex.Valid {
+			t.Fatalf("transaction index not recorded: %+v", a)
+		}
 	}
 	// The seed had recorded the live shape as an observed set (id 1) at
 	// the head; the action that explains it moved that row in place, so

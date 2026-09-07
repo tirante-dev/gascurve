@@ -527,7 +527,11 @@ func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []
 	f.mu.Lock()
 	tl := f.timelineLocked(pending)
 	f.mu.Unlock()
-	rows, results, ok := replayLive(f.chainID, st, prevTs, headers, sample, tl)
+	actions, err := f.resolveActionBlocks(ctx, headers, tl)
+	if err != nil {
+		return f.fail(ctx, err)
+	}
+	rows, results, ok := replayLive(f.chainID, st, prevTs, headers, sample, tl, actions)
 	if !ok {
 		h := hole{From: headers[0].Number, To: head - 1}
 		f.log.Warn("pricer parameters changed without a recorded owner action, restarting from the sampled head", "from", h.From, "to", h.To)
@@ -545,7 +549,7 @@ func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []
 // the timeline and anchoring the head to the sample. ok is false when the
 // state's shape or minimum fee still differs from the sample's after the
 // replay: a change happened that no recorded action explains.
-func replayLive(chainID uint64, st *pricer.State, prevTs uint64, headers []nitro.Header, sample *nitro.Sample, tl *timeline) (rows []db.Block, results []pricer.Result, ok bool) {
+func replayLive(chainID uint64, st *pricer.State, prevTs uint64, headers []nitro.Header, sample *nitro.Sample, tl *timeline, actions actionBlocks) (rows []db.Block, results []pricer.Result, ok bool) {
 	head := sample.Header.Number
 	anchor := func(n uint64) ([]uint64, bool) {
 		if n == head {
@@ -553,38 +557,47 @@ func replayLive(chainID uint64, st *pricer.State, prevTs uint64, headers []nitro
 		}
 		return nil, false
 	}
-	rows, results = replayForward(chainID, st, prevTs, headers, tl, anchor)
+	rows, results = replayForward(chainID, st, prevTs, headers, tl, anchor, actions)
 	if !sameShape(st, sample) || st.MinBaseFee.Cmp(bigOrZero(sample.MinBaseFee)) != 0 {
 		return nil, nil, false
 	}
 	return rows, results, true
 }
 
-// replayForward replays headers through st, splitting the run at every
-// block where the timeline records a pricer change (a constraint set, the
-// minimum fee, a legacy parameter) and pinning the backlogs wherever
-// anchor supplies real ones. It is the shared core of the live catch-up
-// and of the gap filler: st is advanced to the end of the last header and
-// each row carries the floor in force at its block.
-func replayForward(chainID uint64, st *pricer.State, prevTs uint64, headers []nitro.Header, tl *timeline, anchor pricer.Anchor) ([]db.Block, []pricer.Result) {
-	var results []pricer.Result
+// replayForward replays headers through st. Actionless observed-set
+// boundaries retain their block-start fallback. Recorded owner pricing
+// actions are applied at their transaction boundaries after Step priced the
+// block, with receipt gas split around each action. The state advances to
+// the end of the last header and each row carries the floor that priced its
+// block.
+func replayForward(chainID uint64, st *pricer.State, prevTs uint64, headers []nitro.Header, tl *timeline, anchor pricer.Anchor, actions actionBlocks) ([]db.Block, []pricer.Result) {
+	results := make([]pricer.Result, 0, len(headers))
 	fees := map[uint64]*big.Int{}
-	start := 0
-	for start < len(headers) {
-		tl.applyAt(st, headers[start].Number)
-		end := start + 1
-		for end < len(headers) && !tl.boundaryAt(headers[end].Number) {
-			end++
+	prev := prevTs
+	for _, header := range headers {
+		for _, change := range tl.changesAt(header.Number, false) {
+			applyPricingChange(st, change)
 		}
-		chunk := headers[start:end]
-		blocks := make([]pricer.Block, len(chunk))
-		for i, h := range chunk {
-			blocks[i] = pricer.Block{Number: h.Number, Timestamp: h.Timestamp, GasUsed: h.GasUsed, BaseFee: h.BaseFee}
-			fees[h.Number] = new(big.Int).Set(st.MinBaseFee)
+		fees[header.Number] = new(big.Int).Set(st.MinBaseFee)
+		var dt uint64
+		if prev != 0 && header.Timestamp > prev {
+			dt = header.Timestamp - prev
 		}
-		results = append(results, pricer.Replay(st, prevTs, blocks, anchor)...)
-		prevTs = chunk[len(chunk)-1].Timestamp
-		start = end
+		prev = header.Timestamp
+		predicted, exponent, per := st.Step(dt)
+		applyActionGas(st, header.GasUsed, actions[header.Number])
+		result := pricer.Result{
+			Number: header.Number, Exponent: exponent, PerConstraint: per,
+			Predicted: predicted, ErrorBips: pricer.ErrorBips(predicted, header.BaseFee),
+		}
+		if anchor != nil {
+			if backlogs, ok := anchor(header.Number); ok {
+				st.SetBacklogs(backlogs)
+				result.Anchored = true
+			}
+		}
+		result.Backlogs = st.Backlogs()
+		results = append(results, result)
 	}
 	rows := blockRows(chainID, headers, results, func(n uint64) *big.Int { return fees[n] })
 	return rows, results
@@ -619,6 +632,8 @@ func (f *Follower) replayStateLocked(ctx context.Context, sample *nitro.Sample) 
 	// scan finds any change after the row and a default is no evidence.
 	tl := f.timelineLocked(nil)
 	switch {
+	case tl.feeChangesInBlock(last.Number):
+		st.MinBaseFee = tl.minFeeAfter(last.Number)
 	case tl.minFeeChangeBlock(last.Number) == 0:
 		st.MinBaseFee = bigOrZero(sample.MinBaseFee)
 	case last.MinBaseFee.Valid && last.MinBaseFee.Wei.BigInt().Sign() > 0:

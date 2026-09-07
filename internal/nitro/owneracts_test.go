@@ -57,7 +57,7 @@ func TestDecodeOwnerActsFixture(t *testing.T) {
 			t.Fatalf("log %d: %v", i, err)
 		}
 		w := want.Events[i]
-		if got.BlockNumber != w.Block || got.TxHash != w.Tx || got.Method != w.Method || got.Selector != w.Selector {
+		if got.BlockNumber != w.Block || got.TxHash != w.Tx || got.TxIndex != logs[i].TxIndex || got.Method != w.Method || got.Selector != w.Selector {
 			t.Fatalf("log %d: got %+v want %+v", i, got, w)
 		}
 		if got.Owner != "0x2a153c6a1b66dbc930a8d7017230ab0253005c09" && got.BlockNumber != 11 {

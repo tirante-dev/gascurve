@@ -99,6 +99,12 @@ func (c *Client) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, 
 	return blocksByNumbers(ctx, numbers, true, c.chunk)
 }
 
+// TransactionReceipts fetches receipts in batches of at most MaxBatch, in
+// the same order as hashes.
+func (c *Client) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
+	return transactionReceipts(ctx, hashes, c.chunk)
+}
+
 // batcher sends a request list of any length, splitting it into HTTP
 // batches as it sees fit, and returns one Result per request in order.
 type batcher func(ctx context.Context, reqs []Request) ([]Result, error)
@@ -142,6 +148,32 @@ func blocksByNumbers(ctx context.Context, numbers []uint64, full bool, send batc
 			return nil, fmt.Errorf("block %d: %w", numbers[i], err)
 		}
 		out = append(out, *b)
+	}
+	return out, nil
+}
+
+func transactionReceipts(ctx context.Context, hashes []string, send batcher) ([]Receipt, error) {
+	reqs := make([]Request, len(hashes))
+	for i, hash := range hashes {
+		reqs[i] = Request{Method: "eth_getTransactionReceipt", Params: []any{hash}}
+	}
+	results, err := send(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != len(hashes) {
+		return nil, fmt.Errorf("receipts: got %d results for %d transactions", len(results), len(hashes))
+	}
+	out := make([]Receipt, 0, len(hashes))
+	for i, result := range results {
+		if result.Err != nil {
+			return nil, fmt.Errorf("receipt %s: %w", hashes[i], result.Err)
+		}
+		receipt, err := parseReceipt(result.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("receipt %s: %w", hashes[i], err)
+		}
+		out = append(out, *receipt)
 	}
 	return out, nil
 }
