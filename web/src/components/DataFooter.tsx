@@ -16,8 +16,8 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
         <div>
           <h2 className="mb-2 text-sm font-semibold text-ink">What is live</h2>
           <p>
-            Base fee, backlogs, prices, gas per second, fee-account balances and L1 pricer values come from the collector&apos;s one-second sample of the chain&apos;s precompiles, pushed over a
-            WebSocket ({STATUS_COPY[status].label}). Balances and L1 values refresh on the slow, 60 s tick.
+            Base fee, backlogs, prices and gas per second update on new heads when a WebSocket head feed is configured, or every 3 s by default on public RPC networks. Fee-account balances and
+            L1 pricer values refresh from a separate slow sample every 60 s. Live snapshots are pushed over a WebSocket ({STATUS_COPY[status].label}).
           </p>
         </div>
         <div>
