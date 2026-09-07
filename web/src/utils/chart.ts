@@ -8,7 +8,6 @@ import { formatDuration, formatGas, formatGasPerSecond, formatInteger, weiToEthN
 
 export const MAX_SERIES = 6;
 
-/** CSS variable for a constraint's colour, by index in the set (fixed order, never cycled). */
 export function seriesColor(index: number): string {
   return `var(--series-${Math.min(MAX_SERIES, index + 1)})`;
 }
@@ -16,19 +15,15 @@ export function seriesColor(index: number): string {
 /** Colour of the "unknown split" series: the muted ink, never a constraint colour. */
 export const UNKNOWN_COLOR = "var(--ink-3)";
 
-/** The floor line and its legend swatch: the cyan accent, never a constraint colour. */
 export const FLOOR_COLOR = "var(--floor)";
 
-/** Owner-action markers on the history charts: the magenta accent. */
 export const MARKER_COLOR = "var(--marker)";
 
-/** Ramp step for a single constraint's exponent contribution, 0 to 4 spans the ramp. */
 export function contributionRampStep(exponentBips: number): number {
   const x = Math.max(0, exponentBips / 10_000);
   return 1 + Math.round(Math.min(1, x / 4) * 8);
 }
 
-/** "60 Mgas/s over 15 s". */
 export function constraintLabel(c: Pick<ConstraintSetEntry, "target" | "window">): string {
   return `${formatGasPerSecond(c.target)} over ${formatDuration(c.window)}`;
 }
@@ -37,12 +32,10 @@ export function shortConstraintLabel(c: Pick<ConstraintSetEntry, "target" | "win
   return `${formatGasPerSecond(c.target)} · ${formatDuration(c.window)}`;
 }
 
-/** Integer bips into x for display. Contributions are only ever divided here. */
 export function bipsToXValue(bips: number): number {
   return bips / 10_000;
 }
 
-/** Each constraint's share of the total, 0 to 1, from integer bips. Zero total gives zero shares. */
 export function sharesOf(bips: readonly number[]): number[] {
   const total = bips.reduce((sum, b) => sum + Math.max(0, b), 0);
   return bips.map((b) => (total > 0 ? Math.max(0, b) / total : 0));
@@ -72,12 +65,10 @@ export const NULL_SPLIT_LABEL = "unknown split (total x, split not recorded)";
 /** Legend and tooltip label of the fee destination series for buckets whose floor and surplus predate the record. */
 export const UNSPLIT_FEES_LABEL = "destination split unavailable";
 
-/** Backlog of slot `index` for points whose constraint set is unknown, keyed buI. */
 export function unknownBacklogKey(index: number): `bu${number}` {
   return `bu${index}`;
 }
 
-/** Label of backlog panel `index` when no definition for it is known. */
 export function unknownSlotLabel(index: number): string {
   return `C${index + 1} · definition unknown`;
 }
@@ -103,23 +94,19 @@ export function segmentLabel(set: Pick<ConstraintSet, "id" | "effectiveBlock">, 
   return `C${index + 1} · ${shortConstraintLabel(c)} · ${setLabel(set)}`;
 }
 
-/** Sets sorted by the block they took effect, oldest first. */
 export function sortedSets(series: Pick<Series, "constraintSets">): ConstraintSet[] {
   return [...series.constraintSets].sort((a, b) => a.effectiveBlock - b.effectiveBlock || a.id - b.id);
 }
 
-/** The constraint set with the newest effective block. */
 export function latestSet(series: Pick<Series, "constraintSets">): ConstraintSet | undefined {
   return sortedSets(series).pop();
 }
 
-/** How many constraint slots a point's data has: from its split when recorded, else from its backlogs. */
 function slotCount(p: Pick<SeriesPoint, "constraintBips" | "backlogs">): number {
   const bips = p.constraintBips;
   return bips !== null && bips.length > 0 ? bips.length : p.backlogs.length;
 }
 
-/** True when a point carries per-constraint data at all. */
 function hasConstraintData(p: Pick<SeriesPoint, "constraintBips" | "backlogs">): boolean {
   return slotCount(p) > 0;
 }
@@ -151,13 +138,11 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">, m
   return out;
 }
 
-/** True when the set's constraint count matches the point's per-constraint data. */
 export function shapeMatches(set: Pick<ConstraintSet, "constraints">, p: Pick<SeriesPoint, "constraintBips" | "backlogs">): boolean {
   const n = slotCount(p);
   return n === 0 || set.constraints.length === n;
 }
 
-/** The segments that describe a point: those of its set when the shape agrees, otherwise none (unknown split). */
 function ownSegments(bySet: Map<number, Segment[]>, p: Pick<SeriesPoint, "constraintSetId" | "constraintBips" | "backlogs">): Segment[] | undefined {
   const candidate = bySet.get(p.constraintSetId);
   const n = slotCount(p);
@@ -184,7 +169,6 @@ export function hasUnknownSets(series: Pick<Series, "constraintSets" | "points">
   return series.points.some((p) => ownSegments(bySet, p) === undefined);
 }
 
-/** True when some point's per-constraint split was never recorded (pricing version 0 history). */
 export function hasUnrecordedSplit(series: Pick<Series, "points">): boolean {
   return series.points.some((p) => p.constraintBips === null);
 }

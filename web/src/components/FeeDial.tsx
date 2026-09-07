@@ -17,27 +17,22 @@ const TONE_TEXT: Record<DialTone, string> = {
   critical: "text-dial-critical",
 };
 
-/** The stroke of the three bands. */
 const BAND_WIDTH = 9;
 
 /** How far from the hub the needle reaches: short of the bands, so its tip sits inside the rim. */
 const NEEDLE_RADIUS = DIAL_RADIUS - BAND_WIDTH;
 
 /**
- * The multiplier over the floor as a speedometer: three bands, green through
- * amber to red, a needle at the multiplier on a log scale from the floor to a
- * hundred times it, and the figure itself under the dial in the band's
- * colour. It stood here before as a tile on a nine-step ramp, which put the
- * everyday state of a chain somewhere hot; three bands at round thresholds
- * say plainly which state the chain is in. The needle follows the eased
- * multiplier, so it moves with the figure beside it rather than jumping once
- * a sample.
+ * The multiplier over the floor as a speedometer: three bands, green through amber to red, a needle at
+ * the multiplier on a log scale from the floor to a hundred times it, and the figure under the dial in
+ * the band's colour. A nine-step ramp put the everyday state of a chain somewhere hot; three bands at
+ * round thresholds say plainly which state it is in. The needle follows the eased multiplier, so it
+ * moves with the figure beside it rather than jumping once a sample.
  */
 export function FeeDial({ baseFeeGwei, floorGwei, multiplier }: { baseFeeGwei: number; floorGwei: string; multiplier: number }) {
   const figure = formatMultiplierFixed(multiplier);
-  // The tone follows the figure as printed, not the raw multiplier: 2.004×
-  // prints as "2.00×", and a "2.00×" in amber under a note that says green
-  // runs to 2× would contradict itself.
+  // The tone follows the figure as printed, not the raw multiplier: 2.004x prints as "2.00x", and a
+  // "2.00x" in amber under a note that says green runs to 2x would contradict itself.
   const tone = dialTone(Number(figure));
   const tip = dialPoint(dialPosition(multiplier), NEEDLE_RADIUS);
   // Each side is rounded on its own, so the product is only ever about equal.
