@@ -233,6 +233,17 @@ if render "metrics" "${work}/metrics.yaml" --values "${ci}/metrics-values.yaml";
   # alert is for.
   has "${work}/metrics.yaml" 'expr: "absent(up{job=..gascurve-api' "metrics: the api down alert does not use absent(up == 1)"
   lacks "${work}/metrics.yaml" 'up{[^}]*} == 0' "metrics: an up == 0 alert cannot fire once its target is gone"
+  # absent() takes its labels from a bare selector and not from a
+  # comparison, and sum() and min by () drop them, so the job and the
+  # namespace are literal labels on every rule: without them two releases
+  # fire alerts Alertmanager cannot tell apart.
+  if ! awk '/^ *- alert: /{ rule = $0; job = 0; ns = 0 }
+    /^ *job: /{ job = 1 }
+    /^ *namespace: /{ ns = 1 }
+    /^ *description: /{ if (!job || !ns) { print "    " rule; bad = 1 } }
+    END { exit bad }' "${work}/metrics.yaml"; then
+    fail "metrics: the rule above does not label the alert with this release's job and namespace"
+  fi
   # An alert switched off leaves no rule behind.
   lacks "${work}/metrics.yaml" 'alert: GascurveCollectorDown' "metrics: rendered an alert that was disabled"
   ok "ServiceMonitors, PrometheusRule and the split lag thresholds"
@@ -245,6 +256,22 @@ if render "metrics-port-zero" "${work}/metrics-zero.yaml" --values "${ci}/existi
   lacks "${work}/metrics-zero.yaml" 'port: metrics' "metrics-port-zero: something still scrapes the collector"
   has "${work}/metrics-zero.yaml" 'port: http' "metrics-port-zero: the api ServiceMonitor went away with the collector's"
   ok "collector server, Service and ServiceMonitor all gone, api untouched"
+fi
+
+# absent(up == 1) fires when no target exists at all, so a rule kept for a
+# component this release does not scrape pages for ever. The groups are
+# gated on the same condition as the ServiceMonitors.
+echo "== no rules for a component this release does not scrape"
+if render "rules-port-zero" "${work}/rules-zero.yaml" --values "${ci}/metrics-values.yaml" \
+  --set config.collector.metrics_port=0; then
+  lacks "${work}/rules-zero.yaml" 'name: gascurve\.collector' "rules-port-zero: collector rules rendered although nothing scrapes the collector"
+  has "${work}/rules-zero.yaml" 'name: gascurve\.api' "rules-port-zero: the api rules went away with the collector's"
+  ok "collector group gone, api group untouched"
+fi
+if render "rules-web-only" "${work}/rules-web.yaml" --values "${ci}/metrics-values.yaml" \
+  --set api.enabled=false --set collector.enabled=false --set web.enabled=true; then
+  lacks "${work}/rules-web.yaml" 'kind: PrometheusRule' "rules-web-only: rendered rules for an api and a collector this release does not deploy"
+  ok "no PrometheusRule at all on a web-only install"
 fi
 
 echo "== an ingress with no backend is refused"

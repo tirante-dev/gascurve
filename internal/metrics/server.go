@@ -36,9 +36,10 @@ type Server struct {
 }
 
 // NewServer binds addr and prepares the handler. Binding here rather than
-// in Run means a port already in use is reported at startup instead of
-// leaving the process running unscraped. ctx bounds the bind alone; Run
-// takes the context the server lives by.
+// in Run means a port already in use is reported before Run is ever
+// reached, and the caller decides what that is worth: the collector logs
+// it and follows the chains unscraped rather than exiting. ctx bounds the
+// bind alone; Run takes the context the server lives by.
 func NewServer(ctx context.Context, addr string, g prometheus.Gatherer, log *logger.Logger) (*Server, error) {
 	if log == nil {
 		log = logger.Nop()

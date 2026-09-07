@@ -13,6 +13,16 @@ cluster or only a name. Scraping through a hand-written scrape_config with
 a different job name therefore needs metrics.prometheusRule set aside as
 well; see the chart README.
 
+A group is emitted only for a component this release actually scrapes, on
+the same condition as its ServiceMonitor. absent(up == 1) fires when no
+target exists, so a rule left behind for a component that was never
+deployed, or for a collector whose metrics_port is 0, would page for ever.
+
+Every rule carries the job and namespace as literal labels: absent() takes
+them from a bare selector alone and not from a comparison, and sum() and
+min by () drop them outright, so the alert that fires would otherwise not
+say which release it came from and Alertmanager would merge two of them.
+
 Prometheus label and value references are written as raw literals here, so
 Helm leaves them for Prometheus to expand.
 */}}
@@ -26,6 +36,8 @@ in. The job alone is not enough, because two namespaces running a release
 of the same name produce the same job, and their series would then be
 aggregated together.
 */}}
+{{- $collectorScraped := and .Values.collector.enabled (gt (int .Values.config.collector.metrics_port) 0) }}
+{{- $apiScraped := .Values.api.enabled }}
 {{- $apiTarget := printf "job=\"%s-api\",namespace=\"%s\"" $fullname .Release.Namespace }}
 {{- $collectorTarget := printf "job=\"%s-collector\",namespace=\"%s\"" $fullname .Release.Namespace }}
 {{- $apiJob := printf "%s-api" $fullname }}
@@ -37,6 +49,7 @@ aggregated together.
 {{- $percent := `{{ $value | humanizePercentage }}` }}
 
 {{- $collectorRules := list }}
+{{- if $collectorScraped }}
 {{- with $alerts.collectorLagDedicated }}
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
@@ -98,7 +111,10 @@ aggregated together.
 {{- end }}
 {{- end }}
 
+{{- end }}
+
 {{- $apiRules := list }}
+{{- if $apiScraped }}
 {{- with $alerts.apiDown }}
 {{- if .enabled }}
 {{- $apiRules = append $apiRules (dict
@@ -130,6 +146,8 @@ aggregated together.
 {{- end }}
 {{- end }}
 
+{{- end }}
+
 {{- if or $collectorRules $apiRules }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -151,6 +169,8 @@ spec:
           for: {{ .for }}
           labels:
             severity: {{ .severity }}
+            job: {{ $collectorJob | quote }}
+            namespace: {{ $.Release.Namespace | quote }}
             {{- with $pr.alertLabels }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -168,6 +188,8 @@ spec:
           for: {{ .for }}
           labels:
             severity: {{ .severity }}
+            job: {{ $apiJob | quote }}
+            namespace: {{ $.Release.Namespace | quote }}
             {{- with $pr.alertLabels }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
