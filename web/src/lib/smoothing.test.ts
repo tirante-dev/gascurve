@@ -125,7 +125,7 @@ describe("averageBacklog and sawtoothSamples", () => {
     expect(sawtoothSamples(blocks, 5, 1000)).toEqual([]);
   });
 
-  it("places the sawtooth on a clock-anchored axis and carries the trailing average with it", () => {
+  it("places the sawtooth on a clock-anchored axis", () => {
     const samples = sawtoothSamples(blocks, 0, 1000);
     // The wall clock at the start of the second after the newest block.
     const chart = sawtoothChart(samples, 1_001_000);
@@ -137,12 +137,8 @@ describe("averageBacklog and sawtoothSamples", () => {
     expect(chart[chart.length - 1].x).toBeCloseTo(-0.1);
     expect(chart.every((p, i) => i === 0 || p.x > chart[i - 1].x)).toBe(true);
     expect(chart[chart.length - 1]).toMatchObject({ number: 200, gasUsed: 4_000_000, backlog: 40_000_000 });
-    // The average is the same 2 s per-block mean the card's figure shows.
-    expect(chart[chart.length - 1].average).toBe(averageBacklog(blocks, 0, 1000));
-    // The first sample has only its own second to average over.
-    expect(chart[0].average).toBe(4_000_000);
-    // A single block sits at the start of its second, and its average is itself.
-    expect(sawtoothChart([{ number: 1, ts: 1000, gasUsed: 5, backlog: 7 }], 1_001_000)).toEqual([{ x: -1, number: 1, ts: 1000, gasUsed: 5, backlog: 7, average: 7 }]);
+    // A single block sits at the start of its second.
+    expect(sawtoothChart([{ number: 1, ts: 1000, gasUsed: 5, backlog: 7 }], 1_001_000)).toEqual([{ x: -1, number: 1, ts: 1000, gasUsed: 5, backlog: 7 }]);
     expect(sawtoothChart([], 1000)).toEqual([]);
   });
 
