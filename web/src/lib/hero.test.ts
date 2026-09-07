@@ -1,5 +1,6 @@
 import { act } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { assignPlaces, NO_PLACES } from "@/lib/smoothing";
 import type { BlockPoint } from "@/types";
 import {
   HERO_RANGE_KEY,
@@ -42,9 +43,24 @@ function ring(seconds: number, perSecond: number, lastTs = LAST_TS, gasUsed = 4_
   return out;
 }
 
+/** The ring's placement of `blocks`, as the frame store keeps it. */
+function placed(blocks: readonly BlockPoint[]) {
+  return assignPlaces(NO_PLACES, blocks);
+}
+
+/** The chart data of a ring placed in one go, the ordinary case for a caller with a fresh ring. */
+function chart(blocks: readonly BlockPoint[], nowMs: number, seconds?: number) {
+  return seconds === undefined ? heroChartData(blocks, placed(blocks), nowMs) : heroChartData(blocks, placed(blocks), nowMs, seconds);
+}
+
+/** The throughput data of a ring placed in one go. */
+function throughput(blocks: readonly BlockPoint[], nowMs: number, seconds?: number) {
+  return seconds === undefined ? heroThroughputData(blocks, placed(blocks), nowMs) : heroThroughputData(blocks, placed(blocks), nowMs, seconds);
+}
+
 describe("heroChartData", () => {
   it("places every block of the window on a clock-anchored axis, spreading a shared second across it", () => {
-    const points = heroChartData(ring(3, 4), NOW_MS);
+    const points = chart(ring(3, 4), NOW_MS);
     expect(points).toHaveLength(12);
     // The oldest second starts three seconds back and its four blocks are
     // spread evenly across it; the newest block is the right edge.
@@ -56,32 +72,32 @@ describe("heroChartData", () => {
     expect(points[0].ts).toBe(LAST_TS - 2);
   });
   it("keeps only the blocks inside the window, measured from the clock", () => {
-    const points = heroChartData(ring(200, 1), NOW_MS);
+    const points = chart(ring(200, 1), NOW_MS);
     expect(points).toHaveLength(HERO_WINDOW_S);
     expect(points[0].x).toBe(-119.5);
     expect(points[points.length - 1].x).toBe(-0.5);
   });
   it("lets a block ahead of a slow browser clock set the edge instead of drawing past it", () => {
     const blocks = [...ring(2, 1), { ...ring(1, 1)[0], number: 999, ts: LAST_TS + 5 }];
-    const points = heroChartData(blocks, NOW_MS);
+    const points = chart(blocks, NOW_MS);
     expect(points[points.length - 1]).toMatchObject({ number: 999, x: 0 });
     expect(points[0].x).toBe(-6);
   });
   it("leaves the earlier points where they were when another block lands in the newest second", () => {
     const blocks = ring(2, 4);
-    const before = heroChartData(blocks.slice(0, 6), NOW_MS);
-    const after = heroChartData(blocks.slice(0, 7), NOW_MS);
+    const before = chart(blocks.slice(0, 6), NOW_MS);
+    const after = chart(blocks.slice(0, 7), NOW_MS);
     expect(after.slice(0, 6).map((p) => p.x)).toEqual(before.map((p) => p.x));
     expect(after[6].x).toBeGreaterThan(after[5].x);
   });
   it("slides with the clock", () => {
     // A clock already past the newest block, so the edge is the clock both times.
-    const now = heroChartData(ring(2, 4), NOW_MS + 500);
-    const later = heroChartData(ring(2, 4), NOW_MS + 1500);
+    const now = chart(ring(2, 4), NOW_MS + 500);
+    const later = chart(ring(2, 4), NOW_MS + 1500);
     later.forEach((p, i) => expect(p.x).toBeCloseTo(now[i].x - 1, 9));
   });
   it("has nothing to draw from an empty ring", () => {
-    expect(heroChartData([], NOW_MS)).toEqual([]);
+    expect(chart([], NOW_MS)).toEqual([]);
   });
 });
 
@@ -116,26 +132,26 @@ describe("the relative time axis", () => {
 
 describe("heroFeeDomain", () => {
   it("holds the fees and the floor with a little padding, so neither sits on the frame", () => {
-    const points = heroChartData(ring(2, 1), NOW_MS);
+    const points = chart(ring(2, 1), NOW_MS);
     const [min, max] = heroFeeDomain(points, 0.02);
     // The floor is the low end, the fee the high one, padded by a twentieth of the span.
     expect(min).toBeCloseTo(0.02 - (0.399726 - 0.02) / 20, 6);
     expect(max).toBeCloseTo(0.399726 + (0.399726 - 0.02) / 20, 6);
   });
   it("gives a flat series a band to draw in, and never asks for a negative fee", () => {
-    const flat = heroChartData(ring(2, 1), NOW_MS).map((p) => ({ ...p, fee: 0.02 }));
+    const flat = chart(ring(2, 1), NOW_MS).map((p) => ({ ...p, fee: 0.02 }));
     const [min, max] = heroFeeDomain(flat, 0.02);
     expect(min).toBeCloseTo(0.018, 6);
     expect(max).toBeCloseTo(0.022, 6);
     expect(heroFeeDomain([], 0)).toEqual([0, 1]);
     expect(heroFeeDomain([], Number.NaN)).toEqual([0, 1]);
-    expect(heroFeeDomain(heroChartData(ring(2, 1), NOW_MS), 0)[0]).toBe(0);
+    expect(heroFeeDomain(chart(ring(2, 1), NOW_MS), 0)[0]).toBe(0);
   });
 });
 
 describe("heroFeeAxis", () => {
   it("snaps the band out to round ticks that all read at one width", () => {
-    const points = heroChartData(ring(2, 1), NOW_MS);
+    const points = chart(ring(2, 1), NOW_MS);
     const axis = heroFeeAxis(points, 0.02);
     expect(axis.ticks).toEqual([0, 0.1, 0.2, 0.3, 0.4, 0.5]);
     expect(axis.domain).toEqual([0, 0.5]);
@@ -155,7 +171,7 @@ describe("heroFeeAxis", () => {
 });
 
 describe("stableFeeAxis", () => {
-  const at = (fee: number) => heroChartData(ring(2, 1), NOW_MS).map((p) => ({ ...p, fee }));
+  const at = (fee: number) => chart(ring(2, 1), NOW_MS).map((p) => ({ ...p, fee }));
   it("starts from the fresh axis", () => {
     expect(stableFeeAxis(null, at(0.4), 0.02)).toEqual(heroFeeAxis(at(0.4), 0.02));
   });
@@ -278,7 +294,7 @@ describe("the hero range", () => {
 describe("the live throughput series", () => {
   it("sums each whole second's blocks and places the second at its own end", () => {
     // Three blocks a second for five seconds, 4 Mgas each: 12 Mgas a second.
-    const points = heroThroughputData(ring(5, 3), NOW_MS);
+    const points = throughput(ring(5, 3), NOW_MS);
     // The seconds at either end of the ring are partial and are left out.
     expect(points.map((p) => p.ts)).toEqual([LAST_TS - 3, LAST_TS - 2, LAST_TS - 1]);
     expect(points.map((p) => p.gas)).toEqual([12_000_000, 12_000_000, 12_000_000]);
@@ -295,20 +311,48 @@ describe("the live throughput series", () => {
     // already moved past it: without the rule it would read as a chain that
     // stopped carrying gas.
     const partial = [...ring(4, 10, LAST_TS - 1), ...ring(1, 3, LAST_TS)];
-    const points = heroThroughputData(partial, (LAST_TS + 2) * 1000);
+    const points = throughput(partial, (LAST_TS + 2) * 1000);
     expect(points.map((p) => p.ts)).toEqual([LAST_TS - 3, LAST_TS - 2, LAST_TS - 1]);
     expect(points.every((p) => p.blocks === 10)).toBe(true);
   });
 
+  it("draws a quiet second as zero rather than letting the line carry over it", () => {
+    // Blocks in every second but one. The ring is continuous across the quiet
+    // one (consecutive block numbers), so the chain really did carry nothing
+    // through it, and an area that interpolated across it said otherwise.
+    // Renumbered, because a second the chain produced no block in leaves no
+    // hole in the block numbers either.
+    const blocks = ring(5, 2)
+      .filter((b) => b.ts !== LAST_TS - 2)
+      .map((b, i) => ({ ...b, number: i + 1 }));
+    const points = throughput(blocks, NOW_MS);
+    expect(points.map((p) => p.ts)).toEqual([LAST_TS - 3, LAST_TS - 2, LAST_TS - 1]);
+    expect(points.map((p) => p.gas)).toEqual([8_000_000, 0, 8_000_000]);
+    expect(points.map((p) => p.blocks)).toEqual([2, 0, 2]);
+  });
+
+  it("draws a hole in the ring itself as a break, because nobody measured that second", () => {
+    // The same shape, but the block numbers jump across the empty second: the
+    // blocks of that second are missing from the ring rather than absent from
+    // the chain, and zero would be a claim nobody can make.
+    // Here the block numbers keep the two the ring never received, so the jump
+    // says the blocks are missing rather than that the chain was idle.
+    const gapped = ring(5, 2).filter((b) => b.ts !== LAST_TS - 2);
+    const points = throughput(gapped, NOW_MS);
+    expect(points.map((p) => p.ts)).toEqual([LAST_TS - 3, LAST_TS - 2, LAST_TS - 1]);
+    expect(points.map((p) => p.gas)).toEqual([8_000_000, null, 8_000_000]);
+    expect(points.map((p) => p.blocks)).toEqual([2, null, 2]);
+  });
+
   it("reaches back over the window and no further, and has nothing to say about an empty ring", () => {
-    expect(heroThroughputData([], NOW_MS)).toEqual([]);
-    const long = heroThroughputData(ring(HERO_WINDOW_S + 30, 1), NOW_MS);
+    expect(throughput([], NOW_MS)).toEqual([]);
+    const long = throughput(ring(HERO_WINDOW_S + 30, 1), NOW_MS);
     expect(long).toHaveLength(HERO_WINDOW_S);
     expect(long[0].x).toBeGreaterThanOrEqual(-HERO_WINDOW_S);
     // A shorter window keeps only what fits in it.
-    expect(heroThroughputData(ring(20, 1), NOW_MS, 5)).toHaveLength(5);
+    expect(throughput(ring(20, 1), NOW_MS, 5)).toHaveLength(5);
     // A ring with nothing whole in it draws nothing rather than a fraction.
-    expect(heroThroughputData(ring(2, 3), NOW_MS)).toEqual([]);
+    expect(throughput(ring(2, 3), NOW_MS)).toEqual([]);
   });
 });
 

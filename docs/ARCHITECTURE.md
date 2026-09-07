@@ -178,7 +178,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 | `GET /status` | `{ version, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion, holes: { pending, blocks, unfillable }, activeEndpoint, failovers, endpoints: [{ index, ws, archive, disabled, error: string | null, wsCooling, wsError: string | null }] }] }` (`headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion` are nullable; `endpoints` is `[]` when unknown; endpoint URLs are never exposed, in `error` and `wsError` either. `wsCooling` reports an endpoint whose WebSocket is cooled down after a dial, subscribe or repeated disconnect failure: its JSON-RPC keeps serving ordinary calls while the head subscription moves to another endpoint. `holes.pending` counts the ranges queued for the gap filler, `holes.unfillable` the ones nothing can be replayed into, and `holes.blocks` how many blocks are still not indexed across both) |
 | `GET /ws?network=…` | WebSocket, see §7 |
 
-Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applied server-side if more than 2000 points), `24h` → `1m` buckets, `30d` → `15m`, `all` → `1h`. `/live` returns 404 until the collector has produced a sample. Arrays are never `null` in responses. `L1Series` reaches back at most `collector.sample_retention`.
+Points in `Series`, `BatchSeries` and `L1Series` are always ascending by `t`. Range to resolution: `1h` → per block from `blocks` (a `step` of 5 s is applied server-side if more than 2000 points), `24h` → `1m` buckets, `30d` → `15m`, `all` → `1h`. `/live` returns 404 until the collector has produced a sample. Arrays are never `null` in responses. `L1Series` reaches back at most `collector.sample_retention`.
 
 ```ts
 type Network = {
@@ -229,6 +229,7 @@ type Series = {
 type SeriesPoint = {
   t: number;                               // unix seconds, bucket start
   blocks: number; gasUsed: number; gasPerSecond: number; feesWei: string;
+  // minBaseFee, floorFeesWei and surplusFeesWei are null together, under one condition: any block in the bucket was written at pricing version 0.
   coverage: number;                        // share of the bucket the collector indexed (1 = whole); gasPerSecond is the rate over that covered span, so the bucket in progress and the bucket the collector started inside read as rates, not as fractions of a bucket. Sums (gasUsed, feesWei, blocks) are over the covered span only. The live start trims only the one bucket it falls inside: a bucket that ends before it was written by the backfiller or the gap filler and is whole. Coverage does not look inside a bucket, so a hole in the middle of one is not represented (the gap filler closes those and the bucket is rebuilt whole). A bucket lying entirely at or after the serving clock is not returned at all, so coverage is always above zero
   baseFeeMin: string; baseFeeAvg: string; baseFeeMax: string;
   exponentBips: number; constraintBips: number[] | null;   // start-of-block values of the bucket's last block; null for pricing version 0 history

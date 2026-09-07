@@ -8,6 +8,7 @@ import {
   gapBandLabel,
   gapCaption,
   gapModel,
+  bucketSeconds,
   irregularStep,
   isGapRow,
   NOTHING_INDEXED,
@@ -54,6 +55,36 @@ describe("the step points are expected at", () => {
     expect(irregularStep(at(T, T + 2), 15)).toBe(15);
     expect(irregularStep([], 15)).toBe(15);
     expect(irregularStep(at(T), 0)).toBe(0);
+  });
+});
+
+describe("the width of one bucket", () => {
+  it("comes from the resolution, never from the distance between two points", () => {
+    expect(bucketSeconds("5s")).toBe(5);
+    expect(bucketSeconds("1m")).toBe(60);
+    expect(bucketSeconds("15m")).toBe(900);
+    expect(bucketSeconds("1h")).toBe(3600);
+    // A per-block range carries one point per block, so its bucket is a
+    // second, which is all a header's timestamp resolves. Its gap threshold
+    // is a separate question and stays BLOCK_GAP_S.
+    expect(bucketSeconds("block")).toBe(1);
+    expect(stepSeconds("block")).toBe(BLOCK_GAP_S);
+  });
+
+  it("is not thrown by the accidents of the points it is given", () => {
+    // Two per-block points sharing a timestamp used to make a bucket of zero
+    // width, which put every owner action in the range into one bucket.
+    expect(bucketSeconds("block", at(T, T))).toBe(1);
+    // A missing second point used to inflate the bucket to the size of the hole.
+    expect(bucketSeconds("1m", at(T, T + 600))).toBe(60);
+    // A range with one bucket in it used to read as a minute whatever it was.
+    expect(bucketSeconds("15m", at(T))).toBe(900);
+  });
+
+  it("falls back to the points, and then to a minute, for a resolution the client does not know", () => {
+    expect(bucketSeconds("batch", at(T, T + 15, T + 45))).toBe(15);
+    expect(bucketSeconds("batch", at(T))).toBe(DEFAULT_STEP_SECONDS);
+    expect(bucketSeconds(undefined)).toBe(DEFAULT_STEP_SECONDS);
   });
 });
 
@@ -105,6 +136,16 @@ describe("finding the spans with nothing in them", () => {
     expect(findGaps(at(T), { from: T, to: T + 60 }, 0)).toEqual([]);
     expect(findGaps(at(T), { from: T, to: T + 60 }, Number.NaN)).toEqual([]);
     expect(findGaps(at(T), { from: T, to: T }, 60)).toEqual([]);
+  });
+
+  it("never shades outside the window the range asked for", () => {
+    // A point before the start of the window: the hole after it begins at the
+    // window, not one step after a point the chart does not draw.
+    expect(findGaps(at(T - 600, T + 300), { from: T, to: T + 360 }, 60)).toEqual([{ from: T, to: T + 300, kind: "interior" }]);
+    // And a point past the end: the hole before it stops at the window.
+    expect(findGaps(at(T, T + 900), { from: T, to: T + 300 }, 60)).toEqual([{ from: T + 60, to: T + 300, kind: "interior" }]);
+    // Nothing of the hole falls inside the window at all, so nothing is shaded.
+    expect(findGaps(at(T + 600, T + 900), { from: T + 600, to: T + 660 }, 60)).toEqual([]);
   });
 
   it("counts half a minute without a block as a gap on a per-block range", () => {

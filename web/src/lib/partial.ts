@@ -21,9 +21,10 @@ export type Covered = { coverage?: number };
 export const WHOLE = 1;
 
 /**
- * Which end a partial bucket sits at. "in-progress" is the last point of the
- * range, the bucket the collector is still filling; "leading" is one further
- * back, the first bucket after indexing began.
+ * Which kind of partial bucket a point is. "in-progress" is a bucket that
+ * runs up to the right edge of the range, the one the collector is still
+ * filling; "leading" is any other partial bucket, one the collector only
+ * reached part way into.
  */
 export type PartialKind = "in-progress" | "leading";
 
@@ -44,12 +45,34 @@ export function isPartial(point: Covered): boolean {
 }
 
 /**
- * One entry per point: which kind of partial bucket it is, or null when it is
- * a whole one. The last point of the range is the bucket in progress; every
- * other partial one is a leading bucket the collector reached part way into.
+ * The right edge of the range a point sits in: where the window ends and how
+ * wide one bucket is. A partial bucket is only "in progress" when its own
+ * bucket reaches that edge.
  */
-export function partialKinds(points: readonly Covered[]): (PartialKind | null)[] {
-  return points.map((p, i) => (isPartial(p) ? (i === points.length - 1 ? "in-progress" : "leading") : null));
+export type RangeEdge = { to: number; step: number };
+
+/** True when the bucket starting at `t` runs up to (or past) the right edge of the range. */
+function reachesEdge(t: number, edge: RangeEdge): boolean {
+  return t + edge.step >= edge.to;
+}
+
+/**
+ * One entry per point: which kind of partial bucket it is, or null when it is
+ * a whole one. A partial bucket is the bucket in progress only when it runs up
+ * to the right edge of the range; a partial bucket anywhere else is one the
+ * collector reached part way into, whether it sits at the start of the
+ * indexed history or at the end of it because indexing stopped part way
+ * through a bucket and the range has a trailing gap after it. Without an edge
+ * to measure against (a caller with no window) the last point is taken as the
+ * one in progress, which is what it is while the collector is running.
+ */
+export function partialKinds(points: readonly (Covered & { t?: number })[], edge?: RangeEdge): (PartialKind | null)[] {
+  const usable = edge !== undefined && Number.isFinite(edge.to) && Number.isFinite(edge.step) && edge.step > 0 ? edge : null;
+  return points.map((p, i) => {
+    if (!isPartial(p)) return null;
+    if (usable === null || typeof p.t !== "number") return i === points.length - 1 ? "in-progress" : "leading";
+    return reachesEdge(p.t, usable) ? "in-progress" : "leading";
+  });
 }
 
 /** What the band over the bucket in progress says. */
@@ -104,11 +127,12 @@ export type PartialBand = { from: number; to: number; kind: PartialKind; coverag
  * The bands over the partial buckets of a range: one bucket wide each, so a
  * chart that leaves them out of its marks still shows where they are. `step`
  * is the bucket width; a step that is not a positive number leaves the bands
- * out rather than drawing zero-width ones.
+ * out rather than drawing zero-width ones. `to` is the right edge of the
+ * range, which decides which partial bucket (if any) is the one in progress.
  */
-export function partialBands(points: readonly (Covered & { t: number })[], step: number): PartialBand[] {
+export function partialBands(points: readonly (Covered & { t: number })[], step: number, to?: number): PartialBand[] {
   if (!Number.isFinite(step) || step <= 0) return [];
-  const kinds = partialKinds(points);
+  const kinds = partialKinds(points, to === undefined ? undefined : { to, step });
   const out: PartialBand[] = [];
   points.forEach((p, i) => {
     const kind = kinds[i];

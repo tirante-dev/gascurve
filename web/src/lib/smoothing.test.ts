@@ -3,6 +3,7 @@ import type { BlockPoint, LiveSnapshot } from "@/types";
 import { contributionsBips } from "./pricer";
 import {
   approach,
+  assignPlaces,
   AVERAGE_WINDOW_S,
   averageBacklog,
   bipsFor,
@@ -12,7 +13,9 @@ import {
   drained,
   isShortWindow,
   liveNow,
+  NO_PLACES,
   placeBlocks,
+  placeOf,
   SAWTOOTH_WINDOW_S,
   sawtoothChart,
   sawtoothSamples,
@@ -304,16 +307,75 @@ describe("definitions", () => {
 describe("createFrameStore", () => {
   it("publishes to subscribers and lets them leave", () => {
     const store = createFrameStore({ nowMs: 5 });
-    expect(store.get()).toEqual({ blocks: [], values: null, nowMs: 5 });
+    expect(store.get()).toEqual({ blocks: [], places: new Map(), values: null, nowMs: 5 });
     const seen = vi.fn();
     const stop = store.subscribe(seen);
-    const next = { blocks: [], values: null, nowMs: 6 };
+    const next = { blocks: [], places: NO_PLACES, values: null, nowMs: 6 };
     store.set(next);
     expect(store.get()).toBe(next);
     expect(seen).toHaveBeenCalledTimes(1);
     stop();
     store.set({ ...next, nowMs: 7 });
     expect(seen).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("assignPlaces", () => {
+  /** Blocks numbered from `first`, one per entry, at the given timestamps. */
+  const ring = (first: number, ...ts: number[]) => ts.map((t, i) => ({ number: first + i, ts: t }));
+  const placesOf = (blocks: readonly { number: number; ts: number }[], previous = NO_PLACES) => assignPlaces(previous, blocks);
+
+  it("places a fresh ring exactly as placeBlocks does", () => {
+    const blocks = ring(1, 4, 4, 5, 5, 5, 5);
+    const places = placesOf(blocks);
+    expect(blocks.map((b) => placeOf(places, b))).toEqual(placeBlocks(blocks));
+  });
+
+  it("leaves the blocks already in the newest second where they are when a third one lands", () => {
+    // Two blocks in the second before, so the newest second is spread by two:
+    // the first two land at 5 and 5.5. Recomputing from the counts would move
+    // them to 5 and 5 + 1/3 the moment a third block arrived.
+    const two = ring(1, 4, 4, 5, 5);
+    const first = placesOf(two);
+    expect(first.get(3)).toBe(5);
+    expect(first.get(4)).toBe(5.5);
+    const three = [...two, { number: 5, ts: 5 }];
+    const second = placesOf(three, first);
+    expect(second.get(3)).toBe(5);
+    expect(second.get(4)).toBe(5.5);
+    // The third block divides what is left of the second rather than spilling
+    // out of it, so the order on the axis still follows the order of arrival.
+    expect(second.get(5)).toBeCloseTo(5 + 2 / 3, 12);
+    expect(second.get(5)).toBeLessThan(6);
+    // Recomputing every fraction from the current counts, which is what the
+    // charts did before the ring kept its own placement, moves them instead.
+    expect(placeBlocks(three)).toEqual([4, 4.5, 5, 5 + 1 / 3, 5 + 2 / 3]);
+    const four = placesOf([...three, { number: 6, ts: 5 }], second);
+    expect([...four.keys()].map((n) => four.get(n))).toEqual([4, 4.5, 5, 5.5, 5 + 2 / 3, 5.75]);
+  });
+
+  it("keeps the survivors of the oldest second where they are when the ring evicts one", () => {
+    const full = ring(1, 4, 4, 4, 5, 5);
+    const before = placesOf(full);
+    expect(before.get(2)).toBeCloseTo(4 + 1 / 3, 12);
+    // The ring drops its oldest block and takes a new one at the head.
+    const evicted = [...full.slice(1), { number: 6, ts: 5 }];
+    const after = placesOf(evicted, before);
+    expect(after.get(2)).toBeCloseTo(4 + 1 / 3, 12);
+    expect(after.get(3)).toBeCloseTo(4 + 2 / 3, 12);
+    // The evicted block loses its place with the ring rather than growing the map.
+    expect(after.has(1)).toBe(false);
+    expect(after.size).toBe(evicted.length);
+  });
+
+  it("hands back the same map when nothing entered or left, and empties with the ring", () => {
+    const blocks = ring(1, 4, 5);
+    const places = placesOf(blocks);
+    expect(placesOf(blocks, places)).toBe(places);
+    expect(assignPlaces(places, [])).toBe(NO_PLACES);
+    expect(assignPlaces(NO_PLACES, [])).toBe(NO_PLACES);
+    // A block the placement never saw falls back to its bare timestamp.
+    expect(placeOf(NO_PLACES, { number: 9, ts: 7 })).toBe(7);
   });
 });
 

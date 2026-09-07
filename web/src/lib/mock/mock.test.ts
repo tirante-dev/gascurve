@@ -17,7 +17,7 @@ function recorded<T>(value: T | null): T {
 
 /** Σ gasUsed × minBaseFee over blocks: what the infra account is credited for them. */
 function floorWei(blocks: readonly BlockPoint[]): bigint {
-  return blocks.reduce((sum, b) => sum + BigInt(b.gasUsed) * BigInt(b.minBaseFee), 0n);
+  return blocks.reduce((sum, b) => sum + BigInt(b.gasUsed) * BigInt(recorded(b.minBaseFee)), 0n);
 }
 
 describe("mock world", () => {
@@ -175,7 +175,7 @@ describe("mock world", () => {
     for (const p of hour.points) {
       expect(recorded(p.constraintBips).reduce((sum, x) => sum + x, 0)).toBe(p.exponentBips);
       expect(BigInt(recorded(p.floorFeesWei)) + BigInt(recorded(p.surplusFeesWei))).toBe(BigInt(p.feesWei));
-      expect(BigInt(recorded(p.floorFeesWei))).toBe(BigInt(p.gasUsed) * BigInt(p.minBaseFee));
+      expect(BigInt(recorded(p.floorFeesWei))).toBe(BigInt(p.gasUsed) * BigInt(recorded(p.minBaseFee)));
       expect(BigInt(recorded(p.surplusFeesWei))).toBeGreaterThanOrEqual(0n);
     }
 
@@ -342,7 +342,7 @@ describe("mock world", () => {
     expect(world.series("all", now).ownerActions).toHaveLength(1);
   });
 
-  it("serves the oldest Robinhood history without a split or fee destinations, as the api does for rows written before the migration", () => {
+  it("serves the oldest Robinhood history without a split, a floor or fee destinations, as the api does for pricing version 0 rows", () => {
     const world = findMockWorld("robinhood");
     if (!world) throw new Error("no world");
     const now = mockNow();
@@ -352,6 +352,8 @@ describe("mock world", () => {
     expect(early).toHaveLength(36);
     for (const p of early) {
       expect(p.constraintBips).toBeNull();
+      // The contract makes the floor nullable on exactly the same rows.
+      expect(p.minBaseFee).toBeNull();
       expect(p.floorFeesWei).toBeNull();
       expect(p.surplusFeesWei).toBeNull();
       // Everything else about the bucket is known.

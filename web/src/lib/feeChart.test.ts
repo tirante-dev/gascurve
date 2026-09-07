@@ -10,6 +10,7 @@ import {
   feeChartLabel,
   feeDomain,
   feeTooltipRows,
+  formatFloor,
   markersFor,
   ownerActionNote,
 } from "./feeChart";
@@ -153,6 +154,22 @@ describe("owner actions on the fee chart", () => {
     expect(describeAction({ ...setFloor, method: "unknown", args: {} })).toBe("unknown");
   });
 
+  it("reads the constraint objects the api actually sends, not just the tuples", () => {
+    // The contract decodes setGasPricingConstraints into objects. They used to
+    // stringify as "[object Object]" on every real marker.
+    const decoded: OwnerAction = {
+      ...setConstraints,
+      args: {
+        constraints: [
+          { gasTargetPerSecond: 60_000_000, adjustmentWindowSeconds: 15, startingBacklog: 0 },
+          { gasTargetPerSecond: 40_000_000, adjustmentWindowSeconds: 86_400, startingBacklog: 11_194_391_810_886 },
+        ],
+      },
+    };
+    expect(describeAction(decoded)).toBe("setGasPricingConstraints: 60 Mgas/s · 15 s, 40 Mgas/s · 24 h");
+    expect(describeAction(decoded)).not.toContain("[object Object]");
+  });
+
   it("footnotes a hovered bucket with the actions inside it, and says nothing when there are none", () => {
     const markers = markersFor({ ownerActions: [setFloor] });
     const note = ownerActionNote(markers, 60);
@@ -168,6 +185,51 @@ describe("owner actions on the fee chart", () => {
     // A chart that draws sums leaves the bucket out, and says so.
     expect(bucketNote([], 60, true)({ t: 0, partial: "in-progress", coverage: 0.5 })).toBe("bucket in progress, 50% elapsed; not drawn as a bucket total");
     expect(note({ t: markers[0].t + 600, partial: null, coverage: 1 })).toBeNull();
+  });
+});
+
+describe("the bucket width a range is read at", () => {
+  it("comes from the resolution, so the owner-action buckets do not depend on point spacing", () => {
+    expect(feeChartData(series, "constraints").bucketSeconds).toBe(60);
+    // Two per-block points at the same second used to give a zero-width
+    // bucket, which put no action in any bucket at all.
+    const perBlock: Series = { ...series, resolution: "block", points: [point({ t: 1788679200 }), point({ t: 1788679200 })] };
+    expect(feeChartData(perBlock, "constraints").bucketSeconds).toBe(1);
+    // One bucket in a 15-minute range used to read as a minute.
+    const singleton: Series = { ...series, resolution: "15m", points: [point({ t: 1788679200 })] };
+    expect(feeChartData(singleton, "constraints").bucketSeconds).toBe(900);
+    // A hole after the first point used to inflate the bucket to its size.
+    const holed: Series = { ...series, resolution: "1m", points: [point({ t: 1788679200 }), point({ t: 1788679200 + 600 })] };
+    expect(feeChartData(holed, "constraints").bucketSeconds).toBe(60);
+    expect(feeChartData(null, "constraints").bucketSeconds).toBe(DEFAULT_BUCKET_SECONDS);
+  });
+});
+
+describe("a bucket whose floor was never recorded", () => {
+  // Pricing version 0 history: the contract makes minBaseFee nullable, and a
+  // null floor used to reach `.trim()` and take the whole chart down.
+  const nullFloor: Series = { ...series, points: series.points.map((p, i) => (i === 0 ? { ...p, minBaseFee: null, floorFeesWei: null, surplusFeesWei: null } : p)) };
+
+  it("draws no floor for it rather than throwing", () => {
+    const data = feeChartData(nullFloor, "constraints");
+    expect(data.points[0].floor).toBeNull();
+    expect(data.points[1].floor).toBeCloseTo(0.02, 9);
+  });
+
+  it("leaves it out of the log domain, so a missing floor never pulls the axis", () => {
+    const data = feeChartData(nullFloor, "constraints");
+    // The same domain the range has with that bucket's floor simply absent.
+    expect(feeDomain(data.points)).toEqual(feeDomain(data.points.map((p) => ({ ...p, floor: p.floor }))));
+    expect(feeDomain([{ ...data.points[0], feeMin: 0.4, feeMax: 0.4, floor: null }])).toEqual([0.1, 1]);
+  });
+
+  it("reads out as n/a in a tooltip and a table, never as a floor of zero", () => {
+    const data = feeChartData(nullFloor, "constraints");
+    const floorRow = feeTooltipRows()[2];
+    expect(floorRow.value(data.points[0] as unknown as Record<string, unknown>)).toBe("n/a");
+    expect(floorRow.value(data.points[1] as unknown as Record<string, unknown>)).toBe("0.02 gwei");
+    expect(formatFloor(null)).toBe("n/a");
+    expect(formatFloor(0.02)).toBe("0.02");
   });
 });
 

@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFrameStore, targetValues } from "@/lib/smoothing";
-import type { BlockPoint, LiveSnapshot } from "@/types";
+import { createFrameStore, NO_PLACES, targetValues } from "@/lib/smoothing";
+import type { BlockPoint, LiveSnapshot, OwnerAction } from "@/types";
 import { prefersReducedMotion, useLiveFrame, useSmoothedLive } from "./useSmoothedLive";
 
 function block(number: number, ts: number, backlogs: number[]): BlockPoint {
@@ -341,11 +341,70 @@ describe("useSmoothedLive", () => {
     expect(back).toBeLessThan(0.8);
   });
 
+  it("publishes a placement of the ring, assigned once per block and evicted with it", () => {
+    const ring = [block(1, 1000, [10]), block(2, 1000, [20]), block(3, 1001, [30])];
+    const { result, rerender } = renderHook(({ blocks }) => useSmoothedLive({ snapshot: snapshot(1), recentBlocks: blocks }), { initialProps: { blocks: ring } });
+    runFrame(16);
+    const first = result.current.frame.get().places;
+    expect([...first.entries()]).toEqual([
+      [1, 1000],
+      [2, 1000.5],
+      [3, 1001],
+    ]);
+    // A second block lands in the newest second: the one already there keeps
+    // its place rather than being recomputed with it.
+    clock = 16;
+    rerender({ blocks: [...ring, block(4, 1001, [40])] });
+    runFrame(300);
+    const grown = result.current.frame.get().places;
+    expect(grown.get(3)).toBe(1001);
+    expect(grown.get(4)).toBe(1001.5);
+    // The oldest block leaves the ring and loses its place with it.
+    clock = 300;
+    rerender({ blocks: [block(2, 1000, [20]), block(3, 1001, [30]), block(4, 1001, [40])] });
+    runFrame(600);
+    const evicted = result.current.frame.get().places;
+    expect(evicted.has(1)).toBe(false);
+    expect(evicted.get(2)).toBe(1000.5);
+    expect(evicted.get(3)).toBe(1001);
+  });
+
+  it("snaps and stops averaging across an owner call that reinstalls the same constraints", () => {
+    const blocks = [block(10, 1000, [3_000_000, 0]), block(11, 1000, [3_100_000, 0])];
+    const replaced: OwnerAction = { block: 12, at: "2026-09-06T07:20:01Z", txHash: "0xabc", method: "setGasPricingConstraints", selector: "0xcc0d556a", args: { constraints: [] } };
+    const { result, rerender } = renderHook(
+      ({ actions, s, recentBlocks }) => useSmoothedLive({ snapshot: s, recentBlocks, ownerActions: actions }),
+      { initialProps: { actions: [] as OwnerAction[], s: snapshot(11, "399726000"), recentBlocks: blocks } },
+    );
+    runFrame(16);
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.399726);
+
+    // The owner reinstalls the very same targets and windows with new starting
+    // backlogs. The signature does not change, so nothing used to snap: the
+    // figures eased through state the chain never had and the short-window
+    // average still counted blocks from before the reset.
+    const after = [...blocks, block(12, 1000, [9_000_000, 0])];
+    clock = 16;
+    rerender({ actions: [replaced], s: snapshot(12, "800000000"), recentBlocks: after });
+    runFrame(300);
+    // Snapped, not eased a third of the way there.
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.8);
+    // And the short-window average is block 12 alone, not the mean of the three.
+    expect(result.current.frame.get().values?.backlogs[0]).toBe(9_000_000);
+  });
+
+  it("runs no frame loop at all while it is disabled", () => {
+    const { result } = renderHook(() => useSmoothedLive({ snapshot: snapshot(1), recentBlocks: [block(1, 1000, [1])] }, false));
+    expect(frames).toHaveLength(0);
+    expect(result.current.display).toBeNull();
+    expect(result.current.frame.get().values).toBeNull();
+  });
+
   it("reads the store with useLiveFrame", () => {
     const store = createFrameStore({ nowMs: 1 });
     const { result } = renderHook(() => useLiveFrame(store));
     expect(result.current.nowMs).toBe(1);
-    act(() => store.set({ blocks: [], values: null, nowMs: 2 }));
+    act(() => store.set({ blocks: [], places: NO_PLACES, values: null, nowMs: 2 }));
     expect(result.current.nowMs).toBe(2);
   });
 

@@ -482,6 +482,26 @@ describe("useLive", () => {
     unmount();
   });
 
+  it("opens nothing at all while it is disabled, and connects when it is not", async () => {
+    // A chart page drawing only bucketed history has no use for the feed, so
+    // it holds no socket open and does no polling.
+    getLiveMock.mockResolvedValue(snapshot(20));
+    const { result, rerender } = renderHook(({ on }) => useLive("robinhood", on), { initialProps: { on: false } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(result.current.snapshot).toBeNull();
+    await flush(10_000);
+    expect(getLiveMock).not.toHaveBeenCalled();
+    // Turned on, it behaves exactly as it always has.
+    rerender({ on: true });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
   it("ignores a socket factory that resolves after unmount", async () => {
     const { unmount } = renderHook(() => useLive("robinhood"));
     unmount();
@@ -514,7 +534,7 @@ describe("useApi and useSeries", () => {
     expect(result.current.data?.range).toBe("1h");
     expect(result.current.loading).toBe(false);
     expect(result.current.updatedAt).not.toBeNull();
-    expect(getSeriesMock).toHaveBeenCalledWith("robinhood", "1h");
+    expect(getSeriesMock).toHaveBeenCalledWith("robinhood", "1h", expect.anything());
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
@@ -561,6 +581,45 @@ describe("useApi and useSeries", () => {
     // interval is still what decides when data is refreshed.
     fetchSharedSeries("robinhood", "24h");
     expect(getSeriesMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("cancels a shared request only when the last consumer has walked away", async () => {
+    const answer: Series = { range: "24h", resolution: "1m", from: 0, to: 0, constraintSets: [], ownerActions: [], points: [] };
+    const signals: AbortSignal[] = [];
+    getSeriesMock.mockImplementation((_n: unknown, _r: unknown, options: { signal: AbortSignal }) => {
+      signals.push(options.signal);
+      return new Promise<Series>(() => undefined);
+    });
+    const one = new AbortController();
+    const two = new AbortController();
+    const promise = fetchSharedSeries("robinhood", "24h", one.signal);
+    expect(fetchSharedSeries("robinhood", "24h", two.signal)).toBe(promise);
+    expect(getSeriesMock).toHaveBeenCalledTimes(1);
+    // One view leaves. The other is still waiting on the answer, so the
+    // request keeps running.
+    one.abort();
+    expect(signals[0].aborted).toBe(false);
+    // The last one leaves: nobody is waiting, so the request is cancelled
+    // rather than left to run through its timeout and retries.
+    two.abort();
+    expect(signals[0].aborted).toBe(true);
+    // And the key is free, so the next asker starts a fresh request.
+    getSeriesMock.mockResolvedValueOnce(answer);
+    await expect(fetchSharedSeries("robinhood", "24h")).resolves.toBe(answer);
+    expect(getSeriesMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves a settled request alone when its consumers leave afterwards", async () => {
+    const answer: Series = { range: "1h", resolution: "5s", from: 0, to: 0, constraintSets: [], ownerActions: [], points: [] };
+    const signals: AbortSignal[] = [];
+    getSeriesMock.mockImplementation(async (_n: unknown, _r: unknown, options: { signal: AbortSignal }) => {
+      signals.push(options.signal);
+      return answer;
+    });
+    const controller = new AbortController();
+    await expect(fetchSharedSeries("robinhood", "1h", controller.signal)).resolves.toBe(answer);
+    controller.abort();
+    expect(signals[0].aborted).toBe(false);
   });
 
   it("does not hold on to a request that failed", async () => {

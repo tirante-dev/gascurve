@@ -145,12 +145,12 @@ describe("the enlarge control on every chart card", () => {
 
   it("follows the range control, so a link is to what the reader is looking at", async () => {
     render(<NetworkPage network="robinhood" />);
-    await userEvent.click(within(screen.getByRole("tablist", { name: "History range" })).getByRole("tab", { name: "30d" }));
+    await userEvent.click(within(screen.getByRole("group", { name: "History range" })).getByRole("button", { name: "30d" }));
     expect(enlarge("Contribution to x per constraint")).toHaveAttribute("href", "/robinhood/charts/contribution?range=30d");
     expect(enlarge("Fees collected per bucket")).toHaveAttribute("href", "/robinhood/charts/fee-flows?range=30d");
     // The hero has a range of its own, and keeps it.
     expect(enlarge("Base fee")).toHaveAttribute("href", "/robinhood/charts/base-fee?range=live");
-    await userEvent.click(within(screen.getByRole("tablist", { name: "Base fee chart range" })).getByRole("tab", { name: "1h" }));
+    await userEvent.click(within(screen.getByRole("group", { name: "Base fee chart range" })).getByRole("button", { name: "1h" }));
     expect(enlarge("Base fee")).toHaveAttribute("href", "/robinhood/charts/base-fee?range=1h");
   });
 
