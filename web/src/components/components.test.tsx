@@ -8,7 +8,7 @@ import { applyReorg } from "@/hooks/useLive";
 import { BACKLOG_TITLE, backlogAxis, ConstraintCards, ConstraintCardsView, drainLabel, Sawtooth, sawtoothTooltipRows, secondsAgoLabel } from "./ConstraintCards";
 import { ChartTooltip } from "./ChartTooltip";
 import { DataFooter } from "./DataFooter";
-import { COLLECTOR_LAG_S, CostTile, FeeSplitBar, HeroChart, heroTooltipRows, LiveHero, LiveHeroView, sampleAge } from "./LiveHero";
+import { COLLECTOR_LAG_S, CostTile, FeeSplitBar, HeroChart, HeroChartPanel, heroTooltipRows, LiveHero, LiveHeroView, sampleAge } from "./LiveHero";
 import { HERO_RANGE_KEY, setHeroRange } from "@/lib/hero";
 import { HistoryTabs } from "./HistoryTabs";
 import { NetworkSwitcher } from "./NetworkSwitcher";
@@ -210,8 +210,8 @@ describe("LiveHero", () => {
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByRole("figure", { name: /0.3997 to 0.8000 gwei/ })).toBeInTheDocument();
   });
-  it("reads every block out without a pointer, in an inspector and a data table", async () => {
-    render(
+  it("keeps the hero clear of inspectors and tables, at every range", async () => {
+    const { rerender } = render(
       <LiveHeroView
         network="robinhood"
         snapshot={snapshot}
@@ -222,23 +222,16 @@ describe("LiveHero", () => {
         range="live"
       />,
     );
-    // A slider picks a block, which gives arrow keys, Home and End for free,
-    // and the values are read out in a live region.
-    const slider = screen.getByRole("slider", { name: "Select a block to read its values" });
-    expect(screen.getByText("Block inspector")).toBeInTheDocument();
-    expect(screen.getAllByText("base fee").length).toBeGreaterThan(0);
-    // And the same seconds are read out for the throughput chart under it.
-    expect(screen.getByRole("slider", { name: "Select a second to read its values" })).toBeInTheDocument();
-    // The whole series is available as a table for a reader who wants all of it.
-    const table = screen.getByText(/Base fee per block, as a table/);
-    await userEvent.click(table);
-    expect(screen.getByRole("table", { name: /Every block of the live base fee chart/ })).toBeInTheDocument();
-    fireEvent.change(slider, { target: { value: "0" } });
-    expect(slider).toHaveValue("0");
-  });
-
-  it("reads a bucketed range out without a pointer too, on the page and enlarged", async () => {
-    render(
+    // The top box is the figures and the two charts, nothing else: the
+    // inspector and the table belong to the enlarged view, which has room.
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.queryByText("Block inspector")).toBeNull();
+    expect(screen.queryByText("Second inspector")).toBeNull();
+    expect(screen.queryByText(/as a table/)).toBeNull();
+    // Still the charts themselves, and the enlarge link that leads to them.
+    expect(screen.getByRole("figure", { name: /^Base fee per block/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Open Base fee enlarged/ })).toBeInTheDocument();
+    rerender(
       <LiveHeroView
         network="robinhood"
         snapshot={snapshot}
@@ -251,7 +244,36 @@ describe("LiveHero", () => {
         model="constraints"
       />,
     );
-    expect(screen.getAllByRole("slider", { name: "Select a bucket to read its values" }).length).toBeGreaterThan(1);
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.queryByText(/as a table/)).toBeNull();
+  });
+
+  it("reads every block out without a pointer once the chart is enlarged", async () => {
+    render(
+      <HeroChartPanel
+        readout
+        snapshot={snapshot}
+        blocks={sawtoothBlocks(5, snapshot.block.ts)}
+        nowMs={Date.parse(snapshot.sampledAt)}
+        range="live"
+        series={null}
+      />,
+    );
+    // A slider picks a block, which gives arrow keys, Home and End for free,
+    // and the values are read out in a live region.
+    const slider = screen.getByRole("slider", { name: "Select a block to read its values" });
+    expect(screen.getByText("Block inspector")).toBeInTheDocument();
+    expect(screen.getAllByText("base fee").length).toBeGreaterThan(0);
+    // The whole series is available as a table for a reader who wants all of it.
+    await userEvent.click(screen.getByText(/Base fee per block, as a table/));
+    expect(screen.getByRole("table", { name: /Every block of the live base fee chart/ })).toBeInTheDocument();
+    fireEvent.change(slider, { target: { value: "0" } });
+    expect(slider).toHaveValue("0");
+  });
+
+  it("reads a bucketed range out without a pointer once enlarged", async () => {
+    render(<HeroChartPanel readout snapshot={snapshot} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} range="24h" series={history} model="constraints" />);
+    expect(screen.getByRole("slider", { name: "Select a bucket to read its values" })).toBeInTheDocument();
     await userEvent.click(screen.getByText(/Base fee over 24h, as a table/));
     expect(screen.getByRole("table", { name: /Every bucket of the base fee chart over 24h/ })).toBeInTheDocument();
   });
