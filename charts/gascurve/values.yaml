@@ -284,8 +284,18 @@ metrics:
         threshold: 0.05
         for: 10m
         severity: warning
-      # /ready answers 503 only when the database ping fails, and the
-      # readiness probe runs it every 10 s.
+      # One or more api replicas have no PostgreSQL LISTEN connection. Their
+      # WebSocket clients go stale and readiness sheds them, but REST reads
+      # and the collector keep working, so this is not a database outage.
+      apiListenerDown:
+        enabled: true
+        for: 3m
+        severity: warning
+      # /ready answers 503 for two reasons, the database ping and the
+      # notification listener, and the readiness probe runs it every 10 s.
+      # The rule subtracts the listener case with `unless`, which leaves the
+      # database as the cause. An api too old to export
+      # gascurve_api_listener_ready subtracts nothing and alerts as before.
       databaseUnreachable:
         enabled: true
         for: 3m

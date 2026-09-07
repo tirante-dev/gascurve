@@ -77,11 +77,16 @@ func run() error {
 	}()
 
 	reg := metrics.NewRegistry()
+	apiMetrics := metrics.NewAPI(reg)
+	apiMetrics.ObserveListener(func() (bool, uint64) {
+		st := listener.Status()
+		return st.Ready, st.Reconnects
+	})
 	server := api.New(store, cfg.Server, hub, log,
 		api.WithListener(listener),
 		api.WithVersion(version.Version),
 		api.WithEthUsdMaxAge(cfg.Collector.EthUsdMaxAge),
-		api.WithMetrics(metrics.NewAPI(reg), reg))
+		api.WithMetrics(apiMetrics, reg))
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Server.Port)),
 		Handler:           server.Handler(),

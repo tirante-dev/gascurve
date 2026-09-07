@@ -267,7 +267,7 @@ Server to client, one JSON object per message:
 
 Client to server: `{ type: 'pong' }` and `{ type: 'subscribe', network: string }` to switch networks on the same socket. The server closes idle sockets that miss two pings. The web client reconnects with exponential back-off (1 s to 30 s) and falls back to polling `/live` every 2 s while disconnected.
 
-The API supervises its PostgreSQL notification listener. Ordinary connection loss is handled by lib/pq, and an unexpected close of lib/pq's notification channel replaces the whole listener without closing the hub's stable input. Readiness is false while the listener is disconnected. Every successful reconnect sends a reconciliation marker before later notifications, so the hub refreshes stored blocks, rebuilds a newer live snapshot and delivers missed owner actions before resuming normal fan-out. If the stable supervised input ever closes without process cancellation, the API exits instead of serving WebSocket pings from a permanently stale hub.
+The API supervises its PostgreSQL notification listener. Ordinary connection loss is handled by lib/pq, and an unexpected close of lib/pq's notification channel replaces the whole listener without closing the hub's stable input. Readiness is false while the listener is disconnected. Every successful reconnect sends a reconciliation marker before later notifications, so the hub refreshes stored blocks, rebuilds a newer live snapshot and delivers missed owner actions before resuming normal fan-out. If the stable supervised input ever closes without process cancellation, the API exits instead of serving WebSocket pings from a permanently stale hub. `/ready` therefore answers 503 for two reasons now, the database ping and the listener, which is why `gascurve_api_listener_ready` exists: `GascurveDatabaseUnreachable` subtracts the listener case so the two page separately.
 
 ## 8. Web (`web/`, Next.js App Router, TypeScript strict, Tailwind, Recharts, Vitest)
 
@@ -347,6 +347,8 @@ The api's series carry no network label: it serves every network from one proces
 | `gascurve_api_ws_clients` | gauge | | WebSocket clients currently subscribed |
 | `gascurve_api_ws_frames_sent_total` | counter | | frames written to clients, pings included |
 | `gascurve_api_ws_clients_dropped_total` | counter | | clients closed for a full outbound queue |
+| `gascurve_api_listener_ready` | gauge | | 1 while the PostgreSQL notification listener is connected and subscribed |
+| `gascurve_api_listener_reconnects_total` | counter | | notification listener recoveries since the process started |
 
 `route` is the chi route pattern (`/api/v1/networks/{network}/series`), resolved after the handler returned, never the request path: a network name or a block number must not become a series of its own. A request no route claims is labeled with the wildcard chi matched (`/api/v1/*`), or `unmatched` when it never reached the router. `/metrics` and `/api/v1/ws` are not counted: one is the scrape itself, the other a long-lived connection whose duration says nothing about request latency.
 

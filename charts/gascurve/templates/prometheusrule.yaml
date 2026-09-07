@@ -110,14 +110,24 @@ Helm leaves them for Prometheus to expand.
   "description" (printf "%s of the requests the api answered over the last 5 minutes were 5xx, for %s. The api reads PostgreSQL and nothing else, so this is the database or a query, never an RPC." $percent .for)) }}
 {{- end }}
 {{- end }}
+{{- with $alerts.apiListenerDown }}
+{{- if .enabled }}
+{{- $apiRules = append $apiRules (dict
+  "alert" "GascurveApiListenerDown"
+  "expr" (printf "min(gascurve_api_listener_ready{job=\"%s\"}) == 0" $apiJob)
+  "for" .for "severity" .severity
+  "summary" "gascurve api has lost its PostgreSQL notification feed"
+  "description" (printf "At least one api replica has had no LISTEN connection for %s. That replica answers /ready with 503 and leaves the Service, and any WebSocket client still on it sees no tick, block or owner action until it recovers. This is NOTIFY, not the query pool: REST reads and the collector's writes are unaffected." .for)) }}
+{{- end }}
+{{- end }}
 {{- with $alerts.databaseUnreachable }}
 {{- if .enabled }}
 {{- $apiRules = append $apiRules (dict
   "alert" "GascurveDatabaseUnreachable"
-  "expr" (printf "sum(rate(gascurve_api_requests_total{job=\"%s\",route=~\"(/api/v1)?/ready\",status=\"503\"}[5m])) > 0" $apiJob)
+  "expr" (printf "sum by (job) (rate(gascurve_api_requests_total{job=\"%s\",route=~\"(/api/v1)?/ready\",status=\"503\"}[5m])) > 0 unless on (job) (min by (job) (gascurve_api_listener_ready{job=\"%s\"}) == 0)" $apiJob $apiJob)
   "for" .for "severity" .severity
   "summary" "gascurve cannot reach PostgreSQL"
-  "description" (printf "The api's readiness endpoint has been answering 503 for %s. It answers 503 for one reason: the database ping failed. The collector cannot write either while this holds." .for)) }}
+  "description" (printf "The api's readiness endpoint has been answering 503 for %s while every replica's notification listener was ready, which leaves the database ping as the cause. The collector cannot write either while this holds." .for)) }}
 {{- end }}
 {{- end }}
 
