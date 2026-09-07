@@ -29,6 +29,14 @@ const (
 	cacheAll     = "public, max-age=600"
 )
 
+// degradedErrorStreak is how many consecutive failures of one collector
+// loop mark a network degraded. It matches the collector's own readiness
+// rule: a single error against a metered public RPC is routine and the
+// loop recovers on its next tick, while a loop that keeps failing is also
+// caught by its freshness window. A collector too old to report the streak
+// sends zero, so such a deployment degrades on staleness alone.
+const degradedErrorStreak = 3
+
 var errNoData = errors.New("no data yet")
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -627,11 +635,10 @@ func networkHealth(n model.NetworkStatus, now time.Time) (status string, reasons
 		} {
 			name, loop := item.name, item.loop
 			success := parseStatusTime(loop.LastSuccessAt)
-			failure := parseStatusTime(loop.LastErrorAt)
 			switch {
 			case success.IsZero():
 				reasons = append(reasons, name+" loop has not succeeded")
-			case failure.After(success):
+			case loop.ErrorStreak >= degradedErrorStreak:
 				reasons = append(reasons, name+" loop failing")
 			case loop.StaleAfterSecs > 0 && now.Sub(success) > time.Duration(loop.StaleAfterSecs)*time.Second:
 				reasons = append(reasons, name+" loop stale")
