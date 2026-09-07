@@ -83,7 +83,7 @@ Both binaries serve Prometheus metrics at `/metrics` whatever this chart is told
 
 The Ingress does not expose either endpoint: it routes `/api` to the api and everything else to web, so `/metrics` is reachable from inside the cluster only.
 
-The chart always renders a headless Service for the collector (`<release>-collector`, port `metrics`), so a plain `scrape_config` can find it without the Prometheus operator. What is opt in is the operator's own objects, which need the `ServiceMonitor` and `PrometheusRule` CRDs:
+Whenever the collector is enabled and `config.collector.metrics_port` is not `0`, the chart renders a headless Service for it (`<release>-collector`, port `metrics`), whether or not the operator objects are on, so a plain `scrape_config` can find it without the Prometheus operator. Setting `metrics_port: 0` takes the collector's server, that Service and its ServiceMonitor away together. What is opt in is the operator's own objects, which need the `ServiceMonitor` and `PrometheusRule` CRDs:
 
 ```bash
 helm upgrade gascurve … \
@@ -119,7 +119,7 @@ Each alert can be switched off on its own, and its window, threshold and severit
 
 Lag is the one figure that needs two rules. A network with a dedicated endpoint normally sits at 0 to 2 seconds; one followed over a public RPC at its documented 4 calls per second normally sits at 20 to 60 seconds, because a tick costs about five calls and the catch-up gets what is left. A single threshold would either page constantly on the public networks or never fire on the dedicated one. `metrics.prometheusRule.dedicatedNetworks` is a regular expression on the `network` label that splits the fleet; it defaults to `robinhood` and must be widened when more networks move onto dedicated nodes.
 
-`collectorDown` and `apiDown` match `up{job="<release>-collector"}` and `up{job="<release>-api"}`, which is the job label an operator derives from a ServiceMonitor (the Service name). Scraping through a hand-written `scrape_config` with a different job name means those two alerts never fire; the rest do not depend on it.
+Every rule is scoped to `job="<release>-collector"` or `job="<release>-api"`, the job label an operator derives from a ServiceMonitor (the Service name), so two releases in one cluster never alert on each other's metrics. Scraping through a hand-written `scrape_config` with a different job name therefore means no alert fires: either name the job after the Service, or set `metrics.prometheusRule.enabled: false` and write the rules yourself.
 
 ## Migrations
 

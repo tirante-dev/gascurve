@@ -7,10 +7,11 @@ Every rule is built into a list first, so an alert switched off leaves no
 empty group behind, and a group with nothing in it is not emitted at all
 (the operator rejects one).
 
-The up{} alerts match the job label an operator derives from a
-ServiceMonitor, which is the Service name. The rest are scoped to this
-release's job too, so two installs in one cluster do not alert on each
-other's traffic.
+Every rule is scoped to the job label an operator derives from a
+ServiceMonitor, which is the Service name, so two releases in one cluster
+never alert on each other's metrics. Scraping through a hand-written
+scrape_config with a different job name therefore needs
+metrics.prometheusRule set aside as well; see the chart README.
 
 Prometheus label and value references are written as raw literals here, so
 Helm leaves them for Prometheus to expand.
@@ -31,7 +32,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorLagDedicated"
-  "expr" (printf "gascurve_collector_head_lag_seconds{network=~\"%s\"} > %v" $pr.dedicatedNetworks .threshold)
+  "expr" (printf "gascurve_collector_head_lag_seconds{job=\"%s\",network=~\"%s\"} > %v" $collectorJob $pr.dedicatedNetworks .threshold)
   "for" .for "severity" .severity
   "summary" (printf "gascurve collector is behind on %s" $network)
   "description" (printf "The collector's head on %s (chain %s) has been %ss old for %s. This network follows a dedicated endpoint and normally sits at 0 to 2 seconds, so anything near %v seconds is a stall, not load." $network $chain $seconds .for .threshold)) }}
@@ -41,7 +42,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorLagPublic"
-  "expr" (printf "gascurve_collector_head_lag_seconds{network!~\"%s\"} > %v" $pr.dedicatedNetworks .threshold)
+  "expr" (printf "gascurve_collector_head_lag_seconds{job=\"%s\",network!~\"%s\"} > %v" $collectorJob $pr.dedicatedNetworks .threshold)
   "for" .for "severity" .severity
   "summary" (printf "gascurve collector is behind on %s" $network)
   "description" (printf "The collector's head on %s (chain %s) has been %ss old for %s. This network is followed over a public RPC and normally sits at 20 to 60 seconds, so %v seconds means the call budget is no longer keeping up." $network $chain $seconds .for .threshold)) }}
@@ -51,7 +52,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorSampleStale"
-  "expr" (printf "time() - gascurve_collector_last_sample_timestamp_seconds > %v" .threshold)
+  "expr" (printf "time() - gascurve_collector_last_sample_timestamp_seconds{job=\"%s\"} > %v" $collectorJob .threshold)
   "for" .for "severity" .severity
   "summary" (printf "gascurve collector has taken no sample for %s" $network)
   "description" (printf "No successful state sample for %s (chain %s) in %ss. The fast loop samples every 0.5 to 3 seconds, so this is the follower not running, its RPC refusing every call, or the database refusing writes." $network $chain $seconds)) }}
@@ -61,7 +62,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorRateLimited"
-  "expr" (printf "rate(gascurve_collector_rate_limit_events_total[5m]) > %v" .threshold)
+  "expr" (printf "rate(gascurve_collector_rate_limit_events_total{job=\"%s\"}[5m]) > %v" $collectorJob .threshold)
   "for" .for "severity" .severity
   "summary" (printf "gascurve collector is being throttled on %s" $network)
   "description" (printf "The endpoints serving %s (chain %s) have reported throttling %s times a second for %s. Each event costs a 2 to 60 second back-off shared by every loop, so history work stalls first. Lower calls_per_second for that network, or give it an endpoint with a real budget." $network $chain $rate .for)) }}
@@ -71,7 +72,7 @@ Helm leaves them for Prometheus to expand.
 {{- if .enabled }}
 {{- $collectorRules = append $collectorRules (dict
   "alert" "GascurveCollectorEndpointsExhausted"
-  "expr" "min by (network, chain_id) (gascurve_collector_endpoint_disabled) == 1"
+  "expr" (printf "min by (network, chain_id) (gascurve_collector_endpoint_disabled{job=\"%s\"}) == 1" $collectorJob)
   "for" .for "severity" .severity
   "summary" (printf "every gascurve RPC endpoint for %s is disabled" $network)
   "description" (printf "Every endpoint configured for %s (chain %s) has been disabled for %s, so nothing can serve it. /status names the endpoints by index and says why each was disabled." $network $chain .for)) }}

@@ -335,7 +335,7 @@ The api's series carry no network label: it serves every network from one proces
 
 `route` is the chi route pattern (`/api/v1/networks/{network}/series`), resolved after the handler returned, never the request path: a network name or a block number must not become a series of its own. A request no route claims is labeled with the wildcard chi matched (`/api/v1/*`), or `unmatched` when it never reached the router. `/metrics` and `/api/v1/ws` are not counted: one is the scrape itself, the other a long-lived connection whose duration says nothing about request latency.
 
-The chart renders a `ServiceMonitor` per deployable and a `PrometheusRule` (both off by default, both needing the Prometheus operator's CRDs) plus a headless Service for the collector, which has no Service of its own otherwise. Thresholds and alert windows are values; see `charts/gascurve/README.md`.
+The chart renders a `ServiceMonitor` per deployable and a `PrometheusRule` (both off by default, both needing the Prometheus operator's CRDs) plus a headless Service for the collector, which has no Service of its own otherwise. Every alert is scoped to the job label an operator derives from a ServiceMonitor (the Service name), so two releases in one cluster never alert on each other's metrics. Thresholds and alert windows are values; see `charts/gascurve/README.md`.
 
 ## 10. Versioning, images and delivery
 

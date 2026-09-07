@@ -211,6 +211,11 @@ if render "metrics" "${work}/metrics.yaml" --values "${ci}/metrics-values.yaml";
   has "${work}/metrics.yaml" 'alert: GascurveApiDown' "metrics: the api down alert is missing"
   has "${work}/metrics.yaml" 'alert: GascurveApiErrorRate' "metrics: the api error rate alert is missing"
   has "${work}/metrics.yaml" 'alert: GascurveDatabaseUnreachable' "metrics: the database alert is missing"
+  # Every rule names this release's job, so two releases in one cluster
+  # never alert on each other's metrics.
+  if ! awk '/^ *expr: /{ if ($0 !~ /job=/) { print "    " $0; bad = 1 } } END { exit bad }' "${work}/metrics.yaml"; then
+    fail "metrics: the rule above is not scoped to this release's job"
+  fi
   # An alert switched off leaves no rule behind.
   lacks "${work}/metrics.yaml" 'alert: GascurveCollectorDown' "metrics: rendered an alert that was disabled"
   ok "ServiceMonitors, PrometheusRule and the split lag thresholds"
