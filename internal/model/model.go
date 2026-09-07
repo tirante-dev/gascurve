@@ -177,10 +177,15 @@ type BlockPoint struct {
 // including a bucket any of whose source blocks is such history; they are
 // never null otherwise.
 type SeriesPoint struct {
-	T               int64    `json:"t"`
-	Blocks          int64    `json:"blocks"`
-	GasUsed         uint64   `json:"gasUsed"`
+	T       int64  `json:"t"`
+	Blocks  int64  `json:"blocks"`
+	GasUsed uint64 `json:"gasUsed"`
+	// GasPerSecond is the rate over the covered span of the bucket, and
+	// Coverage the share of the bucket that span is (1 for a whole bucket,
+	// less for the bucket in progress or the first one after the collector
+	// started), so a chart never reads a partial bucket as a low rate.
 	GasPerSecond    uint64   `json:"gasPerSecond"`
+	Coverage        float64  `json:"coverage"`
 	FeesWei         string   `json:"feesWei"`
 	BaseFeeMin      string   `json:"baseFeeMin"`
 	BaseFeeAvg      string   `json:"baseFeeAvg"`

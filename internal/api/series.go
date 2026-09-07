@@ -107,7 +107,7 @@ func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRang
 		}
 		if len(blocks) > maxBlockPoints {
 			out.Resolution = "5s"
-			out.Points = stepDown(blocks, sets, stepDownWidth)
+			out.Points = stepDown(blocks, sets, stepDownWidth, now)
 		} else {
 			out.Resolution = "block"
 			out.Points = blockPoints(blocks, sets)
@@ -119,9 +119,13 @@ func (s *Server) buildSeries(ctx context.Context, chainID uint64, rng seriesRang
 	if err != nil {
 		return nil, err
 	}
+	liveStart, err := s.liveStart(ctx, chainID)
+	if err != nil {
+		return nil, err
+	}
 	width := db.Resolutions[rng.resolution]
 	for _, b := range buckets {
-		out.Points = append(out.Points, bucketPoint(b, width))
+		out.Points = append(out.Points, bucketPoint(b, width, now, liveStart))
 	}
 	out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 	return out, nil
@@ -182,8 +186,47 @@ func setSize(cs db.ConstraintSet) int {
 // bucketPoint renders a bucket. The average comes from the exact sum when
 // the bucket carries one and from the stored average otherwise; the fee
 // split and the exponents are null when the bucket predates them.
-func bucketPoint(b db.Bucket, width time.Duration) model.SeriesPoint {
-	secs := max(uint64(width/time.Second), 1)
+// liveStart is when the collector's live loop started storing this chain,
+// from the live_start checkpoint; the zero time when there is none.
+func (s *Server) liveStart(ctx context.Context, chainID uint64) (time.Time, error) {
+	raw, ok, err := s.store.GetState(ctx, chainID, db.StateLiveStart)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !ok {
+		return time.Time{}, nil
+	}
+	var v struct {
+		TS int64 `json:"ts"`
+	}
+	// An unreadable checkpoint reads as no known start, not as a failed request.
+	_ = json.Unmarshal([]byte(raw), &v)
+	if v.TS <= 0 {
+		return time.Time{}, nil
+	}
+	return time.Unix(v.TS, 0).UTC(), nil
+}
+
+// coverage is the part of a bucket the collector has indexed: what lies
+// after the live start and before now. Rates are taken over that span, so
+// the bucket in progress, or the first one after the collector started,
+// reads as the rate the chain ran at rather than as a fraction of a full
+// bucket, and the share is reported so a chart can mark the bucket as
+// partial. The span is never below one second nor above the width.
+func coverage(start time.Time, width time.Duration, now, liveStart time.Time) (secs uint64, share float64) {
+	covStart, covEnd := start, start.Add(width)
+	if liveStart.After(covStart) {
+		covStart = liveStart
+	}
+	if now.Before(covEnd) {
+		covEnd = now
+	}
+	covered := min(max(covEnd.Sub(covStart), time.Second), width)
+	return max(uint64(covered/time.Second), 1), float64(covered) / float64(width)
+}
+
+func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) model.SeriesPoint {
+	secs, share := coverage(b.BucketStart, width, now, liveStart)
 	var setID int64
 	if b.ConstraintSetID.Valid {
 		setID = b.ConstraintSetID.Int64
@@ -193,7 +236,7 @@ func bucketPoint(b db.Bucket, width time.Duration) model.SeriesPoint {
 		avg = new(big.Int).Div(b.BaseFeeSum.Wei.BigInt(), big.NewInt(b.Blocks)).String()
 	}
 	return model.SeriesPoint{
-		T: b.BucketStart.Unix(), Blocks: b.Blocks, GasUsed: b.GasUsed, GasPerSecond: b.GasUsed / secs,
+		T: b.BucketStart.Unix(), Blocks: b.Blocks, GasUsed: b.GasUsed, GasPerSecond: b.GasUsed / secs, Coverage: share,
 		FeesWei: b.FeesWei.String(), BaseFeeMin: b.BaseFeeMin.String(), BaseFeeAvg: avg, BaseFeeMax: b.BaseFeeMax.String(),
 		ExponentBips: b.ExponentEndBips, ConstraintBips: int64s(b.ConstraintBipsEnd), Backlogs: b.BacklogsEnd.Uint64s(), BacklogsMax: b.BacklogsMax.Uint64s(),
 		MinBaseFee: b.MinBaseFee.StringPtr(), FloorFeesWei: b.FloorFeesWei.StringPtr(), SurplusFeesWei: b.SurplusFeesWei.StringPtr(),
@@ -215,7 +258,7 @@ func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint
 		gas := new(big.Int).SetUint64(b.GasUsed)
 		fees := new(big.Int).Mul(b.BaseFee.BigInt(), gas)
 		p := model.SeriesPoint{
-			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, GasPerSecond: perSecond[b.TS.Unix()],
+			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, GasPerSecond: perSecond[b.TS.Unix()], Coverage: 1,
 			FeesWei: fees.String(), BaseFeeMin: b.BaseFee.String(), BaseFeeAvg: b.BaseFee.String(), BaseFeeMax: b.BaseFee.String(),
 			ExponentBips: b.ExponentBips, ConstraintBips: int64s(b.ConstraintBips), Backlogs: b.Backlogs.Uint64s(), BacklogsMax: b.Backlogs.Uint64s(),
 			MinBaseFee: b.MinBaseFee.StringPtr(), ConstraintSetID: setIDAt(sets, b.Number, len(b.Backlogs)), ReplayErrorBips: replayError(b),
@@ -235,7 +278,7 @@ func stringPtr(v *big.Int) *string {
 }
 
 // stepDown folds blocks into fixed width buckets.
-func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration) []model.SeriesPoint {
+func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration, now time.Time) []model.SeriesPoint {
 	secs := int64(width / time.Second)
 	var out []model.SeriesPoint
 	var cur *acc
@@ -243,14 +286,14 @@ func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration) [
 		start := (b.TS.Unix() / secs) * secs
 		if cur == nil || cur.start != start {
 			if cur != nil {
-				out = append(out, cur.point(secs))
+				out = append(out, cur.point(width, now))
 			}
 			cur = &acc{start: start, sum: new(big.Int), fees: new(big.Int), floor: new(big.Int)}
 		}
 		cur.add(b, setIDAt(sets, b.Number, len(b.Backlogs)))
 	}
 	if cur != nil {
-		out = append(out, cur.point(secs))
+		out = append(out, cur.point(width, now))
 	}
 	return out
 }
@@ -303,7 +346,10 @@ func (a *acc) add(b db.Block, setID int64) {
 	a.errBips = max(a.errBips, replayError(b))
 }
 
-func (a *acc) point(secs int64) model.SeriesPoint {
+// point renders the step; the rate covers the part of the step before now
+// (the blocks are the whole coverage, so no live start applies here).
+func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
+	secs, share := coverage(time.Unix(a.start, 0), width, now, time.Time{})
 	avg := new(big.Int).Div(a.sum, big.NewInt(a.blocks))
 	if a.maxBacklog == nil {
 		a.maxBacklog = []uint64{}
@@ -315,7 +361,7 @@ func (a *acc) point(secs int64) model.SeriesPoint {
 		a.floor = new(big.Int)
 	}
 	p := model.SeriesPoint{
-		T: a.start, Blocks: a.blocks, GasUsed: a.gas, GasPerSecond: a.gas / uint64(secs),
+		T: a.start, Blocks: a.blocks, GasUsed: a.gas, GasPerSecond: a.gas / secs, Coverage: share,
 		FeesWei: a.fees.String(), BaseFeeMin: a.minFee.String(), BaseFeeAvg: avg.String(), BaseFeeMax: a.maxFee.String(),
 		ExponentBips: a.exponent, ConstraintBips: a.constraintBips, Backlogs: a.backlogs, BacklogsMax: a.maxBacklog,
 		MinBaseFee: a.minBaseFee, ConstraintSetID: a.setID, ReplayErrorBips: a.errBips,

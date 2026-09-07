@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -535,7 +536,7 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 		t.Fatalf("block points: %+v", pts)
 	}
 	// Stepping down folds unknown blocks into an unknown split.
-	if p := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}}, nil, 5*time.Second); len(p) != 1 || p[0].FloorFeesWei != nil {
+	if p := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}}, nil, 5*time.Second, now); len(p) != 1 || p[0].FloorFeesWei != nil {
 		t.Fatalf("step down with an unknown block: %+v", p)
 	}
 }
@@ -996,7 +997,7 @@ func TestHelpers(t *testing.T) {
 	if intParam(httptest.NewRequest(http.MethodGet, "/?limit=5000", http.NoBody), "limit", 1, 1, 10) != 10 {
 		t.Fatal("intParam clamp")
 	}
-	if p := (&acc{blocks: 1, sum: bigInt(0), fees: bigInt(0), minFee: bigInt(1), maxFee: bigInt(1)}).point(5); p.BacklogsMax == nil || p.Backlogs == nil || p.ConstraintBips != nil || p.MinBaseFee != nil || *p.FloorFeesWei != "0" {
+	if p := (&acc{blocks: 1, sum: bigInt(0), fees: bigInt(0), minFee: bigInt(1), maxFee: bigInt(1)}).point(5*time.Second, now); p.BacklogsMax == nil || p.Backlogs == nil || p.ConstraintBips != nil || p.MinBaseFee != nil || *p.FloorFeesWei != "0" {
 		t.Fatalf("point: %+v", p)
 	}
 	if legacyExponent(&model.LegacyParams{SpeedLimit: 1, Inertia: 1, Tolerance: 1, Backlog: 0}) != 0 || legacyExponent(&model.LegacyParams{SpeedLimit: 10, Inertia: 10, Tolerance: 1, Backlog: 110}) != 10_000 {
@@ -1020,5 +1021,79 @@ func TestRangeBounds(t *testing.T) {
 	}
 	if firstPoint(nil) != 0 || firstBatch(nil) != 0 || firstL1(nil) != 0 {
 		t.Fatal("first of nothing is zero")
+	}
+}
+
+// TestSeriesCoverage: a bucket still in progress, and the first bucket
+// after the collector started, report their rate over the span they cover
+// and the share that span is, so a chart neither dips at its right edge
+// nor reads a partial bucket as a quiet one.
+func TestSeriesCoverage(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+		t.Fatal(err)
+	}
+	clock := now.Add(20 * time.Second) // twenty seconds into the minute that starts at now
+	inProgress := now.Truncate(time.Minute)
+	first := inProgress.Add(-2 * time.Minute)
+	full := inProgress.Add(-time.Minute)
+	bucket := func(start time.Time) db.Bucket {
+		return db.Bucket{ChainID: robinhood, Resolution: db.Resolution1m, BucketStart: start, Blocks: 3, GasUsed: 300, FeesWei: db.WeiFromUint64(90),
+			BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1), BacklogsEnd: db.Uint64Array{}, BacklogsMax: db.Uint64Array{}, PricingVersion: db.PricingFull}
+	}
+	if err := store.FoldBuckets(ctx, []db.Bucket{bucket(first), bucket(full), bucket(inProgress)}); err != nil {
+		t.Fatal(err)
+	}
+	// The collector started forty-five seconds into the first bucket.
+	if err := store.SetState(ctx, robinhood, db.StateLiveStart, `{"block":1,"ts":`+strconv.FormatInt(first.Add(45*time.Second).Unix(), 10)+`}`); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.ServerConfig{RateLimitPerSecond: 1000, RateLimitBurst: 1000}
+	s := New(store, cfg, nil, logger.Nop(), WithClock(func() time.Time { return clock }))
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	resp, body := get(t, ts, "/api/v1/networks/robinhood/series?range=24h")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	var out model.Series
+	decode(t, body, &out)
+	if len(out.Points) != 3 {
+		t.Fatalf("points: %+v", out.Points)
+	}
+	// First bucket: fifteen seconds covered of sixty.
+	if p := out.Points[0]; p.GasPerSecond != 20 || p.Coverage != 0.25 {
+		t.Fatalf("first bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
+	}
+	// A whole bucket.
+	if p := out.Points[1]; p.GasPerSecond != 5 || p.Coverage != 1 {
+		t.Fatalf("full bucket: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
+	}
+	// The bucket in progress: twenty seconds covered.
+	if p := out.Points[2]; p.GasPerSecond != 15 || p.Coverage < 0.33 || p.Coverage > 0.34 {
+		t.Fatalf("bucket in progress: %d gas/s coverage %v", p.GasPerSecond, p.Coverage)
+	}
+	// An unreadable live_start is ignored, not an error.
+	if err := store.SetState(ctx, robinhood, db.StateLiveStart, "{bad"); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := get(t, ts, "/api/v1/networks/robinhood/series?range=24h"); resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	// The span never drops below a second nor rises above the width.
+	if secs, share := coverage(now, time.Minute, now, time.Time{}); secs != 1 || share != 1.0/60 {
+		t.Fatalf("clamped low: %d %v", secs, share)
+	}
+	if secs, share := coverage(now, time.Minute, now.Add(time.Hour), now.Add(-time.Hour)); secs != 60 || share != 1 {
+		t.Fatalf("clamped high: %d %v", secs, share)
+	}
+	// A live start after the bucket's end still leaves a one-second span.
+	if secs, _ := coverage(now, time.Minute, now.Add(time.Hour), now.Add(2*time.Minute)); secs != 1 {
+		t.Fatalf("live start past the bucket: %d", secs)
+	}
+	// Per-block points are whole by definition.
+	if p := blockPoints([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull}}, nil); p[0].Coverage != 1 {
+		t.Fatalf("block coverage: %v", p[0].Coverage)
 	}
 }

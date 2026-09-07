@@ -217,6 +217,7 @@ type Series = {
 type SeriesPoint = {
   t: number;                               // unix seconds, bucket start
   blocks: number; gasUsed: number; gasPerSecond: number; feesWei: string;
+  coverage: number;                        // share of the bucket the collector indexed (1 = whole); gasPerSecond is the rate over that covered span, so the bucket in progress and the first one after the collector started read as rates, not as fractions of a bucket. Sums (gasUsed, feesWei, blocks) are over the covered span only
   baseFeeMin: string; baseFeeAvg: string; baseFeeMax: string;
   exponentBips: number; constraintBips: number[] | null;   // start-of-block values of the bucket's last block; null for pre-000006 history
   backlogs: number[]; backlogsMax: number[];
