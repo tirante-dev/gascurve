@@ -5,6 +5,16 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd)
 
+# `make ci` runs test-tooling and this script runs `make ci`, so the only thing
+# keeping that from looping forever is the preflight failing. Turn a regression
+# there into an error instead of a hang.
+if [ "${GASCURVE_TOOLS_TEST:-}" = 1 ]; then
+	printf 'FAIL: tools_test.sh re-entered itself, so `make ci` reached test-tooling with a failing preflight\n' >&2
+	exit 1
+fi
+GASCURVE_TOOLS_TEST=1
+export GASCURVE_TOOLS_TEST
+
 # shellcheck source=tool-versions.env
 . "${script_dir}/tool-versions.env"
 
@@ -104,9 +114,28 @@ case "${output}" in
 		exit 1
 		;;
 esac
+
+# Only the tool the first check needs is installed. A preflight that is a real
+# phase boundary rejects the run before any check produces output; a plain
+# prerequisite list would let fmt-check pass first and only fail at lint.
+partial_bin=${work}/partial-bin
+mkdir -p "${partial_bin}"
+cp "${tools_bin}/goimports" "${partial_bin}/goimports"
+
+if output=$(make --no-print-directory -s -C "${repo_root}" ci TOOLS_BIN_DIR="${partial_bin}" 2>&1); then
+	printf 'FAIL: ci unexpectedly passed with an incomplete tool set\n' >&2
+	exit 1
+fi
 case "${output}" in
-	*"go vet"*|*"All CI checks passed"*)
-		printf 'FAIL: ci started checks or printed success after its preflight failed\n' >&2
+	*"golangci-lint ${GOLANGCI_LINT_VERSION} is not installed"*) ;;
+	*)
+		printf 'FAIL: ci preflight did not report the missing golangci-lint:\n%s\n' "${output}" >&2
+		exit 1
+		;;
+esac
+case "${output}" in
+	*"OK: formatting"*|*"All CI checks passed"*)
+		printf 'FAIL: ci ran checks after its preflight failed:\n%s\n' "${output}" >&2
 		exit 1
 		;;
 esac
