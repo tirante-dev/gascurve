@@ -265,6 +265,20 @@ reject "trusted proxy octet with a leading zero" "trusted_proxies" \
   --set database.existingSecret=my-db \
   --set ingress.enabled=true --set ingress.host=gascurve.com \
   --set 'config.server.trusted_proxies[0]=01.2.3.4'
+reject "trusted proxy that is not a whole IPv6 address" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=:::'
+reject "NetworkPolicy selector using In with no values" "allowedPeers" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set-json 'api.networkPolicy.allowedPeers=[{"podSelector":{"matchExpressions":[{"key":"role","operator":"In"}]}}]'
+reject "NetworkPolicy selector using Exists with values" "allowedPeers" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set-json 'api.networkPolicy.allowedPeers=[{"podSelector":{"matchExpressions":[{"key":"role","operator":"Exists","values":["proxy"]}]}}]'
 reject "empty ingress controller NetworkPolicy peers" "allowedPeers" \
   --set database.existingSecret=my-db \
   --set ingress.enabled=true --set ingress.host=gascurve.com \
@@ -310,6 +324,14 @@ if render "ingress" "${work}/ingress.yaml" --values "${ci}/ingress-values.yaml";
   has "${work}/ingress.yaml" 'port: http' "ingress: NetworkPolicy does not limit access to the API HTTP port"
   lacks "${work}/ingress.yaml" 'kind: Secret' "ingress: rendered a Secret, but database.existingSecret was set"
   ok "Ingress, trusted proxies and API NetworkPolicy rendered"
+fi
+
+if render "ingress-peer-expressions" "${work}/ingress-peer-expressions.yaml" \
+  --values "${ci}/ingress-values.yaml" \
+  --set-json 'api.networkPolicy.allowedPeers=[{"namespaceSelector":{"matchExpressions":[{"key":"kubernetes.io/metadata.name","operator":"In","values":["ingress-nginx"]}]},"podSelector":{"matchExpressions":[{"key":"app.kubernetes.io/component","operator":"Exists"}]}}]'; then
+  has "${work}/ingress-peer-expressions.yaml" 'operator: In' "ingress-peer-expressions: the In selector did not reach the NetworkPolicy"
+  has "${work}/ingress-peer-expressions.yaml" 'operator: Exists' "ingress-peer-expressions: the Exists selector did not reach the NetworkPolicy"
+  ok "well formed matchExpressions peers render"
 fi
 
 if render "ingress-scraped" "${work}/ingress-scraped.yaml" \
