@@ -122,7 +122,7 @@ describe("NetworkPage with a chain-id route", () => {
       to: 61,
       constraintSets: [],
       ownerActions: [],
-      points: [{ t: 1, blocks: 1, gasUsed: 1, gasPerSecond: 1, feesWei: "0", baseFeeMin: "1", baseFeeAvg: "1", baseFeeMax: "1", exponentBips: 34, constraintBips: [34, 0], backlogs: [3_111_506, 0], backlogsMax: [3_111_506, 0], minBaseFee: "1", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 }],
+      points: [{ t: 1, blocks: 1, gasUsed: 1, gasPerSecond: 1, coverage: 1, feesWei: "0", baseFeeMin: "1", baseFeeAvg: "1", baseFeeMax: "1", exponentBips: 34, constraintBips: [34, 0], backlogs: [3_111_506, 0], backlogsMax: [3_111_506, 0], minBaseFee: "1", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 }],
     };
     // The model comes from the api's network list before any hello.
     const { rerender } = render(<NetworkPage network="robinhood" />);

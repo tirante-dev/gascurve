@@ -13,12 +13,12 @@ const getL1Mock = vi.fn();
 vi.mock("@/lib/api/batches", () => ({ getBatches: (...args: unknown[]) => getBatchesMock(...args) }));
 vi.mock("@/lib/api/l1", () => ({ getL1: (...args: unknown[]) => getL1Mock(...args) }));
 
-import { ChartTooltip } from "./ChartTooltip";
+import { applicableRows, ChartTooltip } from "./ChartTooltip";
 import { HATCH_SPACING, HATCH_STROKE, HatchPattern } from "./primitives";
 import { targetValues } from "@/lib/smoothing";
 import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
-import { FeeFlows, feeTotals, unsplitNote } from "./FeeFlows";
+import { FeeFlows, feeFlowRows, feeTotals, unsplitNote } from "./FeeFlows";
 import { L1Section } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
 import { describeSplit, SeriesCharts } from "./SeriesCharts";
@@ -29,6 +29,7 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     blocks: 1,
     gasUsed: 0,
     gasPerSecond: 0,
+    coverage: 1,
     feesWei: "0",
     baseFeeMin: "1",
     baseFeeAvg: "1",
@@ -353,6 +354,27 @@ describe("FeeFlows", () => {
     expect(line.getAttribute("stroke-width")).toBe(String(HATCH_STROKE));
     expect(swatch.style.backgroundImage).toContain(`${HATCH_STROKE}px`);
     expect(swatch.style.backgroundImage).toContain(`${HATCH_SPACING}px`);
+  });
+
+  it("hatches the bucket the collector is still filling rather than stacking a total it has not finished collecting", () => {
+    const filling: Series = { ...series, points: [...series.points.slice(0, 2), { ...series.points[2], coverage: 0.4 }] };
+    render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={filling} model="constraints" nowMs={NOW_MS} />);
+    expect(screen.getByText("Hatched and left out: bucket in progress, 40% elapsed")).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /or the bucket is still filling/ })).toBeInTheDocument();
+    // Only the stack leaves it out: the bucket keeps every figure it has.
+    const details = screen.getByText(/Data table \(3 buckets\)/).closest("details") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    expect(within(details).getAllByRole("row")).toHaveLength(4);
+    expect(within(within(details).getAllByRole("row")[3]).queryByText("n/a")).toBeNull();
+  });
+
+  it("reads a bucket in progress out as what it has collected so far, not as what the bucket holds", () => {
+    const rows = feeFlowRows(false);
+    expect(rows.map((r) => r.label)).toEqual(["fees in bucket", "fees so far", "floor to infra", "congestion to network", "floor in force"]);
+    const whole = { feesEth: 1, floorFeesEth: 1, surplusFeesEth: 0, unsplitFeesEth: null, floor: 0.02, partial: null, coverage: 1 };
+    expect(applicableRows(rows, whole).map((r) => r.label)).toEqual(["fees in bucket", "floor to infra", "congestion to network", "floor in force"]);
+    expect(applicableRows(rows, { ...whole, partial: "in-progress", coverage: 0.4 }).map((r) => r.label)).toEqual(["fees so far", "floor to infra", "congestion to network", "floor in force"]);
   });
 
   it("shows no unknown-split legend or footnote when every bucket carries the split", () => {

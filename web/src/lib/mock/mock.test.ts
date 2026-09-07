@@ -203,6 +203,15 @@ describe("mock world", () => {
     expect(all.points[0].backlogs).toHaveLength(6);
     expect(all.points[0].constraintSetId).toBe(1);
     expect(all.points[all.points.length - 1].backlogs).toHaveLength(2);
+    // What the collector has of each bucket. A whole bucket is whole; the one
+    // in progress at the right edge and the one the range's start cuts into
+    // carry the share that was indexed, and every sum in them is a sum over
+    // that share alone.
+    expect(hour.points.every((p) => p.coverage > 0 && p.coverage <= 1)).toBe(true);
+    expect(month.points[0].coverage).toBeCloseTo(2 / 3, 6);
+    expect(month.points[month.points.length - 1].coverage).toBeCloseTo(1 / 3, 6);
+    expect(month.points.slice(1, -1).every((p) => p.coverage === 1)).toBe(true);
+    expect(all.points[all.points.length - 1].coverage).toBeLessThan(1);
     // The long-window backlog is reset to the starting value at the Sep 3 owner action.
     const sep3 = isoToUnix("2026-09-03T17:08:00Z");
     const before = month.points.filter((p) => p.t < sep3 - 900).pop();

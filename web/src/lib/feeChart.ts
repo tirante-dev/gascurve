@@ -7,6 +7,7 @@
 import type { OwnerAction, PricerModel, Series } from "@/types";
 import type { TooltipRow } from "@/components/ChartTooltip";
 import { gapModel, withGapBreaks, NO_GAPS, type GapModel, type GapRow } from "@/lib/gaps";
+import { partialRowNote } from "@/lib/partial";
 import { buildChartPoints, FLOOR_COLOR, logDomain, shortConstraintLabel, spanSeconds, withSetBoundaries, type ChartPoint } from "@/utils/chart";
 import { formatGwei, formatInteger, formatSignificant } from "@/utils/format";
 
@@ -49,6 +50,20 @@ export function ownerActionNote(markers: readonly Marker[], bucketSeconds: numbe
   return (row) => {
     const hits = actionsInBucket(markers, Number(row.t), bucketSeconds);
     return hits.length > 0 ? hits.map((h) => `Owner action at block ${formatInteger(h.action.block)}: ${describeAction(h.action)}`).join(" · ") : null;
+  };
+}
+
+/**
+ * The whole tooltip footnote for a hovered bucket: that the collector has
+ * only part of the bucket when that is so, then every owner action that
+ * landed inside it. `sums` is true for a chart drawing sums per bucket, which
+ * leaves a partial bucket out of its marks rather than drawing it short.
+ */
+export function bucketNote(markers: readonly Marker[], bucketSeconds: number, sums = false): (row: Record<string, unknown>) => string | null {
+  const actions = ownerActionNote(markers, bucketSeconds);
+  return (row) => {
+    const parts = [partialRowNote(row, sums), actions(row)].filter((part): part is string => part !== null);
+    return parts.length > 0 ? parts.join(" \u00b7 ") : null;
   };
 }
 

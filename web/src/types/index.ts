@@ -118,6 +118,14 @@ export type SeriesPoint = {
   blocks: number;
   gasUsed: number;
   gasPerSecond: number;
+  /**
+   * The share of the bucket the collector indexed: 1 for a whole one, less for
+   * the bucket in progress at the right edge and for the first bucket after
+   * the collector started. `gasPerSecond` is the rate over that covered span,
+   * so rates and averages read normally; the sums below are sums over the
+   * covered span alone.
+   */
+  coverage: number;
   feesWei: string;
   baseFeeMin: string;
   baseFeeAvg: string;

@@ -4,7 +4,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { PricerModel, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
-import { describeAction, feeChartData, feeTooltipRows, ownerActionNote, type DrawnRow } from "@/lib/feeChart";
+import { bucketNote, describeAction, feeChartData, feeTooltipRows, type DrawnRow } from "@/lib/feeChart";
 import { emptyRangeNote, type GapModel, type GapWindow } from "@/lib/gaps";
 import { throughputAxis, throughputTick, type ThroughputAxis } from "@/lib/hero";
 import {
@@ -124,7 +124,10 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   const unrecorded = hasUnrecordedSplit(series);
   const count = seriesCount(series);
   const indices = Array.from({ length: count }, (_, i) => i);
-  const note = ownerActionNote(markers, bucketSeconds);
+  // Rates and averages are drawn on a partial bucket as they are (the api's
+  // gasPerSecond is already the rate over the covered span), so the note is
+  // the only place these charts say the bucket is not whole.
+  const note = bucketNote(markers, bucketSeconds);
 
   const contributionRows: TooltipRow[] = segments.map((s) => ({
     label: s.label,

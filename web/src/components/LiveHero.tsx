@@ -4,7 +4,7 @@ import { memo, useMemo, useState, useSyncExternalStore, type ReactNode } from "r
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
 import { useSeries } from "@/hooks/useSeries";
-import { feeChartCaption, feeChartData, feeChartLabel, feeTooltipRows, ownerActionNote, type FeeChartData } from "@/lib/feeChart";
+import { bucketNote, feeChartCaption, feeChartData, feeChartLabel, feeTooltipRows, type FeeChartData } from "@/lib/feeChart";
 import { emptyRangeNote } from "@/lib/gaps";
 import {
   heroChartData,
@@ -179,7 +179,7 @@ export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText,
  */
 export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabel, height }: { data: FeeChartData; rangeLabel: string; height?: string }) {
   const rows = useMemo(() => feeTooltipRows(), []);
-  const note = useMemo(() => ownerActionNote(data.markers, data.bucketSeconds), [data.markers, data.bucketSeconds]);
+  const note = useMemo(() => bucketNote(data.markers, data.bucketSeconds), [data.markers, data.bucketSeconds]);
   return (
     <>
       <ChartBox label={feeChartLabel(rangeLabel, data.points)} height={height}>

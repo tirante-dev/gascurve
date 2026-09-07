@@ -831,6 +831,10 @@ export class MockWorld {
           blocks: b.blocks,
           gasUsed: b.gas,
           gasPerSecond: b.duration > 0 ? Math.round(b.gas / b.duration) : 0,
+          // What the collector has of the bucket: a whole one everywhere but
+          // at the two ends, where the bucket in progress and the first one
+          // after the world began hold only part of their span.
+          coverage: Math.min(1, b.duration / spec.seconds),
           feesWei: b.feesWei.toString(),
           baseFeeMin: b.feeMin.toString(),
           baseFeeAvg: (b.blocks > 0 ? b.feeSum / BigInt(b.blocks) : b.feeMin).toString(),

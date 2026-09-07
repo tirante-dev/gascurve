@@ -1,5 +1,6 @@
 // Pure helpers that turn api shapes into what the charts draw.
 
+import { coverageOf, partialKinds, type PartialKind } from "@/lib/partial";
 import { saturatingCastToBips, saturatingUMul, toUint64 } from "@/lib/pricer";
 import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesPoint } from "@/types";
 import { formatDuration, formatGas, formatGasPerSecond, formatInteger, weiToEthNumber, weiToGweiNumber } from "./format";
@@ -245,6 +246,13 @@ export type ChartPoint = {
   /** `feesEth` for buckets whose destination split is unknown, null otherwise. */
   unsplitFeesEth: number | null;
   blocks: number;
+  /** The share of the bucket the collector indexed; 1 for a whole one. */
+  coverage: number;
+  /**
+   * Which kind of partial bucket this is, null for a whole one. Rates and
+   * averages are drawn on a partial bucket as they are; the sums are not.
+   */
+  partial: PartialKind | null;
   replayErrorBips: number;
   constraintSetId: number;
   /** False when the point's set is not in the series; then its backlogs sit under the `buI` keys. */
@@ -279,7 +287,11 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
   const segments = segmentsFor(series, model);
   const bySet = groupBySet(segments);
   const slots = seriesCount(series);
-  return series.points.map((p) => {
+  // Which buckets the collector indexed only part of, from their position in
+  // the range: the last one is still filling, an earlier one is where
+  // indexing began.
+  const kinds = partialKinds(series.points);
+  return series.points.map((p, i) => {
     const own = ownSegments(bySet, p);
     const split = p.constraintBips;
     const feesEth = weiToEthNumber(p.feesWei);
@@ -299,6 +311,8 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
       surplusFeesEth: feeSplitKnown ? weiToEthNumber(surplusWei) : null,
       unsplitFeesEth: feeSplitKnown ? null : feesEth,
       blocks: p.blocks,
+      coverage: coverageOf(p),
+      partial: kinds[i],
       replayErrorBips: p.replayErrorBips,
       constraintSetId: p.constraintSetId,
       setKnown: own !== undefined,

@@ -5,11 +5,12 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import type { LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
 import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL, type ChartPoint } from "@/utils/chart";
 import { emptyRangeNote, gapModel, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
+import { isPartialRow, partialBands, partialRowNote, withFeeStack } from "@/lib/partial";
 import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, formatUsdFixed, freshUsdPrice, shortAddress } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
 import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
-import { gapBands, GapNote } from "./ChartGaps";
+import { gapBands, GapNote, PartialHatch, PartialNote, partialBandAreas } from "./ChartGaps";
 import { Card, ChartFrame, HatchPattern, Label, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
 
 const FLOOR_FILL = "var(--seq-2)";
@@ -80,7 +81,10 @@ export const FEE_CHART_HEIGHT = 160;
 /** What a hovered bucket says: the fees in it, where they went, and the floor that split them. */
 export function feeFlowRows(unsplit: boolean): TooltipRow[] {
   return [
-    { label: "fees in bucket", value: (r) => `${formatSignificant(Number(r.feesEth), 4)} ETH` },
+    { label: "fees in bucket", value: (r) => `${formatSignificant(Number(r.feesEth), 4)} ETH`, when: (r) => !isPartialRow(r) },
+    // A bucket the collector has not finished holds what it has collected so
+    // far, which is a different fact from what the bucket will hold.
+    { label: "fees so far", value: (r) => `${formatSignificant(Number(r.feesEth), 4)} ETH`, when: isPartialRow },
     { label: "floor to infra", color: FLOOR_FILL, kind: "rect", value: (r) => ethCell(r.floorFeesEth), when: (r) => r.unsplitFeesEth === null },
     { label: "congestion to network", color: SURPLUS_FILL, kind: "rect", value: (r) => ethCell(r.surplusFeesEth), when: (r) => r.unsplitFeesEth === null },
     ...(unsplit ? [{ label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR, kind: "hatch" as const, value: (r: Record<string, unknown>) => ethCell(r.unsplitFeesEth), when: (r: Record<string, unknown>) => r.unsplitFeesEth !== null }] : []),
@@ -96,31 +100,38 @@ export function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT
   const window = gaps.window.to > gaps.window.from ? gaps.window : { from: points[0]?.t ?? 0, to: (points[points.length - 1]?.t ?? 0) + gaps.step };
   const span = window.to > window.from ? window.to - window.from : spanSeconds(points);
   const unsplit = points.some((p) => p.unsplitFeesEth !== null);
+  // The stack is a sum over the bucket, so a bucket the collector has only
+  // part of would draw as a bucket that collected little. It is hatched
+  // instead, and the stack ends at the last whole bucket.
+  const bands = partialBands(points, gaps.step);
   // Empty rows inside the holes, so a bucket that was never indexed breaks the
   // stack rather than reading as a bucket that collected nothing.
-  const rows = withGapBreaks(points, gaps.gaps);
+  const rows = withGapBreaks(withFeeStack(points), gaps.gaps);
   return (
     <>
-      <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as the floor part and the congestion part, hatched where the split predates the record">
+      <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as the floor part and the congestion part, hatched where the split predates the record or the bucket is still filling">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={rows} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <defs>
               <HatchPattern id={UNSPLIT_PATTERN_ID} color={UNKNOWN_COLOR} />
+              <PartialHatch />
             </defs>
             <CartesianGrid vertical={false} />
             {gapBands(gaps.gaps, window)}
+            {partialBandAreas(bands, window)}
             <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
-            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={feeFlowRows(unsplit)} />} />
-            <Area type="monotone" dataKey="floorFeesEth" stackId="fees" connectNulls={false} stroke={FLOOR_FILL} strokeWidth={1} fill={FLOOR_FILL} fillOpacity={0.6} isAnimationActive={false} activeDot={false} />
-            <Area type="monotone" dataKey="surplusFeesEth" stackId="fees" connectNulls={false} stroke={SURPLUS_FILL} strokeWidth={1} fill={SURPLUS_FILL} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
+            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={feeFlowRows(unsplit)} note={(r) => partialRowNote(r, true)} />} />
+            <Area type="monotone" dataKey="stackFloorEth" stackId="fees" connectNulls={false} stroke={FLOOR_FILL} strokeWidth={1} fill={FLOOR_FILL} fillOpacity={0.6} isAnimationActive={false} activeDot={false} />
+            <Area type="monotone" dataKey="stackSurplusEth" stackId="fees" connectNulls={false} stroke={SURPLUS_FILL} strokeWidth={1} fill={SURPLUS_FILL} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
             {unsplit ? (
-              <Area type="monotone" dataKey="unsplitFeesEth" stackId="fees" connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={1} strokeDasharray="4 3" fill={`url(#${UNSPLIT_PATTERN_ID})`} isAnimationActive={false} activeDot={false} />
+              <Area type="monotone" dataKey="stackUnsplitEth" stackId="fees" connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={1} strokeDasharray="4 3" fill={`url(#${UNSPLIT_PATTERN_ID})`} isAnimationActive={false} activeDot={false} />
             ) : null}
           </AreaChart>
         </ResponsiveContainer>
       </ChartFrame>
       <GapNote gaps={gaps} />
+      <PartialNote bands={bands} />
     </>
   );
 }

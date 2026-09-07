@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { OwnerAction, Series, SeriesPoint } from "@/types";
 import {
   actionsInBucket,
+  bucketNote,
   DEFAULT_BUCKET_SECONDS,
   describeAction,
   feeChartCaption,
@@ -20,6 +21,7 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
     blocks: 1,
     gasUsed: 0,
     gasPerSecond: 0,
+    coverage: 1,
     feesWei: "0",
     baseFeeMin: "1",
     baseFeeAvg: "1",
@@ -156,6 +158,16 @@ describe("owner actions on the fee chart", () => {
     const note = ownerActionNote(markers, 60);
     expect(note({ t: markers[0].t })).toBe("Owner action at block 20: setMinimumL2BaseFee: 0.02 gwei");
     expect(note({ t: markers[0].t + 600 })).toBeNull();
+  });
+
+  it("puts what the collector has of the bucket in front of the actions in it", () => {
+    const markers = markersFor({ ownerActions: [setFloor] });
+    const note = bucketNote(markers, 60);
+    expect(note({ t: markers[0].t, partial: "in-progress", coverage: 0.5 })).toBe("bucket in progress, 50% elapsed · Owner action at block 20: setMinimumL2BaseFee: 0.02 gwei");
+    expect(note({ t: markers[0].t + 600, partial: "leading", coverage: 0.25 })).toBe("partially indexed, 25% of the bucket");
+    // A chart that draws sums leaves the bucket out, and says so.
+    expect(bucketNote([], 60, true)({ t: 0, partial: "in-progress", coverage: 0.5 })).toBe("bucket in progress, 50% elapsed; not drawn as a bucket total");
+    expect(note({ t: markers[0].t + 600, partial: null, coverage: 1 })).toBeNull();
   });
 });
 

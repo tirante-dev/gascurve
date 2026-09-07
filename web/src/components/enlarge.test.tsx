@@ -74,6 +74,7 @@ const series: Series = {
     blocks: 12,
     gasUsed: 100,
     gasPerSecond: 1,
+    coverage: 1,
     feesWei: "1000000000000000000",
     baseFeeMin: "100000000",
     baseFeeAvg: "300000000",
