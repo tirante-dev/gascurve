@@ -809,6 +809,15 @@ func (f *Follower) recordPruneFrontier(ctx context.Context, s db.Store, before t
 // record that will not parse is replaced by the same path.
 func (f *Follower) seedPruneFrontierLocked(ctx context.Context) error {
 	boundary, hasBoundary := f.boundaryLocked()
+	if !hasBoundary {
+		// No live start means no block rows, so nothing has been pruned
+		// and there is nothing to protect. Seeding from the wall clock here
+		// would record a fiction: on a stalled or development chain whose
+		// first head predates that cutoff, every bucket start would sit
+		// below a frontier the forward-only record can never lower, and
+		// rows would be stored with no buckets over them for good.
+		return nil
+	}
 	cutoff, err := f.pruneCutoff(ctx, boundary, hasBoundary)
 	if err != nil {
 		return err

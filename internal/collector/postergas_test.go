@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
 )
@@ -39,9 +40,9 @@ func seedBlocksWithoutPosterGas(t *testing.T, rpc *fakeRPC, store *dbtest.MemSto
 const repairLiveStart = uint64(900)
 
 // repairFollower is a follower whose live start sits at repairLiveStart.
-func repairFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore) *Follower {
+func repairFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore, opts ...func(*Options)) *Follower {
 	t.Helper()
-	f := newTestFollower(t, rpc, store)
+	f := newTestFollower(t, rpc, store, opts...)
 	ls := &liveStart{Block: repairLiveStart, TS: int64(tsFor(repairLiveStart))}
 	if err := f.saveLiveStart(context.Background(), store, ls); err != nil {
 		t.Fatal(err)
@@ -485,11 +486,14 @@ func TestRepairStepRebuildsTheResolutionsThatAreStillWhole(t *testing.T) {
 func TestPruneFrontierPinsToTheBoundaryWhileTheBackfillRuns(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
-	f := repairFollower(t, newFakeRPC(1000), store)
+	later := baseTime.Add(2 * time.Hour)
+	f := repairFollower(t, newFakeRPC(1000), store, func(o *Options) { o.Now = func() time.Time { return later } })
 	if err := store.DeleteState(ctx, 4663, db.StatePruneFrontier); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.BlockRetention = time.Minute
+	// An hour of retention, the floor, with the clock two hours on: the
+	// retention cutoff is then past the boundary, so the pin has to engage.
+	f.cfg.BlockRetention = time.Hour
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: false, Active: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -644,11 +648,12 @@ func TestPruneRecordsAFrontierThatOnlyMovesForward(t *testing.T) {
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
 	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
-	f := repairFollower(t, rpc, store)
+	later := baseTime.Add(2 * time.Hour)
+	f := repairFollower(t, rpc, store, func(o *Options) { o.Now = func() time.Time { return later } })
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.BlockRetention = time.Minute
+	f.cfg.BlockRetention = time.Hour
 	if err := f.prune(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -681,17 +686,19 @@ func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 	rpc := newFakeRPC(1000)
 
 	// Absent, backfill finished: seeded to the retention cutoff.
+	later := baseTime.Add(2 * time.Hour)
+	clock := func(o *Options) { o.Now = func() time.Time { return later } }
 	store := dbtest.New()
 	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
-	f := newTestFollower(t, rpc, store)
-	f.cfg.BlockRetention = time.Minute
+	f := newTestFollower(t, rpc, store, clock)
+	f.cfg.BlockRetention = time.Hour
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	want := f.now().Add(-time.Minute)
+	want := f.now().Add(-time.Hour)
 	if got, err := f.pruneFrontier(ctx); err != nil || !got.Equal(want) {
 		t.Fatalf("seeded frontier %v %v, want the cutoff %v", got, err, want)
 	}
@@ -726,12 +733,24 @@ func TestSeedPruneFrontierFromThePruneCutoff(t *testing.T) {
 		t.Fatalf("an unreadable frontier was not reseeded: %v", got)
 	}
 
+	// Empty: no live start, so no rows and nothing pruned. Seeding from the
+	// wall clock would record a fiction a stalled or development chain could
+	// never get out from under, so nothing is recorded.
+	empty := newTestFollower(t, rpc, dbtest.New(), clock)
+	empty.cfg.BlockRetention = time.Hour
+	if err := empty.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := empty.pruneFrontier(ctx); err != nil || !got.IsZero() {
+		t.Fatalf("seeded a frontier on an empty store: %v %v", got, err)
+	}
+
 	// Backfill unfinished: the cutoff is pinned to the boundary, and so is
 	// the seed, which is what keeps it below every row a gap fill can write.
 	pinned := dbtest.New()
 	seedBlocksWithoutPosterGas(t, rpc, pinned, 900, 905)
-	g := newTestFollower(t, rpc, pinned)
-	g.cfg.BlockRetention = time.Minute
+	g := newTestFollower(t, rpc, pinned, clock)
+	g.cfg.BlockRetention = time.Hour
 	if err := g.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -759,9 +778,11 @@ func TestRepairOnAnUpgradedDatabaseIsFlooredByTheSeed(t *testing.T) {
 	seedBlocksWithoutPosterGas(t, rpc, store, 64_500, 64_502)
 	first := time.Unix(int64(tsFor(28_500)), 0).UTC()
 	second := time.Unix(int64(tsFor(64_500)), 0).UTC()
-	now := second.Add(90 * time.Second)
+	// The clock on the hour after the second row, with an hour of retention,
+	// the floor: the cutoff lands on that row's hour exactly.
+	now := second.Truncate(time.Hour).Add(time.Hour)
 	f := newTestFollower(t, rpc, store, func(o *Options) { o.Now = func() time.Time { return now } })
-	f.cfg.BlockRetention = now.Sub(second.Truncate(time.Hour))
+	f.cfg.BlockRetention = time.Hour
 	if err := f.saveCursor(ctx, store, &backfillCursor{Done: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -833,5 +854,20 @@ func TestPosterGasCursorRoundTrips(t *testing.T) {
 	var decoded posterGasCursor
 	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
 		t.Fatalf("stored cursor is not json: %v", err)
+	}
+}
+
+// The floor on block_retention exists because row-backed buckets are rebuilt
+// from the rows inside them, so rows have to outlive the widest bucket they
+// fall in. The constant lives in config, which cannot import db; this pins
+// the two together so a wider resolution cannot be added without the floor
+// following it.
+func TestMinBlockRetentionCoversTheWidestBucket(t *testing.T) {
+	var widest time.Duration
+	for _, res := range db.ResolutionOrder {
+		widest = max(widest, db.Resolutions[res])
+	}
+	if config.MinBlockRetention != widest {
+		t.Fatalf("config.MinBlockRetention is %v, the widest bucket is %v", config.MinBlockRetention, widest)
 	}
 }
