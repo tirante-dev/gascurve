@@ -9,8 +9,14 @@ import (
 	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/logger"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 )
+
+// WithMetrics points every follower Run starts at the process instruments.
+func WithMetrics(m *metrics.Collector) func(*Options) {
+	return func(o *Options) { o.Metrics = m }
+}
 
 // Run drives the fast loop, the slow loop and the history loop (gap
 // filling and the backfill) until ctx ends.

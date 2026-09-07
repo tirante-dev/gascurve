@@ -43,6 +43,12 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "gascurve.containerSecurityContext" (list . .Values.collector.securityContext) | nindent 12 }}
+          {{- if gt (int .Values.config.collector.metrics_port) 0 }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.config.collector.metrics_port }}
+              protocol: TCP
+          {{- end }}
           env:
             {{- include "gascurve.goEnv" (list . .Values.collector.extraEnv) | nindent 12 }}
           volumeMounts:

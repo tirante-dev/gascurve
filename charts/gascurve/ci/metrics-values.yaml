@@ -1,0 +1,30 @@
+# ct lint / helm lint values: the Prometheus operator objects switched on,
+# with the selector labels a kube-prometheus-stack install needs and a
+# tighter public-RPC lag window than the default.
+database:
+  existingSecret: gascurve-db
+
+metrics:
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+    interval: 15s
+    scrapeTimeout: 10s
+  prometheusRule:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+    alertLabels:
+      team: platform
+    dedicatedNetworks: robinhood|robinhood-testnet
+    alerts:
+      collectorLagPublic:
+        enabled: true
+        threshold: 120
+        for: 10m
+        severity: warning
+      collectorDown:
+        enabled: false
+        for: 5m
+        severity: critical

@@ -383,10 +383,10 @@ func testConfig() config.CollectorConfig {
 	}
 }
 
-func newTestFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore) *Follower {
+func newTestFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore, opts ...func(*Options)) *Follower {
 	t.Helper()
 	clock := baseTime.Add(1000 * time.Second / 10)
-	f := NewFollower(Options{
+	o := Options{
 		Network:   config.NetworkConfig{Name: "robinhood", DisplayName: "Robinhood Chain", ChainID: 4663, ExplorerURL: "https://x", CallsPerSecond: 4, Enabled: true},
 		Collector: testConfig(),
 		RPC:       rpc,
@@ -394,6 +394,9 @@ func newTestFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore) *Follow
 		Log:       logger.Nop(),
 		Now:       func() time.Time { return clock },
 		Sleep:     func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
-	})
-	return f
+	}
+	for _, apply := range opts {
+		apply(&o)
+	}
+	return NewFollower(o)
 }

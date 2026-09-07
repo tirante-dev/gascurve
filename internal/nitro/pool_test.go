@@ -850,3 +850,34 @@ func TestPoolWSHealthRebinds(t *testing.T) {
 	none.Connected()
 	none.Failed(true, errors.New("x"))
 }
+
+// TestPoolStatusCarriesObservableCounters: the routing state reports each
+// endpoint's own throttling count and the pool's aggregate call counts per
+// pacer class, and never a URL.
+func TestPoolStatusCarriesObservableCounters(t *testing.T) {
+	ctx := context.Background()
+	a, b := chainFake(t, testChainIDHex), chainFake(t, testChainIDHex)
+	clock := newFakeClock()
+	p := newTestPool(t, clock, 30*time.Second, endpointOf(a, 100), endpointOf(b, 100))
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a.fail(http.StatusTooManyRequests)
+	echoVia(t, p, "one")
+	if _, err := p.Call(WithClass(ctx, Fast), "echo", "two"); err != nil {
+		t.Fatal(err)
+	}
+	st := p.Status()
+	if st.Endpoints[0].RateLimitEvents != 1 || st.Endpoints[1].RateLimitEvents != 0 {
+		t.Fatalf("per-endpoint rate limit events = %d and %d", st.Endpoints[0].RateLimitEvents, st.Endpoints[1].RateLimitEvents)
+	}
+	stats := p.Stats()
+	if stats.FastCalls != 1 || stats.BulkCalls == 0 {
+		t.Fatalf("pool class counters = fast %d bulk %d", stats.FastCalls, stats.BulkCalls)
+	}
+	for _, e := range st.Endpoints {
+		if strings.Contains(e.Error, "http") || strings.Contains(e.WSError, "http") {
+			t.Fatalf("an endpoint URL reached the status: %+v", e)
+		}
+	}
+}

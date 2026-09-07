@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tirante-dev/gascurve/internal/db"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
@@ -51,6 +52,25 @@ type backfillCursor struct {
 	LastAnchor          uint64   `json:"lastAnchor,omitempty"`
 	LastAnchorErrorBips int64    `json:"lastAnchorErrorBips,omitempty"`
 	AnchorMinFee        string   `json:"anchorMinFee,omitempty"`
+}
+
+// backfillState renders the cursor for the instruments: where the active
+// segment has replayed to, the oldest block the configured depth reaches,
+// and how many blocks are still to be replayed, counting the segments
+// below the active one. A cursor that has not chosen a segment yet reports
+// the whole range below its end.
+func backfillState(c *backfillCursor) metrics.BackfillState {
+	out := metrics.BackfillState{Cursor: c.Next, Floor: c.DepthStart, Done: c.Done}
+	if c.Done {
+		return out
+	}
+	if !c.Active {
+		out.Cursor = c.SegStart
+		out.Remaining = pricer.SaturatingUSub(c.End, c.DepthStart)
+		return out
+	}
+	out.Remaining = pricer.SaturatingUSub(c.End, c.Next) + pricer.SaturatingUSub(c.SegStart, c.DepthStart)
+	return out
 }
 
 func (f *Follower) loadCursor(ctx context.Context) (*backfillCursor, error) {
@@ -111,6 +131,9 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err != nil {
 		return BackfillIdle, err
 	}
+	// The committed cursor is what the instruments report, so the gauges
+	// never claim progress a failed commit did not make.
+	f.metrics.ObserveBackfill(backfillState(c))
 	if c.Done {
 		return BackfillDone, nil
 	}

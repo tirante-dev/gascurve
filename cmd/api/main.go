@@ -1,4 +1,5 @@
-// Command api serves the gascurve REST API and WebSocket from PostgreSQL.
+// Command api serves the gascurve REST API, the WebSocket and Prometheus
+// metrics from PostgreSQL, all on server.port.
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/logger"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/version"
 )
 
@@ -70,7 +72,11 @@ func run() error {
 	hub := api.NewHub(store, log, api.WithOrigins(cfg.Server.CORSOrigins))
 	go hub.Run(ctx, listener)
 
-	server := api.New(store, cfg.Server, hub, log, api.WithVersion(version.Version), api.WithEthUsdMaxAge(cfg.Collector.EthUsdMaxAge))
+	reg := metrics.NewRegistry()
+	server := api.New(store, cfg.Server, hub, log,
+		api.WithVersion(version.Version),
+		api.WithEthUsdMaxAge(cfg.Collector.EthUsdMaxAge),
+		api.WithMetrics(metrics.NewAPI(reg), reg))
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Server.Port)),
 		Handler:           server.Handler(),
