@@ -281,7 +281,7 @@ src/utils/               formatting (gwei, gas, durations), bips math
 
 Every chart card carries an enlarge control linking to `/{network}/charts/{chart}`, where `chart` is one of the registry ids in `src/lib/chartViews.ts`: `base-fee`, `backlog-sawtooth`, `contribution`, `gas-per-second`, `backlogs`, `fee-flows`, `l1`, `taylor`. The enlarged page draws the same component with the same hooks at a taller frame, keeps the range in `?range=` and the constraint slot in `?constraint=`, and offers tabs across every chart plus a link back to the section it came from.
 
-Units in copy: gas carries an SI prefix on the unit, never on the number (`11.2 Tgas`, `60 Mgas/s`, `812,345 gas` below one million). Figures that animate use fixed decimal counts per band so neighbouring elements never shift. USD figures (from `ethUsd`) are shown by default with the ETH amount on hover.
+Units in copy: gas carries an SI prefix on the unit, never on the number (`11.2 Tgas`, `60 Mgas/s`, `812,345 gas` below one million). Figures that animate use fixed decimal counts per band so neighbouring elements never shift. USD figures (from `ethUsd`) are shown by default; hovering one gives the working (`ETH amount × $price/ETH = $figure`) and the quote behind it (source and age), and the same facts are in the accessible description.
 
 Environment: `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`), `NEXT_PUBLIC_WS_URL` (derived from the API URL when unset), `NEXT_PUBLIC_SITE_URL`.
 
