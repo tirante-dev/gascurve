@@ -30,7 +30,7 @@ func TestIntegrationUpgradeFromProductionSchema(t *testing.T) {
 		"INSERT INTO networks (chain_id, name, display_name, explorer_url) "+
 			"VALUES (900000001, 'migration-test', 'Migration Test', 'https://example.com'); "+
 			"INSERT INTO blocks (chain_id, number, ts, gas_used, base_fee, backlogs, pricing_version) "+
-			"VALUES (900000001, 42, '2026-09-07T12:00:00Z', 123, 456, '{7,8}', 1);"); err != nil {
+			"VALUES (900000001, 42, '2026-01-01T00:00:00Z', 123, 456, '{7,8}', 1);"); err != nil {
 		t.Fatal(err)
 	}
 
