@@ -4,14 +4,15 @@ Deploys the three gascurve components: one collector (single replica, the only R
 
 A database is required whenever the collector or the api is enabled: set exactly one of `database.url` and `database.existingSecret`. `values.schema.json` rejects an install, upgrade or template that sets neither or both, so the default values alone do not install.
 
-`values.schema.json` models the whole `config` tree, not just the chart's own keys, because a value the chart waves through and the binary then rejects only shows up as a crash-looping pod. Intervals must be positive Go durations (`500ms`, `3s`, `720h`), `calls_per_second` is `0` for a dedicated node or a real budget from `0.1` to `10000`, `ws_url` must be `ws://` or `wss://` while `rpc_url` must be `http://` or `https://`, `eth_usd_source` is `""`, `coinbase`, `coingecko` or an `https://` URL, and chart-owned objects reject keys they do not know, so a field put at the wrong level fails the install instead of being mounted and ignored. Ingress needs a backend: enabling it with both `api.enabled` and `web.enabled` false is refused rather than rendering an Ingress with no paths.
+`values.schema.json` models the whole `config` tree, not just the chart's own keys, because a value the chart waves through and the binary then rejects only shows up as a crash-looping pod. Intervals must be positive Go durations (`500ms`, `3s`, `720h`), `calls_per_second` is `0` for a dedicated node or a real budget from `0.1` to `10000`, `ws_url` must be `ws://` or `wss://` while `rpc_url` must be `http://` or `https://`, `eth_usd_source` is `""`, `coinbase`, `coingecko` or an `https://` URL, and chart-owned objects reject keys they do not know, so a field put at the wrong level fails the install instead of being mounted and ignored. Ingress needs a backend: enabling it with both `api.enabled` and `web.enabled` false is refused rather than rendering an Ingress with no paths. An ingress that routes to the API also requires at least one valid address or CIDR in `config.server.trusted_proxies`.
 
 The one rule the schema cannot express is the cross-reference between a network with no `rpc_url` and a `NETWORK_<NAME>_RPC_URL` in the collector's environment; the templates check that, for fallback endpoints too. A literal override with an empty value does not count: `internal/config` ignores an empty environment override, so the schema rejects that shape outright.
 
 ```bash
 helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
   --set database.url='postgres://user:pass@postgres:5432/gascurve?sslmode=disable' \
-  --set ingress.enabled=true --set ingress.host=gascurve.com
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16'
 ```
 
 ## Values
@@ -23,6 +24,9 @@ helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
 | `collector.enabled` | Run the collector (always 1 replica) | `true` |
 | `api.replicaCount` / `web.replicaCount` | Replicas | `2` / `2` |
 | `ingress.enabled`, `ingress.host`, `ingress.tls` | One host: `/` to web, `/api` to api. Needs at least one of `api.enabled` and `web.enabled` | `false`, `gascurve.com` |
+| `config.server.trusted_proxies` | Addresses or CIDRs of reverse proxies allowed to supply the client forwarding chain. Required when ingress and api are enabled | `[]` |
+| `api.networkPolicy.enabled` | With chart-managed ingress, restrict API pod ingress to the configured controller peers | `true` |
+| `api.networkPolicy.allowedPeers` | Kubernetes NetworkPolicy peers allowed to reach the API. Defaults to the standard ingress-nginx controller labels | ingress-nginx controller |
 | `collector.resources` | Portable defaults, not a production profile. See Sizing the collector | `100m` / `128Mi` requested |
 | `database.url` | Rendered into a chart-managed Secret. Exactly one of `database.url` and `database.existingSecret` is required when the collector or api is enabled | `""` |
 | `database.existingSecret`, `database.existingSecretKey` | Use an existing Secret instead of `database.url` | `""`, `DB_URL` |
@@ -35,6 +39,43 @@ helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
 | `metrics.serviceMonitor.enabled`, `metrics.prometheusRule.enabled` | Prometheus operator objects. See Metrics and alerts | `false`, `false` |
 
 The web image is built with `NEXT_PUBLIC_API_URL=/api/v1`, so it talks to the API through the same host. Put the API on another host only if you rebuild the image with a different value.
+
+## Ingress client addresses
+
+The REST token bucket and WebSocket connection cap are both per client address. Kubernetes ingress normally makes the ingress controller pod the API's direct peer, so without proxy configuration every visitor shares the controller's limits. For an ingress deployment that includes the API, set `config.server.trusted_proxies` to the addresses or CIDRs the API pods actually see for the ingress controller and any other trusted proxy hops:
+
+```yaml
+config:
+  server:
+    trusted_proxies:
+      - 10.244.0.0/16
+```
+
+The example is only a placeholder. Use your cluster's controller or proxy ranges. Include every trusted hop that can appear on the right side of `X-Forwarded-For`. Do not use `0.0.0.0/0` or `::/0`: either value lets any reachable peer choose its rate-limit identity.
+
+The API ignores `X-Forwarded-For` and `X-Real-IP` unless the direct peer is trusted. It then walks `X-Forwarded-For` from right to left past trusted proxy hops and uses the first untrusted address. This preserves the safe behavior for direct or untrusted traffic while giving each user behind ingress a separate REST bucket and WebSocket connection count.
+
+Trusting a pod CIDR by itself is not an access boundary because other pods may share that range. When chart-managed ingress and the API are enabled, the chart therefore creates an ingress-only NetworkPolicy for the API pods. Its default peer selects the standard ingress-nginx controller:
+
+```yaml
+api:
+  networkPolicy:
+    enabled: true
+    allowedPeers:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: ingress-nginx
+            app.kubernetes.io/component: controller
+```
+
+Change the namespace and pod selectors for another ingress installation. `ipBlock` peers are also accepted when a controller cannot be selected by labels. The policy only restricts ingress to the API pods; database and RPC egress are unchanged. Your cluster must use a networking implementation that enforces Kubernetes NetworkPolicy. Set `api.networkPolicy.enabled=false` only when an equivalent policy outside the chart already prevents direct access to the API Service or pods.
+
+The API serves `/metrics` on the same port as REST and WebSocket, so this layer 4 policy also blocks direct API ServiceMonitor scrapes. To scrape it directly, append the Prometheus pods to `api.networkPolicy.allowedPeers`; that exception can reach every API route, not only `/metrics`. Keep those pod addresses outside `config.server.trusted_proxies` so their forwarding headers remain untrusted. If the address ranges overlap, use an equivalent path-aware policy or a trusted metrics proxy instead. Collector scraping is unaffected because it has a separate metrics port and is not selected by this policy.
+
+Upgrades of an existing release with both ingress and API enabled must add `config.server.trusted_proxies` before this chart version will render. Confirm the controller peer range and labels first, then apply the Helm upgrade. A wrong CIDR leaves forwarded headers ignored, and wrong NetworkPolicy selectors block ingress traffic. No database migration or data recomputation is involved.
 
 ## RPC URLs and Secrets
 

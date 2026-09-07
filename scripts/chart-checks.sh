@@ -240,6 +240,24 @@ reject "ingress with no backend, schema validation skipped" "no HTTP paths" \
   --set database.existingSecret=my-db --set api.enabled=false --set web.enabled=false \
   --set ingress.enabled=true --set ingress.host=gascurve.com
 
+echo "== ingress client identity and isolation are explicit"
+reject "ingress and api without trusted proxies" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com
+reject "ingress and api without trusted proxies, schema validation skipped" "trusted_proxies is empty" \
+  --skip-schema-validation \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com
+reject "malformed trusted proxy CIDR" "trusted_proxies" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=not-a-cidr'
+reject "empty ingress controller NetworkPolicy peers" "allowedPeers" \
+  --set database.existingSecret=my-db \
+  --set ingress.enabled=true --set ingress.host=gascurve.com \
+  --set 'config.server.trusted_proxies[0]=10.244.0.0/16' \
+  --set-json 'api.networkPolicy.allowedPeers=[]'
+
 echo "== database.url renders the chart-managed Secret"
 if render "database-url" "${work}/url.yaml" --values "${ci}/database-url-values.yaml"; then
   has "${work}/url.yaml" 'kind: Secret' "database-url: no chart-managed Secret rendered"
@@ -259,8 +277,29 @@ fi
 echo "== ingress"
 if render "ingress" "${work}/ingress.yaml" --values "${ci}/ingress-values.yaml"; then
   has "${work}/ingress.yaml" 'kind: Ingress' "ingress: no Ingress rendered"
+  has "${work}/ingress.yaml" 'trusted_proxies:' "ingress: trusted proxy configuration did not reach the ConfigMap"
+  has "${work}/ingress.yaml" '10.244.0.0/16' "ingress: trusted proxy CIDR did not reach the ConfigMap"
+  has "${work}/ingress.yaml" 'kind: NetworkPolicy' "ingress: no API NetworkPolicy rendered"
+  has "${work}/ingress.yaml" 'kubernetes.io/metadata.name: ingress-nginx' "ingress: NetworkPolicy does not select the ingress-nginx namespace"
+  has "${work}/ingress.yaml" 'app.kubernetes.io/component: controller' "ingress: NetworkPolicy does not select ingress controller pods"
+  has "${work}/ingress.yaml" 'port: http' "ingress: NetworkPolicy does not limit access to the API HTTP port"
   lacks "${work}/ingress.yaml" 'kind: Secret' "ingress: rendered a Secret, but database.existingSecret was set"
-  ok "Ingress rendered"
+  ok "Ingress, trusted proxies and API NetworkPolicy rendered"
+fi
+
+if render "ingress-policy-disabled" "${work}/ingress-policy-disabled.yaml" \
+  --values "${ci}/ingress-values.yaml" --set api.networkPolicy.enabled=false; then
+  has "${work}/ingress-policy-disabled.yaml" 'kind: Ingress' "ingress-policy-disabled: no Ingress rendered"
+  lacks "${work}/ingress-policy-disabled.yaml" 'kind: NetworkPolicy' "ingress-policy-disabled: API NetworkPolicy rendered although its chart control is disabled"
+  ok "API NetworkPolicy control can defer to an equivalent external policy"
+fi
+
+if render "web-only-ingress" "${work}/web-only-ingress.yaml" \
+  --set database.existingSecret=my-db --set api.enabled=false \
+  --set ingress.enabled=true --set ingress.host=gascurve.com; then
+  has "${work}/web-only-ingress.yaml" 'kind: Ingress' "web-only-ingress: no Ingress rendered"
+  lacks "${work}/web-only-ingress.yaml" 'kind: NetworkPolicy' "web-only-ingress: rendered an API NetworkPolicy with no API"
+  ok "web-only ingress needs neither API proxy trust nor an API NetworkPolicy"
 fi
 
 echo "== web only"

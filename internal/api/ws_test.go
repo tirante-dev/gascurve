@@ -608,6 +608,87 @@ func TestWebSocketConnectionCaps(t *testing.T) {
 	}
 }
 
+// TestWebSocketConnectionCapsUseRealIP verifies that the HTTP real-IP
+// middleware also provides the identity used by the WebSocket per-IP cap.
+// Trusted ingress clients get separate counts, while an untrusted peer
+// cannot choose a count by forging X-Forwarded-For.
+func TestWebSocketConnectionCapsUseRealIP(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		trusted       []string
+		secondAllowed bool
+	}{
+		{name: "trusted ingress", trusted: []string{"127.0.0.1", "::1"}, secondAllowed: true},
+		{name: "untrusted forwarding header", secondAllowed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := seed(t)
+			hub := NewHub(store, logger.Nop(), WithPingInterval(time.Hour), WithOrigins(nil), WithConnectionLimits(1, 4))
+			cfg := config.ServerConfig{
+				RateLimitPerSecond: 1000,
+				RateLimitBurst:     1000,
+				TrustedProxies:     tc.trusted,
+				WSMaxPerIP:         1,
+				WSMaxTotal:         4,
+			}
+			s := New(store, cfg, hub, logger.Nop(), WithClock(func() time.Time { return now }))
+			ts := httptest.NewServer(s.Handler())
+			defer ts.Close()
+
+			dial := func(ip string) (*websocket.Conn, *http.Response, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/ws?network=robinhood"
+				return websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: http.Header{"X-Forwarded-For": []string{ip}}})
+			}
+
+			first, resp, err := dial("198.51.100.1")
+			if err != nil {
+				t.Fatalf("first dial: %v", err)
+			}
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+			defer first.CloseNow()
+			readMsg(t, first)
+
+			second, resp, err := dial("198.51.100.2")
+			if tc.secondAllowed {
+				if err != nil {
+					t.Fatalf("second client dial: %v", err)
+				}
+				if resp != nil && resp.Body != nil {
+					resp.Body.Close()
+				}
+				defer second.CloseNow()
+				readMsg(t, second)
+
+				third, refused, err := dial("198.51.100.2")
+				if third != nil {
+					third.CloseNow()
+				}
+				if err == nil || refused == nil || refused.StatusCode != http.StatusTooManyRequests {
+					t.Fatalf("same client cap: err %v response %+v", err, refused)
+				}
+				if refused.Body != nil {
+					refused.Body.Close()
+				}
+				return
+			}
+
+			if second != nil {
+				second.CloseNow()
+			}
+			if err == nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("untrusted forwarded address bypassed cap: err %v response %+v", err, resp)
+			}
+			if resp.Body != nil {
+				resp.Body.Close()
+			}
+		})
+	}
+}
+
 // TestWebSocketHelloAtomic: a tick that lands while a hello is being
 // prepared is delivered after the hello, once, and never lost; concurrent
 // refreshes never duplicate blocks or move the ring head backwards.

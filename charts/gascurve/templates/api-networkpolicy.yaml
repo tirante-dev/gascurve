@@ -1,0 +1,22 @@
+{{- if and .Values.ingress.enabled .Values.api.enabled .Values.api.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gascurve.fullname" . }}-api
+  labels:
+    {{- include "gascurve.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gascurve.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- toYaml .Values.api.networkPolicy.allowedPeers | nindent 8 }}
+      ports:
+        - port: http
+          protocol: TCP
+{{- end }}

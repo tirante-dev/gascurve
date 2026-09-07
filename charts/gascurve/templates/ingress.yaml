@@ -2,6 +2,12 @@
 {{- if and (not .Values.api.enabled) (not .Values.web.enabled) -}}
 {{- fail "ingress.enabled is true but both api.enabled and web.enabled are false, so this Ingress would have no HTTP paths and the API server would reject it. Enable the api or the web component, or set ingress.enabled: false. values.schema.json rejects this combination too; you are seeing this message because schema validation was skipped." -}}
 {{- end -}}
+{{- if and .Values.api.enabled (empty .Values.config.server.trusted_proxies) -}}
+{{- fail "ingress.enabled and api.enabled are true but config.server.trusted_proxies is empty. Set it to the addresses or CIDRs of every reverse proxy hop the API should trust. Forwarded client headers remain untrusted when this list is empty. values.schema.json rejects this combination too; you are seeing this message because schema validation was skipped." -}}
+{{- end -}}
+{{- if and .Values.api.enabled .Values.api.networkPolicy.enabled (empty .Values.api.networkPolicy.allowedPeers) -}}
+{{- fail "api.networkPolicy.enabled is true for an ingress deployment but api.networkPolicy.allowedPeers is empty. Configure the ingress controller NetworkPolicy peers, or disable the chart policy only after applying an equivalent policy outside this chart." -}}
+{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

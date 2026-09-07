@@ -4,3 +4,8 @@ database:
 ingress:
   enabled: true
   host: gascurve.com
+config:
+  server:
+    # Example pod CIDR seen by the API for the ingress-nginx controller.
+    trusted_proxies:
+      - 10.244.0.0/16
