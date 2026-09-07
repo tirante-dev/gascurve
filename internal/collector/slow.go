@@ -16,10 +16,9 @@ import (
 
 var errBatchCostUnreconstructable = errors.New("batch report cost parameters are not reconstructable")
 
-// SlowTick runs the slow loop once: the ETH/USD spot, L1 getters, fee
-// accounts, ArbOS version, owner action logs, batch report scan, pruning
-// and RPC stats.
-// Every step runs even when an earlier one failed; errors are joined.
+// SlowTick runs the slow loop once: the ETH/USD spot, L1 getters, fee accounts, ArbOS version,
+// owner action logs, batch report scan, pruning and RPC stats. Every step runs even when an earlier
+// one failed; errors are joined.
 func (f *Follower) SlowTick(ctx context.Context) error {
 	if err := f.ensureInit(ctx); err != nil {
 		return err
@@ -48,11 +47,9 @@ func (f *Follower) SlowTick(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// sampleEthUsd refreshes the ETH/USD spot from the process-wide cache (one
-// fetch per slow_interval, shared by every network) and records it for this
-// chain, so the API can serve it without an outbound call. A failed fetch
-// is not an error here: the previous value stands until the tick finds it
-// older than eth_usd_max_age.
+// sampleEthUsd refreshes the ETH/USD spot from the process-wide cache (one fetch per slow_interval,
+// shared by every network) and records it for this chain. A failed fetch is not an error: the
+// previous value stands until it ages past eth_usd_max_age.
 func (f *Follower) sampleEthUsd(ctx context.Context) error {
 	if f.ethUsd == nil {
 		return nil
@@ -61,9 +58,8 @@ func (f *Follower) sampleEthUsd(ctx context.Context) error {
 	if p == nil {
 		return nil
 	}
-	// The checkpoint comes first: a quote published in memory but not
-	// stored would be served by the tick and the WebSocket while /live,
-	// which reads the checkpoint, still showed the previous one.
+	// The checkpoint comes first: a quote published in memory but not stored would be served by the
+	// tick and the WebSocket while /live still showed the previous one.
 	raw, _ := json.Marshal(model.EthUsd{Price: p.Price, At: p.At.UTC().Format(time.RFC3339), Source: p.Source})
 	if err := f.store.SetState(ctx, f.chainID, db.StateEthUsd, string(raw)); err != nil {
 		return err
@@ -109,9 +105,8 @@ func (f *Follower) sampleSlow(ctx context.Context) error {
 		Network:  model.Account{Address: accounts.Network.Address, Balance: weiString(accounts.Network.Balance)},
 		L1Reward: model.Account{Address: accounts.L1Reward.Address, Balance: weiString(accounts.L1Reward.Balance)},
 	}
-	// A generation, not a flag: the tick that persists this sample clears
-	// exactly this generation, so a newer sample taken while that
-	// transaction runs still gets stored by the next tick.
+	// A generation, not a flag: the tick that persists this sample clears exactly this generation, so
+	// a newer sample taken while that transaction runs is still stored by the next tick.
 	f.slowGen++
 	f.mu.Unlock()
 	return nil
@@ -135,12 +130,10 @@ func (f *Follower) checkArbOSVersion(ctx context.Context) error {
 	return f.store.SetState(ctx, f.chainID, db.StateArbOSVersion, cur)
 }
 
-// scanOwnerActions fetches OwnerActs logs since the cursor in chunks of at
-// most ownerLogChunk blocks and maintains owner_actions and
-// constraint_sets. A chain too large to scan from genesis starts at a
-// cutoff whose pricing state is established first (see establishOrigin).
-// Once a pass reaches the head it started from, owner_scan_through records
-// that the timeline is complete through it.
+// scanOwnerActions fetches OwnerActs logs since the cursor in chunks of at most ownerLogChunk
+// blocks and maintains owner_actions and constraint_sets. A chain too large to scan from genesis
+// starts at a cutoff whose pricing state is established first (see establishOrigin). Once a pass
+// reaches the head it started from, owner_scan_through records that the timeline is complete.
 func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	gen, err := f.generation(ctx, f.store)
 	if err != nil {
@@ -182,9 +175,8 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	if head <= f.ownerScanThrough {
 		return nil
 	}
-	// The readiness checkpoint is a cursor like any other: it commits under
-	// the generation check, so a rewind that lowered it cannot be undone by
-	// a pass that started on the old fork.
+	// The readiness checkpoint commits under the generation check, so a rewind that lowered it cannot
+	// be undone by a pass that started on the old fork.
 	if err := f.withGeneration(ctx, gen, func(s db.Store) error {
 		return s.SetState(ctx, f.chainID, db.StateOwnerScanThrough, strconv.FormatUint(head, 10))
 	}); err != nil {
@@ -194,23 +186,16 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	return nil
 }
 
-// originMargin is how much further back than backfill_depth a fresh owner
-// scan starts, so the pricing state is known a little before the first
-// block the backfill replays.
+// originMargin is how much further back than backfill_depth a fresh owner scan starts, so the
+// pricing state is known a little before the first block the backfill replays.
 const originMargin = 10 * time.Minute
 
-// scanStart is where a fresh owner scan begins: the block at backfill_depth
-// (plus originMargin) before the head's own timestamp, so the scan covers
-// the history the backfill can use and no more; a shallow depth, as in
-// development, never re-indexes a whole chain. The depth is bounded before
-// the margin is added to it, so no configured value can overflow the
-// arithmetic. A chain younger than the depth starts at genesis, whose
-// pricing state is nitro's default and needs no origin. Otherwise the
-// state in force at the cutoff is established first (establishOrigin) and
-// the scan runs from the cutoff on. A cutoff that cannot be resolved (the
-// head is behind it) is an error: nothing is written and the next pass
-// tries again, rather than an origin at the head marking all the history
-// before it unavailable.
+// scanStart is where a fresh owner scan begins: backfill_depth (plus originMargin) before the head's
+// own timestamp, so the scan covers the history the backfill can use and no more. The depth is
+// bounded before the margin is added, so no configured value can overflow. A chain younger than the
+// depth starts at genesis, whose pricing state is nitro's default; otherwise the state at the cutoff
+// is established first. A cutoff that cannot be resolved is an error: the next pass tries again,
+// rather than an origin at the head marking all the history before it unavailable.
 func (f *Follower) scanStart(ctx context.Context, head, gen uint64) (uint64, error) {
 	cutoff, err := f.historyStart(ctx, head, f.historyDepth(f.cfg.BackfillDepth)+originMargin)
 	if err != nil {
@@ -225,17 +210,12 @@ func (f *Follower) scanStart(ctx context.Context, head, gen uint64) (uint64, err
 	return cutoff, nil
 }
 
-// establishOrigin records the complete pricing state in force at the block
-// a truncated owner scan starts from, once. With an archive endpoint the
-// whole state is sampled there: the minimum base fee, the constraints and
-// their backlogs, or, on a legacy chain, the speed limit, inertia,
-// tolerance and backlog. The sample is end-of-block state for the cutoff,
-// whose own gas it already contains, so the constraint set is recorded as
-// effective at the block after it and the replay starts there; adding the
-// cutoff's gas again would inflate every backlog and price from the origin
-// until the next anchor. Without an archive endpoint nothing before the
-// cutoff can be priced: the range is recorded as a hole and the backfill
-// never enters it, rather than guessing the state in force.
+// establishOrigin records the pricing state in force at the block a truncated owner scan starts
+// from, once. With an archive endpoint the whole state is sampled there. The sample is end-of-block
+// state for the cutoff, whose own gas it already contains, so the set is recorded as effective at
+// the block after it and the replay starts there: adding the cutoff's gas again would inflate every
+// backlog from the origin to the next anchor. Without archive, nothing before the cutoff can be
+// priced, so the range is recorded as a hole rather than guessing the state in force.
 func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64) error {
 	f.mu.Lock()
 	known := f.scanOrigin != nil
@@ -306,13 +286,10 @@ func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64) erro
 	return nil
 }
 
-// scanOwnerRange records the actions in [from, to] and advances the
-// cursor in the same chain-locked transaction, but only when the chain has
-// not been rewound since gen was read: logs fetched from a fork the fast
-// loop has meanwhile replaced must not be written back, nor may their
-// cursor restore a checkpoint the rewind lowered. A malformed OwnerActs
-// event fails the range so the cursor never moves past an event that was
-// not understood.
+// scanOwnerRange records the actions in [from, to] and advances the cursor in the same chain-locked
+// transaction, but only when the chain has not been rewound since gen was read: logs from a fork the
+// fast loop has replaced must not be written back, nor may their cursor restore a checkpoint the
+// rewind lowered. A malformed OwnerActs event fails the range, so the cursor never moves past it.
 func (f *Follower) scanOwnerRange(ctx context.Context, from, to, gen uint64) error {
 	actions, err := f.fetchOwnerActions(ctx, from, to)
 	if err != nil {
@@ -326,9 +303,8 @@ func (f *Follower) scanOwnerRange(ctx context.Context, from, to, gen uint64) err
 	})
 }
 
-// fetchOwnerRange reads the owner actions over [from, to] in chunks of at
-// most ownerLogChunk blocks, so a range wider than an endpoint accepts in
-// one eth_getLogs is still covered.
+// fetchOwnerRange reads the owner actions over [from, to] in chunks of at most ownerLogChunk blocks,
+// so a range wider than one eth_getLogs accepts is still covered.
 func (f *Follower) fetchOwnerRange(ctx context.Context, from, to uint64) ([]*nitro.OwnerAction, error) {
 	var out []*nitro.OwnerAction
 	for start := from; start <= to; start += ownerLogChunk {
@@ -342,9 +318,8 @@ func (f *Follower) fetchOwnerRange(ctx context.Context, from, to uint64) ([]*nit
 	return out, nil
 }
 
-// fetchOwnerActions reads and decodes the OwnerActs logs in [from, to].
-// Unknown selectors decode to raw actions; a structurally malformed event
-// is an error.
+// fetchOwnerActions reads and decodes the OwnerActs logs in [from, to]. Unknown selectors decode to
+// raw actions; a structurally malformed event is an error.
 func (f *Follower) fetchOwnerActions(ctx context.Context, from, to uint64) ([]*nitro.OwnerAction, error) {
 	logs, err := f.rpc.OwnerActsLogs(ctx, from, to)
 	if err != nil {
@@ -368,9 +343,8 @@ func (f *Follower) fetchOwnerActions(ctx context.Context, from, to uint64) ([]*n
 	return actions, nil
 }
 
-// storeOwnerActions records actions and reports whether any was new (the
-// set, fee and legacy caches then need a reload once the transaction
-// committed).
+// storeOwnerActions records actions and reports whether any was new, which means the set, fee and
+// legacy caches need a reload once the transaction committed.
 func (f *Follower) storeOwnerActions(ctx context.Context, s db.Store, actions []*nitro.OwnerAction) (bool, error) {
 	changed := false
 	for _, a := range actions {
@@ -383,12 +357,10 @@ func (f *Follower) storeOwnerActions(ctx context.Context, s db.Store, actions []
 	return changed, nil
 }
 
-// recordAction stores one decoded action, its constraint set when it is a
-// setGasPricingConstraints call, and notifies the API; it reports whether
-// the action was new. When an observed set with the same constraints was
-// recorded at a later block (the live shape seen before its action was
-// found), that row is moved to the action in place, so the set keeps its
-// id.
+// recordAction stores one decoded action, its constraint set when it is a setGasPricingConstraints
+// call, and notifies the API; it reports whether the action was new. An observed set with the same
+// constraints recorded at a later block (the live shape seen before its action was found) is moved
+// onto the action in place, so the set keeps its id.
 func (f *Follower) recordAction(ctx context.Context, s db.Store, a *nitro.OwnerAction) (recorded bool, err error) {
 	args, err := db.MarshalJSONB(a.Args)
 	if err != nil {
@@ -438,10 +410,9 @@ func (f *Follower) recordAction(ctx context.Context, s db.Store, a *nitro.OwnerA
 	return true, s.Notify(ctx, db.ChannelOwnerAction, string(payload))
 }
 
-// observedToReplace returns the observed set an action at block with
-// entries explains: the first set at or after the block, when it is
-// observed with the same constraints and no row already occupies (block,
-// source). Nil means the action gets its own row.
+// observedToReplace returns the observed set an action at block with entries explains: the first set
+// at or after the block, when it is observed with the same constraints and no row already occupies
+// (block, source). Nil means the action gets its own row.
 func observedToReplace(sets []db.ConstraintSet, block uint64, source string, entries []model.ConstraintSetEntry) *db.ConstraintSet {
 	var first *db.ConstraintSet
 	for i := range sets {
@@ -474,16 +445,12 @@ func (f *Follower) currentHead(ctx context.Context) (uint64, error) {
 	return f.rpc.BlockNumber(ctx)
 }
 
-// scanBatchReports inspects new blocks for batch posting reports and
-// stores the decoded cost. The policy is the active endpoint's: a budgeted
-// endpoint only looks at two-transaction blocks (the shape of a report
-// block) and at most batchScanLimit of them per slow tick; an unlimited
-// one reads every block with full transactions until it has caught up.
-// It is bound to the endpoint generation and taken again whenever the pool
-// moved to another endpoint, so an unlimited scan does not keep reading
-// full blocks on a paced fallback. The cursor commits under the generation
-// check, so blocks read from a fork the fast loop has rewound are
-// discarded.
+// scanBatchReports inspects new blocks for batch posting reports and stores the decoded cost,
+// following the active endpoint's policy: a budgeted endpoint only looks at two-transaction blocks
+// (the shape of a report block) and at most batchScanLimit per tick, an unlimited one reads every
+// block with full transactions. The policy is taken again whenever the pool moved endpoint, so an
+// unlimited scan does not keep reading full blocks on a paced fallback. The cursor commits under the
+// generation check, so blocks read from a rewound fork are discarded.
 func (f *Follower) scanBatchReports(ctx context.Context) error {
 	pol := f.policy()
 	resolver, err := f.batchCostResolver()
@@ -526,10 +493,9 @@ func (f *Follower) scanBatchReports(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		// The fast loop keeps appending blocks while this runs, so the
-		// candidates can reach past the anchor the parameters were pinned
-		// to. Those are left for the next tick, which pins a newer one,
-		// rather than priced against a snapshot that predates them.
+		// The fast loop keeps appending blocks, so the candidates can reach past the anchor the
+		// parameters were pinned to. Those are left for the next tick rather than priced against a
+		// snapshot that predates them.
 		nums = capBlocks(nums, resolver.anchor.block)
 		if len(nums) == 0 {
 			return nil
@@ -637,9 +603,8 @@ func (r *batchCostResolver) paramsAt(block, arbosVersion uint64) (nitro.BatchPos
 		}
 	}
 
-	// A truncated scan without archive state can still use the current
-	// anchor for a parameter when no setter lies between the report and the
-	// anchor. If there is one, the pre-setter value cannot be inferred.
+	// Without archive state, the current anchor still works for a parameter when no setter lies
+	// between the report and the anchor. If there is one, the pre-setter value cannot be inferred.
 	if !perBatchAfter {
 		params.PerBatchGasCharge, perBatchKnown = r.anchor.params.PerBatchGasCharge, true
 	}
@@ -677,9 +642,8 @@ func capBlocks(nums []uint64, through uint64) []uint64 {
 	return nums
 }
 
-// batchCandidates lists the next blocks to inspect after the cursor: every
-// block on an unlimited endpoint, only two-transaction blocks on a
-// budgeted one.
+// batchCandidates lists the next blocks to inspect after the cursor: every block on an unlimited
+// endpoint, only two-transaction blocks on a budgeted one.
 func (f *Follower) batchCandidates(ctx context.Context, after uint64, pol policy) ([]uint64, error) {
 	if !pol.unlimited {
 		return f.store.TwoTxBlocks(ctx, f.chainID, after, batchScanLimit)
@@ -731,17 +695,9 @@ func batchReportOf(chainID uint64, b nitro.Block, resolver *batchCostResolver) (
 	return nil, nil
 }
 
-// prune drops per-block rows and raw samples beyond retention. Rows in the
-// hour of the first live block are kept while the backfill is still
-// pruneCutoff is the timestamp block rows are dropped below. Ordinarily it
-// is the retention window, but while the backfill is unfinished the rows of
-// the boundary hour and everything above it are kept whatever retention says,
-// because the backfill's last segment rebuilds those buckets from them.
-//
-// Nothing else predicts from this. What a rebuild needs to know is what has
-// been deleted, not what would be, and that is the recorded frontier: prune
-// writes it in the same transaction as the delete, and RebuildBuckets reads
-// it under the same chain lock.
+// pruneCutoff is the timestamp block rows are dropped below: the retention window, or the boundary
+// while the backfill is unfinished, since its last segment rebuilds the boundary hour from rows. It
+// predicts; what a rebuild goes by is the recorded frontier, written with the delete it describes.
 func (f *Follower) pruneCutoff(ctx context.Context, boundary time.Time, hasBoundary bool) (time.Time, error) {
 	before := f.now().Add(-f.cfg.BlockRetention)
 	c, err := f.loadCursor(ctx)
@@ -754,13 +710,8 @@ func (f *Follower) pruneCutoff(ctx context.Context, boundary time.Time, hasBound
 	return before, nil
 }
 
-// recordPruneFrontier remembers the highest cutoff a prune has committed. It
-// only ever moves forward: a cutoff is a statement that rows below it are
-// gone, and lowering block_retention's opposite, raising it, does not bring
-// deleted rows back. Anything that reasons about whether a bucket's window is
-// still whole has to go by what was deleted rather than by what the current
-// setting would delete, and those two disagree for as long as it takes the
-// raised window to pass.
+// recordPruneFrontier remembers the highest cutoff a prune has committed. It only moves forward: a
+// cutoff says rows below it are gone, and raising block_retention does not bring deleted rows back.
 func (f *Follower) recordPruneFrontier(ctx context.Context, s db.Store, before time.Time) error {
 	raw, ok, err := s.GetState(ctx, f.chainID, db.StatePruneFrontier)
 	if err != nil {
@@ -782,31 +733,12 @@ func (f *Follower) recordPruneFrontier(ctx context.Context, s db.Store, before t
 	return s.SetState(ctx, f.chainID, db.StatePruneFrontier, before.UTC().Format(time.RFC3339Nano))
 }
 
-// seedPruneFrontierLocked records a frontier before any loop can rebuild
-// against it. The store refuses a rebuild only below a frontier it can read,
-// and a database pruned by a collector older than the checkpoint has none
-// until its first prune writes one: up to a slow_interval in which a repair
-// or a gap fill could recompute a window prune has already cut into.
-//
-// The seed is prune's own cutoff, recorded through the same forward-only
-// path prune uses. It is exact when block_retention was not raised, since a
-// cutoff only moves forward with the clock, and it never sits above a window
-// the gap filler may still legitimately rebuild, because the filler writes
-// rows only from the boundary hour up and the cutoff is pinned to that
-// boundary for as long as the backfill is unfinished.
-//
-// It is not the oldest surviving row. That row is a deletion boundary on a
-// database that was pruned and the start of history on one that was not, and
-// the two cannot be told apart at startup; taken as a frontier it would
-// refuse to bucket the rows a gap fill writes below it, so filled history
-// would never appear. The one case no seed can close is raising
-// block_retention in the same rollout that introduces the checkpoint: the
-// old boundary is then above the new cutoff and nothing recorded it. That is
-// an operational constraint, stated in the docs, not a fix pretended here.
-//
-// Runs once at start, under f.mu, in a chain transaction that re-checks the
-// record: another collector for the chain may have seeded first, and a
-// record that will not parse is replaced by the same path.
+// seedPruneFrontierLocked records a frontier before any loop can rebuild against it: the store guards
+// only below one it can read, and a database pruned before the checkpoint existed has none until its
+// first prune. The seed is prune's own cutoff, through the same forward-only record. Not the oldest
+// surviving row, which was tried: on a never-pruned database that row is the start of history, and
+// as a frontier it refused to bucket the rows a gap fill writes below it. The one case no seed can
+// close, raising block_retention in the rollout that introduces the checkpoint, is stated in docs.
 func (f *Follower) seedPruneFrontierLocked(ctx context.Context) error {
 	boundary, hasBoundary := f.boundaryLocked()
 	if !hasBoundary {
@@ -827,11 +759,8 @@ func (f *Follower) seedPruneFrontierLocked(ctx context.Context) error {
 	})
 }
 
-// pruneFrontier is the highest cutoff a prune has committed, or the zero
-// time when none is recorded or it will not parse: no floor, the same
-// reading the store makes, so the repair's cost check and the store's guard
-// cannot disagree. Past startup neither case is reachable, since
-// seedPruneFrontierLocked records one before any loop runs.
+// pruneFrontier is the highest cutoff a prune has committed, or the zero time when none is recorded
+// or it will not parse: no floor, the same reading the store makes, so the two cannot disagree.
 func (f *Follower) pruneFrontier(ctx context.Context) (time.Time, error) {
 	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StatePruneFrontier)
 	if err != nil || !ok {
@@ -845,7 +774,8 @@ func (f *Follower) pruneFrontier(ctx context.Context) (time.Time, error) {
 	return t.UTC(), nil
 }
 
-// running: its last segment rebuilds those buckets from rows.
+// prune drops per-block rows and raw samples beyond retention. Rows in the hour of the first live
+// block are kept while the backfill runs: its last segment rebuilds those buckets from rows.
 func (f *Follower) prune(ctx context.Context) error {
 	now := f.now()
 	f.mu.Lock()
@@ -857,30 +787,12 @@ func (f *Follower) prune(ctx context.Context) error {
 	}
 	var n, m int64
 	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
-		// Block rows are pruned, and the frontier recorded, only with a
-		// live start, and the two are decided together from this one view
-		// so they cannot disagree. A frontier is only meaningful relative to
-		// a live start, and without one the cutoff is the wall clock, which
-		// on a stalled or development chain sits past every block. The loops
-		// start together, so the first prune can run before the first tick
-		// sets the live start, and that tick can commit its first row in the
-		// gap before this transaction takes the chain lock: a row deleted
-		// then would be a live row, and deleted without a record of it,
-		// which is the exact state the frontier exists to rule out. Doing
-		// nothing is right, since with no live start there are meant to be
-		// no rows. The live start cannot be re-read here: ensureInit holds
-		// f.mu while it takes this lock for the seed, so taking f.mu inside
-		// it would invert that order. Samples carry no such record and are
-		// pruned regardless.
-		// The snapshot above can go stale in the gap before this lock: a
-		// rewind that cut the chain to nothing clears live_start. The
-		// durable checkpoint is authoritative and reading it here takes no
-		// f.mu, so it is safe where re-reading the follower would not be
-		// (ensureInit holds f.mu while it takes this lock for the seed).
-		// Absent means a rewind cleared it, and block rows are left alone.
-		// Present but moved is safe with the cutoff computed above: a new
-		// live start only ever pins the cutoff lower, so a stale pin
-		// deletes less and records lower, and the next prune catches up.
+		// Delete and record are decided together, from one view, and never without a live start: a
+		// frontier is only meaningful relative to one, and the first prune can run before the first
+		// tick sets it. The durable checkpoint is rechecked here without f.mu (ensureInit holds f.mu
+		// while it takes this lock for the seed): absent means a rewind cleared it, so block rows are
+		// left alone; present but moved is safe, since a new live start only pins the cutoff lower.
+		// Samples carry no record and are pruned regardless.
 		if hasBoundary {
 			if _, still, err := s.GetState(ctx, f.chainID, db.StateLiveStart); err != nil {
 				return err
@@ -892,8 +804,7 @@ func (f *Follower) prune(ctx context.Context) error {
 			if n, err = s.PruneBlocks(ctx, f.chainID, before); err != nil {
 				return err
 			}
-			// In the same transaction as the delete it describes, so the
-			// record can never claim rows are gone that are still there.
+			// In the same transaction as the delete it describes.
 			if err := f.recordPruneFrontier(ctx, s, before); err != nil {
 				return err
 			}
@@ -910,11 +821,9 @@ func (f *Follower) prune(ctx context.Context) error {
 	return nil
 }
 
-// persistStats records rate limit accounting and, with a pool, the
-// endpoint routing state for /status. It is also where the RPC counters
-// reach the instruments: they are observed before the checkpoint writes,
-// so a database that is refusing writes does not also take the endpoint
-// series away.
+// persistStats records rate limit accounting and, with a pool, the endpoint routing state for
+// /status. The RPC counters are observed before the checkpoint writes, so a database refusing writes
+// does not also take the endpoint series away.
 func (f *Follower) persistStats(ctx context.Context) error {
 	st := f.rpc.Stats()
 	var status *nitro.PoolStatus
@@ -934,8 +843,7 @@ func (f *Follower) persistStats(ctx context.Context) error {
 		if err := f.store.SetState(ctx, f.chainID, db.StateEndpoints, string(b)); err != nil {
 			return err
 		}
-		// A disabled endpoint is an error the operator must see even though
-		// the network keeps running on another one.
+		// A disabled endpoint is an error the operator must see even though the network keeps running.
 		if msg := endpointError(*status); msg != "" {
 			if err := f.store.SetNetworkError(ctx, f.chainID, msg); err != nil {
 				return err

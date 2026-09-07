@@ -23,9 +23,6 @@ import {
   latestSet,
   logDomain,
   NULL_SPLIT_LABEL,
-  rampColor,
-  rampInk,
-  rampStep,
   FLOOR_COLOR,
   MARKER_COLOR,
   resampleBatches,
@@ -164,17 +161,7 @@ describe("colours and ramps", () => {
     expect(FLOOR_COLOR).toBe("var(--floor)");
     expect(MARKER_COLOR).toBe("var(--marker)");
   });
-  it("maps multipliers onto the sequential ramp", () => {
-    expect(rampStep(10_000)).toBe(1);
-    expect(rampStep(5_000)).toBe(1);
-    expect(rampStep(100_000)).toBe(5);
-    expect(rampStep(1_000_000)).toBe(9);
-    expect(rampStep(50_000_000)).toBe(9);
-    expect(rampColor(199_900)).toBe("var(--seq-6)");
-    expect(rampInk(1)).toBe("var(--seq-ink-1)");
-    expect(rampInk(6)).toBe("var(--seq-ink-6)");
-    expect(rampInk(12)).toBe("var(--seq-ink-9)");
-    expect(rampInk(0)).toBe("var(--seq-ink-1)");
+  it("maps a constraint's contribution onto the sequential ramp", () => {
     expect(contributionRampStep(0)).toBe(1);
     expect(contributionRampStep(20_000)).toBe(5);
     expect(contributionRampStep(90_000)).toBe(9);

@@ -515,17 +515,12 @@ export class MockWorld {
   }
 
   /**
-   * Replaces the last `depth` blocks of the ring with a canonical fork, the
-   * way a reorg does: the pricer is rewound to the ancestor's end-of-block
-   * state, the orphaned block numbers are replayed with different gas, and
-   * the records of the seconds they belong to are rebuilt from the ring, so
-   * series, balances and the live snapshot agree with the new tail. Returns
-   * the ancestor and the canonical blocks, oldest first; null when the ring
-   * is too short.
-   *
-   * Every ring block was minted by `tick`, which records its second as one
-   * per-second record and never overlaps a coarse one, so the records from
-   * the first forked second on are exactly the ones to rebuild.
+   * Replaces the last `depth` blocks of the ring with a canonical fork, the way a reorg does: the pricer
+   * is rewound to the ancestor's end-of-block state, the orphaned block numbers are replayed with
+   * different gas, and the records of their seconds are rebuilt from the ring. Returns the ancestor and
+   * the canonical blocks, oldest first; null when the ring is too short. Every ring block was minted by
+   * `tick`, which records its second once and never overlaps a coarse one, so the records from the first
+   * forked second on are exactly the ones to rebuild.
    */
   reorg(depth: number, salt = 1): { ancestor: number; blocks: BlockPoint[] } | null {
     if (!Number.isInteger(depth) || depth <= 0 || this.blocks.length <= depth) return null;

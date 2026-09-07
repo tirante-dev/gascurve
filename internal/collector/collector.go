@@ -1,9 +1,7 @@
-// Package collector follows Arbitrum Nitro chains: one Follower per network
-// samples the precompiles every tick, fetches the headers it missed, replays
-// the pricer forward from a known state with re-anchoring, rebuilds buckets,
-// records owner actions, batch posting reports and L1 pricer state, refills
-// the ranges it had to skip, runs a resumable backfill and publishes a
-// LiveSnapshot with NOTIFY after each tick.
+// Package collector follows Arbitrum Nitro chains: one Follower per network samples the precompiles
+// every tick, fetches the headers it missed, replays the pricer forward with re-anchoring, rebuilds
+// buckets, records owner actions, batch reports and L1 state, refills skipped ranges, runs a
+// resumable backfill and publishes a LiveSnapshot with NOTIFY after each tick.
 package collector
 
 import (
@@ -62,24 +60,18 @@ type ArchiveRPC interface {
 	PricingSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
 }
 
-// EndpointPool is what a nitro.Pool adds to RPC: chain id verification of
-// every endpoint, capability routing (the endpoint serving newHeads, the
-// one serving historical state), the active endpoint's call policy and the
-// routing state for /status. Capability routing is managed: only verified
-// endpoints are used, and both paths move to the next capable endpoint
-// when the one they used fails.
+// EndpointPool is what a nitro.Pool adds to RPC: chain id verification, capability routing (newHeads
+// and historical state), the active endpoint's call policy and the routing state for /status. Only
+// verified endpoints are used, and both capability paths move on when the one they used fails.
 type EndpointPool interface {
 	RPC
 	Verify(ctx context.Context) error
 	// HasWS reports whether any endpoint is configured with a ws_url.
 	HasWS() bool
-	// WSEndpoint leases the WebSocket endpoint to dial next, verifying it
-	// first, so a subscriber rebinds when its endpoint is disabled. The
-	// lease carries the failures back, so an endpoint whose socket does
-	// not work is cooled down and the next attempt resolves another one.
+	// WSEndpoint leases the WebSocket endpoint to dial next, verifying it first. The lease carries
+	// failures back, so an endpoint whose socket does not work is cooled down.
 	WSEndpoint(ctx context.Context) (*nitro.WSLease, error)
-	// Archive returns the managed historical-state path, nil when no
-	// endpoint serves it.
+	// Archive returns the managed historical-state path, nil when no endpoint serves it.
 	Archive() *nitro.ArchivePool
 	Status() nitro.PoolStatus
 	// Policy is the active endpoint's call policy.
@@ -113,12 +105,10 @@ const (
 	genesisBlockLimit = 1_000
 	// batchScanLimit caps the two-transaction blocks inspected per slow tick.
 	batchScanLimit = 100
-	// batchFetchChunk is the full-transaction batch size (weighted heavier
-	// by public endpoints).
+	// batchFetchChunk is the full-transaction batch size.
 	batchFetchChunk = 20
-	// minBackfillBatch is the smallest header batch the backfill sends:
-	// with less spare budget than this it queues for it at the pacer
-	// rather than shrinking the batch further or idling.
+	// minBackfillBatch is the smallest header batch the backfill sends: with less spare budget it
+	// queues at the pacer rather than shrinking further.
 	minBackfillBatch = 5
 	// backfillIdle is the pause when the backfill has nothing to do.
 	backfillIdle = time.Second
@@ -126,13 +116,11 @@ const (
 	restartDelay = 5 * time.Second
 	// maxReorgDepth bounds the common-ancestor search on a reorg.
 	maxReorgDepth = 128
-	// boundaryWidth is the widest bucket: buckets from the hour of the
-	// first live block on are rebuilt from block rows.
+	// boundaryWidth is the widest bucket: buckets from the hour of the first live block on are
+	// rebuilt from block rows.
 	boundaryWidth = time.Hour
-	// maxRecoveryDeferrals preserves the live path's priority while bounding
-	// how many history-loop turns sustained lag may take away from a missing
-	// range. The fast pacer reserve still protects head sampling on the turn
-	// recovery is allowed to use the bulk lane.
+	// maxRecoveryDeferrals bounds how many history-loop turns sustained lag may take away from a
+	// missing range, while leaving the live path its priority.
 	maxRecoveryDeferrals = 30
 )
 
@@ -148,26 +136,23 @@ const (
 type Options struct {
 	Network   config.NetworkConfig
 	Collector config.CollectorConfig
-	// RPC serves ordinary calls: a nitro.Pool in production. When it is an
-	// EndpointPool the follower verifies every endpoint at start and, unless
-	// Archive or Heads override them, routes anchors to the pool's archive
-	// endpoint and heads to its WebSocket endpoint.
+	// RPC serves ordinary calls: a nitro.Pool in production. An EndpointPool has every endpoint
+	// verified at start and, unless Archive or Heads override them, routes anchors and heads to the
+	// pool's archive and WebSocket endpoints.
 	RPC RPC
-	// Archive serves the backfill anchors and archive minimum fee samples.
-	// Nil means the pool's archive endpoint, or, for a plain RPC, RPC itself
-	// when Network.Archive is set; otherwise the backfill is a pure replay.
+	// Archive serves the backfill anchors and archive minimum fee samples. Nil means the pool's
+	// archive endpoint, or RPC itself when Network.Archive is set; otherwise the backfill is a pure
+	// replay.
 	Archive ArchiveRPC
 	Store   db.Store
 	Log     *logger.Logger
 	Now     func() time.Time
 	Sleep   func(context.Context, time.Duration) error
-	// Heads overrides the newHeads source. Nil means a nitro.HeadSubscriber
-	// for the pool's WebSocket endpoint (or Network.WSURL with a plain
-	// RPC); polling when there is none.
+	// Heads overrides the newHeads source. Nil means a subscriber for the pool's WebSocket endpoint,
+	// or polling when there is none.
 	Heads HeadSource
-	// Metrics is where the follower reports what it observes. Nil gives it
-	// a registry of its own, so the instrument calls are always live and
-	// never have to be guarded at the call site.
+	// Metrics is where the follower reports what it observes. Nil gives it a registry of its own, so
+	// instrument calls never have to be guarded at the call site.
 	Metrics *metrics.Collector
 	// Monitor records loop freshness, head progress and RPC accounting for
 	// health endpoints and the durable API status checkpoint.
@@ -188,25 +173,21 @@ type Follower struct {
 	heads   HeadSource
 	monitor *Monitor
 	chainID uint64
-	// ethUsd is the process-wide ETH/USD cache, nil when the source is
-	// disabled or unusable.
+	// ethUsd is the process-wide ETH/USD cache, nil when the source is disabled or unusable.
 	ethUsd *ethUsdCache
 	// tickInterval is the fast loop's cadence: the network's tick_interval
 	// when set, else collector.tick_interval.
 	tickInterval time.Duration
-	// metrics is this network's slice of the process instruments. It is
-	// never nil and never blocks: a scrape reads the registry, not the
-	// follower.
+	// metrics is this network's slice of the process instruments. It never blocks: a scrape reads the
+	// registry, not the follower.
 	metrics *metrics.Network
 
 	catchingUp atomic.Bool
-	// behind is how many blocks the stored head trailed the sampled head at
-	// the last tick. History work (the gap filler and the backfill) waits
-	// while it exceeds a header batch: on a small budget their batches
-	// queue ahead of the catch-up's and turn a lag into a skipped gap.
+	// behind is how many blocks the stored head trailed the sampled head at the last tick. History
+	// work waits while it exceeds a header batch: on a small budget their batches would queue ahead
+	// of the catch-up's and turn a lag into a skipped gap.
 	behind atomic.Uint64
-	// recoveryDeferrals counts consecutive missing-range turns yielded to a
-	// persistently lagging fast loop. It is reset after one recovery turn.
+	// recoveryDeferrals counts consecutive missing-range turns yielded to a lagging fast loop.
 	recoveryDeferrals atomic.Uint64
 	// repairDeferrals is the same count for the poster-gas repair, kept
 	// apart so the filler and the repair each get their guaranteed turn
@@ -215,9 +196,7 @@ type Follower struct {
 
 	mu          sync.Mutex
 	initialized bool
-	// head, headHash, prevTs, state, lastSample and lastResult describe
-	// the last committed tick; they are only published after the
-	// transaction that wrote it committed.
+	// The last committed tick, published only after the transaction that wrote it committed.
 	head             uint64
 	headHash         string
 	prevTs           uint64
@@ -230,17 +209,13 @@ type Follower struct {
 	legacyChanges    []legacyChange
 	batchCostChanges []batchCostChange
 	liveStart        *liveStart
-	// repairNarrow is the batch the poster-gas repair has narrowed itself to
-	// after a failed read, 0 while it is running at full size. repairBlock
-	// and repairAttempts count consecutive failures against one block, so a
-	// block is retried before the pass moves past it. All three are in memory
-	// only: a restart starts wide again, and gives a skipped block another go.
+	// Narrowing after a failed read, and consecutive failures against one block, so it is retried
+	// before the pass moves past it. In memory only: a restart starts wide and retries a skipped block.
 	repairNarrow   int
 	repairBlock    uint64
 	repairAttempts int
-	// ownerScanThrough is the owner_scan_through checkpoint: the block
-	// through which the recorded owner-action timeline is complete, 0 until
-	// a scan pass has reached its head.
+	// ownerScanThrough is the block through which the recorded owner-action timeline is complete, 0
+	// until a scan pass has reached its head.
 	ownerScanThrough uint64
 	// scanOrigin is the owner_scan_origin checkpoint, nil for a chain
 	// scanned from genesis.
@@ -251,10 +226,8 @@ type Follower struct {
 	// ethUsdPrice is the last quote the slow loop obtained, published in a
 	// tick only while it is younger than cfg.EthUsdMaxAge.
 	ethUsdPrice *prices.Price
-	// slowGen counts the slow samples taken and slowSaved the newest one a
-	// tick has persisted. A tick clears only the generation it wrote, so a
-	// sample published while its transaction ran is still persisted by the
-	// next tick.
+	// slowGen counts the slow samples taken and slowSaved the newest one a tick persisted. A tick
+	// clears only the generation it wrote, so a sample published mid-transaction survives to the next.
 	slowGen       uint64
 	slowSaved     uint64
 	cursorChecked bool
@@ -295,27 +268,23 @@ type batchCostAnchor struct {
 	params nitro.BatchPostingCostParams
 }
 
-// setChange is a constraint set taking effect at a block; a set with the
-// same shape as its predecessor still resets the backlogs to its starting
-// values, exactly as setGasPricingConstraints does.
+// setChange is a constraint set taking effect at a block; a set with the same shape as its
+// predecessor still resets the backlogs to its starting values, as setGasPricingConstraints does.
 type setChange struct {
 	block   uint64
 	entries []model.ConstraintSetEntry
 	pos     actionPosition
 }
 
-// liveStart is the first block the live loop stored (collector_state
-// live_start). Buckets from the hour containing it on are rebuilt from
-// block rows; older buckets belong to the backfill's additive folds.
+// liveStart is the first block the live loop stored. Buckets from the hour containing it on are
+// rebuilt from block rows; older buckets belong to the backfill's additive folds.
 type liveStart struct {
 	Block uint64 `json:"block"`
 	TS    int64  `json:"ts"`
 }
 
-// hole is a block range the collector did not index. It is stored as one
-// durable missing_ranges row with its lifecycle, cursor, replay state, retry
-// information and time bounds. The model shape is also the legacy JSON shape
-// imported during the forward migration rollout.
+// hole is a block range the collector did not index, stored as one durable missing_ranges row. The
+// model shape is also the legacy JSON shape imported during the forward migration rollout.
 type hole = model.Hole
 
 // Missing-range lifecycle states and reasons.
@@ -330,28 +299,22 @@ const (
 	reasonExpired             = model.HoleReasonExpired
 )
 
-// scanOrigin is where a deliberately truncated owner scan began
-// (collector_state owner_scan_origin). With Archive the complete pricer
-// state in force at the end of Block was sampled there: the minimum base
-// fee, and either a constraint set recorded at Block+1 with the sampled
-// backlogs or, on a legacy chain, Legacy. History from Block+1 on then
-// replays from real values. Without an archive endpoint nothing before
-// Block can be priced and the range is recorded as a hole.
+// scanOrigin is where a deliberately truncated owner scan began. With Archive the complete pricer
+// state at the end of Block was sampled there, so history from Block+1 on replays from real values.
+// Without an archive endpoint nothing before Block can be priced and the range becomes a hole.
 type scanOrigin struct {
 	Block      uint64 `json:"block"`
 	MinBaseFee string `json:"minBaseFee,omitempty"`
 	Archive    bool   `json:"archive"`
-	// Legacy is the sampled legacy pricer state at the end of Block
-	// (parameters and backlog), nil on a constraints chain or without an
-	// archive endpoint.
+	// Legacy is the sampled legacy state at the end of Block, nil on a constraints chain or without
+	// an archive endpoint.
 	Legacy *model.LegacyParams `json:"legacy,omitempty"`
 	// BatchCost is the batch-poster accounting state at the end of Block.
 	BatchCost *nitro.BatchPostingCostParams `json:"batchCost,omitempty"`
 }
 
-// replayFrom is the first block a replay may start at: the origin sample
-// is end-of-block state for Block, whose gas is already counted in it, so
-// the block after it is the first one to replay.
+// replayFrom is the first block a replay may start at: the origin sample is end-of-block state for
+// Block, whose gas it already counts, so the block after it is the first one to replay.
 func (o *scanOrigin) replayFrom() uint64 {
 	if o == nil {
 		return 0
@@ -359,8 +322,8 @@ func (o *scanOrigin) replayFrom() uint64 {
 	return o.Block + 1
 }
 
-// fullState reports whether the origin carries a complete pricer state, so
-// history above it can be replayed rather than guessed.
+// fullState reports whether the origin carries a complete pricer state, so history above it can be
+// replayed rather than guessed.
 func (o *scanOrigin) fullState() bool { return o != nil && o.Archive && o.MinBaseFee != "" }
 
 // fee returns the sampled minimum base fee, nil when none was sampled.
@@ -375,8 +338,7 @@ func (o *scanOrigin) fee() *big.Int {
 	return v
 }
 
-// NewFollower builds a follower; the network's chain id is the key for
-// every table.
+// NewFollower builds a follower; the network's chain id is the key for every table.
 func NewFollower(o Options) *Follower {
 	f := &Follower{
 		net:     o.Network,
@@ -438,16 +400,12 @@ func NewFollower(o Options) *Follower {
 	return f
 }
 
-// TickInterval returns the fast loop's cadence for this network.
 func (f *Follower) TickInterval() time.Duration { return f.tickInterval }
 
-// bindPool routes capabilities once the pool's endpoints are verified.
-// Neither binding names an endpoint: the head subscriber asks the pool for
-// a verified WebSocket endpoint before every connection attempt, so it
-// rebinds when the one it followed is disabled or stops verifying, and the
-// archive path picks and verifies its endpoint per call, failing over to
-// the next one that serves historical state. Explicit Options win and a
-// binding is made only once, so a restarted follower keeps its subscriber.
+// bindPool routes capabilities once the pool's endpoints are verified. Neither binding names an
+// endpoint: the head subscriber asks for a verified WebSocket endpoint before every attempt, and the
+// archive path picks and verifies its endpoint per call. Explicit Options win, and a binding is made
+// only once, so a restarted follower keeps its subscriber.
 func (f *Follower) bindPool() {
 	if f.heads == nil {
 		if f.pool.HasWS() {
@@ -467,9 +425,8 @@ func (f *Follower) bindPool() {
 	}
 }
 
-// endpointsStatus renders the pool's routing state for /status. A disabled
-// endpoint carries the sanitized reason it was disabled for; nothing here
-// is derived from a URL.
+// endpointsStatus renders the pool's routing state for /status. A disabled endpoint carries the
+// sanitized reason; nothing here is derived from a URL.
 func endpointsStatus(st nitro.PoolStatus) model.EndpointsStatus {
 	out := model.EndpointsStatus{ActiveEndpoint: st.Active, Failovers: st.Failovers, Endpoints: make([]model.EndpointStatus, len(st.Endpoints))}
 	for i, e := range st.Endpoints {
@@ -486,11 +443,9 @@ func endpointsStatus(st nitro.PoolStatus) model.EndpointsStatus {
 	return out
 }
 
-// poolMetrics renders what the RPC reports for the instruments: the
-// aggregate counters always, and with a pool the routing state and each
-// endpoint's own counters. Endpoints are named by index alone, never by
-// URL: a URL is a credential, which is why internal/nitro scrubs one from
-// every error it returns.
+// poolMetrics renders what the RPC reports for the instruments: the aggregate counters always, and
+// with a pool the routing state and each endpoint's own counters. Endpoints are named by index, never
+// by URL, which is a credential.
 func poolMetrics(st nitro.Stats, status *nitro.PoolStatus) metrics.PoolState {
 	out := metrics.PoolState{
 		RateLimitEvents: st.RateLimitEvents, FastCalls: st.FastCalls, BulkCalls: st.BulkCalls,
@@ -507,10 +462,8 @@ func poolMetrics(st nitro.Stats, status *nitro.PoolStatus) metrics.PoolState {
 	return out
 }
 
-// endpointError summarizes the disabled endpoints of a pool for
-// networks.last_error, so a network that keeps running on a fallback still
-// reports the mismatch as an error. It names indexes and reasons only,
-// never a URL.
+// endpointError summarizes the disabled endpoints of a pool for networks.last_error, so a network
+// running on a fallback still reports the mismatch. It names indexes and reasons only, never a URL.
 func endpointError(st nitro.PoolStatus) string {
 	var parts []string
 	for _, e := range st.Endpoints {
@@ -521,21 +474,17 @@ func endpointError(st nitro.PoolStatus) string {
 	return strings.Join(parts, "; ")
 }
 
-// endpointGen identifies the endpoint an operation's policy came from:
-// the pool's active index together with its failover counter, so both a
-// failover and a return to the probed primary change it. A plain client
-// has one endpoint and the zero value never changes.
+// endpointGen identifies the endpoint an operation's policy came from: the active index together
+// with the failover counter, so both a failover and a return to the primary change it.
 type endpointGen struct {
 	active    int
 	failovers uint64
 }
 
-// policy is the call policy one operation works to: taken from the active
-// endpoint, so a tick, a scan or a backfill step never mixes two
-// endpoints' budgets halfway through, and bound to the endpoint
-// generation it came from, so an operation whose endpoint changed under
-// it can decide again rather than run an unlimited catch-up on a paced
-// fallback.
+// policy is the call policy one operation works to, taken from the active endpoint so a tick, scan or
+// backfill step never mixes two endpoints' budgets halfway through. It is bound to the endpoint
+// generation, so an operation whose endpoint changed under it can decide again rather than run an
+// unlimited catch-up on a paced fallback.
 type policy struct {
 	unlimited bool
 	rate      float64
@@ -553,10 +502,8 @@ func (f *Follower) policy() policy {
 	return policy{unlimited: f.net.Unlimited(), rate: f.net.CallsPerSecond}
 }
 
-// repolicy re-reads the policy when the pool has moved to another endpoint
-// since pol was taken, so the rest of a multi-step operation works to the
-// budget of the endpoint that will actually serve it. It reports whether
-// the endpoint changed.
+// repolicy re-reads the policy when the pool has moved endpoint since pol was taken, so the rest of a
+// multi-step operation works to the budget of the endpoint that will serve it.
 func (f *Follower) repolicy(pol policy) (policy, bool) {
 	cur := f.policy()
 	if cur.gen == pol.gen {
@@ -579,14 +526,12 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Snapshot returns the last published snapshot, if any.
 func (f *Follower) Snapshot() *model.LiveSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.snapshot
 }
 
-// Head returns the last stored block number.
 func (f *Follower) Head() uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -614,10 +559,8 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	if err := f.loadLiveStartLocked(ctx); err != nil {
 		return err
 	}
-	// Before the checkpoints it clears are read, so an unreadable
-	// owner-scan checkpoint cannot block the rebuild that would replace
-	// it, and the loads below then see what the rebuild left. It needs the
-	// live start above it for the bucket boundary and nothing else.
+	// Before the checkpoints it clears are read, so an unreadable owner-scan checkpoint cannot block
+	// the rebuild that would replace it. It needs only the live start above it for the boundary.
 	if err := f.applyHistoryEpochLocked(ctx); err != nil {
 		return err
 	}
@@ -640,11 +583,9 @@ func (f *Follower) ensureInit(ctx context.Context) error {
 	return nil
 }
 
-// loadEthUsdLocked restores the recorded ETH/USD spot, so a restarted
-// collector keeps publishing it until it ages out rather than waiting for
-// the first slow tick. An unreadable row is dropped, never fatal: the price
-// is decoration on the snapshot, not chain state. Nothing is restored while
-// the source is disabled.
+// loadEthUsdLocked restores the recorded ETH/USD spot, so a restarted collector keeps publishing it
+// until it ages out. An unreadable row is dropped, never fatal: the price is decoration on the
+// snapshot, not chain state.
 func (f *Follower) loadEthUsdLocked(ctx context.Context) error {
 	if f.ethUsd == nil {
 		return nil
@@ -670,10 +611,8 @@ func (f *Follower) loadEthUsdLocked(ctx context.Context) error {
 	return nil
 }
 
-// reloadHeadLocked reads the last committed block from the database and
-// forgets the in-memory replay state, so the next tick rebuilds it from
-// the stored row. Used at start, after a failed commit and after a rewind
-// (which also clears the sample and snapshot, see clearHeadStateLocked).
+// reloadHeadLocked reads the last committed block and forgets the in-memory replay state, so the next
+// tick rebuilds it from the stored row. Used at start, after a failed commit and after a rewind.
 func (f *Follower) reloadHeadLocked(ctx context.Context) error {
 	last, err := f.store.LatestBlock(ctx, f.chainID)
 	if err != nil {
@@ -688,16 +627,14 @@ func (f *Follower) reloadHeadLocked(ctx context.Context) error {
 	return nil
 }
 
-// clearHeadStateLocked drops everything in memory that describes the head
-// a rewind orphaned: the last sample and the published snapshot as well as
-// the replay state. Only the tick that commits the replacement head
-// publishes them again, so nothing reads state from a fork that is gone.
+// clearHeadStateLocked drops everything in memory describing the head a rewind orphaned. Only the
+// tick that commits the replacement head publishes them again, so nothing reads state from a dead fork.
 func (f *Follower) clearHeadStateLocked() {
 	f.lastSample, f.snapshot = nil, nil
 }
 
-// loadScanStateLocked loads the owner scan checkpoints: how far the
-// timeline is complete and where a truncated scan began.
+// loadScanStateLocked loads the owner scan checkpoints: how far the timeline is complete and where a
+// truncated scan began.
 func (f *Follower) loadScanStateLocked(ctx context.Context) error {
 	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StateOwnerScanThrough)
 	if err != nil {
@@ -724,8 +661,8 @@ func (f *Follower) loadScanStateLocked(ctx context.Context) error {
 	return nil
 }
 
-// loadLiveStartLocked loads the live_start checkpoint. A database written
-// before the checkpoint existed derives it from the oldest stored block.
+// loadLiveStartLocked loads the live_start checkpoint. A database written before it existed derives
+// it from the oldest stored block.
 func (f *Follower) loadLiveStartLocked(ctx context.Context) error {
 	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StateLiveStart)
 	if err != nil {
@@ -762,8 +699,8 @@ func (f *Follower) saveLiveStart(ctx context.Context, s db.Store, ls *liveStart)
 	return s.SetState(ctx, f.chainID, db.StateLiveStart, string(b))
 }
 
-// boundaryLocked returns the start of the hour containing the first live
-// block: buckets from there on are row-backed.
+// boundaryLocked returns the start of the hour containing the first live block: buckets from there
+// on are row-backed.
 func (f *Follower) boundaryLocked() (time.Time, bool) {
 	if f.liveStart == nil {
 		return time.Time{}, false
@@ -771,10 +708,9 @@ func (f *Follower) boundaryLocked() (time.Time, bool) {
 	return time.Unix(f.liveStart.TS, 0).UTC().Truncate(boundaryWidth), true
 }
 
-// recordHole appends a durable un-indexed range. saveHoles merges it into
-// compatible work it overlaps or touches rather than duplicating it. A range
-// without an explicit lifecycle is pending, except reasonNoState, which is
-// blocked until a replay state appears before it.
+// recordHole appends a durable un-indexed range; saveHoles merges it into compatible work it touches.
+// A range without an explicit lifecycle is pending, except reasonNoState, which is blocked until a
+// replay state appears before it.
 func (f *Follower) recordHole(ctx context.Context, s db.Store, h hole) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil {
@@ -785,8 +721,7 @@ func (f *Follower) recordHole(ctx context.Context, s db.Store, h hole) error {
 	return f.saveHoles(ctx, s, append(holes, h))
 }
 
-// reloadSetsLocked refreshes the constraint set, minimum fee and legacy
-// parameter caches from the recorded owner actions.
+// reloadSetsLocked refreshes the constraint set, minimum fee and legacy parameter caches.
 func (f *Follower) reloadSetsLocked(ctx context.Context) error {
 	sets, err := f.store.ConstraintSets(ctx, f.chainID)
 	if err != nil {
@@ -883,9 +818,7 @@ func minFeeChangeOf(block uint64, method string, args db.JSONB) (minFeeChange, b
 	return minFeeChange{block: block, fee: fee}, true
 }
 
-// legacyChangeOf decodes a recorded legacy parameter change: the speed
-// limit (setSpeedLimit), the inertia (setL2GasPricingInertia) or the
-// tolerance (setL2GasBacklogTolerance).
+// legacyChangeOf decodes a recorded legacy parameter change: the speed limit, inertia or tolerance.
 func legacyChangeOf(block uint64, method string, args db.JSONB) (legacyChange, bool) {
 	var a struct {
 		Limit *uint64 `json:"limit"`
@@ -907,12 +840,10 @@ func legacyChangeOf(block uint64, method string, args db.JSONB) (legacyChange, b
 	return legacyChange{}, false
 }
 
-// timeline is the pricer-affecting owner history a replay splits at:
-// constraint sets (a set resets the backlogs to its starting values even
-// when its shape is unchanged), minimum base fee changes and legacy
-// parameter changes, plus the scan origin's sampled fee. It merges the
-// recorded history with actions fetched for the current tick but not yet
-// committed, so a replay can split at them before they are stored.
+// timeline is the pricer-affecting owner history a replay splits at: constraint sets (a set resets
+// the backlogs even when its shape is unchanged), minimum base fee changes, legacy parameter changes
+// and the scan origin's sampled fee. Actions fetched for the current tick but not yet committed are
+// merged in, so a replay can split at them before they are stored.
 type timeline struct {
 	sets   []setChange
 	fees   []minFeeChange
@@ -941,8 +872,7 @@ func (f *Follower) timelineLocked(pending []*nitro.OwnerAction) *timeline {
 			}
 		}
 		if !matched {
-			// An observed set has no action position. Keep the historical
-			// block-start fallback until an OwnerActs log explains it.
+			// An observed set has no action position: keep the block-start fallback until a log explains it.
 			tl.sets = append(tl.sets, setChange{block: cs.EffectiveBlock, entries: entries})
 		}
 	}
@@ -1012,11 +942,9 @@ func (tl *timeline) hasAction(pos actionPosition) bool {
 	return false
 }
 
-// minFeeAt returns the minimum base fee in force at a block from the
-// recorded setMinimumL2BaseFee actions, with the scan origin's sampled fee
-// and nitro's genesis default before the first recorded change. A
-// transaction action changes the state after its block has already been
-// priced. It never uses the live value.
+// minFeeAt returns the minimum base fee in force at a block from the recorded setMinimumL2BaseFee
+// actions, with the scan origin's sampled fee and nitro's genesis default before the first change. A
+// transaction action changes the state after its block was priced. It never uses the live value.
 func (tl *timeline) minFeeAt(number uint64) *big.Int {
 	fee := big.NewInt(pricer.InitialMinimumBaseFeeWei)
 	if of := tl.origin.fee(); of != nil && number >= tl.origin.Block {
@@ -1030,8 +958,7 @@ func (tl *timeline) minFeeAt(number uint64) *big.Int {
 	return new(big.Int).Set(fee)
 }
 
-// minFeeAfter returns the minimum base fee in the state at the end of a
-// block, after every transaction action in that block.
+// minFeeAfter returns the minimum base fee at the end of a block, after every action in that block.
 func (tl *timeline) minFeeAfter(number uint64) *big.Int {
 	fee := big.NewInt(pricer.InitialMinimumBaseFeeWei)
 	if of := tl.origin.fee(); of != nil && number >= tl.origin.Block {
@@ -1054,8 +981,7 @@ func (tl *timeline) feeChangesInBlock(number uint64) bool {
 	return false
 }
 
-// minFeeChangeBlock returns the block of the last fee change that priced
-// number (the origin counts as one; 0 when none).
+// minFeeChangeBlock returns the block of the last fee change that priced number (0 when none).
 func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
 	var block uint64
 	if tl.origin.fee() != nil && number >= tl.origin.Block {
@@ -1069,17 +995,14 @@ func (tl *timeline) minFeeChangeBlock(number uint64) uint64 {
 	return block
 }
 
-// legacyAt returns base with every recorded legacy change at or before
-// number applied (the latest per parameter wins). At and above a scan
-// origin that sampled the legacy state, that sample is the base instead of
-// the caller's, so history is replayed from what was really in force
-// rather than from the current parameters.
+// legacyAt returns base with every recorded legacy change at or before number applied (the latest per
+// parameter wins). At and above a scan origin that sampled the legacy state, that sample is the base
+// instead, so history is replayed from what was really in force.
 func (tl *timeline) legacyAt(number uint64, base *pricer.Legacy) *pricer.Legacy {
 	return tl.legacyThrough(number, base, true)
 }
 
-// legacyBefore returns the parameters that priced a block, excluding
-// transaction actions inside that block.
+// legacyBefore returns the parameters that priced a block, excluding actions inside that block.
 func (tl *timeline) legacyBefore(number uint64, base *pricer.Legacy) *pricer.Legacy {
 	return tl.legacyThrough(number, base, false)
 }
@@ -1175,10 +1098,9 @@ func (tl *timeline) boundaryAt(number uint64) bool {
 	return false
 }
 
-// applyAt applies every change effective exactly at number to st: a
-// constraint set replaces the constraints and resets the backlogs (on the
-// constraints model only), a fee change replaces the floor, a legacy change
-// replaces its parameter.
+// applyAt applies every change effective exactly at number to st: a constraint set replaces the
+// constraints and resets the backlogs (constraints model only), a fee change replaces the floor, a
+// legacy change replaces its parameter.
 func (tl *timeline) applyAt(st *pricer.State, number uint64) {
 	for _, transaction := range []bool{false, true} {
 		for _, change := range tl.changesAt(number, transaction) {
@@ -1198,20 +1120,17 @@ func (f *Follower) setAt(number uint64) *db.ConstraintSet {
 	return out
 }
 
-// minFeeAt is the recorded minimum base fee in force at a block (see
-// timeline.minFeeAt). The caller holds f.mu or is a test.
+// minFeeAt is the recorded minimum base fee in force at a block. The caller holds f.mu or is a test.
 func (f *Follower) minFeeAt(number uint64) *big.Int {
 	return f.timelineLocked(nil).minFeeAt(number)
 }
 
-// minFeeChangeBlock is the block of the last recorded fee change at or
-// before number. The caller holds f.mu or is a test.
+// minFeeChangeBlock is the block of the last recorded fee change at or before number, under f.mu.
 func (f *Follower) minFeeChangeBlock(number uint64) uint64 {
 	return f.timelineLocked(nil).minFeeChangeBlock(number)
 }
 
-// boundaryAt reports whether a recorded owner action changes the pricer at
-// a block. The caller holds f.mu or is a test.
+// boundaryAt reports whether a recorded owner action changes the pricer at a block, under f.mu.
 func (f *Follower) boundaryAt(number uint64) bool {
 	return f.timelineLocked(nil).boundaryAt(number)
 }
@@ -1235,8 +1154,8 @@ func stateFromSample(s *nitro.Sample) *pricer.State {
 	return st
 }
 
-// stateFromEntries builds a pricer state for a constraint set document,
-// backlogs at the set's starting values.
+// stateFromEntries builds a pricer state for a constraint set document, backlogs at its starting
+// values.
 func stateFromEntries(entries []model.ConstraintSetEntry, minFee *big.Int) *pricer.State {
 	st := &pricer.State{MinBaseFee: new(big.Int).Set(minFee), Constraints: make([]pricer.Constraint, len(entries))}
 	for i, e := range entries {
@@ -1304,8 +1223,8 @@ func sameEntries(entries []model.ConstraintSetEntry, live []nitro.Constraint) bo
 	return true
 }
 
-// sameSets compares two set documents by target and window (the starting
-// backlogs may differ: an observed set records the live ones).
+// sameSets compares two set documents by target and window; the starting backlogs may differ, since
+// an observed set records the live ones.
 func sameSets(a, b []model.ConstraintSetEntry) bool {
 	if len(a) != len(b) {
 		return false
@@ -1335,12 +1254,11 @@ func entriesJSON(entries []model.ConstraintSetEntry) db.JSONB {
 	return db.JSONB(b)
 }
 
-// errStaleGeneration marks work that was fetched from the chain before a
-// rewind and must not be committed on top of the canonical chain.
+// errStaleGeneration marks work fetched before a rewind, which must not be committed on top of the
+// canonical chain.
 var errStaleGeneration = errors.New("chain rewound while fetching, discarding the work")
 
-// generation reads the chain's rewind counter (collector_state
-// generation), 0 before the first rewind.
+// generation reads the chain's rewind counter, 0 before the first rewind.
 func (f *Follower) generation(ctx context.Context, s db.Store) (uint64, error) {
 	raw, ok, err := s.GetState(ctx, f.chainID, db.StateGeneration)
 	if err != nil || !ok {
@@ -1353,8 +1271,8 @@ func (f *Follower) generation(ctx context.Context, s db.Store) (uint64, error) {
 	return gen, nil
 }
 
-// bumpGeneration increments the rewind counter inside the rewind's own
-// transaction, so every writer that captured the old value aborts.
+// bumpGeneration increments the rewind counter inside the rewind's own transaction, so every writer
+// that captured the old value aborts.
 func (f *Follower) bumpGeneration(ctx context.Context, s db.Store) error {
 	gen, err := f.generation(ctx, s)
 	if err != nil {
@@ -1363,13 +1281,10 @@ func (f *Follower) bumpGeneration(ctx context.Context, s db.Store) error {
 	return s.SetState(ctx, f.chainID, db.StateGeneration, strconv.FormatUint(gen+1, 10))
 }
 
-// withGeneration runs fn in the chain transaction, but only when the chain
-// has not been rewound since gen was captured. A writer captures the
-// generation before its network calls and commits under this check, so
-// work fetched from a fork that has since been rewound is discarded and
-// retried instead of being written back on top of the canonical chain.
-// Holding the lock across the network calls instead would block the fast
-// loop for as long as the RPC takes.
+// withGeneration runs fn in the chain transaction, but only when the chain has not been rewound since
+// gen was captured, so work fetched from a dead fork is discarded and retried rather than written back.
+// Holding the lock across the network calls instead would block the fast loop for as long as the RPC
+// takes.
 func (f *Follower) withGeneration(ctx context.Context, gen uint64, fn func(db.Store) error) error {
 	return f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		cur, err := f.generation(ctx, s)
@@ -1383,30 +1298,23 @@ func (f *Follower) withGeneration(ctx context.Context, gen uint64, fn func(db.St
 	})
 }
 
-// historyMustWait reports whether the gap filler and the backfill should
-// hold off: the fast loop is catching up right now, or its last tick found
-// the stored head more than a header batch behind the chain, so every
-// spare call belongs to the live path until it has caught up.
+// historyMustWait reports whether the gap filler and backfill should hold off: the fast loop is
+// catching up, or its last tick found the stored head more than a header batch behind, so every spare
+// call belongs to the live path.
 func (f *Follower) historyMustWait() bool {
 	return f.catchingUp.Load() || f.behind.Load() > uint64(f.cfg.HeaderBatchSize)
 }
 
-// recoveryMustWait gives the active catch-up absolute priority, and gives a
-// lagging fast loop all but one of every maxRecoveryDeferrals history turns.
-// This keeps the live reserve and dominant share while guaranteeing that a
-// durable missing range is retried eventually under sustained ingress load.
+// recoveryMustWait gives the active catch-up absolute priority, and a lagging fast loop all but one of
+// every maxRecoveryDeferrals history turns, so a durable missing range is still retried eventually.
 func (f *Follower) recoveryMustWait() bool { return f.deferredWait(&f.recoveryDeferrals) }
 
-// repairMustWait is the same policy for the poster-gas repair, on its own
-// count. The repair reads and rebuilds from block rows that retention
-// removes, so a lag that never lifts must not hold it off for good: under
-// sustained ingress the filler and the repair each take one turn in
-// maxRecoveryDeferrals, and the live path keeps the rest.
+// repairMustWait is the same policy on the repair's own count, so a lag that never lifts cannot hold
+// it off for good while retention removes the rows it exists to repair. Neither consumes the other's turn.
 func (f *Follower) repairMustWait() bool { return f.deferredWait(&f.repairDeferrals) }
 
-// deferredWait is the policy behind both: absolute priority to an active
-// catch-up, and all but one of every maxRecoveryDeferrals turns to a
-// lagging fast loop, counted on the caller's own counter.
+// deferredWait counts the caller's deferrals: absolute priority to an active catch-up, all but one of
+// every maxRecoveryDeferrals turns to a lagging fast loop.
 func (f *Follower) deferredWait(deferrals *atomic.Uint64) bool {
 	if f.catchingUp.Load() {
 		return true

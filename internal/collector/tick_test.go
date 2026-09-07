@@ -1567,11 +1567,9 @@ func TestCatchUpReEvaluatesAfterFailover(t *testing.T) {
 	}
 }
 
-// A reorg that reaches a bucket straddling the prune frontier leaves it with
-// no correct aggregate: prune took its early rows, the rewind orphans its
-// retained ones, and what is stored describes the dead fork. RebuildBuckets
-// declines the window, so on its own the old-fork aggregate would be served
-// for good. The rewind discards exactly the windows the store declined.
+// A reorg reaching a bucket straddling the prune frontier leaves it with no correct aggregate: prune
+// took its early rows, the rewind orphans its retained ones, and what is stored is the dead fork.
+// RebuildBuckets declines the window, so the rewind discards exactly the windows the store declined.
 func TestRewindDiscardsBucketsStraddlingThePruneFrontier(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
@@ -1590,15 +1588,10 @@ func TestRewindDiscardsBucketsStraddlingThePruneFrontier(t *testing.T) {
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Blocks arrive ten a second, so the minute bucket at 07:01 holds
-	// blocks 600 through 1199. A frontier at 07:01:30 falls inside it:
-	// rows before block 900 count as pruned, rows from it on are retained.
-	//
-	// That minute bucket is the one this test is about. It starts exactly
-	// at the bucket boundary, so the rewind's own DeleteBucketsBefore leaves
-	// it alone, and only the discard below the frontier can remove it. The
-	// quarter-hour and hour windows start before the boundary and would go
-	// either way.
+	// Blocks arrive ten a second, so the minute bucket at 07:01 holds blocks 600 through 1199, and a
+	// frontier at 07:01:30 falls inside it. That minute is the case that matters: it starts exactly at
+	// the bucket boundary, so the rewind's own DeleteBucketsBefore leaves it alone and only the discard
+	// below the frontier can remove it. The quarter hour and hour start earlier and would go either way.
 	inside := time.Unix(int64(tsFor(900)), 0).UTC()
 	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, inside.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)

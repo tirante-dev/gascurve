@@ -29,19 +29,11 @@ export function resetSharedSeries(): void {
 }
 
 /**
- * The Series for (network, range), sharing one request with whoever else is
- * asking for the same one: the hero's chart and the history section mount and
- * refetch together, so two views on one range must not become two requests to
- * the api. Nothing is held after the request settles, so the refetch interval
- * still decides when data is refreshed and no view is ever handed a stale
- * range.
- *
- * One caller's abort never cancels the fetch another is waiting on: consumers
- * are counted per key against a shared controller, and the request is
- * cancelled only when the last of them leaves before it settles. Rapid range
- * switching used to leave one abandoned request per visited key running
- * through its ten-second timeout and two retries with nobody to hand the
- * result to.
+ * The Series for (network, range), sharing one request with whoever else is asking for the same one: the
+ * hero's chart and the history section mount and refetch together. Nothing is held after the request
+ * settles, so no view is handed a stale range. One caller's abort never cancels the fetch another is
+ * waiting on: consumers are counted per key against a shared controller, so rapid range switching no
+ * longer leaves an abandoned request per visited key running through its timeout and two retries.
  */
 export function fetchSharedSeries(network: string, range: SeriesRange, signal?: AbortSignal): Promise<Series> {
   const key = seriesKey(network, range);

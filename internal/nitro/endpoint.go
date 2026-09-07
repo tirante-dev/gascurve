@@ -18,12 +18,10 @@ const (
 	capRecoveryInterval = time.Minute
 )
 
-// Endpoint is one JSON-RPC endpoint of a network: a Client with its own
-// token bucket, its capabilities (WebSocket URL, archive state) and an
-// adaptive batch cap. The cap starts at the configured header batch size,
-// halves (floor 10) whenever the endpoint answers a batch with 429 and
-// recovers one step per successful minute. Chain id verification can
-// disable an endpoint for good.
+// Endpoint is one JSON-RPC endpoint of a network: a Client with its own token bucket, its
+// capabilities (WebSocket URL, archive state) and an adaptive batch cap. The cap starts at the
+// configured header batch size, halves (floor 10) whenever the endpoint answers a batch with 429 and
+// recovers one step per successful minute. Chain id verification can disable an endpoint for good.
 type Endpoint struct {
 	*Client
 	index   int
@@ -47,12 +45,9 @@ type Endpoint struct {
 	logRange        uint64
 	lastLogRefusal  time.Time
 	lastLogRecovery time.Time
-	// WebSocket health, tracked apart from HTTP verification: an endpoint
-	// whose JSON-RPC answers can still have a socket that cannot be
-	// dialed, cannot be subscribed to, or will not stay up. wsUntil is
-	// when its socket may be tried again, wsReason says why it was cooled
-	// down, wsDrops counts subscriptions lost soon after connecting and
-	// wsUpAt is when the last one connected.
+	// WebSocket health, tracked apart from HTTP verification: an endpoint whose JSON-RPC answers can
+	// still have a socket that will not stay up. wsUntil is when it may be tried again, wsReason why
+	// it was cooled down, wsDrops counts subscriptions lost soon after connecting.
 	wsUntil  time.Time
 	wsReason string
 	wsDrops  int
@@ -60,16 +55,14 @@ type Endpoint struct {
 }
 
 const (
-	// wsDropLimit is how many subscriptions may be lost in quick
-	// succession before the endpoint's WebSocket is cooled down. A dial or
-	// subscribe failure cools it down at once: nothing about it worked.
+	// wsDropLimit is how many subscriptions may be lost in quick succession before the endpoint's
+	// WebSocket is cooled down. A dial or subscribe failure cools it down at once.
 	wsDropLimit = 3
 	// wsHealthyFor is how long a subscription must hold before the drops
 	// before it stop counting against the endpoint.
 	wsHealthyFor = time.Minute
 )
 
-// noteWSConnected records a live subscription on the endpoint.
 func (e *Endpoint) noteWSConnected() {
 	now := e.now()
 	e.mu.Lock()
@@ -78,13 +71,10 @@ func (e *Endpoint) noteWSConnected() {
 	e.wsUntil, e.wsReason = time.Time{}, ""
 }
 
-// noteWSFailure records a WebSocket failure and reports whether it cooled
-// the endpoint's socket down for cooldown. subscribed says whether the
-// subscription had been acknowledged before it broke: a dial or subscribe
-// failure cools the endpoint down at once, while a subscription that was
-// live is only held against it when it keeps dropping soon after
-// connecting, so an ordinary reconnect does not move a follower off a
-// working endpoint.
+// noteWSFailure records a WebSocket failure and reports whether it cooled the socket down.
+// subscribed says whether the subscription had been acknowledged: a dial or subscribe failure cools
+// the endpoint down at once, while a live subscription is only held against it when it keeps dropping
+// soon after connecting, so an ordinary reconnect does not move a follower off a working endpoint.
 func (e *Endpoint) noteWSFailure(subscribed bool, cooldown time.Duration, reason string) bool {
 	now := e.now()
 	e.mu.Lock()
@@ -146,27 +136,23 @@ func (e *Endpoint) setPreSend(fn func(context.Context) error) { e.preSend = fn }
 // Index is the endpoint's position: 0 is the primary.
 func (e *Endpoint) Index() int { return e.index }
 
-// WSURL returns the newHeads endpoint, "" when the endpoint has none.
 func (e *Endpoint) WSURL() string { return e.wsURL }
 
 // Archive reports whether the endpoint serves historical state.
 func (e *Endpoint) Archive() bool { return e.archive }
 
-// BatchCap returns the current adaptive batch cap.
 func (e *Endpoint) BatchCap() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.batchCap
 }
 
-// Disabled reports whether verification disabled the endpoint.
 func (e *Endpoint) Disabled() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.disabled
 }
 
-// Verified reports whether eth_chainId has confirmed the endpoint's chain.
 func (e *Endpoint) Verified() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -220,14 +206,10 @@ func (e *Endpoint) observe(items int, limited bool) {
 	e.log.Info("batch cap recovered one step", "batchCap", e.batchCap)
 }
 
-// batch sends reqs in chunks of at most the current cap, itself bounded by
-// what the endpoint's token bucket can hold at once for the calling class
-// (a budgeted endpoint never sends a batch it has not paid for in full).
-// Every typed call goes through it, not only the header batches, so a
-// ten-call L1 sample on a four calls per second budget is split rather
-// than eating the fast reserve. A throttled chunk is retried after the
-// back-off at whatever the cap has become, so an oversized batch shrinks
-// instead of being resent as is; the attempt budget is the client's.
+// batch sends reqs in chunks of at most the current cap, itself bounded by what the token bucket can
+// hold at once for the calling class. Every typed call goes through it, so a ten-call L1 sample on a
+// four calls per second budget is split rather than eating the fast reserve. A throttled chunk is
+// retried after the back-off at whatever the cap has become, so an oversized batch shrinks.
 func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	out := make([]Result, 0, len(reqs))
 	attempts := 0
@@ -252,41 +234,30 @@ func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) 
 	return out, nil
 }
 
-// HeadersByNumbers fetches headers and receipt-backed poster gas in batches
-// of at most the adaptive cap.
 func (e *Endpoint) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
 	return headersByNumbers(ctx, numbers, e.batch)
 }
 
-// BlocksWithTxs fetches full blocks in batches of at most the adaptive cap.
 func (e *Endpoint) BlocksWithTxs(ctx context.Context, numbers []uint64) ([]Block, error) {
 	return blocksByNumbers(ctx, numbers, true, e.batch)
 }
 
-// TransactionReceipts fetches receipts in batches of at most the adaptive
-// cap.
 func (e *Endpoint) TransactionReceipts(ctx context.Context, hashes []string) ([]Receipt, error) {
 	return transactionReceipts(ctx, hashes, e.batch)
 }
 
-// MaxLogRange is the widest block range one eth_getLogs asks for before an
-// endpoint has said otherwise, and the ceiling the learned range grows back
-// to.
+// MaxLogRange is the widest block range one eth_getLogs asks for before an endpoint has said
+// otherwise, and the ceiling the learned range grows back to.
 const MaxLogRange = 100_000
 
-// minLogRange is the floor the learned range halves down to. One block is
-// the narrowest question there is: an endpoint that refuses it is not
-// serving logs at all, which is an endpoint failure rather than a range
-// the caller asked too much for.
+// minLogRange is the floor the learned range halves down to. An endpoint that refuses a single block
+// is not serving logs at all, which is an endpoint failure rather than an over-wide ask.
 const minLogRange = 1
 
-// logRefusalBackoff is the pause before re-asking a refused getLogs range
-// in narrower pieces. It is paid once per piece, not once per halving: the
-// halvings that follow a refusal are a smaller ask rather than the same
-// request again, and waiting for each of them would stall a scan for
-// minutes. It doubles per consecutive refused piece, up to
-// maxLogRefusalBackoff, so an endpoint that keeps refusing is asked less
-// often as well as for less.
+// logRefusalBackoff is the pause before re-asking a refused getLogs range in narrower pieces, paid
+// once per piece rather than once per halving: the halvings are a smaller ask, and waiting for each
+// would stall a scan for minutes. It doubles per consecutive refused piece, up to
+// maxLogRefusalBackoff, so an endpoint that keeps refusing is asked less often as well as for less.
 const (
 	logRefusalBackoff    = time.Second
 	maxLogRefusalBackoff = 30 * time.Second
@@ -308,13 +279,10 @@ func (e *Endpoint) logRangeLocked() uint64 {
 	return e.logRange
 }
 
-// observeLogRange adapts the getLogs range from one call's outcome, the way
-// observe adapts the batch cap: a refused range halves the width (floor
-// minLogRange) and stamps the refusal; an accepted call after a quiet
-// capRecoveryInterval doubles it again (ceiling MaxLogRange), so the
-// endpoint's real limit is found without being told, and probed again now
-// and then in case it moved. The next call reads the new width with
-// LogRange.
+// observeLogRange adapts the getLogs range from one call's outcome, the way observe adapts the batch
+// cap: a refused range halves the width (floor minLogRange), an accepted call after a quiet
+// capRecoveryInterval doubles it (ceiling MaxLogRange). The endpoint's real limit is found without
+// being told, and probed again now and then in case it moved.
 func (e *Endpoint) observeLogRange(width uint64, refused bool) {
 	now := e.now()
 	e.mu.Lock()
@@ -341,32 +309,23 @@ func (e *Endpoint) observeLogRange(width uint64, refused bool) {
 	e.log.Info("eth_getLogs range recovered one step", "range", e.logRange)
 }
 
-// logsRefused reports whether err is the endpoint declining the request it
-// was given rather than failing to answer: a JSON-RPC error of any wording
-// (providers cap getLogs by block range, by result count or by response
-// size and each says so differently), or a rate limit that outlasted the
-// client's own back-off. A transport or context failure is not a refusal
-// and goes back to the caller, whose pool decides about failover.
+// logsRefused reports whether err is the endpoint declining the request rather than failing to
+// answer: a JSON-RPC error of any wording (providers cap getLogs by range, result count or response
+// size and each says so differently), or a rate limit that outlasted the client's back-off. A
+// transport or context failure is not a refusal and goes back to the caller.
 func logsRefused(err error) bool {
 	var rpcErr *RPCError
 	return errors.As(err, &rpcErr) || errors.Is(err, ErrRateLimited)
 }
 
-// OwnerActsLogs fetches OwnerActs events over [from, to] in pieces of at
-// most the endpoint's getLogs range. A refused piece wider than one block
-// narrows the range and is re-asked in smaller pieces; the accepted width
-// is kept for later calls and probed upward again after a quiet minute.
-// Logs come back in block order, as one call would return them.
+// OwnerActsLogs fetches OwnerActs events over [from, to] in pieces of at most the endpoint's getLogs
+// range. A refused piece wider than one block narrows the range and is re-asked in smaller pieces;
+// the accepted width is kept for later calls. Logs come back in block order.
 //
-// A refusal of a single block is not a range the caller asked too much
-// for: this endpoint cannot answer the question at all, so it comes back
-// as an EndpointError and the pool tries the next endpoint. The provider's
-// own error stays underneath it, so the last endpoint's refusal still
-// surfaces as the JSON-RPC error it was.
-//
-// The back-off is paid at most once per piece and honors the context, so
-// narrowing a range from a hundred thousand blocks to one costs seventeen
-// calls rather than seventeen waits.
+// A refusal of a single block means this endpoint cannot answer at all, so it comes back as an
+// EndpointError and the pool tries the next one, with the provider's own error underneath. The
+// back-off is paid at most once per piece, so narrowing from a hundred thousand blocks to one costs
+// seventeen calls rather than seventeen waits.
 func (e *Endpoint) OwnerActsLogs(ctx context.Context, from, to uint64) ([]Log, error) {
 	fetch := func(a, b uint64) ([]Log, error) { return e.Client.OwnerActsLogs(ctx, a, b) }
 	var out []Log
@@ -387,9 +346,8 @@ func (e *Endpoint) OwnerActsLogs(ctx context.Context, from, to uint64) ([]Log, e
 			}
 			start = end + 1
 			if !waited {
-				// A piece taken at the first ask clears the back-off; one
-				// that had to be narrowed keeps the longer pause for the
-				// next piece.
+				// A piece taken at the first ask clears the back-off; one that had to be narrowed keeps
+				// the longer pause for the next piece.
 				backoff = logRefusalBackoff
 			}
 			waited = false

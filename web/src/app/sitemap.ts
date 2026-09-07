@@ -3,14 +3,9 @@ import { CHART_VIEWS } from "@/lib/chartViews";
 import { SITE_NETWORKS, absoluteUrl } from "@/lib/seo";
 
 /**
- * /sitemap.xml: the index, and for every network its page, its explainer and
- * one entry per chart.
- *
- * The priorities say what the site is for. Robinhood Chain's page is the one
- * that matters, its explainer and charts rank under it, and the chains carried
- * for comparison sit below all of those. Change frequencies reflect what
- * actually moves: the network pages carry the live feed, the explainer only
- * changes when the copy does.
+ * /sitemap.xml: the index, and for every network its page, its explainer and one entry per chart. The
+ * priorities say what the site is for, with Robinhood Chain first and the comparison chains below.
+ * Change frequencies reflect what actually moves.
  */
 export default function sitemap(): MetadataRoute.Sitemap {
   const now = new Date();

@@ -21,9 +21,8 @@ type Postgres struct {
 	db    *sqlx.DB
 	q     sqlx.ExtContext
 	stats *stats
-	// tx describes the open transaction this store is bound to, nil when it
-	// is the pool. Nested calls read it to tell whether they can reuse the
-	// transaction, must add a lock to it, or are incompatible with it.
+	// tx describes the open transaction this store is bound to, nil when it is the pool. Nested calls
+	// read it to tell whether they can reuse the transaction, must add a lock, or are incompatible.
 	tx *txMode
 }
 
@@ -43,41 +42,34 @@ type stats struct {
 	lastLatency  atomic.Int64
 }
 
-// txMode is the metadata of an open transaction: the chain locks it holds,
-// in acquisition order, and whether it is the read-only repeatable-read
-// snapshot.
+// txMode is the metadata of an open transaction: the chain locks it holds, in acquisition order, and
+// whether it is the read-only repeatable-read snapshot.
 type txMode struct {
 	locks    []uint64
 	snapshot bool
 }
 
-// Nesting errors. A caller that believes it holds chain exclusion, or a
-// single database moment, and does not is a correctness problem, so the
-// combination is refused rather than silently downgraded.
+// Nesting errors. A caller that believes it holds chain exclusion, or a single database moment, and
+// does not is a correctness problem, so the combination is refused rather than silently downgraded.
 var (
-	// ErrNestedSnapshot is returned when a read-only repeatable-read
-	// transaction is requested inside a writing one: it would see that
+	// ErrNestedSnapshot: a repeatable-read transaction inside a writing one would see that
 	// transaction's own uncommitted writes and no consistent snapshot.
 	ErrNestedSnapshot = errors.New("db: snapshot transaction inside a write transaction")
 	// ErrSnapshotWrite is returned when a chain transaction is requested
 	// inside a read-only snapshot transaction, which cannot write.
 	ErrSnapshotWrite = errors.New("db: chain transaction inside a snapshot transaction")
-	// ErrLockOrder is returned when a chain lock is requested inside a
-	// transaction that already holds a higher one. Locks are always taken
-	// in ascending chain id order, so taking this one now could deadlock
-	// against a transaction doing the reverse.
+	// ErrLockOrder: a chain lock requested inside a transaction holding a higher one. Locks are always
+	// taken in ascending chain id order, so taking this one now could deadlock against the reverse.
 	ErrLockOrder = errors.New("db: chain lock out of order")
 )
 
-// NewPostgres wraps an open connection pool.
 func NewPostgres(d *sqlx.DB) *Postgres {
 	return &Postgres{db: d, q: d, stats: &stats{}}
 }
 
-// DB exposes the underlying pool (for migrations and shutdown).
+// DB exposes the underlying pool, for migrations and shutdown.
 func (p *Postgres) DB() *sqlx.DB { return p.db }
 
-// Stats returns a concurrency-safe snapshot of database operation accounting.
 func (p *Postgres) Stats() Stats {
 	return Stats{
 		Operations: p.stats.operations.Load(), Errors: p.stats.errors.Load(),
@@ -95,7 +87,6 @@ func (p *Postgres) observe(start time.Time, err error) {
 	}
 }
 
-// Ping checks connectivity.
 func (p *Postgres) Ping(ctx context.Context) error {
 	start := time.Now()
 	err := p.db.PingContext(ctx)
@@ -103,9 +94,8 @@ func (p *Postgres) Ping(ctx context.Context) error {
 	return err
 }
 
-// WithTx runs fn in a transaction. Nested inside any open transaction it
-// reuses it: a plain transaction asks for nothing the outer one does not
-// already give.
+// WithTx runs fn in a transaction. Nested inside any open transaction it reuses it: a plain
+// transaction asks for nothing the outer one does not already give.
 func (p *Postgres) WithTx(ctx context.Context, fn func(Store) error) error {
 	if p.tx != nil {
 		return fn(p)
@@ -113,14 +103,11 @@ func (p *Postgres) WithTx(ctx context.Context, fn func(Store) error) error {
 	return p.transact(ctx, nil, &txMode{}, nil, fn)
 }
 
-// WithChainTx runs fn in a transaction that holds the chain's advisory
-// lock (pg_advisory_xact_lock, released at commit or rollback) before any
-// other statement. Nested inside a transaction that already holds that
-// chain's lock it reuses it; inside one holding only lower chain ids it
-// takes the missing lock, keeping the ascending order that makes the
-// locks deadlock free; inside one holding a higher chain id, or inside a
-// read-only snapshot, it fails rather than run without the exclusion the
-// caller believes it has.
+// WithChainTx runs fn in a transaction holding the chain's advisory lock before any other statement.
+// Nested inside a transaction that already holds that lock it reuses it; inside one holding only lower
+// chain ids it takes the missing lock, keeping the ascending order that makes the locks deadlock free;
+// inside one holding a higher chain id, or a read-only snapshot, it fails rather than run without the
+// exclusion the caller believes it has.
 func (p *Postgres) WithChainTx(ctx context.Context, chainID uint64, fn func(Store) error) error {
 	if p.tx == nil {
 		return p.transact(ctx, nil, &txMode{locks: []uint64{chainID}}, func(s *Postgres) error {
@@ -155,10 +142,9 @@ func (p *Postgres) lockChain(ctx context.Context, chainID uint64) error {
 	return nil
 }
 
-// WithSnapshotTx runs fn in a read-only repeatable-read transaction. Inside
-// another snapshot it reuses it; inside a writing transaction it fails,
-// since it would read that transaction's own uncommitted rows instead of
-// one committed database moment.
+// WithSnapshotTx runs fn in a read-only repeatable-read transaction. Inside another snapshot it reuses
+// it; inside a writing transaction it fails, since it would read that transaction's own uncommitted
+// rows instead of one committed database moment.
 func (p *Postgres) WithSnapshotTx(ctx context.Context, fn func(Store) error) error {
 	if p.tx != nil {
 		if !p.tx.snapshot {
@@ -169,9 +155,8 @@ func (p *Postgres) WithSnapshotTx(ctx context.Context, fn func(Store) error) err
 	return p.transact(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, &txMode{snapshot: true}, nil, fn)
 }
 
-// transact begins a transaction with opts, records mode on the bound
-// store so nested calls can check compatibility, runs setup and then fn on
-// it, and commits unless either failed.
+// transact begins a transaction with opts, records mode on the bound store so nested calls can check
+// compatibility, runs setup and then fn, and commits unless either failed.
 func (p *Postgres) transact(ctx context.Context, opts *sql.TxOptions, mode *txMode, setup func(*Postgres) error, fn func(Store) error) error {
 	start := time.Now()
 	tx, err := p.db.BeginTxx(ctx, opts)
@@ -240,7 +225,6 @@ func getOne[T any](ctx context.Context, p *Postgres, query string, args ...any) 
 	return &out, nil
 }
 
-// UpsertNetwork inserts or updates the static network fields.
 func (p *Postgres) UpsertNetwork(ctx context.Context, n Network) error {
 	_, err := p.exec(ctx, `
 		INSERT INTO networks (chain_id, name, display_name, explorer_url, enabled, updated_at)
@@ -254,13 +238,12 @@ func (p *Postgres) UpsertNetwork(ctx context.Context, n Network) error {
 
 const networkColumns = `chain_id, name, display_name, explorer_url, enabled, head_block, head_at, last_sample_at, last_error, updated_at`
 
-// Networks lists all networks ordered by chain id.
 func (p *Postgres) Networks(ctx context.Context) ([]Network, error) {
 	return selectAll[Network](ctx, p, `SELECT `+networkColumns+` FROM networks ORDER BY chain_id`)
 }
 
-// NetworkByRef resolves a reference deterministically: a decimal within
-// the BIGINT range is a chain id and nothing else, anything else is a name.
+// NetworkByRef resolves a reference deterministically: a decimal within the BIGINT range is a chain id
+// and nothing else, anything else is a name.
 func (p *Postgres) NetworkByRef(ctx context.Context, ref string) (*Network, error) {
 	if id, ok := ChainIDRef(ref); ok {
 		return getOne[Network](ctx, p, `SELECT `+networkColumns+` FROM networks WHERE chain_id = $1`, id)
@@ -268,9 +251,8 @@ func (p *Postgres) NetworkByRef(ctx context.Context, ref string) (*Network, erro
 	return getOne[Network](ctx, p, `SELECT `+networkColumns+` FROM networks WHERE name = $1`, ref)
 }
 
-// ChainIDRef reports whether a network reference is a chain id: a decimal
-// number that fits a BIGINT. Larger numbers and names are looked up by
-// name only.
+// ChainIDRef reports whether a network reference is a chain id: a decimal that fits a BIGINT. Larger
+// numbers and names are looked up by name only.
 func ChainIDRef(ref string) (int64, bool) {
 	id, err := strconv.ParseInt(ref, 10, 64)
 	if err != nil || id < 0 || strconv.FormatInt(id, 10) != ref {
@@ -279,16 +261,14 @@ func ChainIDRef(ref string) (int64, bool) {
 	return id, true
 }
 
-// UpdateNetworkHead records the newest block and sample time.
 func (p *Postgres) UpdateNetworkHead(ctx context.Context, chainID, headBlock uint64, headAt, sampledAt time.Time) error {
 	_, err := p.exec(ctx, `UPDATE networks SET head_block = $2, head_at = $3, last_sample_at = $4, last_error = NULL, updated_at = now() WHERE chain_id = $1`,
 		chainID, headBlock, headAt, sampledAt)
 	return err
 }
 
-// SetNetworkHead records the head after a rewind, nulling the fields that
-// no longer have a value. last_error is left alone: a rewind is not a
-// successful sample and must not clear a standing error.
+// SetNetworkHead records the head after a rewind, nulling the fields that no longer have a value.
+// last_error is left alone: a rewind is not a successful sample and must not clear a standing error.
 func (p *Postgres) SetNetworkHead(ctx context.Context, chainID uint64, headBlock *uint64, headAt, sampledAt *time.Time) error {
 	var block sql.NullInt64
 	if headBlock != nil {
@@ -306,7 +286,6 @@ func (p *Postgres) SetNetworkHead(ctx context.Context, chainID uint64, headBlock
 	return err
 }
 
-// SetNetworkError records or clears the last error.
 func (p *Postgres) SetNetworkError(ctx context.Context, chainID uint64, msg string) error {
 	var v sql.NullString
 	if msg != "" {
@@ -318,13 +297,12 @@ func (p *Postgres) SetNetworkError(ctx context.Context, chainID uint64, msg stri
 
 const blockColumns = `chain_id, number, hash, parent_hash, ts, gas_used, poster_gas, base_fee, l1_block, tx_count, backlogs, constraint_bips, exponent_bips, predicted_base_fee, min_base_fee, anchored, pricing_version`
 
-// PostgreSQL accepts at most 65,535 bind parameters. Keeping a little room
-// below that limit also avoids sending unnecessarily large statements if a
-// caller supplies more rows than the collector's configured batch size.
+// PostgreSQL accepts at most 65,535 bind parameters; a little room below that also keeps statements
+// reasonable when a caller supplies more rows than the configured batch size.
 const postgresBatchParameters = 60_000
 
-// valueTuples builds ($1, ...), ($n, ...) for a multi-row INSERT. Values stay
-// in bind parameters, so batching does not interpolate any row data into SQL.
+// valueTuples builds ($1, ...), ($n, ...) for a multi-row INSERT. Values stay in bind parameters, so
+// batching never interpolates row data into SQL.
 func valueTuples(rows, columns int) string {
 	var b strings.Builder
 	for row := range rows {
@@ -344,10 +322,8 @@ func valueTuples(rows, columns int) string {
 	return b.String()
 }
 
-// uniqueLayers partitions rows so a single INSERT never contains the same
-// conflict key twice. PostgreSQL rejects an INSERT whose ON CONFLICT clause
-// would update one target row twice. Later occurrences go in later statements,
-// retaining the old per-row conflict order for duplicate input keys.
+// uniqueLayers partitions rows so a single INSERT never contains the same conflict key twice, which
+// PostgreSQL rejects. Later occurrences go in later statements, keeping the per-row conflict order.
 func uniqueLayers[T any, K comparable](rows []T, key func(T) K) [][]T {
 	counts := make(map[K]int, len(rows))
 	var layers [][]T
@@ -363,9 +339,8 @@ func uniqueLayers[T any, K comparable](rows []T, key func(T) K) [][]T {
 	return layers
 }
 
-// blockSpan is the lowest and highest block number in a batch. A batched
-// statement fails as a whole, so its error names the rows it carried
-// rather than only the statement that carried them.
+// blockSpan is the lowest and highest block number in a batch. A batched statement fails as a whole,
+// so its error names the rows it carried.
 func blockSpan(batch []Block) (lo, hi uint64) {
 	lo, hi = batch[0].Number, batch[0].Number
 	for _, b := range batch[1:] {
@@ -374,9 +349,7 @@ func blockSpan(batch []Block) (lo, hi uint64) {
 	return lo, hi
 }
 
-// bucketSpan is the earliest and latest bucket start in a batch, for the
-// same reason as blockSpan. One batch may hold several resolutions, so
-// only the window they cover is named.
+// bucketSpan is the earliest and latest bucket start in a batch, for the same reason as blockSpan.
 func bucketSpan(batch []Bucket) (first, last time.Time) {
 	first, last = batch[0].BucketStart, batch[0].BucketStart
 	for _, b := range batch[1:] {
@@ -390,7 +363,6 @@ func bucketSpan(batch []Bucket) (first, last time.Time) {
 	return first, last
 }
 
-// UpsertBlocks writes blocks, replacing replay fields on conflict.
 func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
 	const columns = 17
 	for _, layer := range uniqueLayers(blocks, func(b Block) struct{ chainID, number uint64 } {
@@ -421,42 +393,31 @@ func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
 	return nil
 }
 
-// BlockByNumber returns one block.
 func (p *Postgres) BlockByNumber(ctx context.Context, chainID, number uint64) (*Block, error) {
 	return getOne[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 AND number = $2`, chainID, number)
 }
 
-// DeleteBlocksAfter removes and returns blocks above a number.
 func (p *Postgres) DeleteBlocksAfter(ctx context.Context, chainID, after uint64) ([]Block, error) {
 	return selectAll[Block](ctx, p, `DELETE FROM blocks WHERE chain_id = $1 AND number > $2 RETURNING `+blockColumns+``, chainID, after)
 }
 
-// BlocksMissingPosterGas returns blocks stored without receipt-backed poster
-// gas, ascending from a number. The scan rides the (chain_id, number) primary
-// key, so a caller that advances its cursor past what it has repaired keeps
-// each pass short.
+// BlocksMissingPosterGas returns blocks stored without poster gas, ascending from a number, riding
+// the (chain_id, number) key so a caller advancing its cursor keeps each pass short.
 func (p *Postgres) BlocksMissingPosterGas(ctx context.Context, chainID, from uint64, limit int) ([]Block, error) {
 	return selectAll[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks
 		WHERE chain_id = $1 AND number >= $2 AND poster_gas IS NULL
 		ORDER BY number ASC LIMIT $3`, chainID, from, limit)
 }
 
-// SetPosterGas writes poster gas onto stored rows in one statement. The join
-// carries the guards the column's own CHECK enforces, so a row that has since
-// been rewritten, pruned or rewound is left alone instead of failing the
-// batch, and only a row that still lacks the value is touched: the repair is
-// then idempotent against a live collector writing the same blocks.
+// SetPosterGas writes poster gas onto stored rows in one statement. The join carries the column's own
+// CHECK guards, so a row rewritten, pruned or rewound since is left alone, and only a row still lacking
+// the value is touched: the repair is idempotent against a live collector writing the same blocks.
 func (p *Postgres) SetPosterGas(ctx context.Context, chainID uint64, gas map[uint64]uint64) error {
 	if len(gas) == 0 {
 		return nil
 	}
-	// Both columns are BIGINT, so a value past its range describes no row
-	// this store could hold. Nothing incorrect would be written (a wrapped
-	// number matches no row and a wrapped gas fails the guard below), but it
-	// would be skipped without a word and the error range below would name
-	// blocks nobody asked for. Refuse the batch instead: a caller that got
-	// here is wrong about its own numbers, and the rows come from these
-	// columns in the first place.
+	// Both columns are BIGINT; a value past that range describes no row this store could hold, and
+	// would be skipped without a word. Refuse it: the caller is wrong about its own numbers.
 	numbers := make([]int64, 0, len(gas))
 	for n, g := range gas {
 		if n > math.MaxInt64 || g > math.MaxInt64 {
@@ -481,27 +442,22 @@ func (p *Postgres) SetPosterGas(ctx context.Context, chainID uint64, gas map[uin
 	return nil
 }
 
-// LatestBlock returns the highest stored block.
 func (p *Postgres) LatestBlock(ctx context.Context, chainID uint64) (*Block, error) {
 	return getOne[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 ORDER BY number DESC LIMIT 1`, chainID)
 }
 
-// OldestBlock returns the lowest stored block.
 func (p *Postgres) OldestBlock(ctx context.Context, chainID uint64) (*Block, error) {
 	return getOne[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 ORDER BY number ASC LIMIT 1`, chainID)
 }
 
-// RecentBlocks returns the newest blocks first.
 func (p *Postgres) RecentBlocks(ctx context.Context, chainID uint64, limit int) ([]Block, error) {
 	return selectAll[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 ORDER BY number DESC LIMIT $2`, chainID, limit)
 }
 
-// BlocksAfter returns blocks above a number, ascending.
 func (p *Postgres) BlocksAfter(ctx context.Context, chainID, after uint64, limit int) ([]Block, error) {
 	return selectAll[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 AND number > $2 ORDER BY number ASC LIMIT $3`, chainID, after, limit)
 }
 
-// BlocksBetween returns blocks in a time range, ascending.
 func (p *Postgres) BlocksBetween(ctx context.Context, chainID uint64, from, to time.Time) ([]Block, error) {
 	return selectAll[Block](ctx, p, `SELECT `+blockColumns+` FROM blocks WHERE chain_id = $1 AND ts >= $2 AND ts < $3 ORDER BY number ASC`, chainID, from, to)
 }
@@ -530,7 +486,6 @@ func (p *Postgres) GasBetween(ctx context.Context, chainID uint64, from, to time
 	return total, &computeTotal, nil
 }
 
-// TwoTxBlocks lists candidate batch-report blocks.
 func (p *Postgres) TwoTxBlocks(ctx context.Context, chainID, after uint64, limit int) ([]uint64, error) {
 	var nums []int64
 	start := time.Now()
@@ -542,7 +497,6 @@ func (p *Postgres) TwoTxBlocks(ctx context.Context, chainID, after uint64, limit
 	return Uint64s(nums), nil
 }
 
-// PruneBlocks deletes blocks older than before.
 func (p *Postgres) PruneBlocks(ctx context.Context, chainID uint64, before time.Time) (int64, error) {
 	res, err := p.exec(ctx, `DELETE FROM blocks WHERE chain_id = $1 AND ts < $2`, chainID, before)
 	if err != nil {
@@ -553,10 +507,9 @@ func (p *Postgres) PruneBlocks(ctx context.Context, chainID uint64, before time.
 
 const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, poster_gas, fees_wei, poster_fees_wei, base_fee_min, base_fee_avg, base_fee_max, base_fee_sum, exponent_end_bips, backlogs_end, backlogs_max, constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, constraint_set_id, replay_error_bips, last_block, pricing_version`
 
-// FoldBuckets adds partial buckets into the stored rows (the backfill's
-// path for windows without block rows; the cursor commits with it). A sum
-// or fee split that is unknown (NULL) on either side stays unknown; the
-// average then uses the rounded reconstruction for the unknown side.
+// FoldBuckets adds partial buckets into the stored rows (the backfill's path for windows without block
+// rows). A sum or fee split that is unknown on either side stays unknown; the average then uses the
+// rounded reconstruction for the unknown side.
 func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 	type bucketKey struct {
 		chainID     uint64
@@ -615,16 +568,10 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 	return nil
 }
 
-// rebuildable drops the starts a rebuild must not touch: those below the
-// prune frontier, where block rows have been deleted. Recomputing such a
-// window sums only what survived, so a correct aggregate is replaced by a
-// short one, which is worse than leaving it alone. The guard lives here, in
-// the operation that does the damage, rather than in each of its callers.
-//
-// An unrecorded frontier constrains nothing, and neither does one that will
-// not parse: the alternative is refusing every rebuild on a database with one
-// bad row of state, which trades a narrow risk for a total outage of the
-// thing. The collector logs an unreadable frontier where it reads one.
+// rebuildable drops the starts below the prune frontier, where rows have been deleted: recomputing
+// such a window sums only what survived and replaces a correct aggregate with a short one. The guard
+// lives in the operation that does the damage, not in each caller. An unrecorded or unreadable
+// frontier constrains nothing, since refusing every rebuild over one bad row of state would be worse.
 func (p *Postgres) rebuildable(ctx context.Context, chainID uint64, starts []time.Time) ([]time.Time, error) {
 	if len(starts) == 0 {
 		return starts, nil
@@ -646,8 +593,7 @@ func (p *Postgres) rebuildable(ctx context.Context, chainID uint64, starts []tim
 	return out, nil
 }
 
-// parseFrontier reads a recorded prune frontier. False when there is none or
-// it will not parse: both mean no floor, by design (see rebuildable).
+// parseFrontier reads a recorded prune frontier; false when there is none or it will not parse.
 func parseFrontier(raw string, recorded bool) (time.Time, bool) {
 	if !recorded {
 		return time.Time{}, false
@@ -659,15 +605,12 @@ func parseFrontier(raw string, recorded bool) (time.Time, bool) {
 	return t.UTC(), true
 }
 
-// RebuildBuckets recomputes buckets from the block rows in their windows,
-// mirroring BucketBuilder in SQL. A window whose rows retention has deleted
-// is left alone (see rebuildable); one that has no rows for any other reason
-// loses its bucket. The constraint set is the one in force at the window's last
-// block, and only when its constraint count matches the block's backlogs
-// (the live model); a block is never tagged with a set of another shape.
-// The bucket's pricing version is the lowest of its blocks': one block of
-// history without the breakdown makes the window's exponents, floor and
-// fee split unknown rather than letting a rebuild present them as exact.
+// RebuildBuckets recomputes buckets from the block rows in their windows, mirroring BucketBuilder in
+// SQL. A window below the prune frontier is left alone (see rebuildable); one with no rows for any
+// other reason loses its bucket. The constraint set is the one in force at the window's last block,
+// and only when its constraint count matches the block's backlogs, so a block is never tagged with a
+// set of another shape. The bucket's pricing version is the lowest of its blocks': one block without
+// the breakdown makes the window's exponents, floor and fee split unknown.
 func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error {
 	width, ok := Resolutions[resolution]
 	if !ok {
@@ -680,13 +623,10 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 	if len(starts) == 0 {
 		return nil
 	}
-	// The upserted CTE below is deliberately not referenced by the DELETE.
-	// A data-modifying CTE always runs to completion whether or not the
-	// primary query reads its output, and the two touch disjoint rows: the
-	// insert covers exactly the requested starts that have blocks, the
-	// delete exactly the ones that do not. Joining the delete to it would
-	// be worse than redundant, since a rebuild that inserts nothing would
-	// then delete nothing and leave the emptied buckets behind.
+	// The upserted CTE below is deliberately not referenced by the DELETE. A data-modifying CTE runs to
+	// completion whether or not the primary query reads it, and the two touch disjoint rows: the insert
+	// covers the requested starts that have blocks, the delete the ones that do not. Joining them would
+	// mean a rebuild that inserts nothing also deletes nothing, leaving emptied buckets behind.
 	if _, err := p.exec(ctx, `
 			WITH requested AS (
 				SELECT DISTINCT bucket_start, bucket_start + $3::BIGINT * interval '1 second' AS bucket_end
@@ -760,7 +700,6 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 	return nil
 }
 
-// DeleteBucketsBefore drops every resolution's buckets starting before t.
 func (p *Postgres) DeleteBucketsBefore(ctx context.Context, chainID uint64, before time.Time) (int64, error) {
 	res, err := p.exec(ctx, `DELETE FROM buckets WHERE chain_id = $1 AND bucket_start < $2`, chainID, before)
 	if err != nil {
@@ -769,10 +708,9 @@ func (p *Postgres) DeleteBucketsBefore(ctx context.Context, chainID uint64, befo
 	return res.RowsAffected()
 }
 
-// BelowFrontier names those of starts below the prune frontier: the ones
-// rebuildable declines, by the same predicate. The single place the
-// question is answered, so a caller folding into what the store would not
-// rebuild cannot disagree with the store about which windows those are.
+// BelowFrontier names those of starts below the prune frontier, the ones rebuildable declines, by the
+// same predicate: the one place the question is answered, so a caller folding into what the store
+// would not rebuild cannot disagree with it about which windows those are.
 func (p *Postgres) BelowFrontier(ctx context.Context, chainID uint64, starts []time.Time) ([]time.Time, error) {
 	if len(starts) == 0 {
 		return nil, nil
@@ -794,10 +732,8 @@ func (p *Postgres) BelowFrontier(ctx context.Context, chainID uint64, starts []t
 	return below, nil
 }
 
-// DiscardBucketsBelowFrontier removes the buckets at the given starts that
-// lie below the prune frontier, the same starts rebuildable declines. With
-// no frontier recorded, or one that will not parse, nothing lies below it
-// and nothing is removed, exactly as nothing is declined.
+// DiscardBucketsBelowFrontier removes the buckets at those of starts below the prune frontier, the
+// same starts rebuildable declines; with no readable frontier nothing is removed, as nothing is declined.
 func (p *Postgres) DiscardBucketsBelowFrontier(ctx context.Context, chainID uint64, resolution string, starts []time.Time) error {
 	if _, ok := Resolutions[resolution]; !ok {
 		return fmt.Errorf("discard buckets: unknown resolution %q", resolution)
@@ -815,7 +751,6 @@ func (p *Postgres) DiscardBucketsBelowFrontier(ctx context.Context, chainID uint
 	return nil
 }
 
-// Buckets returns buckets in a range, ascending.
 func (p *Postgres) Buckets(ctx context.Context, chainID uint64, resolution string, from, to time.Time) ([]Bucket, error) {
 	return selectAll[Bucket](ctx, p, `SELECT `+bucketColumns+` FROM buckets WHERE chain_id = $1 AND resolution = $2 AND bucket_start >= $3 AND bucket_start < $4 ORDER BY bucket_start ASC`,
 		chainID, resolution, from, to)
@@ -823,7 +758,6 @@ func (p *Postgres) Buckets(ctx context.Context, chainID uint64, resolution strin
 
 const sampleColumns = `chain_id, sampled_at, block_number, base_fee, min_base_fee, constraints, legacy, prices, l1, accounts`
 
-// InsertStateSample stores a sample (replacing one at the same instant).
 func (p *Postgres) InsertStateSample(ctx context.Context, s StateSample) error {
 	_, err := p.exec(ctx, `
 		INSERT INTO state_samples (`+sampleColumns+`)
@@ -836,7 +770,6 @@ func (p *Postgres) InsertStateSample(ctx context.Context, s StateSample) error {
 	return err
 }
 
-// LatestStateSample returns the newest sample, optionally with L1 data.
 func (p *Postgres) LatestStateSample(ctx context.Context, chainID uint64, withL1 bool) (*StateSample, error) {
 	q := `SELECT ` + sampleColumns + ` FROM state_samples WHERE chain_id = $1`
 	if withL1 {
@@ -845,14 +778,12 @@ func (p *Postgres) LatestStateSample(ctx context.Context, chainID uint64, withL1
 	return getOne[StateSample](ctx, p, q+` ORDER BY sampled_at DESC LIMIT 1`, chainID)
 }
 
-// StateSampleAt returns the newest sample at or below a block.
 func (p *Postgres) StateSampleAt(ctx context.Context, chainID, block uint64) (*StateSample, error) {
 	return getOne[StateSample](ctx, p, `SELECT `+sampleColumns+`
 		FROM state_samples WHERE chain_id = $1 AND block_number <= $2
 		ORDER BY block_number DESC, sampled_at DESC LIMIT 1`, chainID, block)
 }
 
-// L1Samples returns one L1-carrying sample per step.
 func (p *Postgres) L1Samples(ctx context.Context, chainID uint64, from, to time.Time, step time.Duration) ([]StateSample, error) {
 	secs := max(int64(step/time.Second), 1)
 	return selectAll[StateSample](ctx, p, `
@@ -863,7 +794,6 @@ func (p *Postgres) L1Samples(ctx context.Context, chainID uint64, from, to time.
 		chainID, from, to, secs)
 }
 
-// PruneStateSamples deletes samples older than before.
 func (p *Postgres) PruneStateSamples(ctx context.Context, chainID uint64, before time.Time) (int64, error) {
 	res, err := p.exec(ctx, `DELETE FROM state_samples WHERE chain_id = $1 AND sampled_at < $2`, chainID, before)
 	if err != nil {
@@ -872,7 +802,6 @@ func (p *Postgres) PruneStateSamples(ctx context.Context, chainID uint64, before
 	return res.RowsAffected()
 }
 
-// DeleteStateSamplesAfter deletes samples taken above a block.
 func (p *Postgres) DeleteStateSamplesAfter(ctx context.Context, chainID, block uint64) (int64, error) {
 	res, err := p.exec(ctx, `DELETE FROM state_samples WHERE chain_id = $1 AND block_number > $2`, chainID, block)
 	if err != nil {
@@ -883,24 +812,21 @@ func (p *Postgres) DeleteStateSamplesAfter(ctx context.Context, chainID, block u
 
 const missingRangeColumns = `chain_id, from_block, to_block, detected_at, lifecycle, reason, cursor, replay_state, folded, retry_count, last_attempt_at, next_retry_at, last_error, predecessor_at, successor_at, cursor_at, created_at, updated_at`
 
-// MissingRanges lists every durable missing interval in block order.
 func (p *Postgres) MissingRanges(ctx context.Context, chainID uint64) ([]MissingRange, error) {
 	return selectAll[MissingRange](ctx, p, `SELECT `+missingRangeColumns+` FROM missing_ranges WHERE chain_id = $1 ORDER BY from_block`, chainID)
 }
 
-// missingRangeBindings is the number of bound values per inserted row, one
-// short of missingRangeColumns because updated_at is always now().
+// missingRangeBindings is the bound values per inserted row, one short of missingRangeColumns because
+// updated_at is always now().
 const missingRangeBindings = 17
 
-// missingRangeBatch keeps one insert well inside the 65535 bound parameters a
-// statement can carry.
+// missingRangeBatch keeps one insert well inside the 65535 bound parameters a statement can carry.
 const missingRangeBatch = 1000
 
-// ReplaceMissingRanges replaces one chain's normalized intervals. Collector
-// callers hold the chain transaction, so the delete and inserts commit as one
-// durable lifecycle update. Normalization can reshape the whole set, so the
-// rewrite stays a replace, but the rows go in batched statements: a per row
-// round trip would hold the chain lock in proportion to the set size.
+// ReplaceMissingRanges replaces one chain's normalized intervals. Collector callers hold the chain
+// transaction, so the delete and inserts commit as one durable lifecycle update. Normalization can
+// reshape the whole set, so it stays a replace, but the rows go in batched statements: a per row round
+// trip would hold the chain lock in proportion to the set size.
 func (p *Postgres) ReplaceMissingRanges(ctx context.Context, chainID uint64, ranges []MissingRange) error {
 	if _, err := p.exec(ctx, `DELETE FROM missing_ranges WHERE chain_id = $1`, chainID); err != nil {
 		return err
@@ -946,7 +872,6 @@ func nullTime(t time.Time) sql.NullTime {
 
 const ownerActionColumns = `chain_id, block_number, tx_hash, tx_index, log_index, ts, method, selector, args`
 
-// InsertOwnerActions inserts new actions and returns the number added.
 func (p *Postgres) InsertOwnerActions(ctx context.Context, actions []OwnerAction) (int, error) {
 	inserted := 0
 	for _, a := range actions {
@@ -970,7 +895,6 @@ func (p *Postgres) InsertOwnerActions(ctx context.Context, actions []OwnerAction
 	return inserted, nil
 }
 
-// OwnerActions lists actions newest first.
 func (p *Postgres) OwnerActions(ctx context.Context, chainID uint64, from, to time.Time, limit int) ([]OwnerAction, error) {
 	q := `SELECT ` + ownerActionColumns + ` FROM owner_actions WHERE chain_id = $1`
 	args := []any{chainID}
@@ -990,13 +914,11 @@ func (p *Postgres) OwnerActions(ctx context.Context, chainID uint64, from, to ti
 	return selectAll[OwnerAction](ctx, p, q, args...)
 }
 
-// OwnerActionsSince lists actions from a block on, ascending.
 func (p *Postgres) OwnerActionsSince(ctx context.Context, chainID, block uint64) ([]OwnerAction, error) {
 	return selectAll[OwnerAction](ctx, p, `SELECT `+ownerActionColumns+` FROM owner_actions WHERE chain_id = $1 AND block_number >= $2 ORDER BY block_number ASC, log_index ASC`, chainID, block)
 }
 
-// RewindAfter deletes owner actions, constraint sets and batch reports
-// above a block.
+// RewindAfter deletes owner actions, constraint sets and batch reports above a block.
 func (p *Postgres) RewindAfter(ctx context.Context, chainID, block uint64) error {
 	for _, q := range []string{
 		`DELETE FROM owner_actions WHERE chain_id = $1 AND block_number > $2`,
@@ -1010,7 +932,6 @@ func (p *Postgres) RewindAfter(ctx context.Context, chainID, block uint64) error
 	return nil
 }
 
-// InsertConstraintSet upserts a set and returns its id.
 func (p *Postgres) InsertConstraintSet(ctx context.Context, cs ConstraintSet) (int64, error) {
 	var id int64
 	start := time.Now()
@@ -1034,12 +955,10 @@ func (p *Postgres) UpdateConstraintSet(ctx context.Context, cs ConstraintSet) er
 	return err
 }
 
-// ConstraintSets lists sets ascending by block.
 func (p *Postgres) ConstraintSets(ctx context.Context, chainID uint64) ([]ConstraintSet, error) {
 	return selectAll[ConstraintSet](ctx, p, `SELECT id, chain_id, effective_block, effective_at, constraints, source FROM constraint_sets WHERE chain_id = $1 ORDER BY effective_block ASC, id ASC`, chainID)
 }
 
-// UpsertBatchReports stores reports.
 func (p *Postgres) UpsertBatchReports(ctx context.Context, reports []BatchReport) error {
 	for _, r := range reports {
 		if _, err := p.exec(ctx, `
@@ -1070,7 +989,6 @@ func (p *Postgres) BatchReports(ctx context.Context, chainID uint64, from, to ti
 	return selectAll[BatchReport](ctx, p, `SELECT `+batchReportColumns+` FROM batch_reports WHERE chain_id = $1 AND batch_ts >= $2 AND batch_ts < $3 AND cost_calculation_version = 1 ORDER BY batch_ts ASC, block_number ASC`, chainID, from, to)
 }
 
-// BatchBuckets aggregates reports per step.
 func (p *Postgres) BatchBuckets(ctx context.Context, chainID uint64, from, to time.Time, step time.Duration) ([]BatchBucket, error) {
 	secs := max(int64(step/time.Second), 1)
 	return selectAll[BatchBucket](ctx, p, `
@@ -1086,7 +1004,6 @@ func (p *Postgres) BatchBuckets(ctx context.Context, chainID uint64, from, to ti
 		chainID, from, to, secs)
 }
 
-// GetState reads a checkpoint.
 func (p *Postgres) GetState(ctx context.Context, chainID uint64, key string) (value string, found bool, err error) {
 	start := time.Now()
 	err = sqlx.GetContext(ctx, p.q, &value, `SELECT value FROM collector_state WHERE chain_id = $1 AND key = $2`, chainID, key)
@@ -1104,7 +1021,6 @@ func (p *Postgres) GetState(ctx context.Context, chainID uint64, key string) (va
 	return value, true, nil
 }
 
-// SetState writes a checkpoint.
 func (p *Postgres) SetState(ctx context.Context, chainID uint64, key, value string) error {
 	_, err := p.exec(ctx, `
 		INSERT INTO collector_state (chain_id, key, value, updated_at) VALUES ($1, $2, $3, now())
@@ -1112,13 +1028,11 @@ func (p *Postgres) SetState(ctx context.Context, chainID uint64, key, value stri
 	return err
 }
 
-// DeleteState removes a checkpoint.
 func (p *Postgres) DeleteState(ctx context.Context, chainID uint64, key string) error {
 	_, err := p.exec(ctx, `DELETE FROM collector_state WHERE chain_id = $1 AND key = $2`, chainID, key)
 	return err
 }
 
-// States reads every checkpoint of a network.
 func (p *Postgres) States(ctx context.Context, chainID uint64) (map[string]string, error) {
 	type kv struct {
 		Key   string `db:"key"`
@@ -1135,14 +1049,12 @@ func (p *Postgres) States(ctx context.Context, chainID uint64) (map[string]strin
 	return out, nil
 }
 
-// Notify sends a payload on a channel.
 func (p *Postgres) Notify(ctx context.Context, channel, payload string) error {
 	_, err := p.exec(ctx, `SELECT pg_notify($1, $2)`, channel, payload)
 	return err
 }
 
-// ResetSchema drops and recreates the public schema, then migrates. For
-// integration tests only.
+// ResetSchema drops and recreates the public schema, then migrates. Integration tests only.
 func ResetSchema(ctx context.Context, d *sqlx.DB) error {
 	if _, err := d.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
 		return fmt.Errorf("reset schema: %w", err)

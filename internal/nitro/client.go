@@ -17,17 +17,14 @@ import (
 )
 
 const (
-	// jsonrpcVersion is the protocol version sent in every request.
 	jsonrpcVersion = "2.0"
 	// MaxBatch is the largest number of items sent in one HTTP batch request.
 	MaxBatch = 100
 	// RateLimitCode is the JSON-RPC error code some endpoints use for throttling.
 	RateLimitCode = 429
-	// RateLimitCodeExceeded is the JSON-RPC code providers such as Infura
-	// and Alchemy answer with when a request limit is exceeded.
+	// RateLimitCodeExceeded is the code Infura and Alchemy answer with over their request limit.
 	RateLimitCodeExceeded = -32005
-	// RateLimitCodeQuickNode is the JSON-RPC code QuickNode answers with
-	// when its per-second request limit is reached.
+	// RateLimitCodeQuickNode is the code QuickNode answers with at its per-second limit.
 	RateLimitCodeQuickNode = -32007
 
 	minBackoff = 2 * time.Second
@@ -35,25 +32,18 @@ const (
 	callWindow = 10 * time.Second
 )
 
-// ErrRateLimited is returned when the endpoint kept throttling after all
-// retry attempts.
+// ErrRateLimited is returned when the endpoint kept throttling after all retry attempts.
 var ErrRateLimited = errors.New("rpc: rate limited")
 
-// ErrStaleEndpoint is returned when the endpoint a call had selected is no
-// longer the one ordinary calls go to: another caller failed over while
-// this one queued for the send lock. Nothing was sent and the tokens were
-// refunded, so the pool simply picks again and retries.
+// ErrStaleEndpoint is returned when another caller failed over while this one queued for the send
+// lock. Nothing was sent and the tokens were refunded, so the pool picks again and retries.
 var ErrStaleEndpoint = errors.New("rpc: endpoint no longer active")
 
-// rateLimitMessage matches the messages providers put on a throttling
-// error whatever code they choose ("50/second request limit reached",
-// "limit exceeded", "too many requests").
+// rateLimitMessage matches the messages providers put on a throttling error whatever code they use.
 var rateLimitMessage = regexp.MustCompile(`(?i)rate limit|request limit|too many requests|limit reached|limit exceeded`)
 
-// IsRateLimit reports whether a JSON-RPC error is the endpoint throttling
-// the caller rather than answering: code 429, -32005 or -32007, or a
-// message naming a rate or request limit. Such an error is handled like
-// an HTTP 429: the batch is retried as a whole after the back-off.
+// IsRateLimit reports whether a JSON-RPC error is throttling rather than an answer: code 429,
+// -32005 or -32007, or a message naming a rate or request limit. Handled like an HTTP 429.
 func IsRateLimit(e *RPCError) bool {
 	if e == nil {
 		return false
@@ -65,18 +55,15 @@ func IsRateLimit(e *RPCError) bool {
 	return rateLimitMessage.MatchString(e.Message)
 }
 
-// EndpointError marks a failure of the endpoint itself rather than an
-// answer from the node: a transport error, an HTTP 5xx, throttling that
-// outlasted the back-off, or a chain id mismatch. A Pool fails over on
-// these; JSON-RPC errors (reverts, unknown methods, missing blocks) never
-// carry it.
+// EndpointError marks a failure of the endpoint itself rather than an answer from the node: a
+// transport error, an HTTP 5xx, throttling past the back-off, or a chain id mismatch. A Pool fails
+// over on these; JSON-RPC errors never carry it.
 type EndpointError struct {
 	Err error
 }
 
 func (e *EndpointError) Error() string { return e.Err.Error() }
 
-// Unwrap exposes the underlying error to errors.Is and errors.As.
 func (e *EndpointError) Unwrap() error { return e.Err }
 
 // IsEndpointError reports whether err is, or wraps, an EndpointError.
@@ -85,7 +72,6 @@ func IsEndpointError(err error) bool {
 	return errors.As(err, &ee)
 }
 
-// endpointErrorf wraps a formatted error as an EndpointError.
 func endpointErrorf(format string, args ...any) error {
 	return &EndpointError{Err: fmt.Errorf(format, args...)}
 }
@@ -101,11 +87,9 @@ func (e *RPCError) Error() string {
 	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
 }
 
-// IsRevert reports whether err is an eth_call execution revert: the
-// standard revert code 3, an explicit revert message, or revert data
-// carrying an Error(string) or Panic(uint256) payload. Generic server codes
-// such as -32000 are not reverts by themselves: nodes use them for missing
-// state, unavailable headers and proxy failures.
+// IsRevert reports whether err is an eth_call execution revert: code 3, an explicit revert message,
+// or revert data carrying an Error(string) or Panic(uint256) payload. Generic server codes such as
+// -32000 are not reverts: nodes use them for missing state and proxy failures too.
 func IsRevert(err error) bool {
 	var rpcErr *RPCError
 	if !errors.As(err, &rpcErr) {
@@ -120,8 +104,8 @@ var (
 	revertPanicSelector = Selector("Panic(uint256)")
 )
 
-// isRevertData reports whether a JSON-RPC error data member is valid revert
-// data: a hex string whose first four bytes are the Error or Panic selector.
+// isRevertData reports whether a JSON-RPC error data member is a hex string whose first four bytes
+// are the Error or Panic selector.
 func isRevertData(data json.RawMessage) bool {
 	if len(data) == 0 {
 		return false
@@ -167,9 +151,8 @@ type Stats struct {
 	RateLimitEvents uint64
 	Last429At       time.Time
 	Backoff         time.Duration
-	// FastCalls and BulkCalls count every JSON-RPC call sent since the
-	// client was built, by pacer class, one per item inside a batch. They
-	// only ever grow, so an observer can report them as counters.
+	// FastCalls and BulkCalls count every JSON-RPC call sent, by pacer class, one per batch item.
+	// They only ever grow, so an observer can report them as counters.
 	FastCalls uint64
 	BulkCalls uint64
 }
@@ -190,8 +173,8 @@ type rpcResponse struct {
 // Client is a paced JSON-RPC client for one network.
 type Client struct {
 	url string
-	// index names the endpoint in sanitized errors; scrub rewrites every
-	// error that could quote the URL, which is a credential.
+	// index names the endpoint in sanitized errors; scrub rewrites every error that could quote the
+	// URL, which is a credential.
 	index       int
 	scrub       *scrubber
 	httpClient  *http.Client
@@ -201,19 +184,15 @@ type Client struct {
 	sleep       func(context.Context, time.Duration) error
 	now         func() time.Time
 	maxAttempts int
-	// observe, when set, sees every batch attempt: how many items it
-	// carried and whether the endpoint answered 429. An Endpoint adapts
-	// its batch cap from it.
+	// observe, when set, sees every batch attempt: its item count and whether the endpoint answered
+	// 429. An Endpoint adapts its batch cap from it.
 	observe func(items int, limited bool)
-	// chunk splits a request list of any length into HTTP batches. It is
-	// batchCapped by default; an Endpoint replaces it with its own, which
-	// also honors the adaptive batch cap, so every typed call (the fast
-	// sample, the legacy parameters, the L1 getters, the fee accounts and
-	// the owner-log reads) is chunked the same way the header batches are.
+	// chunk splits a request list of any length into HTTP batches. batchCapped by default; an
+	// Endpoint replaces it with one that also honors the adaptive batch cap, so every typed call is
+	// chunked the same way the header batches are.
 	chunk batcher
-	// preSend, when set, is the last check before the request leaves,
-	// under the send lock: it rejects a call whose endpoint is no longer
-	// the pool's active one.
+	// preSend, when set, is the last check before the request leaves, under the send lock: it rejects
+	// a call whose endpoint is no longer the pool's active one.
 	preSend func(context.Context) error
 
 	sendMu sync.Mutex // one in-flight HTTP request per network
@@ -221,8 +200,7 @@ type Client struct {
 	mu        sync.Mutex
 	nextID    uint64
 	callTimes []time.Time
-	// fastCalls and bulkCalls are the cumulative call counts per pacer
-	// class, kept for observation only: nothing routes on them.
+	// Cumulative call counts per pacer class, kept for observation only: nothing routes on them.
 	fastCalls       uint64
 	bulkCalls       uint64
 	calls           uint64
@@ -240,20 +218,15 @@ type Client struct {
 // Option customizes a Client.
 type Option func(*Client)
 
-// WithHTTPClient sets the HTTP client.
 func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.httpClient = h } }
 
-// WithPacer sets the token bucket.
 func WithPacer(p *Pacer) Option { return func(c *Client) { c.pacer = p } }
 
-// WithLogger sets the logger.
 func WithLogger(l *logger.Logger) Option { return func(c *Client) { c.log = l } }
 
-// WithMaxAttempts sets how many times a throttled request is retried.
 func WithMaxAttempts(n int) Option { return func(c *Client) { c.maxAttempts = n } }
 
-// withBatchObserver reports every batch attempt's item count and whether
-// it was throttled.
+// withBatchObserver reports every batch attempt's item count and whether it was throttled.
 func withBatchObserver(fn func(items int, limited bool)) Option {
 	return func(c *Client) { c.observe = fn }
 }
@@ -298,16 +271,13 @@ func NewClient(url string, callsPerSecond float64, opts ...Option) *Client {
 	if c.chunk == nil {
 		c.chunk = c.batchCapped
 	}
-	// After the options: the index names the endpoint in every message the
-	// URL is taken out of.
+	// After the options: the index names the endpoint in every message the URL is taken out of.
 	c.scrub = newScrubber(c.index, c.url)
 	return c
 }
 
-// Pacer returns the client's token bucket.
 func (c *Client) Pacer() *Pacer { return c.pacer }
 
-// Stats returns request accounting.
 func (c *Client) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -365,7 +335,6 @@ func (c *Client) ids(n int) []uint64 {
 	return out
 }
 
-// Call performs a single JSON-RPC call.
 func (c *Client) Call(ctx context.Context, method string, params ...any) (json.RawMessage, error) {
 	if params == nil {
 		params = []any{}
@@ -377,13 +346,10 @@ func (c *Client) Call(ctx context.Context, method string, params ...any) (json.R
 	return results[0].Raw, results[0].Err
 }
 
-// Batch sends up to MaxBatch calls in one HTTP request and returns one
-// Result per request, in order. Throttling (HTTP 429, or a JSON-RPC rate
-// limit error, see IsRateLimit, on any item) retries the whole batch with
-// exponential back-off. Every attempt pays for its calls at the pacer, in
-// the lane the context's Class selects (WithClass, Bulk by default), and
-// honors the network-wide cooldown, so a retry can never exceed the
-// budget or race other callers.
+// Batch sends up to MaxBatch calls in one HTTP request and returns one Result per request, in
+// order. Throttling retries the whole batch with exponential back-off. Every attempt pays for its
+// calls at the pacer, in the lane the context's Class selects, and honors the network-wide
+// cooldown, so a retry can never exceed the budget or race other callers.
 func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	if len(reqs) == 0 {
 		return nil, nil
@@ -421,16 +387,13 @@ func (c *Client) recordResultErrors(results []Result) {
 	c.mu.Unlock()
 }
 
-// throttled is the error for a request that stayed rate limited after
-// attempts tries.
+// throttled is the error for a request that stayed rate limited after attempts tries.
 func throttled(attempts int) error {
 	return endpointErrorf("%w after %d attempts", ErrRateLimited, attempts)
 }
 
-// attempt sends reqs once: it pays the pacer, waits out any cooldown, posts
-// the batch and reports whether the endpoint throttled it (after recording
-// the 429 and starting the back-off) or answered (after resetting the
-// back-off). The results are in request order.
+// attempt sends reqs once: it pays the pacer, waits out any cooldown, posts the batch and reports
+// whether the endpoint throttled it or answered, updating the back-off either way.
 func (c *Client) attempt(ctx context.Context, reqs []Request) (results []Result, limited bool, err error) {
 	ids := c.ids(len(reqs))
 	body := make([]rpcRequest, len(reqs))
@@ -469,17 +432,12 @@ func (c *Client) cooldown() time.Duration {
 	return c.blockedUntil.Sub(c.now())
 }
 
-// send performs one HTTP round trip under the per-endpoint send lock.
-// The tokens were taken before the caller queued for that lock, so the
-// reservation is revalidated once it holds it: a cooldown another caller
-// started meanwhile invalidates it, so the tokens are refunded, the
-// cooldown is waited out and they are paid for again, which is what keeps
-// a queue of waiters from bursting through the moment the lock opens.
-// preSend then rejects a call whose endpoint is no longer the active one,
-// refunding it too. limited is true on HTTP 429 or when any item carries a
-// JSON-RPC rate limit error; the cooldown it starts is published before
-// the lock is released, so a caller waiting for the lock observes it
-// instead of sending into the throttle. sentAt is when the request left.
+// send performs one HTTP round trip under the per-endpoint send lock. The tokens were taken before
+// the caller queued for that lock, so the reservation is revalidated once it holds it: a cooldown
+// another caller started meanwhile refunds the tokens, waits it out and pays again, which is what
+// stops a queue of waiters bursting through the moment the lock opens. preSend then rejects a call
+// whose endpoint is no longer active. A cooldown this call starts is published before the lock is
+// released, so a waiter observes it instead of sending into the throttle.
 func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses []rpcResponse, limited bool, sentAt time.Time, err error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -512,21 +470,17 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 	return responses, limited, sentAt, err
 }
 
-// isEndpointStatus reports whether an HTTP status is the endpoint failing
-// rather than the node answering: a server error, or a refusal to serve
-// this caller at all. An endpoint that answers 401 or 403 is misconfigured
-// or its key is rejected, which the next endpoint may well not be, so it
-// drives failover exactly as a 5xx does. Every other non-2xx status is
-// returned as an ordinary error: it says something about the request, and
-// retrying it elsewhere would only repeat it.
+// isEndpointStatus reports whether an HTTP status is the endpoint failing rather than the node
+// answering. A 401 or 403 means this endpoint is misconfigured or its key is rejected, which the
+// next one may not be, so it drives failover like a 5xx. Every other non-2xx status says something
+// about the request, so retrying it elsewhere would only repeat it.
 func isEndpointStatus(code int) bool {
 	return code/100 == 5 || code == http.StatusUnauthorized || code == http.StatusForbidden
 }
 
-// post performs the HTTP request itself. Every error it returns is
-// sanitized: transport failures come back as *url.Error with the whole URL
-// in the message, and a provider is free to quote the request URL in its
-// response body or in a JSON-RPC error message.
+// post performs the HTTP request itself. Every error it returns is sanitized: transport failures
+// come back as *url.Error carrying the whole URL, and a provider is free to quote the request URL
+// in its response body too.
 func (c *Client) post(ctx context.Context, payload []byte) (responses []rpcResponse, limited bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
@@ -599,8 +553,7 @@ func matchResults(ids []uint64, responses []rpcResponse) []Result {
 	return out
 }
 
-// noteRateLimit records a 429, starts the network-wide cooldown for the
-// current back-off and doubles it for the next one.
+// noteRateLimit records a 429, starts the network-wide cooldown and doubles the back-off.
 func (c *Client) noteRateLimit() {
 	c.mu.Lock()
 	now := c.now()
@@ -618,9 +571,8 @@ func (c *Client) noteRateLimit() {
 	c.log.Warn("rpc rate limited", "backoff", wait.String(), "callsLast10s", recent)
 }
 
-// resetBackoff returns the back-off to its minimum after a request that was
-// sent past the cooldown succeeded. A success sent before a cooldown that
-// another caller started meanwhile proves nothing and keeps the back-off.
+// resetBackoff returns the back-off to its minimum after a request sent past the cooldown
+// succeeded. One sent before a cooldown another caller started meanwhile proves nothing.
 func (c *Client) resetBackoff(sentAt time.Time) {
 	c.mu.Lock()
 	if !sentAt.Before(c.blockedUntil) {
@@ -640,8 +592,8 @@ func containsFold(s, sub string) bool {
 	return bytes.Contains(bytes.ToLower([]byte(s)), bytes.ToLower([]byte(sub)))
 }
 
-// Available returns how many calls can be made right now without waiting:
-// zero during a 429 cooldown, otherwise the pacer's spare tokens.
+// Available returns the calls that can be made right now without waiting: zero during a 429
+// cooldown, otherwise the pacer's spare tokens.
 func (c *Client) Available() int {
 	if c.cooldown() > 0 {
 		return 0

@@ -219,16 +219,11 @@ func (c *chainServer) sampled() int {
 	return c.samples
 }
 
-// TestLoopsRespectEndpointBudget: the fast loop, the slow loop and the
-// backfill running together against a real endpoint pool never put more
-// calls on the wire than the endpoint's bucket allows (burst plus rate
-// times the elapsed time, whatever window is taken) and never send a batch
-// the bucket cannot hold at once, while every loop still makes progress.
-// The network's own 250 ms tick makes the fast loop demanding: six calls
-// per tick, four ticks a second, more than the 20/s budget, which under strict
-// fast priority would have starved the slow loop and the backfill. The
-// fast lane has the reserve (5/s) to itself and queues for the rest first
-// come, first served, so the bulk loops still get through.
+// TestLoopsRespectEndpointBudget: the fast loop, the slow loop and the backfill running together never
+// put more calls on the wire than the endpoint's bucket allows, never send a batch it cannot hold at
+// once, and all still make progress. The network's own 250 ms tick makes the fast loop demanding (six
+// calls per tick, four ticks a second, over the 20/s budget), which under strict fast priority would
+// have starved the bulk loops.
 func TestLoopsRespectEndpointBudget(t *testing.T) {
 	chain := newChainServer(t)
 	const rate = 20.0

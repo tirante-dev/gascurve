@@ -127,6 +127,10 @@ lint-fix: check-golangci-lint
 vet:
 	$(GOCMD) vet ./...
 
+# The comment budget of CLAUDE.md, over Go and web sources alike. Needs no tool.
+comment-check:
+	@scripts/comment-check.sh
+
 fmt: check-goimports
 	@GOFMT="$$( $(GOCMD) env GOROOT )/bin/gofmt"; "$$GOFMT" -s -w .
 	"$(GOIMPORTS)" -w -local $(MODULE) .
@@ -254,7 +258,7 @@ web-ci: web-lint web-typecheck web-test-coverage web-build
 # The recursive invocation makes the preflight a strict phase boundary, even
 # under parallel make. No check starts until every required command is present.
 ci: tools-check
-	@$(MAKE) migration-check fmt-check vet lint staticcheck govulncheck test-tooling test-coverage test-race build-matrix mod-verify web-install web-ci
+	@$(MAKE) migration-check fmt-check comment-check vet lint staticcheck govulncheck test-tooling test-coverage test-race build-matrix mod-verify web-install web-ci
 	@echo "All CI checks passed."
 
 ci-integration: test-integration

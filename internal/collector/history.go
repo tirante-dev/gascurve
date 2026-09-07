@@ -8,10 +8,9 @@ import (
 	"github.com/tirante-dev/gascurve/internal/db"
 )
 
-// historyEpoch reads the epoch the reconstructed history was last rebuilt
-// at. A chain that has never rebuilt reports 0, as does an unreadable
-// value: the checkpoint only decides whether a rebuild runs, and the
-// configured epoch has to be raised past it either way.
+// historyEpoch reads the epoch the reconstructed history was last rebuilt at. A chain that never
+// rebuilt reports 0, as does an unreadable value: the configured epoch has to be raised past it either
+// way.
 func (f *Follower) historyEpoch(ctx context.Context, s db.Store) (int, error) {
 	raw, ok, err := s.GetState(ctx, f.chainID, db.StateHistoryEpoch)
 	if err != nil || !ok {
@@ -25,35 +24,14 @@ func (f *Follower) historyEpoch(ctx context.Context, s db.Store) (int, error) {
 	return e, nil
 }
 
-// applyHistoryEpochLocked rebuilds the reconstructed history once when the
-// network's history_epoch is above the epoch stored for the chain, and
-// records the new epoch so the next start is a no-op. That is what makes
-// it safe in a restarting pod: the rebuild is keyed to a raised number,
-// not to the presence of a setting, so a container that comes back with
-// the same configuration does not rebuild again.
-//
-// The rebuild drops what the backfill owns and nothing else. The
-// backfill's buckets below the bucket boundary go, its cursor starts over
-// and the owner-scan checkpoints are cleared so the origin is established
-// again, this time sampling the pricing state from the archive endpoint
-// the network has meanwhile been given. Block rows, owner actions,
-// constraint sets and the row-backed buckets above the boundary are
-// untouched: they are observations, not reconstruction. The generation is
-// bumped inside the same transaction, so a backfill or gap-fill step that
-// fetched before the rebuild discards its work instead of committing it
-// onto history that is being replaced.
-//
-// Clearing owner_scan_through with the rest is what orders the rebuild:
-// the backfill starts no segment until a scan pass has completed again,
-// and that pass is what re-establishes the origin. The owner actions
-// themselves survive, so the rescan re-reads logs it has already recorded
-// and writes the same rows, costing one pass rather than any history.
-//
-// Called with f.mu held, from ensureInit, so the loops see either the old
-// history or the reset one and never a half-cleared database. It runs
-// before the owner-scan checkpoints are read, so a checkpoint too damaged
-// to parse cannot block the rebuild that would replace it; the live start
-// is the only state it needs loaded, for the bucket boundary.
+// applyHistoryEpochLocked rebuilds the reconstructed history once when the network's history_epoch is
+// above the epoch stored for the chain, and records the new epoch. Keying it to a raised number rather
+// than the presence of a setting is what makes it safe in a restarting pod. It drops what the backfill
+// owns and nothing else: its buckets below the bucket boundary, its cursor, and the owner-scan
+// checkpoints, so the origin is established again from the archive endpoint the network has meanwhile
+// been given. Clearing owner_scan_through is what orders the rebuild. The generation is bumped in the
+// same transaction, so a step that fetched before the rebuild discards its work. Called with f.mu held
+// before those checkpoints are read, so a damaged one cannot block the rebuild that would replace it.
 func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 	want := f.net.HistoryEpoch
 	if want <= 0 {
@@ -71,8 +49,7 @@ func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 	rebuilt := false
 	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		deleted, rebuilt = 0, false
-		// Re-read inside the transaction: another collector for this chain
-		// may have rebuilt while this one was starting.
+		// Re-read inside the transaction: another collector for this chain may have rebuilt meanwhile.
 		current, err := f.historyEpoch(ctx, s)
 		if err != nil {
 			return err
@@ -109,28 +86,23 @@ func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 	if !rebuilt {
 		return nil
 	}
-	// The archive client is bound after the endpoint pool is verified,
-	// which is later than this, so the configuration answers here.
+	// The archive client is bound after the endpoint pool is verified, which is later than this.
 	archive := f.net.HasArchive()
 	f.log.Info("rebuilding the reconstructed history", "epoch", want, "previousEpoch", have, "bucketsDeleted", deleted, "archive", archive)
 	if !archive {
 		f.log.Warn("the history rebuild has no endpoint marked archive, the replay will be unanchored again")
 	}
-	// The scan-state load that follows in ensureInit reads the same
-	// cleared checkpoints; clearing them here keeps the rebuild correct on
-	// its own rather than through its position in that sequence.
+	// Clearing them here keeps the rebuild correct on its own rather than through its position in the
+	// ensureInit sequence.
 	f.scanOrigin = nil
 	f.ownerScanThrough = 0
 	return nil
 }
 
-// resetHistoryHoles puts the recorded ranges back in step with history that is
-// being rebuilt. A range blocked for lack of state becomes pending so it is
-// examined again against the origin the rebuild re-establishes, which is the
-// point of rebuilding after an archive endpoint appears. The durable record
-// stays visible until it is actually filled. A range that had folded into the
-// deleted additive buckets restarts, since its contribution went with them.
-// A row-backed range keeps its progress because those buckets were not deleted.
+// resetHistoryHoles puts the recorded ranges back in step with history that is being rebuilt. A range
+// blocked for lack of state becomes pending so it is examined again against the re-established origin.
+// A range that folded into the deleted additive buckets restarts, since its contribution went with
+// them; a row-backed range keeps its progress, because those buckets were not deleted.
 func (f *Follower) resetHistoryHoles(ctx context.Context, s db.Store, bucketsDeleted bool) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil || len(holes) == 0 {

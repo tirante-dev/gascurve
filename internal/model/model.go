@@ -141,11 +141,9 @@ type Accounts struct {
 	L1Reward Account `json:"l1Reward"`
 }
 
-// EthUsd is the ETH/USD spot the collector's slow loop fetched (server
-// side, never the browser). Price is a decimal string with two decimal
-// places, At is when it was fetched and Source names the provider
-// (coinbase, coingecko or custom, never a URL). A snapshot carries null
-// instead once the quote is older than collector.eth_usd_max_age.
+// EthUsd is the ETH/USD spot the collector's slow loop fetched. Source names the provider
+// (coinbase, coingecko or custom, never a URL). A snapshot carries null instead once the quote is
+// older than collector.eth_usd_max_age.
 type EthUsd struct {
 	Price  string `json:"price"`
 	At     string `json:"at"`
@@ -176,12 +174,9 @@ type LiveSnapshot struct {
 	EthUsd *EthUsd `json:"ethUsd"`
 }
 
-// BlockPoint is one replayed block. Backlogs are the end-of-block values,
-// ConstraintBips the start-of-block per-constraint exponents that priced
-// the block (they sum to ExponentBips; null for a block stored before they
-// were recorded, an empty array for a legacy block) and MinBaseFee the
-// floor in force, null for that same history (pricing version 0), where
-// the floor was never recorded.
+// BlockPoint is one replayed block. Backlogs are end-of-block values, ConstraintBips the
+// start-of-block per-constraint exponents that priced it (summing to ExponentBips), and MinBaseFee
+// the floor in force. The last two are null for history stored before they were recorded.
 type BlockPoint struct {
 	Number           uint64   `json:"number"`
 	TS               uint64   `json:"ts"`
@@ -196,24 +191,18 @@ type BlockPoint struct {
 	Anchored         bool     `json:"anchored"`
 }
 
-// SeriesPoint is one bucket of a Series. ExponentBips, ConstraintBips,
-// Backlogs and MinBaseFee describe the bucket's last block. FloorFeesWei is
-// compute gas times min(base fee, minimum base fee), SurplusFeesWei is the
-// remaining compute fee, and PosterFeesWei is poster gas times base fee.
-// Pricing fields are null for pricing version 0. PosterGas, PosterFeesWei and
-// ComputeGasPerSecond are independently null until every source block has
-// authoritative receipt poster gas. The compute destination sums also need
-// the pricing floor.
+// SeriesPoint is one bucket of a Series, its pricing fields describing the bucket's last block.
+// FloorFeesWei is compute gas times min(base fee, minimum base fee), SurplusFeesWei the remaining
+// compute fee, PosterFeesWei poster gas times base fee. Poster and compute-per-second fields are
+// null until every source block has authoritative receipt poster gas.
 type SeriesPoint struct {
 	T         int64   `json:"t"`
 	Blocks    int64   `json:"blocks"`
 	GasUsed   uint64  `json:"gasUsed"`
 	PosterGas *uint64 `json:"posterGas"`
-	// GasPerSecond is the rate over the covered span of the bucket. Coverage
-	// is the share of the bucket that span is after subtracting bounded missing
-	// intervals, or null when the missing-range time bounds cannot measure it.
-	// Completeness distinguishes a whole aggregate, a known partial aggregate
-	// and an aggregate whose completeness cannot be located in time.
+	// GasPerSecond is the rate over the covered span of the bucket. Coverage is the share of the
+	// bucket that span is, or null when the missing-range time bounds cannot measure it.
+	// Completeness separates a whole aggregate, a known partial one and one that cannot be located.
 	GasPerSecond        uint64   `json:"gasPerSecond"`
 	ComputeGasPerSecond *uint64  `json:"computeGasPerSecond"`
 	Coverage            *float64 `json:"coverage"`
@@ -234,10 +223,9 @@ type SeriesPoint struct {
 	ReplayErrorBips     int64    `json:"replayErrorBips"`
 }
 
-// Reorg is the WebSocket reorg message: the collector replaced blocks at
-// or below the ring's tip, so the client drops every block above Ancestor
-// and appends Blocks (the canonical replacements, oldest first, never
-// null) before any later blocks message.
+// Reorg is the WebSocket reorg message: the collector replaced blocks at or below the ring's tip,
+// so the client drops everything above Ancestor and appends Blocks (oldest first, never null)
+// before any later blocks message.
 type Reorg struct {
 	ChainID  uint64       `json:"chainId"`
 	Ancestor uint64       `json:"ancestor"`
@@ -248,10 +236,9 @@ type Reorg struct {
 type Series struct {
 	Range      string `json:"range"`
 	Resolution string `json:"resolution"`
-	// From and To bound the requested window in unix seconds, whatever the
-	// points cover: a chart draws the whole window and shows what is not
-	// indexed as missing rather than stretching the data across it. For
-	// the all range From is the first indexed point (To when there is none).
+	// From and To bound the requested window in unix seconds, whatever the points cover, so a chart
+	// draws the whole window and shows what is not indexed as missing. For the all range From is the
+	// first indexed point.
 	From           int64           `json:"from"`
 	To             int64           `json:"to"`
 	ConstraintSets []ConstraintSet `json:"constraintSets"`
@@ -306,15 +293,10 @@ type L1Series struct {
 	Points []L1Point `json:"points"`
 }
 
-// EndpointStatus describes one RPC endpoint of a network in /status.
-// Index 0 is the primary; URLs are never exposed because they can carry
-// keys. Error is why a disabled endpoint was disabled, sanitized the same
-// way (chain ids, never a URL or a credential), and null while the
-// endpoint is usable. WSCooling and WSError report the endpoint's
-// WebSocket separately from its JSON-RPC: a socket that cannot be dialed,
-// cannot be subscribed to or will not stay up is cooled down and the head
-// subscription moves to another endpoint, while the endpoint keeps serving
-// ordinary calls.
+// EndpointStatus describes one RPC endpoint of a network in /status. Index 0 is the primary; URLs
+// are never exposed because they can carry keys, and Error is sanitized the same way. WSCooling
+// and WSError report the WebSocket separately from the JSON-RPC: a socket that will not stay up is
+// cooled down and the head subscription moves on while the endpoint keeps serving ordinary calls.
 type EndpointStatus struct {
 	Index     int     `json:"index"`
 	WS        bool    `json:"ws"`
@@ -325,9 +307,7 @@ type EndpointStatus struct {
 	WSError   *string `json:"wsError"`
 }
 
-// EndpointsStatus is the routing state of a network's endpoint pool: the
-// endpoint ordinary calls go to, how often the collector failed over and
-// every endpoint's capabilities. The collector stores it in
+// EndpointsStatus is the routing state of a network's endpoint pool. The collector stores it in
 // collector_state under the endpoints key; Endpoints is never null.
 type EndpointsStatus struct {
 	ActiveEndpoint int              `json:"activeEndpoint"`
@@ -335,10 +315,9 @@ type EndpointsStatus struct {
 	Endpoints      []EndpointStatus `json:"endpoints"`
 }
 
-// Missing-range lifecycle states. Pending work is ready now, retrying work is
-// delayed until its durable retry time, and blocked work has no replay state
-// to continue from. Blocked ranges are re-examined because later backfill or a
-// newly configured archive endpoint can make them recoverable.
+// Missing-range lifecycle states. Pending work is ready now, retrying work is delayed until its
+// durable retry time, and blocked work has no replay state to continue from. Blocked ranges are
+// re-examined because later backfill or a new archive endpoint can make them recoverable.
 const (
 	MissingRangePending  = "pending"
 	MissingRangeRetrying = "retrying"
@@ -350,27 +329,18 @@ const (
 	// HoleReasonReplayDiscontinuity marks a range skipped because the model
 	// changed without enough recorded state to replay through it safely.
 	HoleReasonReplayDiscontinuity = "replay discontinuity"
-	// HoleReasonNoState marks a hole no replay can fill right now: no
-	// block before it is stored with a pricing state and the hole carries
-	// no replay state of its own, so nothing can be replayed forward into
-	// it. The gap filler skips these and only looks at them again once
-	// something before the range appears.
+	// HoleReasonNoState marks a hole nothing can be replayed into right now: no stored block before
+	// it carries a pricing state and the hole carries none of its own.
 	HoleReasonNoState = "no state"
 	// HoleReasonExpired is accepted only while importing the old bounded JSON
 	// checkpoint. Those ranges become pending again in durable storage.
 	HoleReasonExpired = "expired"
 )
 
-// HoleState is the pricer state at the end of the last block a filler
-// committed for a hole, carried in the hole record itself so a
-// continuation never depends on a stored block at Next-1, which retention
-// may have pruned. Block is that last block and Hash its hash, so a
-// stored predecessor can be cross-checked against it; PrevTS is its
-// timestamp, the previous timestamp the next replay step needs.
-// Constraints carry the end-of-block backlogs of the constraints model and
-// Legacy the whole legacy state (parameters and backlog); exactly one of
-// them is set. SetID is the constraint set in force at Block, 0 when none
-// is recorded.
+// HoleState is the pricer state at the end of the last block a filler committed, carried in the
+// hole record itself so a continuation never depends on a stored block at Next-1 that retention may
+// have pruned. Hash lets a stored predecessor be cross-checked; PrevTS is the previous timestamp the
+// next replay step needs. Exactly one of Constraints and Legacy is set.
 type HoleState struct {
 	Block       uint64        `json:"block"`
 	Hash        string        `json:"hash,omitempty"`
@@ -381,12 +351,10 @@ type HoleState struct {
 	SetID       int64         `json:"setId,omitempty"`
 }
 
-// Hole is the collector's domain shape for one durable missing_ranges row and
-// the decoder for the legacy JSON checkpoint. Next is the first block still
-// missing, State describes Next-1, and Folded prevents additive bucket work
-// from being counted twice after a rewind. Lifecycle, reason and retry fields
-// describe recovery. The three time bounds let the API map the remaining
-// interval without decoding State.
+// Hole is the collector's domain shape for one durable missing_ranges row and the decoder for the
+// legacy JSON checkpoint. Next is the first block still missing, State describes Next-1, and Folded
+// stops additive bucket work being counted twice after a rewind. The three time bounds let the API
+// map the remaining interval without decoding State.
 type Hole struct {
 	From          uint64     `json:"from"`
 	To            uint64     `json:"to"`
@@ -435,10 +403,9 @@ type HolesStatus struct {
 	OldestPendingAgeSeconds *int64  `json:"oldestPendingAgeSeconds"`
 }
 
-// RPCCapacity is the latest estimate of the calls per second required to
-// sample the head and fetch intervening headers compared with the active
-// endpoint's configured budget. A configured value of zero is unlimited.
-// Saturated means observed ingress demand exceeded that finite budget.
+// RPCCapacity compares the calls per second needed to sample the head and fetch intervening headers
+// with the active endpoint's configured budget (zero is unlimited). Saturated means observed demand
+// exceeded a finite budget.
 type RPCCapacity struct {
 	ConfiguredCallsPerSecond float64  `json:"configuredCallsPerSecond"`
 	RequiredCallsPerSecond   float64  `json:"requiredCallsPerSecond"`
@@ -501,12 +468,9 @@ func SummarizeHolesAt(holes []Hole, now time.Time) HolesStatus {
 	return out
 }
 
-// LoopStatus is the latest outcome of one collector loop. Both success and
-// error timestamps are retained so a recovered error remains diagnosable
-// without continuing to mark the network degraded. ErrorStreak counts the
-// consecutive failures since the last success and is what says a loop is
-// failing: one error on a metered public RPC is routine, and the loop
-// recovers on its next tick.
+// LoopStatus is the latest outcome of one collector loop. Both timestamps are retained so a
+// recovered error stays diagnosable without marking the network degraded. ErrorStreak is what says
+// a loop is failing: one error on a metered public RPC is routine and recovers on the next tick.
 type LoopStatus struct {
 	LastSuccessAt  *string `json:"lastSuccessAt"`
 	LastErrorAt    *string `json:"lastErrorAt"`

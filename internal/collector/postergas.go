@@ -1,29 +1,10 @@
-// Poster gas that was never recorded. Receipt-backed poster gas arrived after
-// the collector had already been storing blocks, so every row written before
-// it carries none, and a bucket is only as good as its worst source block: one
-// block without receipts leaves the whole bucket with no poster gas, no
-// compute-gas rate and no fee split. Nothing repairs that on its own. Retention
-// never drops a bucket, and no loop revisits one it has finished, so those
-// buckets would stay blank for as long as they are served.
-//
-// This is the pass that fills them. It walks the blocks that still lack the
-// value, reads eth_getBlockReceipts for each (one call, not the two a header
-// read costs, since the stored row already carries what the receipts are
-// checked against), writes the gas onto the rows and rebuilds the buckets over
-// them. Rebuilding is what actually repairs the history: the bucket aggregate
-// recomputes poster gas, the compute-gas rate and the floor, surplus and
-// poster fee columns from the rows underneath it.
-//
-// Rebuilding a window whose rows retention has deleted would sum only what
-// survived, replacing a correct aggregate with a short one. That is not
-// guarded here: RebuildBuckets refuses such a window itself, for every caller,
-// which is the only place the judgement is made and the only place it can be
-// made against the committed state. This pass reads the same recorded prune
-// frontier only to avoid spending calls on rows that could rebuild nothing.
-//
-// The one bound that is this pass's own is the live-start boundary. Buckets
-// starting below it belong to the backfill, which owns them additively and
-// rebuilds them through history_epoch instead.
+// Receipt-backed poster gas arrived after the collector had been storing blocks, and a bucket with
+// one source block lacking it has no poster gas, no compute-gas rate and no fee split. Nothing
+// repairs that on its own: retention never drops a bucket and no loop revisits a finished one. This
+// pass reads eth_getBlockReceipts for the rows that lack the value (one call per block, the stored
+// row already carrying what the receipts are checked against), writes it, and rebuilds the buckets
+// over them, which is what recomputes the aggregates. The region below the live-start boundary is
+// the backfill's and is rebuilt through history_epoch instead. Design notes are in docs/ARCHITECTURE.md.
 
 package collector
 
@@ -54,29 +35,20 @@ const (
 	RepairNone
 )
 
-// posterGasCursor is the durable progress of the repair: the next block it
-// will examine, and whether it has run out of work. Every block written since
-// receipts were introduced carries poster gas, so Done is reached once and
-// stays true; a rewind that removes blocks cannot create new work below the
-// cursor, because the fast loop rewrites what it re-fetches with the receipts
-// already attached.
+// posterGasCursor is the durable progress of the repair. Every block written since receipts were
+// introduced carries poster gas, so Done is reached once and stays true.
 type posterGasCursor struct {
 	Next uint64 `json:"next"`
 	Done bool   `json:"done"`
-	// Skipped are blocks a sweep gave up on after maxRepairAttempts. The
-	// cursor only moves forward, so without recording them a block that
-	// failed while an endpoint was briefly unavailable would be behind the
-	// cursor for good, and a restart would resume past it rather than retry
-	// it. They are swept again before the pass calls itself done.
+	// Skipped are blocks a sweep gave up on. The cursor only moves forward, so without them a block
+	// that failed during a brief outage would be behind it for good, restart or not.
 	Skipped []uint64 `json:"skipped,omitempty"`
-	// Sweeps counts the re-sweeps already made, so a block that fails every
-	// time ends the pass instead of circling in it.
+	// Sweeps counts the re-sweeps, so a block that fails every time ends the pass.
 	Sweeps int `json:"sweeps,omitempty"`
 }
 
-// loadPosterGasCursor reads the checkpoint. An unreadable one starts the pass
-// over rather than failing the loop: repeating work is harmless here, since
-// every write is guarded on the row still lacking the value.
+// loadPosterGasCursor reads the checkpoint. An unreadable one starts the pass over: every write is
+// guarded on the row still lacking the value, so repeating work is harmless.
 func (f *Follower) loadPosterGasCursor(ctx context.Context) (*posterGasCursor, error) {
 	raw, ok, err := f.store.GetState(ctx, f.chainID, db.StatePosterGasRepair)
 	if err != nil {
@@ -101,55 +73,37 @@ func (f *Follower) savePosterGasCursor(ctx context.Context, s db.Store, c *poste
 	return s.SetState(ctx, f.chainID, db.StatePosterGasRepair, string(b))
 }
 
-// maxRepairAttempts is how often a single block is read before the pass gives
-// up on it and moves past. A batch that fails narrows to one block, and the
-// error there can be either kind: receipts that do not describe the block
-// (deterministic, no retry will help) or the endpoint being unreachable, rate
-// limited or behind (transient, and every retry might). Counting attempts
-// covers both without having to tell them apart, which matters because the
-// two are not reliably distinguishable: an endpoint that has fallen behind
-// answers for a block it does not have with a null receipt set, exactly like
-// a block that cannot be verified. Skipping on the first error would let one
-// outage walk the cursor through a whole range and leave it unrepairable.
-// The count is in memory: it measures one endpoint's bad few minutes, not the
-// block, so it starts over per process and per sweep.
+// maxRepairAttempts is how often a single block is read before the pass moves past it. The error can
+// be deterministic (receipts that do not describe the block) or transient (an endpoint unreachable,
+// rate limited or behind), and the two cannot be told apart: a lagging endpoint answers for a block it
+// lacks with a null receipt set. Skipping on the first error would let one outage walk the cursor
+// through a range. The count is in memory, per process and per sweep.
 const maxRepairAttempts = 3
 
-// maxRepairSweeps bounds how often the pass goes back for the blocks it gave
-// up on. The cursor only moves forward, so a block passed over is behind it
-// and needs a sweep of its own to be seen again; without a bound a block that
-// can never be read would keep the pass going for the life of the process.
+// maxRepairSweeps bounds how often the pass goes back for the blocks it gave up on, since the cursor
+// only moves forward: without a bound a block that can never be read would keep it going for good.
 const maxRepairSweeps = 3
 
-// maxRepairSkipped bounds the block numbers a cursor carries, so a long
-// outage cannot grow the checkpoint without limit. Past it the pass stops
-// recording them and the log is the record.
+// maxRepairSkipped bounds the block numbers a cursor carries; past it the log is the record.
 const maxRepairSkipped = 10_000
 
-// repairBatchFor sizes the next batch the way the backfill sizes its own: the
-// configured header batch, capped by what the token bucket holds spare so the
-// pass never holds the turnstile through a long sleep, and narrowed further
-// while batches are failing. Receipts cost one call per block, so the whole
-// available budget counts rather than half of it.
+// repairBatchFor sizes the batch as the backfill does: the configured header batch, capped by the
+// spare budget, narrowed while batches fail. Receipts cost one call per block, so the whole budget counts.
 func (f *Follower) repairBatchFor(narrowed int) int {
 	n := f.cfg.HeaderBatchSize
 	if avail := max(f.rpc.Available(), 0); avail < n {
 		n = max(avail, minBackfillBatch)
 	}
-	// The narrowing is applied last and wins. A spare budget below the
-	// smallest batch raises the size back to minBackfillBatch, and a batch
-	// that fails whole because one target in it will not read would then
-	// never reach the single-block path that steps that target over: the
-	// repair would retry the same few blocks for good.
+	// The narrowing is applied last and wins: a spare budget below the smallest batch would otherwise
+	// raise it back up, and a batch that fails whole would never reach the single-block path.
 	if narrowed > 0 && narrowed < n {
 		n = narrowed
 	}
 	return max(n, 1)
 }
 
-// RepairStep fills in poster gas for one batch of the blocks stored without
-// it and rebuilds the buckets over them. A step discarded by a rewind is not
-// an error: the cursor is unmoved and the next step reads the canonical rows.
+// RepairStep fills in poster gas for one batch. A step discarded by a rewind is not an error: the
+// cursor is unmoved and the next step reads the canonical rows.
 func (f *Follower) RepairStep(ctx context.Context) (RepairStatus, error) {
 	status, err := f.repairStep(ctx)
 	if errors.Is(err, errStaleGeneration) {
@@ -196,19 +150,11 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 	}
 	next := rows[len(rows)-1].Number + 1
 
-	// Which rows are worth a call. Correctness is no longer decided here:
-	// RebuildBuckets refuses a window below the prune frontier itself, so a
-	// bucket whose rows are partly gone cannot be recomputed short however
-	// this pass asks. What is left is a cost question, answered off the same
-	// recorded frontier the store uses, so the two cannot disagree: a row
-	// whose finest bucket is already below it can rebuild nothing, and
-	// reading its receipts would spend a call for no effect.
-	//
-	// The boundary is still this pass's own business. Buckets starting below
-	// it belong to the backfill, which owns them additively and rebuilds
-	// them through history_epoch. The test is the row's own timestamp, the
-	// same split commitFill makes, so the rows of the boundary hour that sit
-	// below the first live block stay in scope.
+	// Which rows are worth a call. Correctness is the store's: RebuildBuckets refuses a window below
+	// the prune frontier itself. What is left is cost, answered off the same recorded frontier so the
+	// two cannot disagree: a row whose finest bucket is already below it can rebuild nothing. The
+	// boundary is this pass's own: buckets below it are the backfill's. The test is the row's
+	// timestamp, the split commitFill makes, so the boundary hour's rows below the first live block stay.
 	frontier, err := f.pruneFrontier(ctx)
 	if err != nil {
 		return RepairIdle, err
@@ -250,8 +196,7 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 			return err
 		}
 		for _, res := range db.ResolutionOrder {
-			// Every resolution is asked for; the store drops the windows it
-			// must not touch, which is the only place that judgement is made.
+			// Every resolution is asked for; the store drops the windows it must not touch.
 			if err := s.RebuildBuckets(ctx, f.chainID, res, db.BucketStarts(repairable, res)); err != nil {
 				return fmt.Errorf("poster gas %s buckets: %w", res, err)
 			}
@@ -264,13 +209,8 @@ func (f *Follower) repairStep(ctx context.Context) (RepairStatus, error) {
 	return RepairProgressed, nil
 }
 
-// repairFailed narrows the batch and retries. Once a single block is left it
-// is retried maxRepairAttempts times before the pass gives up on it and moves
-// past, leaving it without poster gas: the bucket over it goes on reporting
-// that it has none, which is true. Retrying first is what keeps an endpoint
-// that is unreachable, rate limited or behind from walking the cursor through
-// a range one block per step and leaving all of it unrepairable, since the
-// cursor only ever moves forward.
+// repairFailed narrows the batch and retries; a lone block is retried maxRepairAttempts times before
+// the pass moves past it, so an outage cannot walk the forward-only cursor through a range.
 func (f *Follower) repairFailed(ctx context.Context, c *posterGasCursor, targets []nitro.ReceiptTarget, cause error) (RepairStatus, error) {
 	first, last := targets[0].Number, targets[len(targets)-1].Number
 	if len(targets) > 1 {
@@ -297,12 +237,8 @@ func (f *Follower) repairFailed(ctx context.Context, c *posterGasCursor, targets
 	return RepairProgressed, f.savePosterGasCursor(ctx, f.store, c)
 }
 
-// repairSwept answers a sweep that found nothing left to read. Blocks the
-// sweep gave up on are taken from the top again, since the reason was as
-// likely to have been an endpoint having a bad few minutes as anything about
-// the block. Only when a sweep skips nothing, or the pass has swept
-// maxRepairSweeps times, does it call itself done: a block that fails on
-// every sweep must end the pass rather than circle in it.
+// repairSwept answers a sweep that found nothing left: blocks it gave up on are swept again, up to
+// maxRepairSweeps, since the cause was as likely an endpoint's bad few minutes as the block.
 func (f *Follower) repairSwept(ctx context.Context, c *posterGasCursor) (RepairStatus, error) {
 	if len(c.Skipped) == 0 {
 		c.Done = true

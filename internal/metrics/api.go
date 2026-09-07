@@ -8,7 +8,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// API holds the api's instruments.
 type API struct {
 	reg       prometheus.Registerer
 	requests  *prometheus.CounterVec
@@ -18,7 +17,6 @@ type API struct {
 	wsDropped prometheus.Counter
 }
 
-// NewAPI registers the api's instruments on reg.
 func NewAPI(reg prometheus.Registerer) *API {
 	a := &API{
 		reg: reg,
@@ -48,24 +46,20 @@ func NewAPI(reg prometheus.Registerer) *API {
 	return a
 }
 
-// otherMethod stands in for any method outside knownMethods.
 const otherMethod = "other"
 
-// knownMethods bounds the method label. An HTTP method is an arbitrary
-// token, not a closed set: net/http accepts any token and the router
-// answers 405, so a caller sending a fresh made-up method per request
-// would otherwise mint two series each time and grow the registry without
-// end. Only the methods that exist are labeled; the rest share one value.
+// knownMethods bounds the method label. An HTTP method is an arbitrary token, so a caller sending a
+// made-up method per request would otherwise mint two series each time and grow the registry without
+// end. Everything outside this set shares one value.
 var knownMethods = map[string]bool{
 	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true,
 	http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
 	http.MethodConnect: true, http.MethodOptions: true, http.MethodTrace: true,
 }
 
-// ObserveListener publishes the PostgreSQL notification listener behind
-// status, read at scrape time so nothing has to push it. Without it a wedged
-// LISTEN feed is visible only to /status and to whoever notices that /ready
-// answers 503, which is also what a failed database ping looks like.
+// ObserveListener publishes the PostgreSQL notification listener behind status, read at scrape time so
+// nothing has to push it. Without it a wedged LISTEN feed is visible only to /status and to whoever
+// notices /ready answering 503, which is also what a failed database ping looks like.
 func (a *API) ObserveListener(status func() (ready bool, reconnects uint64)) {
 	a.reg.MustRegister(
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
@@ -88,9 +82,8 @@ func (a *API) ObserveListener(status func() (ready bool, reconnects uint64)) {
 	)
 }
 
-// ObserveRequest records one served request. route must be the router's
-// own pattern rather than the request path, or every block number in a URL
-// becomes a series of its own; method is bounded here.
+// ObserveRequest records one served request. route must be the router's own pattern rather than the
+// request path, or every block number in a URL becomes a series of its own.
 func (a *API) ObserveRequest(route, method string, status int, d time.Duration) {
 	if !knownMethods[method] {
 		method = otherMethod
@@ -99,12 +92,9 @@ func (a *API) ObserveRequest(route, method string, status int, d time.Duration) 
 	a.duration.WithLabelValues(route, method).Observe(d.Seconds())
 }
 
-// WSConnected and WSDisconnected track subscribed WebSocket clients.
 func (a *API) WSConnected()    { a.wsClients.Inc() }
 func (a *API) WSDisconnected() { a.wsClients.Dec() }
 
-// WSFrameSent counts one frame written to a client.
 func (a *API) WSFrameSent() { a.wsFrames.Inc() }
 
-// WSClientDropped counts a client closed for a full outbound queue.
 func (a *API) WSClientDropped() { a.wsDropped.Inc() }

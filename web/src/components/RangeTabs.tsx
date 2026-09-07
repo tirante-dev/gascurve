@@ -4,19 +4,12 @@
 export type RangeOption<T extends string> = { value: T; label: string };
 
 /**
- * The segmented range control. Every range picker on the page is this one
- * component, so the hero's chart and the history section read as the same
- * control rather than as two that happen to look alike.
+ * The segmented range control. Every range picker on the page is this one component, so the hero's chart
+ * and the history section read as the same control.
  *
- * It is a labelled group of toggle buttons, not a tablist: a tablist promises
- * a keyboard model (roving tabIndex, arrow keys, Home and End, a tab panel per
- * tab) that a control switching what one chart draws does not have and should
- * not fake. `aria-pressed` says which choice is on, and every button is in the
- * tab order, which is what the plain buttons already did.
- *
- * The buttons wrap rather than overflow, so five hero ranges or a large
- * constraint set stay inside the card on a phone, and the "updating" note sits
- * under the group where it cannot widen it.
+ * It is a labelled group of toggle buttons, not a tablist: a tablist promises a keyboard model that a
+ * control switching what one chart draws does not have and should not fake. The buttons wrap rather than
+ * overflow, so five ranges stay inside the card on a phone.
  */
 export function RangeTabs<T extends string>({
   options,

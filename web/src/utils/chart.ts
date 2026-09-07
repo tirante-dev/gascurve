@@ -8,7 +8,6 @@ import { formatDuration, formatGas, formatGasPerSecond, formatInteger, weiToEthN
 
 export const MAX_SERIES = 6;
 
-/** CSS variable for a constraint's colour, by index in the set (fixed order, never cycled). */
 export function seriesColor(index: number): string {
   return `var(--series-${Math.min(MAX_SERIES, index + 1)})`;
 }
@@ -16,39 +15,15 @@ export function seriesColor(index: number): string {
 /** Colour of the "unknown split" series: the muted ink, never a constraint colour. */
 export const UNKNOWN_COLOR = "var(--ink-3)";
 
-/** Sequential ramp step (1 to 9) for a multiplier over the floor, on a log scale from 1x to 100x. */
-export function rampStep(multiplierBips: number): number {
-  const m = Math.max(1, multiplierBips / 10_000);
-  const f = Math.min(1, Math.log10(m) / 2);
-  return 1 + Math.round(f * 8);
-}
-
-export function rampColor(multiplierBips: number): string {
-  return `var(--seq-${rampStep(multiplierBips)})`;
-}
-
-/**
- * Text colour that clears AA contrast on the given ramp step. Each step has
- * its own ink token because the step at which the ramp flips from light ink
- * to dark ink differs between the light and dark surfaces.
- */
-export function rampInk(step: number): string {
-  return `var(--seq-ink-${Math.max(1, Math.min(9, Math.round(step)))})`;
-}
-
-/** The floor line and its legend swatch: the cyan accent, never a constraint colour. */
 export const FLOOR_COLOR = "var(--floor)";
 
-/** Owner-action markers on the history charts: the magenta accent. */
 export const MARKER_COLOR = "var(--marker)";
 
-/** Ramp step for a single constraint's exponent contribution, 0 to 4 spans the ramp. */
 export function contributionRampStep(exponentBips: number): number {
   const x = Math.max(0, exponentBips / 10_000);
   return 1 + Math.round(Math.min(1, x / 4) * 8);
 }
 
-/** "60 Mgas/s over 15 s". */
 export function constraintLabel(c: Pick<ConstraintSetEntry, "target" | "window">): string {
   return `${formatGasPerSecond(c.target)} over ${formatDuration(c.window)}`;
 }
@@ -57,12 +32,10 @@ export function shortConstraintLabel(c: Pick<ConstraintSetEntry, "target" | "win
   return `${formatGasPerSecond(c.target)} · ${formatDuration(c.window)}`;
 }
 
-/** Integer bips into x for display. Contributions are only ever divided here. */
 export function bipsToXValue(bips: number): number {
   return bips / 10_000;
 }
 
-/** Each constraint's share of the total, 0 to 1, from integer bips. Zero total gives zero shares. */
 export function sharesOf(bips: readonly number[]): number[] {
   const total = bips.reduce((sum, b) => sum + Math.max(0, b), 0);
   return bips.map((b) => (total > 0 ? Math.max(0, b) / total : 0));
@@ -92,12 +65,10 @@ export const NULL_SPLIT_LABEL = "unknown split (total x, split not recorded)";
 /** Legend and tooltip label of the fee destination series for buckets whose floor and surplus predate the record. */
 export const UNSPLIT_FEES_LABEL = "destination split unavailable";
 
-/** Backlog of slot `index` for points whose constraint set is unknown, keyed buI. */
 export function unknownBacklogKey(index: number): `bu${number}` {
   return `bu${index}`;
 }
 
-/** Label of backlog panel `index` when no definition for it is known. */
 export function unknownSlotLabel(index: number): string {
   return `C${index + 1} · definition unknown`;
 }
@@ -123,23 +94,19 @@ export function segmentLabel(set: Pick<ConstraintSet, "id" | "effectiveBlock">, 
   return `C${index + 1} · ${shortConstraintLabel(c)} · ${setLabel(set)}`;
 }
 
-/** Sets sorted by the block they took effect, oldest first. */
 export function sortedSets(series: Pick<Series, "constraintSets">): ConstraintSet[] {
   return [...series.constraintSets].sort((a, b) => a.effectiveBlock - b.effectiveBlock || a.id - b.id);
 }
 
-/** The constraint set with the newest effective block. */
 export function latestSet(series: Pick<Series, "constraintSets">): ConstraintSet | undefined {
   return sortedSets(series).pop();
 }
 
-/** How many constraint slots a point's data has: from its split when recorded, else from its backlogs. */
 function slotCount(p: Pick<SeriesPoint, "constraintBips" | "backlogs">): number {
   const bips = p.constraintBips;
   return bips !== null && bips.length > 0 ? bips.length : p.backlogs.length;
 }
 
-/** True when a point carries per-constraint data at all. */
 function hasConstraintData(p: Pick<SeriesPoint, "constraintBips" | "backlogs">): boolean {
   return slotCount(p) > 0;
 }
@@ -156,16 +123,11 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">, m
     if (model !== "legacy" || !series.points.some(hasConstraintData)) return [];
     return [{ key: contributionKey(0, 0), backlogKey: backlogKey(0, 0), setId: 0, index: 0, label: "legacy backlog", color: seriesColor(0), constraint: null }];
   }
-  // A set is only usable for a point when its constraint count matches the
-  // point's data; the collector can tag blocks with the latest *known* set
-  // while the owner-action scan is still catching up (a 6-constraint genesis
-  // set against a 2-constraint live model, for example). Such sets are left
-  // out and their points fall back to the unknown split.
-  // With points in hand only the sets that match one of them are drawable: a
-  // set whose shape no point agrees with would put empty C3 to C6 panels and
-  // labels that describe nothing in front of the reader. Points that match no
-  // set stay unknown instead. With no points at all there is nothing to
-  // contradict, so every set in the range keeps its segments.
+  // A set is only usable for a point when its constraint count matches the point's data: the collector can
+  // tag blocks with the latest known set while the owner-action scan is still catching up. Such sets are
+  // left out and their points fall back to the unknown split, since a set no point agrees with would put
+  // empty panels and labels that describe nothing in front of the reader. With no points at all there is
+  // nothing to contradict, so every set in the range keeps its segments.
   const usable = sets.filter((set) => series.points.some((p) => p.constraintSetId === set.id && shapeMatches(set, p)));
   const out: Segment[] = [];
   for (const set of series.points.length === 0 ? sets : usable) {
@@ -176,13 +138,11 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">, m
   return out;
 }
 
-/** True when the set's constraint count matches the point's per-constraint data. */
 export function shapeMatches(set: Pick<ConstraintSet, "constraints">, p: Pick<SeriesPoint, "constraintBips" | "backlogs">): boolean {
   const n = slotCount(p);
   return n === 0 || set.constraints.length === n;
 }
 
-/** The segments that describe a point: those of its set when the shape agrees, otherwise none (unknown split). */
 function ownSegments(bySet: Map<number, Segment[]>, p: Pick<SeriesPoint, "constraintSetId" | "constraintBips" | "backlogs">): Segment[] | undefined {
   const candidate = bySet.get(p.constraintSetId);
   const n = slotCount(p);
@@ -209,7 +169,6 @@ export function hasUnknownSets(series: Pick<Series, "constraintSets" | "points">
   return series.points.some((p) => ownSegments(bySet, p) === undefined);
 }
 
-/** True when some point's per-constraint split was never recorded (pricing version 0 history). */
 export function hasUnrecordedSplit(series: Pick<Series, "points">): boolean {
   return series.points.some((p) => p.constraintBips === null);
 }
@@ -290,14 +249,10 @@ export type ChartPoint = {
 };
 
 /**
- * Flattens a Series into chart rows with numbers the axes can scale.
- * Contributions come from the api's start-of-block `constraintBips`, never
- * from end-of-block backlogs, and are divided by 10,000 only for display. A
- * point with a null split (pricing version 0 history) keeps its
- * set for backlogs and targets but puts its whole x under `cUnknown`; null
- * floor and surplus fees leave both null and put the bucket's fees under
- * `unsplitFeesEth`, never zero. One row per bucket; `withSetBoundaries` adds
- * the rows the stacked charts need.
+ * Flattens a Series into chart rows with numbers the axes can scale. Contributions come from the api's
+ * start-of-block `constraintBips`, never from end-of-block backlogs, and are divided by 10,000 only for
+ * display. A point with a null split keeps its set for backlogs and targets but puts its whole x under
+ * `cUnknown`; null floor and surplus fees put the bucket's fees under `unsplitFeesEth`, never zero.
  */
 export function buildChartPoints(series: Series, model: PricerModel): ChartPoint[] {
   const segments = segmentsFor(series, model);
@@ -369,13 +324,10 @@ function drawnSeriesOf(row: ChartPoint): string {
 }
 
 /**
- * Rows for the stacked and per-set charts: wherever the set in force changes,
- * a duplicate of the boundary bucket is inserted first, carrying the previous
- * set's contributions, backlogs and targets at the new bucket's time. The
- * outgoing series therefore ends with a vertical edge exactly where the
- * incoming one starts, an instantaneous replacement rather than a taper across
- * the bucket. Everything else on the duplicate (fee, gas, x) is the new
- * bucket's, so the shared lines gain a zero-length segment and nothing more.
+ * Rows for the stacked and per-set charts: wherever the set in force changes, a duplicate of the boundary
+ * bucket is inserted first, carrying the previous set's contributions, backlogs and targets at the new
+ * bucket's time, so the outgoing series ends with a vertical edge rather than a taper across the bucket.
+ * Everything else on the duplicate is the new bucket's, so the shared lines gain a zero-length segment.
  */
 export function withSetBoundaries(rows: readonly ChartPoint[]): ChartPoint[] {
   const out: ChartPoint[] = [];
@@ -548,16 +500,12 @@ export type LegacyGauge = {
 };
 
 /**
- * The legacy gauge. Both thresholds are the pricer's own: the free region is
- * the tolerance threshold `tolerance * speedLimit` as a plain uint64 multiply
- * that wraps exactly as nitro's does (a wrapped threshold of zero therefore
- * shows no free region, as the pricer charges from the first unit of gas),
- * and the unit of x is the saturating `inertia * speedLimit` cast into bips.
- * With a free region the span is a whole number of thresholds (at least two,
- * so the threshold sits inside the bar) and the single mark is the threshold.
- * Without one the span is whole units of x with a mark at each, like a
- * constraint gauge. Zero inertia or speed limit gives an empty gauge rather
- * than NaN.
+ * The legacy gauge. Both thresholds are the pricer's own: the free region is `tolerance * speedLimit` as a
+ * plain uint64 multiply that wraps exactly as nitro's does (a wrapped threshold of zero shows no free
+ * region, since the pricer then charges from the first unit of gas), and the unit of x is the saturating
+ * `inertia * speedLimit` cast into bips. With a free region the span is a whole number of thresholds, at
+ * least two so the threshold sits inside the bar; without one it is whole units of x with a mark at each.
+ * Zero inertia or speed limit gives an empty gauge rather than NaN.
  */
 export function legacyGauge(legacy: { speedLimit: number; inertia: number; tolerance: number }, backlog: number): LegacyGauge {
   const speedLimit = toUint64(legacy.speedLimit);

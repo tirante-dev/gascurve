@@ -6,10 +6,6 @@ import { keyMatches, LiveClient, resolveSocketFactory, resolveWsUrl, type Networ
 import type { BlockPoint, LiveSnapshot, LiveStatus, Network, OwnerAction } from "@/types";
 import { useDocumentVisible } from "./useDocumentVisible";
 
-/**
- * Blocks kept for the sparklines. The short-window sawtooth needs fifteen
- * seconds of per-block backlogs, and Robinhood produces about ten a second.
- */
 /** Blocks kept client-side: two minutes of a ten blocks per second chain, the hero chart window. */
 export const RECENT_BLOCKS_RING = 1500;
 export const LIVE_POLL_MS = 2000;
@@ -29,10 +25,9 @@ export type LiveState = {
 };
 
 /**
- * The feed is keyed by the network the server confirmed (name and chain id),
- * so a route that switches from `/4663` to `/robinhood` keeps showing it. A
- * feed filled by polling knows the chain id from the snapshot and the name
- * only as the route parameter it was polled under.
+ * The feed is keyed by the network the server confirmed, so a route that switches from `/4663` to
+ * `/robinhood` keeps showing it. A polled feed knows the chain id from the snapshot and the name only as
+ * the route parameter it was polled under.
  */
 type Feed = {
   key: NetworkKey | null;
@@ -92,19 +87,11 @@ export function isNewerSnapshot(prev: LiveSnapshot | null, next: LiveSnapshot): 
 }
 
 /**
- * Live data for one network: the latest snapshot, a ring of recent blocks and
- * the connection status. Uses the WebSocket, polls /live every 2 s while the
- * socket is down, and stops everything while the tab is hidden. State is keyed
- * by the network the server confirmed with a hello (name and chain id), so
- * switching shows an empty feed until the new hello arrives, a late message for
- * the previous network is never shown under the new one, and moving between a
- * chain-id route and its name keeps the feed. A reorg repairs the ring, the
- * snapshot and the live owner actions in one step, so what is on screen is
- * always one consistent chain.
- *
- * `enabled` false opens nothing at all: no socket, no polling, an empty feed.
- * A page whose charts are all historical takes its network metadata from REST
- * instead, and holds no subscription open for a feed it never draws.
+ * Live data for one network: the latest snapshot, a ring of recent blocks and the connection status. Uses
+ * the WebSocket, polls /live every 2 s while the socket is down, and stops everything while the tab is
+ * hidden. State is keyed by the network the server confirmed with a hello, so a late message for the
+ * previous network is never shown under the new one. A reorg repairs the ring, the snapshot and the live
+ * owner actions in one step. `enabled` false opens nothing at all.
  */
 export function useLive(network: string, enabled = true): LiveState {
   const [feed, setFeed] = useState<Feed>(() => emptyFeed(null));
@@ -135,9 +122,8 @@ export function useLive(network: string, enabled = true): LiveState {
             snapshot: hello.snapshot,
             recentBlocks: appendBlocks([], hello.recentBlocks),
             networkInfo: hello.network,
-            // A hello carries no owner actions, so a reconnect to the same
-            // chain keeps the live ones rather than erasing what was seen
-            // since the page loaded; another chain starts empty.
+            // A hello carries no owner actions, so a reconnect to the same chain keeps the live ones;
+            // another chain starts empty.
             ownerActions: feedIs(prev, key) ? prev.ownerActions : [],
             reorgs: 0,
             resyncing: false,
@@ -147,12 +133,9 @@ export function useLive(network: string, enabled = true): LiveState {
         onReorg: (reorg, key) => {
           setFeed((prev) => {
             const base = feedIs(prev, key) ? prev : emptyFeed(key);
-            // The ring repair and the snapshot move together: a sample taken
-            // on an orphaned block is not a valid origin to ease from, so it
-            // goes with the blocks it was priced on and the feed reports
-            // itself resyncing until the canonical tick lands. Owner actions
-            // above the ancestor are orphaned too; the page revalidates the
-            // REST list so persisted results are replaced as well.
+            // The ring repair and the snapshot move together: a sample taken on an orphaned block is not
+            // a valid origin to ease from, so it goes with the blocks it was priced on. Owner actions
+            // above the ancestor are orphaned too, so the page revalidates the REST list.
             const orphaned = base.snapshot !== null && base.snapshot.block.number > reorg.ancestor;
             return {
               ...base,
@@ -186,8 +169,8 @@ export function useLive(network: string, enabled = true): LiveState {
       });
       client = created;
       clientRef.current = created;
-      // The factory resolves asynchronously; the tab may have been hidden
-      // since mount, in which case the client waits for the next visibility change.
+      // The factory resolves asynchronously and the tab may have been hidden since mount, in which case
+      // the client waits for the next visibility change.
       if (visibleRef.current) created.connect();
       else created.suspend();
     });
@@ -216,9 +199,7 @@ export function useLive(network: string, enabled = true): LiveState {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
-    // One request in flight at a time: the next poll is scheduled only after
-    // the previous one settled, and a result is applied only when it is newer
-    // than what is already shown.
+    // One request in flight at a time, and a result is applied only when it is newer than what is shown.
     const poll = async () => {
       try {
         const next = await getLive(network, { signal: controller.signal, retries: 0 });

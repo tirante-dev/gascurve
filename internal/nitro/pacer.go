@@ -7,22 +7,16 @@ import (
 	"time"
 )
 
-// Class is the priority of a call at the pacer. Bulk is the default: the
-// catch-up header batches, log chunks, batch-report scans and the
-// backfill. Fast is the head-triggered state sample, which is latency
-// critical: it has first claim on the fast reserve, a small share of the
-// budget kept aside for it, and shares the rest first come, first served
-// with Bulk.
+// Class is the priority of a call at the pacer. Bulk is the default: catch-up header batches,
+// log chunks, batch-report scans and the backfill. Fast is the latency-critical head-triggered
+// state sample, which has first claim on the fast reserve and shares the rest with Bulk.
 type Class uint8
 
 const (
-	// Bulk is the default class: everything that is not the fast tick.
 	Bulk Class = iota
-	// Fast is the fast tick's state sample and its single small calls.
 	Fast
 )
 
-// String names the class for logs.
 func (c Class) String() string {
 	if c == Fast {
 		return "fast"
@@ -45,50 +39,25 @@ func ClassOf(ctx context.Context) Class {
 	return Bulk
 }
 
-// tokenEpsilon absorbs floating point error in token arithmetic: a
-// caller a billionth of a token short is not made to sleep for it.
+// tokenEpsilon absorbs floating point error: a caller a billionth of a token short never sleeps.
 const tokenEpsilon = 1e-9
 
-// MinCallsPerSecond is the smallest budget the pacer works with. Below one
-// call every ten seconds a single token takes longer than any request
-// timeout and the wait arithmetic stops being meaningful, so
-// config.Validate rejects such a rate and NewPacer raises anything smaller
-// to it.
+// MinCallsPerSecond is the smallest budget the pacer works with: below it a single token takes
+// longer than any request timeout and the wait arithmetic stops being meaningful.
 const MinCallsPerSecond = 0.1
 
-// maxPacerWait bounds one sleep, so a wait computed from a tiny rate can
-// never overflow time.Duration and no caller is parked for ever: it wakes,
-// re-checks the bucket and sleeps again.
+// maxPacerWait bounds one sleep, so a wait computed from a tiny rate cannot overflow
+// time.Duration and no caller is parked for ever: it wakes, re-checks and sleeps again.
 const maxPacerWait = time.Minute
 
-// Pacer is a token bucket that meters JSON-RPC calls per endpoint: one
-// token per call, including every item inside a batch, refilled at the
-// configured rate with a burst of twice the rate. Wait never spends tokens
-// the requesting class does not hold, so the bucket never goes negative
-// and over any window of w seconds at most burst + rate*w calls pass,
-// whatever the mix of callers.
-//
-// Two classes of caller share the bucket. Part of it is the fast reserve:
-// its own small bucket of max(1, rate/4) tokens, refilled at that many
-// tokens per second (never more than the rate itself), which only Fast
-// callers draw from and which they draw from at once, without queueing,
-// whenever it holds a whole token. Bulk callers only ever see the bucket
-// above the reserve, so a Fast call under bulk load is served as soon as
-// the reserve holds a token, and a Bulk batch is capped at the burst
-// minus the reserve (MaxBatch). What a Fast caller wants beyond the
-// reserve it queues for first come, first served with the Bulk callers:
-// callers wait their turn at a turnstile and take tokens in arrival
-// order, so a large Bulk batch is never starved by a stream of small
-// calls, and a fast tick that wants more than the reserve slows the bulk
-// work down instead of stopping it. A queued Fast caller keeps drawing
-// the reserve as it refills while it waits its turn.
-//
-// Below one call per second a whole-token reserve is the whole burst and
-// the bulk share is empty (MaxBatch is 0). The two lanes then time-share
-// the bucket instead: they alternate whole tokens, so neither starves and
-// neither borrows against future refills. A rate of zero means unlimited:
-// Wait never sleeps and Available is effectively infinite. 429 back-off
-// lives in the Client and applies either way.
+// Pacer is a token bucket that meters JSON-RPC calls per endpoint: one token per call, including every
+// item inside a batch, refilled at the configured rate with a burst of twice the rate. Wait never spends
+// tokens the requesting class does not hold, so at most burst + rate*w calls pass over any window of w
+// seconds. Part of the bucket is the fast reserve: max(1, rate/4) tokens only Fast callers draw, at once
+// and without queueing. What a Fast caller wants beyond it queues first come, first served with the Bulk
+// callers, so a large Bulk batch is never starved by a stream of small calls. Below one call per second
+// the reserve is the whole burst and the two lanes alternate whole tokens instead. A rate of zero means
+// unlimited; 429 back-off lives in the Client.
 type Pacer struct {
 	mu        sync.Mutex
 	unlimited bool
@@ -107,24 +76,21 @@ type Pacer struct {
 	// others queue behind it in arrival order.
 	held  bool
 	queue []*waiter
-	// Time-sharing bookkeeping: how many callers of each lane are waiting
-	// and which lane took the last whole token, plus a channel closed
-	// whenever that changes so the other lane wakes.
+	// Time-sharing bookkeeping: waiters per lane, which lane took the last whole token, and a
+	// channel closed whenever that changes so the other lane wakes.
 	bulkPending int
 	fastPending int
 	lastFast    bool
 	turn        chan struct{}
 }
 
-// waiter is a queued caller: ready is closed when it is handed the
-// turnstile.
+// waiter is a queued caller: ready is closed when it is handed the turnstile.
 type waiter struct {
 	ready chan struct{}
 }
 
-// NewPacer creates a bucket allowing callsPerSecond sustained calls, or an
-// unlimited pacer when callsPerSecond is zero or negative. A positive rate
-// below MinCallsPerSecond is raised to it.
+// NewPacer creates a bucket allowing callsPerSecond sustained calls, or an unlimited pacer when
+// callsPerSecond is zero or negative. A positive rate below MinCallsPerSecond is raised to it.
 func NewPacer(callsPerSecond float64) *Pacer {
 	p := &Pacer{now: time.Now, sleep: sleepContext}
 	if callsPerSecond <= 0 {
@@ -143,7 +109,6 @@ func NewPacer(callsPerSecond float64) *Pacer {
 	return p
 }
 
-// Unlimited reports whether the pacer never waits.
 func (p *Pacer) Unlimited() bool { return p.unlimited }
 
 // withClock replaces the clock and sleeper, for tests.
@@ -159,26 +124,20 @@ func (p *Pacer) withClock(now func() time.Time, sleep func(context.Context, time
 // Rate returns the sustained calls per second, 0 when unlimited.
 func (p *Pacer) Rate() float64 { return p.rate }
 
-// Reserve returns the size of the fast reserve in tokens, max(1, rate/4),
-// 0 when unlimited. The reserve refills at that many tokens per second
-// (at the rate itself when the rate is lower), so it is one second's worth
-// of fast calls.
+// Reserve returns the size of the fast reserve, max(1, rate/4) tokens, 0 when unlimited. It
+// refills at that many tokens per second, so it is one second's worth of fast calls.
 func (p *Pacer) Reserve() float64 { return p.reserve }
 
 // sharedCap is the most tokens the bucket holds above a full reserve.
 func (p *Pacer) sharedCap() float64 { return p.burst - p.reserve }
 
-// timeShared reports whether a whole-token reserve leaves the bulk lane no
-// capacity of its own, which is every rate below one call per second. The
-// two lanes then alternate whole tokens over the whole bucket instead of
-// the bulk lane running a permanent debt.
+// timeShared reports whether a whole-token reserve leaves the bulk lane no capacity of its own,
+// which is every rate below one call per second. The lanes then alternate whole tokens instead.
 func (p *Pacer) timeShared() bool { return !p.unlimited && p.sharedCap() < 1 }
 
-// MaxBatch returns the most items one Bulk request may carry without
-// spending tokens the bucket cannot hold for it: the burst minus the fast
-// reserve on a budgeted endpoint, the protocol cap on an unlimited one. It
-// is 0 when the bulk share holds nothing at all (a time-shared bucket);
-// callers then send one item at a time and wait their turn at the pacer.
+// MaxBatch returns the most items one Bulk request may carry without spending tokens the bucket
+// cannot hold for it: the burst minus the fast reserve, or the protocol cap when unlimited. It is
+// 0 on a time-shared bucket, where callers send one item at a time.
 func (p *Pacer) MaxBatch() int { return p.MaxBatchFor(Bulk) }
 
 // MaxBatchFor is MaxBatch for a class: a Fast request may carry the fast
@@ -194,16 +153,14 @@ func (p *Pacer) MaxBatchFor(class Class) int {
 	return min(max(int(held+tokenEpsilon), 0), MaxBatch)
 }
 
-// chunkSize bounds one HTTP batch: what the pacer can hold for the class,
-// never more than what is left to send, and at least one item, since a
-// bucket with no share for the class still passes one call at a time.
+// chunkSize bounds one HTTP batch: what the pacer can hold for the class, never more than what is
+// left, and at least one item, since a bucket with no share still passes one call at a time.
 func chunkSize(capacity, remaining int) int {
 	return min(max(capacity, 1), remaining)
 }
 
-// refillLocked credits the time since the last refill to the bucket and to
-// the reserve. The reserve never rises above the bucket: tokens the bulk
-// lane spent are gone from both.
+// refillLocked credits the elapsed time to the bucket and to the reserve. The reserve never rises
+// above the bucket: tokens the bulk lane spent are gone from both.
 func (p *Pacer) refillLocked() {
 	t := p.now()
 	if elapsed := t.Sub(p.last).Seconds(); elapsed > 0 {
@@ -214,14 +171,11 @@ func (p *Pacer) refillLocked() {
 	p.last = t
 }
 
-// sharedLocked is what the bucket holds above the reserve's current level:
-// the tokens open to any caller.
+// sharedLocked is what the bucket holds above the reserve's current level.
 func (p *Pacer) sharedLocked() float64 { return max(p.tokens-p.fastTokens, 0) }
 
-// openLocked is what the bucket holds for a class right now: the tokens
-// above the reserve, or, on a time-shared bucket where the bulk lane has
-// no share of its own, the whole bucket for a Bulk caller whose turn it
-// is.
+// openLocked is what the bucket holds for a class right now: the tokens above the reserve, or the
+// whole bucket on a time-shared one for a Bulk caller whose turn it is.
 func (p *Pacer) openLocked(class Class) float64 {
 	if class == Bulk && p.timeShared() {
 		if !p.bulkTurnLocked() {
@@ -240,11 +194,9 @@ func (p *Pacer) bulkTurnLocked() bool { return p.fastPending == 0 || p.lastFast 
 // bucket: it yields to a waiting Bulk caller that was not the last served.
 func (p *Pacer) fastTurnLocked() bool { return p.bulkPending == 0 || !p.lastFast }
 
-// Available returns the number of whole tokens a Bulk caller can take
-// without waiting (math.MaxInt when unlimited): the bucket above the fast
-// reserve's current level, or the whole bucket on a time-shared one. A
-// reserve the fast tick has drawn down makes that many more tokens
-// available to bulk work until it refills.
+// Available returns the whole tokens a Bulk caller can take without waiting (math.MaxInt when
+// unlimited). A reserve the fast tick has drawn down leaves that many more tokens to bulk work
+// until it refills.
 func (p *Pacer) Available() int {
 	if p.unlimited {
 		return math.MaxInt
@@ -258,10 +210,8 @@ func (p *Pacer) Available() int {
 	return max(int(math.Floor(p.sharedLocked()+tokenEpsilon)), 0)
 }
 
-// Refund gives n tokens back to a bucket that had already handed them out
-// for a request that never reached the wire (a cooldown or a failed-over
-// endpoint invalidated the reservation). The bucket never rises above its
-// burst, so a refund can only ever return what was taken.
+// Refund gives n tokens back for a request that never reached the wire. The bucket never rises
+// above its burst, so a refund can only return what was taken.
 func (p *Pacer) Refund(n int) {
 	if p.unlimited || n <= 0 {
 		return
@@ -291,11 +241,9 @@ func (p *Pacer) drawReserveLocked(remaining int) int {
 	return remaining - k
 }
 
-// takeLocked spends as many whole tokens as the class holds right now, at
-// most want, and reports how many it took. Nothing is ever borrowed
-// against future refills, which is what keeps the windowed budget: a
-// caller that wants more than the class holds takes what there is and
-// waits for the rest.
+// takeLocked spends as many whole tokens as the class holds right now, at most want. Nothing is
+// borrowed against future refills, which is what keeps the windowed budget: a caller that wants
+// more than the class holds takes what there is and waits for the rest.
 func (p *Pacer) takeLocked(class Class, want int) int {
 	k := min(want, int(math.Floor(p.openLocked(class)+tokenEpsilon)))
 	if k <= 0 {
@@ -316,8 +264,7 @@ func (p *Pacer) servedLocked(fast bool) {
 	p.notifyTurnLocked()
 }
 
-// turnSignalLocked returns a channel closed the next time a lane takes a
-// token or stops waiting.
+// turnSignalLocked returns a channel closed the next time a lane takes a token or stops waiting.
 func (p *Pacer) turnSignalLocked() <-chan struct{} {
 	if p.turn == nil {
 		p.turn = make(chan struct{})
@@ -343,8 +290,7 @@ func (p *Pacer) enter(class Class) {
 	p.bulkPending++
 }
 
-// leave undoes enter and wakes the other lane, which may have been
-// yielding to this one.
+// leave undoes enter and wakes the other lane, which may have been yielding to this one.
 func (p *Pacer) leave(class Class) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -356,13 +302,10 @@ func (p *Pacer) leave(class Class) {
 	p.notifyTurnLocked()
 }
 
-// Wait takes n tokens for the class ctx carries (Bulk by default). A Fast
-// caller first draws what the reserve holds, at once; for the rest, and
-// for every Bulk token, it waits its turn at the turnstile and takes
-// whole tokens as the bucket holds them, sleeping for the ones it does
-// not. Nothing is ever borrowed against future refills, so n above what
-// the class may hold at once simply takes several refill periods rather
-// than overdrawing.
+// Wait takes n tokens for the class ctx carries (Bulk by default). A Fast caller first draws what
+// the reserve holds, at once; for the rest, and for every Bulk token, it waits its turn at the
+// turnstile. Nothing is borrowed against future refills, so an n above what the class may hold
+// takes several refill periods rather than overdrawing.
 func (p *Pacer) Wait(ctx context.Context, n int) error {
 	if n <= 0 {
 		return nil
@@ -484,13 +427,9 @@ func (p *Pacer) classCapLocked(class Class) float64 {
 	return p.sharedCap()
 }
 
-// openWaitLocked returns how long until want tokens (never more than the
-// class can hold at once) are open to the class, with nobody spending
-// meanwhile: the reserve refills alongside, so the shared part grows at
-// the rate minus the reserve rate until the reserve is full and at the
-// full rate after that. The sleep is rounded up so it always covers the
-// shortfall; a Fast draw meanwhile keeps the reserve from filling, which
-// only makes the sleeper wake early and sleep again.
+// openWaitLocked returns how long until want tokens are open to the class with nobody spending:
+// the reserve refills alongside, so the shared part grows at the rate minus the reserve rate until
+// the reserve is full. Rounded up so the sleep always covers the shortfall.
 func (p *Pacer) openWaitLocked(class Class, want int) time.Duration {
 	need := min(float64(want), p.classCapLocked(class))
 	shared := p.openLocked(class)
@@ -514,16 +453,13 @@ func (p *Pacer) openWaitLocked(class Class, want int) time.Duration {
 	return seconds(t + (need-shared)/p.rate)
 }
 
-// reserveWaitLocked returns how long until the reserve holds a whole
-// token, with nobody spending meanwhile.
+// reserveWaitLocked returns how long until the reserve holds a whole token, with nobody spending.
 func (p *Pacer) reserveWaitLocked() time.Duration {
 	return seconds((1 - p.fastTokens) / p.reserveRate)
 }
 
-// seconds converts a wait in seconds to a duration, rounded up so that
-// truncation can never leave the bucket a rounding error short, and
-// saturated at maxPacerWait so a tiny rate cannot overflow the duration or
-// park a caller indefinitely.
+// seconds converts a wait to a duration, rounded up so truncation cannot leave the bucket short,
+// and saturated at maxPacerWait so a tiny rate cannot overflow it or park a caller indefinitely.
 func seconds(s float64) time.Duration {
 	if !(s > 0) {
 		return 0
@@ -534,11 +470,9 @@ func seconds(s float64) time.Duration {
 	return time.Duration(math.Ceil(s * float64(time.Second)))
 }
 
-// acquire takes the turnstile, queueing in arrival order when another
-// caller holds it. A queued Fast caller keeps drawing the reserve as it
-// refills and leaves the queue once that has covered it. It returns the
-// tokens the caller still needs; zero means it is served and holds
-// nothing.
+// acquire takes the turnstile, queueing in arrival order. A queued Fast caller keeps drawing the
+// reserve as it refills and leaves the queue once that covered it. It returns the tokens the
+// caller still needs; zero means it is served and holds nothing.
 func (p *Pacer) acquire(ctx context.Context, class Class, remaining int) (int, error) {
 	p.mu.Lock()
 	if !p.held {
@@ -567,10 +501,8 @@ func (p *Pacer) park(ctx context.Context, w *waiter) error {
 	}
 }
 
-// parkFast is park for a Fast caller: while it waits its turn it wakes
-// whenever the reserve holds a whole token and draws it, so bulk work
-// ahead of it never delays the reserve's share. Once the reserve has
-// covered it, it leaves the queue and reports zero remaining.
+// parkFast is park for a Fast caller: while it waits its turn it wakes whenever the reserve holds
+// a whole token and draws it, so bulk work ahead of it never delays the reserve's share.
 func (p *Pacer) parkFast(ctx context.Context, w *waiter, remaining int) (int, error) {
 	for {
 		p.mu.Lock()
@@ -598,8 +530,7 @@ func (p *Pacer) parkFast(ctx context.Context, w *waiter, remaining int) (int, er
 	}
 }
 
-// after runs the sleeper for d in the background: done is closed when it
-// ends and stop ends it early.
+// after runs the sleeper for d in the background: done is closed when it ends, stop ends it early.
 func (p *Pacer) after(ctx context.Context, d time.Duration) (done <-chan struct{}, stop func()) {
 	sctx, cancel := context.WithCancel(ctx)
 	ended := make(chan struct{})
@@ -624,8 +555,7 @@ func (p *Pacer) abandonLocked(w *waiter) {
 	}
 }
 
-// dequeueLocked removes w from the queue and reports whether it was
-// still queued.
+// dequeueLocked removes w from the queue and reports whether it was still queued.
 func (p *Pacer) dequeueLocked(w *waiter) bool {
 	for i, x := range p.queue {
 		if x == w {
@@ -636,8 +566,7 @@ func (p *Pacer) dequeueLocked(w *waiter) bool {
 	return false
 }
 
-// releaseLocked hands the turnstile to the first queued caller, or opens
-// it when nobody waits.
+// releaseLocked hands the turnstile to the first queued caller, or opens it when nobody waits.
 func (p *Pacer) releaseLocked() {
 	if len(p.queue) == 0 {
 		p.held = false

@@ -20,28 +20,24 @@ var (
 	errOverflow  = errors.New("abi: value does not fit")
 )
 
-// Keccak256 returns the Keccak-256 hash of data.
 func Keccak256(data []byte) []byte {
 	h := sha3.NewLegacyKeccak256()
 	h.Write(data)
 	return h.Sum(nil)
 }
 
-// Selector returns the 4-byte function selector for a canonical signature
-// such as "getPricesInWei()".
+// Selector returns the 4-byte function selector for a canonical signature such as "getPricesInWei()".
 func Selector(sig string) [4]byte {
 	var out [4]byte
 	copy(out[:], Keccak256([]byte(sig))[:4])
 	return out
 }
 
-// SelectorHex returns the selector as a 0x-prefixed lowercase hex string.
 func SelectorHex(sig string) string {
 	s := Selector(sig)
 	return "0x" + hex.EncodeToString(s[:])
 }
 
-// EventTopic returns the topic0 for an event signature.
 func EventTopic(sig string) string {
 	return "0x" + hex.EncodeToString(Keccak256([]byte(sig)))
 }
@@ -59,7 +55,6 @@ func DecodeHex(s string) ([]byte, error) {
 	return b, nil
 }
 
-// EncodeHex renders bytes as a 0x-prefixed lowercase hex string.
 func EncodeHex(b []byte) string {
 	return "0x" + hex.EncodeToString(b)
 }
@@ -89,7 +84,6 @@ func HexBig(s string) (*big.Int, error) {
 	return b, nil
 }
 
-// word returns the i-th 32-byte word of data.
 func word(data []byte, i int) ([]byte, error) {
 	start := i * wordSize
 	if start < 0 || start+wordSize > len(data) {
@@ -98,7 +92,6 @@ func word(data []byte, i int) ([]byte, error) {
 	return data[start : start+wordSize], nil
 }
 
-// wordBig decodes word i as an unsigned 256-bit integer.
 func wordBig(data []byte, i int) (*big.Int, error) {
 	w, err := word(data, i)
 	if err != nil {
@@ -205,7 +198,6 @@ func uint64Triples(data []byte) ([][3]uint64, error) {
 	return out, nil
 }
 
-// padWord left-pads a big-endian integer to 32 bytes.
 func padWord(b []byte) []byte {
 	if len(b) >= wordSize {
 		return b[len(b)-wordSize:]
@@ -215,7 +207,6 @@ func padWord(b []byte) []byte {
 	return out
 }
 
-// encodeUint64 renders v as one ABI word.
 func encodeUint64(v uint64) []byte {
 	return padWord(new(big.Int).SetUint64(v).Bytes())
 }

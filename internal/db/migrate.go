@@ -19,7 +19,6 @@ type Migrator struct {
 	m *migrate.Migrate
 }
 
-// NewMigrator binds the embedded migrations to an open database.
 func NewMigrator(sqlDB *sql.DB) (*Migrator, error) {
 	src, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {
@@ -36,7 +35,6 @@ func NewMigrator(sqlDB *sql.DB) (*Migrator, error) {
 	return &Migrator{m: m}, nil
 }
 
-// Up applies every pending migration.
 func (m *Migrator) Up() error {
 	if err := m.m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("migrate up: %w", err)
@@ -44,7 +42,6 @@ func (m *Migrator) Up() error {
 	return nil
 }
 
-// Down rolls back n migrations.
 func (m *Migrator) Down(n int) error {
 	if n <= 0 {
 		return errors.New("migrate down: n must be positive")
@@ -55,7 +52,6 @@ func (m *Migrator) Down(n int) error {
 	return nil
 }
 
-// Version returns the current schema version and whether it is dirty.
 func (m *Migrator) Version() (version uint, dirty bool, err error) {
 	version, dirty, err = m.m.Version()
 	if errors.Is(err, migrate.ErrNilVersion) {
@@ -67,7 +63,6 @@ func (m *Migrator) Version() (version uint, dirty bool, err error) {
 	return version, dirty, nil
 }
 
-// RunMigrations applies all pending migrations.
 func RunMigrations(sqlDB *sql.DB) error {
 	m, err := NewMigrator(sqlDB)
 	if err != nil {

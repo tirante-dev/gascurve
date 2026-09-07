@@ -71,15 +71,10 @@ const GAS_UNITS: [number, string][] = [
 ];
 
 /**
- * A gas amount scaled into its band, with the decimals that band prescribes
- * (two below 10, one below 100, none above) before any zero stripping, and the
- * SI prefix of the band it landed in. Rounding is the same exact decimal
- * rounding the gwei formatter uses (`roundDecimal`), so a value that sits a
- * fraction below the decimal half in binary (9.995 is stored as
- * 9.99499999...) still rounds the way it is written. Both the decimal band and
- * the SI prefix are re-evaluated after that rounding: "999.6M" becomes 1 Ggas,
- * "9.995M" becomes 10.0 Mgas, and 999,999.5 gas becomes 1 Mgas rather than a
- * seven-digit figure with no prefix.
+ * A gas amount scaled into its band, with the decimals that band prescribes (two below 10, one below 100,
+ * none above) and the SI prefix of the band it landed in. Rounding is the same exact decimal rounding the
+ * gwei formatter uses, so a value stored a fraction below the decimal half still rounds the way it is
+ * written. Band and prefix are re-evaluated after that rounding, so "999.6M" becomes 1 Ggas.
  */
 function scaleGas(abs: number): { text: string; prefix: string } {
   const band = GAS_UNITS.find(([scale]) => abs >= scale);
@@ -323,15 +318,10 @@ export type UsdMath = {
 };
 
 /**
- * A fee priced in dollars, together with its working. Every USD figure on the
- * page is one ETH amount times one quote, and neither the multiplication nor
- * the quote it used should be something a reader has to take on trust.
- *
- * Null under exactly the condition freshUsdPrice is null under, so a caller
- * that falls back to ETH on a null keeps drawing what it always did.
- *
- * `formatEth` is how the caller renders the ETH amount elsewhere on the page:
- * the working has to quote the figure the reader can see beside it, not a
+ * A fee priced in dollars, together with its working: every USD figure on the page is one ETH amount times
+ * one quote, and neither should be something a reader has to take on trust. Null under exactly the
+ * condition freshUsdPrice is null under. `formatEth` is how the caller renders the ETH amount elsewhere,
+ * so the working quotes the figure the reader can see beside it rather than a second rounding.
  * second rounding of the same number.
  */
 export function usdMath(eth: number, ethUsd: EthUsd | null | undefined, nowMs: number, formatEth: (eth: number) => string = formatEthFixed): UsdMath | null {

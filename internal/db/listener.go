@@ -16,9 +16,8 @@ const (
 	listenerReconnectMaxDelay = 30 * time.Second
 )
 
-// Notification is one LISTEN event. Reconnected is set (with an empty
-// channel) when the connection was re-established: notifications sent
-// meanwhile were lost and the consumer has to reconcile from the tables.
+// Notification is one LISTEN event. Reconnected is set (with an empty channel) when the connection was
+// re-established: notifications sent meanwhile were lost and the consumer has to reconcile.
 type Notification struct {
 	Channel     string
 	Payload     string
@@ -34,8 +33,8 @@ type ListenerStatus struct {
 	Error      string
 }
 
-// Listener delivers NOTIFY payloads. The API hub consumes this interface so
-// it can be tested without Postgres.
+// Listener delivers NOTIFY payloads. The API hub consumes this interface so it can be tested without
+// Postgres.
 type Listener interface {
 	Notifications() <-chan Notification
 	Close() error
@@ -47,9 +46,8 @@ type ListenerStatusReporter interface {
 	Status() ListenerStatus
 }
 
-// notificationListener is the part of *pq.Listener this package uses,
-// narrowed so the status transitions can be driven from a test without a
-// Postgres to disconnect.
+// notificationListener is the part of *pq.Listener this package uses, narrowed so the status
+// transitions can be driven from a test.
 type notificationListener interface {
 	Listen(string) error
 	NotificationChannel() <-chan *pq.Notification
@@ -58,18 +56,14 @@ type notificationListener interface {
 
 type listenerFactory func(pq.EventCallbackType) notificationListener
 
-// PQListener is a Listener over lib/pq's LISTEN support. lib/pq owns the
-// reconnection; PQListener adds only the health lib/pq reports through its
-// event callback, so readiness can take a replica whose notification feed is
+// PQListener is a Listener over lib/pq's LISTEN support. lib/pq owns the reconnection; PQListener adds
+// only the health it reports through its event callback, so readiness can take a replica whose feed is
 // down out of the Service while its query pool keeps working.
 //
-// Nothing here replaces a failed lib/pq listener, because a failed one cannot
-// be observed: lib/pq closes the notification channel in exactly one place,
-// listenerMain, after listenerConnLoop returns, and both of that loop's
-// returns are guarded by l.closed(), which only Close sets. A closed channel
-// therefore means this process closed it. If one ever closes anyway, Hub.Run
-// treats it as fatal and the process restarts, which recovers more simply
-// than swapping the listener underneath a live hub.
+// Nothing here replaces a failed lib/pq listener, because a failed one cannot be observed: lib/pq closes
+// the notification channel only after listenerConnLoop returns, and both of that loop's returns are
+// guarded by l.closed(), which only Close sets. Hub.Run treats a closed channel as fatal and the process
+// restarts, which recovers more simply than swapping the listener underneath a live hub.
 type PQListener struct {
 	l    notificationListener
 	out  chan Notification
@@ -86,8 +80,8 @@ type PQListener struct {
 	subscribed bool
 }
 
-// NewListener subscribes to channels on url. It blocks until the initial
-// subscriptions are established or ctx is done.
+// NewListener subscribes to channels on url, blocking until the initial subscriptions are established
+// or ctx is done.
 func NewListener(ctx context.Context, url string, channels []string, log *logger.Logger) (*PQListener, error) {
 	return newListener(ctx, channels, log, func(callback pq.EventCallbackType) notificationListener {
 		return pq.NewListener(url, listenerReconnectMinDelay, listenerReconnectMaxDelay, callback)
@@ -170,9 +164,8 @@ func (pl *PQListener) markSubscribed() {
 		return
 	}
 	pl.subscribed = true
-	// A successful Listen proves the connection when no event has reported
-	// otherwise. If a disconnect raced the final subscription, its event wins
-	// and the later Connected or Reconnected event restores readiness.
+	// A successful Listen proves the connection when no event has reported otherwise. If a disconnect
+	// raced the final subscription its event wins, and the later Connected event restores readiness.
 	if pl.eventKnown && !pl.connected {
 		return
 	}
@@ -213,17 +206,14 @@ func (pl *PQListener) markUnavailable(reason string) {
 	pl.status.Error = reason
 }
 
-// Notifications returns the delivery channel.
 func (pl *PQListener) Notifications() <-chan Notification { return pl.out }
 
-// Status returns a consistent snapshot of listener health.
 func (pl *PQListener) Status() ListenerStatus {
 	pl.mu.Lock()
 	defer pl.mu.Unlock()
 	return pl.status
 }
 
-// Close stops delivery and closes the connection.
 func (pl *PQListener) Close() error {
 	var err error
 	pl.once.Do(func() {

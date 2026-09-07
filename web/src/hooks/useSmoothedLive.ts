@@ -8,13 +8,10 @@ import { useDocumentVisible } from "./useDocumentVisible";
 import type { LiveState } from "./useLive";
 
 /**
- * The live section's view of the feed: `display` is the latest tick, changed
- * at most every DISPLAY_INTERVAL_MS; `frame` carries what moves faster (the
- * block ring, the eased figures, the wall clock at the last cadence commit)
- * and is read with useLiveFrame by the components that animate, so the rest
- * of the page re-renders only at the cadence. `resyncing` is true while a
- * reorg has taken the displayed state away and the canonical tick that
- * replaces it has not arrived.
+ * The live section's view of the feed: `display` is the latest tick, changed at most every
+ * DISPLAY_INTERVAL_MS; `frame` carries what moves faster and is read with useLiveFrame by the components
+ * that animate, so the rest of the page re-renders only at the cadence. `resyncing` is true while a reorg
+ * has taken the displayed state away.
  */
 export type SmoothedLive = { display: LiveSnapshot | null; frame: FrameStore; resyncing: boolean };
 
@@ -56,11 +53,8 @@ type Loop = {
   /** The constraint definition the committed snapshot was priced under, and the first block known to use it. */
   signature: string | null;
   signatureSince: number;
-  /**
-   * The block of an owner call that replaced the constraints, waiting for the
-   * next commit. A replacement that reinstalls identical targets and windows
-   * still resets the backlogs, so the signature alone does not see it.
-   */
+  /** The block of an owner call that replaced the constraints, waiting for the next commit. A replacement
+   * that reinstalls identical targets still resets the backlogs, so the signature alone does not see it. */
   pendingConstraintBlock: number | null;
 };
 
@@ -83,32 +77,12 @@ function emptyLoop(): Loop {
 }
 
 /**
- * Smooths a feed that ticks many times a second into something the eye can
- * follow. One requestAnimationFrame loop does all of it, keyed on frame
- * timestamps rather than timers:
- *
- * - every DISPLAY_INTERVAL_MS the newest pending tick becomes `display` and
- *   the frame's wall clock is refreshed, so block number, "since last block"
- *   and everything else at the cadence move together;
- * - blocks are handed on every frame in which the ring changed, in one batch;
- * - the figures ease toward their targets with an exponential approach
- *   (see lib/smoothing), long-window backlogs toward a target that itself
- *   drains at the constraint's rate since the sample, so nothing snaps;
- *   contributions and shares are computed from those eased backlogs, never
- *   eased on their own;
- * - a constraint definition that changes (an owner action) snaps every figure
- *   and stops the short-window average from reaching back past the change;
- * - with prefers-reduced-motion the tween and the drain are off and only the
- *   cadence applies; the preference is read again on every frame, so changing
- *   it takes effect at once;
- * - a hidden tab stops the loop; the feed itself is suspended by useLive;
- * - a reorg orphans everything above the ancestor. useLive drops the snapshot
- *   it invalidates, so the display clears (`resyncing`) rather than easing
- *   from an orphan, and only the tick that arrives after the reorg is treated
- *   as a fresh commit: shown on the next frame with its values snapped.
- *
- * A cleared feed (network switch) clears the display at once rather than at
- * the next cadence, so a stale network is never shown under a new one.
+ * Smooths a feed that ticks many times a second into something the eye can follow. One
+ * requestAnimationFrame loop does all of it: the newest pending tick becomes `display` every
+ * DISPLAY_INTERVAL_MS, blocks are handed on in batches, and the figures ease toward their targets (see
+ * lib/smoothing) with long-window backlogs draining at the constraint's rate. A changed constraint
+ * definition snaps every figure; prefers-reduced-motion, read again every frame, leaves only the cadence.
+ * A reorg clears the display rather than easing from an orphan, as does a cleared feed.
  */
 export function useSmoothedLive(
   live: Pick<LiveState, "snapshot" | "recentBlocks"> & Partial<Pick<LiveState, "reorgs" | "resyncing" | "ownerActions">>,
@@ -121,9 +95,8 @@ export function useSmoothedLive(
   const reorgs = live.reorgs ?? 0;
   const seenReorgs = useRef(reorgs);
   const reduced = useRef(prefersReducedMotion());
-  // The newest owner call that replaced what prices a block. A replacement
-  // with identical targets and windows leaves the signature alone but still
-  // installs new starting backlogs, so it is tracked in its own right.
+  // The newest owner call that replaced what prices a block. One with identical targets leaves the
+  // signature alone but still installs new starting backlogs, so it is tracked in its own right.
   const ownerActions = live.ownerActions;
   const constraintBlock = useMemo(() => (ownerActions ? latestConstraintBlock(ownerActions) : null), [ownerActions]);
   const seenConstraintBlock = useRef<number | null>(constraintBlock);
@@ -143,8 +116,7 @@ export function useSmoothedLive(
     s.fresh = true;
   }, [reorgs]);
 
-  // The preference can change while the page stays open, so the loop reads it
-  // rather than the value sampled when the loop started.
+  // The preference can change while the page stays open, so the loop reads it every frame.
   useEffect(() => {
     const query = reducedMotionQuery();
     if (!query) return;
@@ -176,10 +148,8 @@ export function useSmoothedLive(
   useEffect(() => {
     const s = loop.current;
     s.blocks = live.recentBlocks;
-    // A block is placed once, when it enters the ring, and loses its place
-    // when the ring evicts it. Every live chart reads the same map, so the
-    // fee chart and the throughput chart under it agree on where a block is
-    // and neither rebuilds the placement of its own.
+    // A block is placed once, when it enters the ring. Every live chart reads the same map, so the fee
+    // chart and the throughput chart under it agree on where a block is.
     s.places = assignPlaces(s.places, live.recentBlocks);
   }, [live.recentBlocks]);
 
@@ -209,15 +179,12 @@ export function useSmoothedLive(
             s.values = null;
             values = null;
           }
-          // A new constraint definition makes the old figures meaningless:
-          // the tween snaps on the signature, and the short-window average
-          // stops before the block that introduced it.
+          // A new constraint definition makes the old figures meaningless: the tween snaps on the
+          // signature, and the short-window average stops before the block that introduced it.
           const signature = signatureOf(definitionOf(committing.snapshot));
           if (s.signature !== null && s.signature !== signature) s.signatureSince = committing.snapshot.block.number;
-          // An owner call that replaced the constraints, parameter-identical
-          // or not: the backlogs it installed have nothing to do with the
-          // ones before it, so the figures snap and the short-window average
-          // stops at the block the call landed on.
+          // An owner call that replaced the constraints, parameter-identical or not: the backlogs it
+          // installed have nothing to do with the ones before it.
           if (s.pendingConstraintBlock !== null) {
             s.signatureSince = s.pendingConstraintBlock;
             s.pendingConstraintBlock = null;
@@ -249,8 +216,8 @@ export function useSmoothedLive(
     };
   }, [enabled, visible, frame]);
 
-  // A cleared feed hides the committed snapshot at once, and a new network's
-  // first tick is never preceded by the old network's last one.
+  // A cleared feed hides the committed snapshot at once, so a new network's first tick is never preceded
+  // by the old network's last.
   const display = live.snapshot && committed && committed.chainId === live.snapshot.chainId ? committed : null;
   const resyncing = (live.resyncing ?? false) && display === null;
   return useMemo(() => ({ display, frame, resyncing }), [display, frame, resyncing]);

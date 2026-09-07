@@ -4,11 +4,8 @@ import { useState } from "react";
 import { formatInteger } from "@/utils/format";
 import { applicableRows, type TooltipRow } from "./ChartTooltip";
 
-/**
- * A named set of the rows a chart's tooltip reads out. The inspector and the
- * table below read the same ones, so nothing a pointer can see is only
- * available to a pointer.
- */
+/** A named set of the rows a chart's tooltip reads out, shared with the inspector and the table, so
+ * nothing a pointer can see is only available to a pointer. */
 export type ReadoutGroup = { title: string; rows: TooltipRow[] };
 
 /** The rows of every group, in order, with a key that stays unique across groups. */
@@ -17,14 +14,9 @@ function allRows(groups: readonly ReadoutGroup[]): { key: string; row: TooltipRo
 }
 
 /**
- * Keyboard access to every point of a chart: a slider picks one and the same
- * rows its tooltip would show are read out in a live region. The slider is a
- * native range input, so it comes with arrow keys, Home and End and a screen
- * reader announcement for free.
- *
- * Until the reader moves the slider it follows the newest point, which is what
- * a live chart is about; the first move pins it, and the point stays where it
- * was put.
+ * Keyboard access to every point of a chart: a native range input picks one and the rows its tooltip
+ * would show are read out in a live region. Until the reader moves the slider it follows the newest
+ * point; the first move pins it.
  */
 export function PointInspector({
   points,
@@ -80,11 +72,8 @@ export function PointInspector({
 }
 
 /**
- * Every point of a chart as a table, one row per point and one column per
- * value the tooltip carries. Its points are taken when it is opened and held:
- * a live chart moves several times a second, and a table that rewrote itself
- * under the reader would be unreadable as well as expensive. Closing and
- * reopening it takes the points again.
+ * Every point of a chart as a table. Its points are taken when it is opened and held: a live chart moves
+ * several times a second, and a table that rewrote itself under the reader would be unreadable.
  */
 export function PointTable({
   points,

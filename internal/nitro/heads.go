@@ -35,16 +35,13 @@ type Head struct {
 	Timestamp uint64
 }
 
-// HeadSubscriber keeps an eth_subscribe("newHeads") subscription open over
-// WebSocket. It reconnects with exponential back-off (1 s to 30 s) and
-// reports whether it is currently subscribed so the follower can fall back
-// to polling while the socket is down. The URL is never logged: it can
-// carry a key.
+// HeadSubscriber keeps an eth_subscribe("newHeads") subscription open over WebSocket. It reconnects
+// with exponential back-off and reports whether it is subscribed so the follower can fall back to
+// polling. The URL is never logged: it can carry a key.
 type HeadSubscriber struct {
 	url func(context.Context) (string, error)
-	// lease, when set, resolves the endpoint and takes the report of what
-	// happened with its socket, so a WebSocket that does not work moves
-	// the subscription to another endpoint.
+	// lease, when set, resolves the endpoint and takes the report of what happened with its socket, so
+	// a WebSocket that does not work moves the subscription to another endpoint.
 	lease        func(context.Context) (*WSLease, error)
 	userAgent    string
 	log          *logger.Logger
@@ -60,28 +57,22 @@ type HeadSubscriber struct {
 // HeadOption customizes a HeadSubscriber.
 type HeadOption func(*HeadSubscriber)
 
-// WithHeadLogger sets the logger.
 func WithHeadLogger(l *logger.Logger) HeadOption { return func(s *HeadSubscriber) { s.log = l } }
 
-// WithHeadURL replaces the fixed URL with a resolver called before every
-// connection attempt, so a subscriber rebinds to another endpoint the
-// moment the one it followed is disabled or fails verification. An error
-// keeps it retrying with its back-off.
+// WithHeadURL replaces the fixed URL with a resolver called before every connection attempt, so a
+// subscriber rebinds when the endpoint it followed is disabled. An error keeps it retrying.
 func WithHeadURL(fn func(context.Context) (string, error)) HeadOption {
 	return func(s *HeadSubscriber) { s.url = fn }
 }
 
-// WithHeadLease replaces the URL resolver with one that leases an
-// endpoint: the subscriber then reports every dial, subscribe and
-// disconnect failure back, so an endpoint whose WebSocket does not work is
-// cooled down and the next attempt resolves another one. This is the form
-// a Pool provides (Pool.WSEndpoint).
+// WithHeadLease replaces the URL resolver with one that leases an endpoint: the subscriber then reports
+// every dial, subscribe and disconnect failure back, so an endpoint whose WebSocket does not work is
+// cooled down. This is the form a Pool provides.
 func WithHeadLease(fn func(context.Context) (*WSLease, error)) HeadOption {
 	return func(s *HeadSubscriber) { s.lease = fn }
 }
 
-// WithHeadHTTPClient sets the HTTP client used for the WebSocket handshake.
-// Its Timeout bounds the handshake.
+// WithHeadHTTPClient sets the HTTP client used for the WebSocket handshake; its Timeout bounds it.
 func WithHeadHTTPClient(h *http.Client) HeadOption {
 	return func(s *HeadSubscriber) { s.httpClient = h }
 }
@@ -91,8 +82,8 @@ func WithHeadBackoff(minWait, maxWait time.Duration) HeadOption {
 	return func(s *HeadSubscriber) { s.minBackoff, s.maxBackoff = minWait, maxWait }
 }
 
-// WithHeadPingInterval sets how often the socket is pinged; a missed pong
-// closes it so a dead connection is noticed even on an idle chain.
+// WithHeadPingInterval sets how often the socket is pinged; a missed pong closes it, so a dead
+// connection is noticed even on an idle chain.
 func WithHeadPingInterval(d time.Duration) HeadOption {
 	return func(s *HeadSubscriber) { s.pingInterval = d }
 }
@@ -102,8 +93,8 @@ func withHeadSleep(sleep func(context.Context, time.Duration) error) HeadOption 
 	return func(s *HeadSubscriber) { s.sleep = sleep }
 }
 
-// NewHeadSubscriber creates a subscriber for a ws:// or wss:// endpoint.
-// WithHeadURL replaces the fixed endpoint with a resolver.
+// NewHeadSubscriber creates a subscriber for a ws:// or wss:// endpoint. WithHeadURL replaces the
+// fixed endpoint with a resolver.
 func NewHeadSubscriber(url string, opts ...HeadOption) *HeadSubscriber {
 	s := &HeadSubscriber{
 		url:          func(context.Context) (string, error) { return url, nil },
@@ -124,10 +115,9 @@ func NewHeadSubscriber(url string, opts ...HeadOption) *HeadSubscriber {
 // Connected reports whether a newHeads subscription is live right now.
 func (s *HeadSubscriber) Connected() bool { return s.connected.Load() }
 
-// Run keeps the subscription alive until ctx ends, calling fn for every
-// head from the goroutine that called Run. Connection loss is logged and
-// retried with exponential back-off; the back-off resets after each
-// successful subscription.
+// Run keeps the subscription alive until ctx ends, calling fn for every head from the goroutine that
+// called Run. Connection loss is retried with exponential back-off, which resets after each successful
+// subscription.
 func (s *HeadSubscriber) Run(ctx context.Context, fn func(Head)) {
 	backoff := s.minBackoff
 	for ctx.Err() == nil {
@@ -148,9 +138,8 @@ func (s *HeadSubscriber) Run(ctx context.Context, fn func(Head)) {
 	}
 }
 
-// target resolves the endpoint of one connection attempt: its URL, the
-// scrubber that keeps that URL out of every error, and the lease that
-// reports the outcome (nil when the subscriber was built with a plain URL).
+// target resolves the endpoint of one connection attempt: its URL, the scrubber that keeps that URL
+// out of every error, and the lease that reports the outcome (nil for a plain URL).
 type target struct {
 	url   string
 	scrub *scrubber
@@ -172,11 +161,9 @@ func (s *HeadSubscriber) target(ctx context.Context) (target, error) {
 	return target{url: u, scrub: newScrubber(0, u)}, nil
 }
 
-// runOnce dials, subscribes and delivers heads until the connection ends.
-// subscribed reports whether the subscription was acknowledged. Every
-// error it returns is sanitized: the dialer reports a transport failure as
-// a *url.Error carrying the whole URL, which is a credential, and a
-// provider can quote the request back in a subscribe error.
+// runOnce dials, subscribes and delivers heads until the connection ends; subscribed reports whether
+// the subscription was acknowledged. Every error is sanitized: the dialer reports a transport failure
+// as a *url.Error carrying the whole URL, and a provider can quote the request back in an error.
 func (s *HeadSubscriber) runOnce(ctx context.Context, fn func(Head)) (subscribed bool, err error) {
 	t, err := s.target(ctx)
 	if err != nil {
@@ -230,8 +217,7 @@ func (s *HeadSubscriber) runOnce(ctx context.Context, fn func(Head)) (subscribed
 	}
 }
 
-// endpoint names the leased endpoint for a log line, -1 when the
-// subscriber follows a plain URL and has no index to report.
+// endpoint names the leased endpoint for a log line, -1 for a plain URL.
 func (t target) endpoint() int {
 	if t.lease == nil {
 		return -1
@@ -239,9 +225,8 @@ func (t target) endpoint() int {
 	return t.lease.Index
 }
 
-// subscribe sends eth_subscribe and waits for its acknowledgement within
-// the handshake limit. Notifications that arrive before the ack are
-// ignored: nothing can be attributed to a subscription id yet.
+// subscribe sends eth_subscribe and waits for its acknowledgement within the handshake limit.
+// Notifications before the ack are ignored: nothing can be attributed to a subscription id yet.
 func (s *HeadSubscriber) subscribe(ctx context.Context, conn *websocket.Conn) (string, error) {
 	hctx, cancel := context.WithTimeout(ctx, s.httpClient.Timeout)
 	defer cancel()
@@ -272,9 +257,8 @@ func (s *HeadSubscriber) subscribe(ctx context.Context, conn *websocket.Conn) (s
 	}
 }
 
-// pingLoop pings the peer every pingInterval and closes the connection when
-// a pong does not arrive in time, which makes the reader fail and Run
-// reconnect.
+// pingLoop pings the peer every pingInterval and closes the connection when a pong does not arrive,
+// which makes the reader fail and Run reconnect.
 func (s *HeadSubscriber) pingLoop(ctx context.Context, conn *websocket.Conn) {
 	for {
 		if err := s.sleep(ctx, s.pingInterval); err != nil {
@@ -306,8 +290,8 @@ type headNotification struct {
 	} `json:"params"`
 }
 
-// parseHeadNotification decodes one message. ok is false for messages that
-// are not newHeads notifications for subID (they are ignored).
+// parseHeadNotification decodes one message. ok is false for messages that are not newHeads
+// notifications for subID.
 func parseHeadNotification(data []byte, subID string) (Head, bool, error) {
 	var n headNotification
 	if err := json.Unmarshal(data, &n); err != nil {

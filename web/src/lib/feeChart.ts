@@ -1,8 +1,6 @@
-// The base fee chart over a bucketed range: the rows it draws, its log
-// domain, the owner-action markers on it and the rows its tooltip reads out.
-// The hero draws this chart for every range but Live, and the history section
-// draws the other charts from the same rows, so the mapping lives here rather
-// than in either component.
+// The base fee chart over a bucketed range: the rows it draws, its log domain, the owner-action markers
+// and the rows its tooltip reads out. The hero draws this chart for every range but Live and the history
+// section draws the other charts from the same rows, so the mapping lives here.
 
 import type { OwnerAction, PricerModel, Series } from "@/types";
 import type { TooltipRow } from "@/components/ChartTooltip";
@@ -29,10 +27,8 @@ export function actionsInBucket(markers: readonly Marker[], t: number, bucketSec
 }
 
 /**
- * What an owner action did, in one line: the constraint set it installed, the
- * floor it set, or just its name. The constraints go through the same parser
- * the timeline uses, so the objects the api actually sends read as constraints
- * rather than as "[object Object]".
+ * What an owner action did, in one line: the constraint set it installed, the floor it set, or just its
+ * name. The constraints go through the same parser the timeline uses.
  */
 export function describeAction(a: OwnerAction): string {
   if (a.method === "setGasPricingConstraints") {
@@ -51,10 +47,7 @@ export function describeAction(a: OwnerAction): string {
   return a.method;
 }
 
-/**
- * The tooltip footnote for a hovered bucket: every owner action that landed
- * inside it, or null when none did.
- */
+/** The tooltip footnote for a hovered bucket: every owner action that landed inside it, or null. */
 export function ownerActionNote(markers: readonly Marker[], bucketSeconds: number): (row: Record<string, unknown>) => string | null {
   return (row) => {
     const hits = actionsInBucket(markers, Number(row.t), bucketSeconds);
@@ -63,10 +56,9 @@ export function ownerActionNote(markers: readonly Marker[], bucketSeconds: numbe
 }
 
 /**
- * The whole tooltip footnote for a hovered bucket: that the collector has
- * only part of the bucket when that is so, then every owner action that
- * landed inside it. `sums` is true for a chart drawing sums per bucket, which
- * leaves a partial bucket out of its marks rather than drawing it short.
+ * The whole tooltip footnote for a hovered bucket: that the collector has only part of it, then every
+ * owner action inside it. `sums` is true for a chart drawing sums per bucket, which leaves a partial
+ * bucket out of its marks rather than drawing it short.
  */
 export function bucketNote(markers: readonly Marker[], bucketSeconds: number, sums = false): (row: Record<string, unknown>) => string | null {
   const actions = ownerActionNote(markers, bucketSeconds);
@@ -76,19 +68,15 @@ export function bucketNote(markers: readonly Marker[], bucketSeconds: number, su
   };
 }
 
-/**
- * A floor in gwei as a table or tooltip reads it, and "n/a" for a bucket that
- * recorded none: a missing floor is not a floor of zero.
- */
+/** A floor in gwei as a table or tooltip reads it, and "n/a" for a bucket that recorded none: a missing
+ * floor is not a floor of zero. */
 export function formatFloor(gwei: number | null): string {
   return gwei === null ? "n/a" : formatSignificant(gwei, 3);
 }
 
 /**
- * The log y domain of the fee chart: the band, the average and the floor in
- * force all fit inside it. A bucket with no recorded floor contributes only
- * its fees: a missing floor is not a floor of zero, and it must not pull the
- * axis anywhere.
+ * The log y domain of the fee chart: the band, the average and the floor in force all fit inside it. A
+ * bucket with no recorded floor contributes only its fees, since a missing floor is not a floor of zero.
  */
 export function feeDomain(points: readonly ChartPoint[]): [number, number] {
   return logDomain(points.flatMap((p) => (p.floor === null ? [p.feeMin, p.feeMax] : [p.feeMin, p.feeMax, p.floor])));
@@ -119,10 +107,8 @@ export function feeChartLabel(rangeLabel: string, points: readonly ChartPoint[])
 }
 
 /**
- * Everything a bucketed range is drawn from. `points` is one row per bucket
- * (the table and the inspector read those); `drawn` duplicates each bucket
- * where the set in force changes, so a replacement is a vertical edge rather
- * than a slope across the bucket.
+ * Everything a bucketed range is drawn from. `points` is one row per bucket; `drawn` duplicates each
+ * bucket where the set in force changes, so a replacement is a vertical edge rather than a slope.
  */
 /** A row the charts draw: a bucket, or the empty row that breaks a line across a gap. */
 export type DrawnRow = ChartPoint | GapRow;
@@ -145,18 +131,14 @@ export function feeChartData(series: Series | null, model: PricerModel): FeeChar
   const gaps = gapModel(series, points);
   return {
     points,
-    // Empty rows inside the holes, so a missing bucket breaks the line rather
-    // than being bridged by a segment that stands for nothing.
+    // Empty rows inside the holes, so a missing bucket breaks the line rather than being bridged.
     drawn: withGapBreaks(withSetBoundaries(points), gaps.gaps),
     markers: markersFor(series),
     domain: feeDomain(points),
-    // The axis spans the window, so its ticks are formatted for the range that
-    // was asked for and not for the part of it that happens to hold buckets.
+    // The axis spans the window, so its ticks are formatted for the range that was asked for.
     span: gaps.window.to > gaps.window.from ? gaps.window.to - gaps.window.from : spanSeconds(points),
-    // The bucket width is the resolution's own, never the distance between the
-    // first two points: two per-block points sharing a timestamp made a
-    // zero-width bucket, one missing point inflated it to the size of the
-    // hole, and a range with a single bucket read as a minute whatever it was.
+    // The bucket width is the resolution's own, never the distance between the first two points: two
+    // per-block points sharing a timestamp made a zero-width bucket, and one missing point inflated it.
     bucketSeconds: bucketWidth(series.resolution, points),
     gaps,
   };

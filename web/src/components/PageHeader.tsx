@@ -13,7 +13,7 @@ export function PageHeader({ name, info, children }: { name: string; info: Netwo
           gascurve
         </Link>
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-          <span className="text-[11px] uppercase tracking-[0.18em] text-label">nitro base fee telemetry</span>
+          <span className="text-[11px] uppercase tracking-[0.18em] text-label">live gas prices</span>
           <span className="text-sm text-ink-3">{info ? `${info.displayName} · chain ${info.chainId}` : name}</span>
         </div>
       </div>

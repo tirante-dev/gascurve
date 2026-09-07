@@ -38,42 +38,30 @@ const (
 	// StateRPCCapacity is the latest live-ingress demand and configured RPC
 	// capacity estimate (model.RPCCapacity), persisted for the API status.
 	StateRPCCapacity = "rpc_capacity"
-	// StateLiveStart records the first block the live loop stored
-	// ({"block":n,"ts":unix}); buckets from its hour on are rebuilt from
-	// block rows, older ones belong to the backfill alone.
+	// StateLiveStart records the first block the live loop stored ({"block":n,"ts":unix}); buckets
+	// from its hour on are rebuilt from block rows, older ones belong to the backfill alone.
 	StateLiveStart = "live_start"
-	// StateHoles is the legacy JSON checkpoint imported transactionally into
-	// missing_ranges at collector startup. It remains only when decoding or
-	// persistence failed, so operators can repair it without data loss.
+	// StateHoles is the legacy JSON checkpoint imported transactionally into missing_ranges at
+	// startup. It remains only when that failed, so operators can repair it without data loss.
 	StateHoles = "holes"
 	// StateEndpoints is the endpoint pool's routing state
 	// (model.EndpointsStatus as JSON), refreshed by the slow loop.
 	StateEndpoints = "endpoints"
-	// StateOwnerScanThrough is the block through which the owner-action
-	// timeline is complete: the slow loop writes it only when a scan pass
-	// reached the head it started from, never per chunk. The backfill
-	// starts a segment only when it covers the block before live_start.
+	// StateOwnerScanThrough is the block through which the owner-action timeline is complete: written
+	// only when a scan pass reached the head it started from, never per chunk.
 	StateOwnerScanThrough = "owner_scan_through"
-	// StateGeneration counts the canonical rewinds of a chain: every reorg
-	// rewind bumps it inside its own transaction. A writer captures it
-	// before its network calls and compares it inside its chain
-	// transaction, so work fetched from a fork that has since been rewound
-	// is discarded instead of committed on top of the canonical chain.
+	// StateGeneration counts the canonical rewinds of a chain. A writer captures it before its network
+	// calls and compares it inside its chain transaction, so work fetched from a fork that has since
+	// been rewound is discarded instead of committed on top of the canonical chain.
 	StateGeneration = "generation"
-	// StateOwnerScanOrigin describes where a deliberately truncated owner
-	// scan began ({"block":n,"minBaseFee":"…","archive":bool}): the pricing
-	// state in force there when an archive endpoint could sample it, or a
-	// marker that nothing before the block can be reconstructed.
+	// StateOwnerScanOrigin describes where a deliberately truncated owner scan began: the pricing state
+	// in force there, or a marker that nothing before the block can be reconstructed.
 	StateOwnerScanOrigin = "owner_scan_origin"
-	// StateEthUsd is the last ETH/USD spot the slow loop fetched
-	// ({"price":"…","at":"RFC3339","source":"…"}), recorded per chain so the
-	// API can serve it in /live without an outbound call of its own.
+	// StateEthUsd is the last ETH/USD spot the slow loop fetched, recorded per chain so the API can
+	// serve it in /live without an outbound call of its own.
 	StateEthUsd = "eth_usd"
-	// StateHistoryEpoch is the network's history_epoch the collector last
-	// rebuilt the reconstructed history at, as a decimal string. A
-	// configured epoch above it drops the backfill's buckets and
-	// checkpoints once and records the new value, so the rebuild runs on
-	// a raised setting rather than on every restart.
+	// StateHistoryEpoch is the network's history_epoch the collector last rebuilt at. A configured
+	// epoch above it triggers the rebuild once and records the new value, so a restart alone does not.
 	StateHistoryEpoch = "history_epoch"
 	// StateTelemetry is the collector's heartbeat, per-loop outcomes and
 	// cumulative RPC and database accounting for /status.
@@ -108,8 +96,7 @@ func Open(url string, maxOpen, maxIdle int) (*sqlx.DB, error) {
 	return d, nil
 }
 
-// Wei maps NUMERIC(40,0) columns to *big.Int and renders as a decimal
-// string in JSON.
+// Wei maps NUMERIC(40,0) columns to *big.Int and renders as a decimal string in JSON.
 type Wei struct {
 	*big.Int
 }
@@ -122,12 +109,10 @@ func NewWei(v *big.Int) Wei {
 	return Wei{v}
 }
 
-// WeiFromUint64 builds a Wei from an unsigned integer.
 func WeiFromUint64(v uint64) Wei {
 	return Wei{new(big.Int).SetUint64(v)}
 }
 
-// BigInt returns the value, never nil.
 func (w Wei) BigInt() *big.Int {
 	if w.Int == nil {
 		return new(big.Int)
@@ -135,17 +120,14 @@ func (w Wei) BigInt() *big.Int {
 	return w.Int
 }
 
-// String renders the decimal value ("0" for nil).
 func (w Wei) String() string {
 	return w.BigInt().String()
 }
 
-// Value implements driver.Valuer.
 func (w Wei) Value() (driver.Value, error) {
 	return w.String(), nil
 }
 
-// Scan implements sql.Scanner.
 func (w *Wei) Scan(src any) error {
 	switch v := src.(type) {
 	case nil:
@@ -172,12 +154,10 @@ func (w *Wei) setString(s string) error {
 	return nil
 }
 
-// MarshalJSON renders the decimal string.
 func (w Wei) MarshalJSON() ([]byte, error) {
 	return json.Marshal(w.String())
 }
 
-// UnmarshalJSON accepts a decimal string or a JSON number.
 func (w *Wei) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
@@ -186,9 +166,8 @@ func (w *Wei) UnmarshalJSON(b []byte) error {
 	return w.setString(s)
 }
 
-// NullWei is a nullable Wei: Valid is false for SQL NULL, which marks a
-// value that was never recorded (history written before the column
-// existed) as opposed to a zero.
+// NullWei is a nullable Wei: Valid is false for SQL NULL, which marks a value that was never
+// recorded (history written before the column existed) rather than a zero.
 type NullWei struct {
 	Wei   Wei
 	Valid bool
@@ -199,12 +178,10 @@ func NewNullWei(v *big.Int) NullWei {
 	return NullWei{Wei: NewWei(v), Valid: true}
 }
 
-// NullWeiFromUint64 builds a known NullWei from an unsigned integer.
 func NullWeiFromUint64(v uint64) NullWei {
 	return NullWei{Wei: WeiFromUint64(v), Valid: true}
 }
 
-// Value implements driver.Valuer.
 func (n NullWei) Value() (driver.Value, error) {
 	if !n.Valid {
 		return nil, nil
@@ -212,7 +189,6 @@ func (n NullWei) Value() (driver.Value, error) {
 	return n.Wei.Value()
 }
 
-// Scan implements sql.Scanner.
 func (n *NullWei) Scan(src any) error {
 	if src == nil {
 		*n = NullWei{}
@@ -234,7 +210,6 @@ func (n NullWei) StringPtr() *string {
 // JSONB maps JSONB columns. A nil value is SQL NULL and JSON null.
 type JSONB []byte
 
-// Value implements driver.Valuer, sending the document as text.
 func (j JSONB) Value() (driver.Value, error) {
 	if j == nil {
 		return nil, nil
@@ -245,7 +220,6 @@ func (j JSONB) Value() (driver.Value, error) {
 	return string(j), nil
 }
 
-// Scan implements sql.Scanner.
 func (j *JSONB) Scan(src any) error {
 	switch v := src.(type) {
 	case nil:
@@ -260,7 +234,6 @@ func (j *JSONB) Scan(src any) error {
 	return nil
 }
 
-// MarshalJSON emits the raw document.
 func (j JSONB) MarshalJSON() ([]byte, error) {
 	if j == nil {
 		return []byte("null"), nil
@@ -268,7 +241,6 @@ func (j JSONB) MarshalJSON() ([]byte, error) {
 	return j, nil
 }
 
-// UnmarshalJSON stores the raw document.
 func (j *JSONB) UnmarshalJSON(b []byte) error {
 	if string(b) == "null" {
 		*j = nil
@@ -298,12 +270,10 @@ func (j JSONB) Unmarshal(v any) error {
 	return json.Unmarshal(j, v)
 }
 
-// Uint64Array maps NUMERIC(20,0)[] columns to unsigned 64-bit values
-// exactly: backlogs saturate at 2^64-1 in the pricer, which BIGINT cannot
-// hold. It scans the array text form ("{1,2}") and renders the same.
+// Uint64Array maps NUMERIC(20,0)[] columns exactly: backlogs saturate at 2^64-1 in the pricer, which
+// BIGINT cannot hold. It scans and renders the array text form ("{1,2}").
 type Uint64Array []uint64
 
-// Value implements driver.Valuer.
 func (a Uint64Array) Value() (driver.Value, error) {
 	if len(a) == 0 {
 		return "{}", nil
@@ -320,7 +290,6 @@ func (a Uint64Array) Value() (driver.Value, error) {
 	return b.String(), nil
 }
 
-// Scan implements sql.Scanner.
 func (a *Uint64Array) Scan(src any) error {
 	var s string
 	switch v := src.(type) {

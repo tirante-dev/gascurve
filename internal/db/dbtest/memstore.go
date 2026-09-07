@@ -51,7 +51,6 @@ type MemStore struct {
 // ErrInjected is returned by methods listed in FailOn.
 var ErrInjected = errors.New("injected failure")
 
-// New creates an empty store.
 func New() *MemStore {
 	return &MemStore{
 		NetworkRows: map[uint64]db.Network{},
@@ -67,7 +66,6 @@ func New() *MemStore {
 	}
 }
 
-// MissingRanges lists a copy of one chain's durable missing intervals.
 func (m *MemStore) MissingRanges(_ context.Context, chainID uint64) ([]db.MissingRange, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -79,8 +77,8 @@ func (m *MemStore) MissingRanges(_ context.Context, chainID uint64) ([]db.Missin
 	return out, nil
 }
 
-// ReplaceMissingRanges replaces one chain's intervals after copying their
-// byte slices, matching the value semantics of committed database rows.
+// ReplaceMissingRanges replaces one chain's intervals after copying their byte slices, matching the
+// value semantics of committed database rows.
 func (m *MemStore) ReplaceMissingRanges(_ context.Context, chainID uint64, ranges []db.MissingRange) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -101,8 +99,7 @@ func (m *MemStore) ReplaceMissingRanges(_ context.Context, chainID uint64, range
 	return nil
 }
 
-// hook runs the test hook of a method, outside the store lock so it may
-// call back into the follower.
+// hook runs the test hook of a method, outside the store lock so it may call back into the follower.
 func (m *MemStore) hook(method string) {
 	m.mu.Lock()
 	fn := m.Hooks[method]
@@ -119,15 +116,14 @@ func (m *MemStore) fail(method string) error {
 	return nil
 }
 
-// Ping returns PingErr.
 func (m *MemStore) Ping(context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.PingErr
 }
 
-// SetFailure toggles the injected failure of a method under the lock, so
-// tests may flip it from another goroutine.
+// SetFailure toggles the injected failure of a method under the lock, so tests may flip it from
+// another goroutine.
 func (m *MemStore) SetFailure(method string, fail bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -138,7 +134,6 @@ func (m *MemStore) SetFailure(method string, fail bool) {
 	delete(m.FailOn, method)
 }
 
-// WithTx runs fn against the same store.
 func (m *MemStore) WithTx(_ context.Context, fn func(db.Store) error) error {
 	m.mu.Lock()
 	err := m.fail("WithTx")
@@ -149,10 +144,9 @@ func (m *MemStore) WithTx(_ context.Context, fn func(db.Store) error) error {
 	return fn(m)
 }
 
-// WithChainTx runs fn holding the chain's mutex, mirroring the advisory
-// lock: nested calls for the same chain reuse the transaction, one for a
-// higher chain id adds its lock, and the incompatible combinations fail
-// exactly as Postgres refuses them.
+// WithChainTx runs fn holding the chain's mutex, mirroring the advisory lock: nested calls for the
+// same chain reuse the transaction, one for a higher chain id adds its lock, and the incompatible
+// combinations fail exactly as Postgres refuses them.
 func (m *MemStore) WithChainTx(ctx context.Context, chainID uint64, fn func(db.Store) error) error {
 	m.mu.Lock()
 	err := m.fail("WithChainTx")
@@ -165,7 +159,6 @@ func (m *MemStore) WithChainTx(ctx context.Context, chainID uint64, fn func(db.S
 	return fn(&chainTx{MemStore: m, locks: []uint64{chainID}})
 }
 
-// lockChain takes a chain's mutex and returns its release.
 func (m *MemStore) lockChain(chainID uint64) func() {
 	m.chainLocks.Lock()
 	mu, ok := m.chainMu[chainID]
@@ -178,7 +171,6 @@ func (m *MemStore) lockChain(chainID uint64) func() {
 	return mu.Unlock
 }
 
-// WithSnapshotTx runs fn against the same store.
 func (m *MemStore) WithSnapshotTx(_ context.Context, fn func(db.Store) error) error {
 	m.mu.Lock()
 	err := m.fail("WithSnapshotTx")
@@ -189,20 +181,17 @@ func (m *MemStore) WithSnapshotTx(_ context.Context, fn func(db.Store) error) er
 	return fn(m)
 }
 
-// chainTx is the store bound to an open chain transaction, carrying the
-// chain locks it holds so nested calls can be checked the way Postgres
-// checks them.
+// chainTx is the store bound to an open chain transaction, carrying the chain locks it holds so nested
+// calls can be checked the way Postgres checks them.
 type chainTx struct {
 	*MemStore
 	locks []uint64
 }
 
-// WithTx reuses the open transaction.
 func (c *chainTx) WithTx(_ context.Context, fn func(db.Store) error) error { return fn(c) }
 
-// WithChainTx reuses the open transaction for a chain it already locks,
-// adds a missing lock in ascending order, and refuses one that would
-// invert that order.
+// WithChainTx reuses the open transaction for a chain it already locks, adds a missing lock in
+// ascending order, and refuses one that would invert that order.
 func (c *chainTx) WithChainTx(_ context.Context, chainID uint64, fn func(db.Store) error) error {
 	for _, held := range c.locks {
 		if held == chainID {
@@ -217,8 +206,8 @@ func (c *chainTx) WithChainTx(_ context.Context, chainID uint64, fn func(db.Stor
 	return fn(&chainTx{MemStore: c.MemStore, locks: append(append([]uint64(nil), c.locks...), chainID)})
 }
 
-// WithSnapshotTx refuses to run inside a writing transaction: the caller
-// would read its own uncommitted rows instead of one database moment.
+// WithSnapshotTx refuses to run inside a writing transaction: the caller would read its own
+// uncommitted rows instead of one database moment.
 func (c *chainTx) WithSnapshotTx(context.Context, func(db.Store) error) error {
 	return db.ErrNestedSnapshot
 }
@@ -240,7 +229,6 @@ func (m *MemStore) UpsertNetwork(_ context.Context, n db.Network) error {
 	return nil
 }
 
-// Networks lists networks by chain id.
 func (m *MemStore) Networks(context.Context) ([]db.Network, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -255,8 +243,7 @@ func (m *MemStore) Networks(context.Context) ([]db.Network, error) {
 	return out, nil
 }
 
-// NetworkByRef resolves a chain id (a decimal within the BIGINT range) or
-// otherwise a name, never both.
+// NetworkByRef resolves a chain id (a decimal within the BIGINT range) or otherwise a name, never both.
 func (m *MemStore) NetworkByRef(_ context.Context, ref string) (*db.Network, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -273,7 +260,6 @@ func (m *MemStore) NetworkByRef(_ context.Context, ref string) (*db.Network, err
 	return nil, nil
 }
 
-// UpdateNetworkHead records the head.
 func (m *MemStore) UpdateNetworkHead(_ context.Context, chainID, headBlock uint64, headAt, sampledAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -290,8 +276,8 @@ func (m *MemStore) UpdateNetworkHead(_ context.Context, chainID, headBlock uint6
 	return nil
 }
 
-// SetNetworkHead records the head after a rewind, leaving the fields
-// without a value null and the last error alone.
+// SetNetworkHead records the head after a rewind, leaving the fields without a value null and the last
+// error alone.
 func (m *MemStore) SetNetworkHead(_ context.Context, chainID uint64, headBlock *uint64, headAt, sampledAt *time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -316,7 +302,6 @@ func (m *MemStore) SetNetworkHead(_ context.Context, chainID uint64, headBlock *
 	return nil
 }
 
-// SetNetworkError records the error.
 func (m *MemStore) SetNetworkError(_ context.Context, chainID uint64, msg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -330,7 +315,6 @@ func (m *MemStore) SetNetworkError(_ context.Context, chainID uint64, msg string
 	return nil
 }
 
-// UpsertBlocks stores blocks.
 func (m *MemStore) UpsertBlocks(_ context.Context, blocks []db.Block) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -355,7 +339,6 @@ func (m *MemStore) sortedBlocks(chainID uint64) []db.Block {
 	return out
 }
 
-// BlockByNumber returns one block.
 func (m *MemStore) BlockByNumber(_ context.Context, chainID, number uint64) (*db.Block, error) {
 	m.hook("BlockByNumber")
 	m.mu.Lock()
@@ -370,7 +353,6 @@ func (m *MemStore) BlockByNumber(_ context.Context, chainID, number uint64) (*db
 	return &b, nil
 }
 
-// DeleteBlocksAfter removes and returns blocks above a number.
 func (m *MemStore) DeleteBlocksAfter(_ context.Context, chainID, after uint64) ([]db.Block, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -387,7 +369,6 @@ func (m *MemStore) DeleteBlocksAfter(_ context.Context, chainID, after uint64) (
 	return out, nil
 }
 
-// LatestBlock returns the highest block.
 func (m *MemStore) LatestBlock(_ context.Context, chainID uint64) (*db.Block, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -401,7 +382,6 @@ func (m *MemStore) LatestBlock(_ context.Context, chainID uint64) (*db.Block, er
 	return &bs[len(bs)-1], nil
 }
 
-// OldestBlock returns the lowest block.
 func (m *MemStore) OldestBlock(_ context.Context, chainID uint64) (*db.Block, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -415,7 +395,6 @@ func (m *MemStore) OldestBlock(_ context.Context, chainID uint64) (*db.Block, er
 	return &bs[0], nil
 }
 
-// RecentBlocks returns newest first.
 func (m *MemStore) RecentBlocks(_ context.Context, chainID uint64, limit int) ([]db.Block, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -430,7 +409,6 @@ func (m *MemStore) RecentBlocks(_ context.Context, chainID uint64, limit int) ([
 	return out, nil
 }
 
-// BlocksAfter returns blocks above a number.
 func (m *MemStore) BlocksAfter(_ context.Context, chainID, after uint64, limit int) ([]db.Block, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -446,8 +424,7 @@ func (m *MemStore) BlocksAfter(_ context.Context, chainID, after uint64, limit i
 	return out, nil
 }
 
-// BlocksMissingPosterGas returns blocks from a number up that carry no
-// poster gas, ascending.
+// BlocksMissingPosterGas returns blocks from a number up that carry no poster gas, ascending.
 func (m *MemStore) BlocksMissingPosterGas(_ context.Context, chainID, from uint64, limit int) ([]db.Block, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -463,8 +440,8 @@ func (m *MemStore) BlocksMissingPosterGas(_ context.Context, chainID, from uint6
 	return out, nil
 }
 
-// SetPosterGas records poster gas on stored rows, skipping a number that is
-// no longer stored, already has one, or carries more gas than the row used.
+// SetPosterGas records poster gas on stored rows, skipping a number no longer stored, already set, or
+// carrying more gas than the row used.
 func (m *MemStore) SetPosterGas(_ context.Context, chainID uint64, gas map[uint64]uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -482,7 +459,6 @@ func (m *MemStore) SetPosterGas(_ context.Context, chainID uint64, gas map[uint6
 	return nil
 }
 
-// BlocksBetween returns blocks in [from, to).
 func (m *MemStore) BlocksBetween(_ context.Context, chainID uint64, from, to time.Time) ([]db.Block, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -498,8 +474,7 @@ func (m *MemStore) BlocksBetween(_ context.Context, chainID uint64, from, to tim
 	return out, nil
 }
 
-// GasBetween sums total gas and, with complete receipt coverage, compute gas
-// over (from, to].
+// GasBetween sums total gas and, with complete receipt coverage, compute gas over (from, to].
 func (m *MemStore) GasBetween(_ context.Context, chainID uint64, from, to time.Time) (total uint64, compute *uint64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -524,7 +499,6 @@ func (m *MemStore) GasBetween(_ context.Context, chainID uint64, from, to time.T
 	return total, &computeTotal, nil
 }
 
-// TwoTxBlocks lists two-transaction blocks above a number.
 func (m *MemStore) TwoTxBlocks(_ context.Context, chainID, after uint64, limit int) ([]uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -540,7 +514,6 @@ func (m *MemStore) TwoTxBlocks(_ context.Context, chainID, after uint64, limit i
 	return out, nil
 }
 
-// PruneBlocks deletes old blocks.
 func (m *MemStore) PruneBlocks(_ context.Context, chainID uint64, before time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -580,8 +553,8 @@ func (m *MemStore) FoldBuckets(_ context.Context, buckets []db.Bucket) error {
 	return nil
 }
 
-// setIDAtLocked is the constraint set in force at a block among the sets
-// whose constraint count matches the block's backlogs.
+// setIDAtLocked is the constraint set in force at a block among the sets whose constraint count
+// matches the block's backlogs.
 func (m *MemStore) setIDAtLocked(chainID, number uint64, backlogs int) sql.NullInt64 {
 	var out sql.NullInt64
 	var bestBlock uint64
@@ -596,10 +569,8 @@ func (m *MemStore) setIDAtLocked(chainID, number uint64, backlogs int) sql.NullI
 	return out
 }
 
-// RebuildBuckets recomputes buckets from the rows in their windows.
-// pruneFrontierLocked mirrors the Postgres store's floor for rebuilds: the
-// recorded prune frontier, or the zero time when none is recorded or it does
-// not parse.
+// pruneFrontierLocked mirrors the Postgres floor for rebuilds: the recorded frontier, or zero when
+// none is recorded or it does not parse.
 func (m *MemStore) pruneFrontierLocked(chainID uint64) time.Time {
 	raw, ok := m.StateRows[stateKey(chainID, db.StatePruneFrontier)]
 	if !ok {
@@ -647,8 +618,7 @@ func (m *MemStore) RebuildBuckets(_ context.Context, chainID uint64, resolution 
 	return nil
 }
 
-// setSize is the number of constraints in a set document (-1 when it
-// cannot be read, which matches nothing).
+// setSize is the number of constraints in a set document, -1 when it cannot be read.
 func setSize(cs db.ConstraintSet) int {
 	var entries []json.RawMessage
 	if err := cs.Constraints.Unmarshal(&entries); err != nil {
@@ -657,9 +627,7 @@ func setSize(cs db.ConstraintSet) int {
 	return len(entries)
 }
 
-// DeleteBucketsBefore drops buckets starting before t.
-// BelowFrontier names those of starts below the recorded prune frontier,
-// mirroring the Postgres store: the same starts RebuildBuckets declines.
+// BelowFrontier names those of starts below the recorded frontier: the starts RebuildBuckets declines.
 func (m *MemStore) BelowFrontier(_ context.Context, chainID uint64, starts []time.Time) ([]time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -679,9 +647,7 @@ func (m *MemStore) BelowFrontier(_ context.Context, chainID uint64, starts []tim
 	return below, nil
 }
 
-// DiscardBucketsBelowFrontier removes the buckets at the given starts that
-// lie below the recorded prune frontier, mirroring the Postgres store: the
-// same starts RebuildBuckets declines.
+// DiscardBucketsBelowFrontier removes the buckets at those of starts below the recorded frontier.
 func (m *MemStore) DiscardBucketsBelowFrontier(_ context.Context, chainID uint64, resolution string, starts []time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -719,7 +685,6 @@ func (m *MemStore) DeleteBucketsBefore(_ context.Context, chainID uint64, before
 	return n, nil
 }
 
-// Buckets returns buckets in [from, to).
 func (m *MemStore) Buckets(_ context.Context, chainID uint64, resolution string, from, to time.Time) ([]db.Bucket, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -736,7 +701,6 @@ func (m *MemStore) Buckets(_ context.Context, chainID uint64, resolution string,
 	return out, nil
 }
 
-// InsertStateSample stores a sample.
 func (m *MemStore) InsertStateSample(_ context.Context, s db.StateSample) error {
 	m.hook("InsertStateSample")
 	m.mu.Lock()
@@ -754,7 +718,6 @@ func (m *MemStore) InsertStateSample(_ context.Context, s db.StateSample) error 
 	return nil
 }
 
-// LatestStateSample returns the newest sample.
 func (m *MemStore) LatestStateSample(_ context.Context, chainID uint64, withL1 bool) (*db.StateSample, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -778,7 +741,6 @@ func (m *MemStore) LatestStateSample(_ context.Context, chainID uint64, withL1 b
 	return &out, nil
 }
 
-// StateSampleAt returns the newest sample taken at or below a block.
 func (m *MemStore) StateSampleAt(_ context.Context, chainID, block uint64) (*db.StateSample, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -803,7 +765,6 @@ func (m *MemStore) StateSampleAt(_ context.Context, chainID, block uint64) (*db.
 	return &out, nil
 }
 
-// L1Samples returns the first L1 sample per step in [from, to).
 func (m *MemStore) L1Samples(_ context.Context, chainID uint64, from, to time.Time, step time.Duration) ([]db.StateSample, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -830,7 +791,6 @@ func (m *MemStore) L1Samples(_ context.Context, chainID uint64, from, to time.Ti
 	return out, nil
 }
 
-// PruneStateSamples deletes old samples.
 func (m *MemStore) PruneStateSamples(_ context.Context, chainID uint64, before time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -850,7 +810,6 @@ func (m *MemStore) PruneStateSamples(_ context.Context, chainID uint64, before t
 	return n, nil
 }
 
-// DeleteStateSamplesAfter deletes samples taken above a block.
 func (m *MemStore) DeleteStateSamplesAfter(_ context.Context, chainID, block uint64) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -870,7 +829,6 @@ func (m *MemStore) DeleteStateSamplesAfter(_ context.Context, chainID, block uin
 	return n, nil
 }
 
-// InsertOwnerActions inserts new actions.
 func (m *MemStore) InsertOwnerActions(_ context.Context, actions []db.OwnerAction) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -893,7 +851,6 @@ func (m *MemStore) InsertOwnerActions(_ context.Context, actions []db.OwnerActio
 	return n, nil
 }
 
-// OwnerActions lists actions newest first.
 func (m *MemStore) OwnerActions(_ context.Context, chainID uint64, from, to time.Time, limit int) ([]db.OwnerAction, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -925,7 +882,6 @@ func (m *MemStore) OwnerActions(_ context.Context, chainID uint64, from, to time
 	return out, nil
 }
 
-// OwnerActionsSince lists actions from a block on, ascending.
 func (m *MemStore) OwnerActionsSince(_ context.Context, chainID, block uint64) ([]db.OwnerAction, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -947,8 +903,7 @@ func (m *MemStore) OwnerActionsSince(_ context.Context, chainID, block uint64) (
 	return out, nil
 }
 
-// RewindAfter deletes owner actions, constraint sets and batch reports
-// above a block.
+// RewindAfter deletes owner actions, constraint sets and batch reports above a block.
 func (m *MemStore) RewindAfter(_ context.Context, chainID, block uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -975,7 +930,6 @@ func (m *MemStore) RewindAfter(_ context.Context, chainID, block uint64) error {
 	return nil
 }
 
-// InsertConstraintSet upserts on (chain, block, source).
 func (m *MemStore) InsertConstraintSet(_ context.Context, cs db.ConstraintSet) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1011,7 +965,6 @@ func (m *MemStore) UpdateConstraintSet(_ context.Context, cs db.ConstraintSet) e
 	return nil
 }
 
-// ConstraintSets lists sets ascending by block.
 func (m *MemStore) ConstraintSets(_ context.Context, chainID uint64) ([]db.ConstraintSet, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1033,7 +986,6 @@ func (m *MemStore) ConstraintSets(_ context.Context, chainID uint64) ([]db.Const
 	return out, nil
 }
 
-// UpsertBatchReports stores reports.
 func (m *MemStore) UpsertBatchReports(_ context.Context, reports []db.BatchReport) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1046,7 +998,6 @@ func (m *MemStore) UpsertBatchReports(_ context.Context, reports []db.BatchRepor
 	return nil
 }
 
-// BatchReports lists reports in [from, to) by batch time then block.
 func (m *MemStore) BatchReports(_ context.Context, chainID uint64, from, to time.Time) ([]db.BatchReport, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1068,7 +1019,6 @@ func (m *MemStore) BatchReports(_ context.Context, chainID uint64, from, to time
 	return out, nil
 }
 
-// BatchBuckets aggregates reports per step.
 func (m *MemStore) BatchBuckets(_ context.Context, chainID uint64, from, to time.Time, step time.Duration) ([]db.BatchBucket, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1106,7 +1056,6 @@ func (m *MemStore) BatchBuckets(_ context.Context, chainID uint64, from, to time
 
 func stateKey(chainID uint64, key string) string { return fmt.Sprintf("%d/%s", chainID, key) }
 
-// GetState reads a checkpoint.
 func (m *MemStore) GetState(_ context.Context, chainID uint64, key string) (value string, found bool, err error) {
 	m.hook("GetState")
 	m.mu.Lock()
@@ -1118,7 +1067,6 @@ func (m *MemStore) GetState(_ context.Context, chainID uint64, key string) (valu
 	return value, found, nil
 }
 
-// SetState writes a checkpoint.
 func (m *MemStore) SetState(_ context.Context, chainID uint64, key, value string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1129,7 +1077,6 @@ func (m *MemStore) SetState(_ context.Context, chainID uint64, key, value string
 	return nil
 }
 
-// DeleteState removes a checkpoint.
 func (m *MemStore) DeleteState(_ context.Context, chainID uint64, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1140,7 +1087,6 @@ func (m *MemStore) DeleteState(_ context.Context, chainID uint64, key string) er
 	return nil
 }
 
-// States reads all checkpoints of a chain.
 func (m *MemStore) States(_ context.Context, chainID uint64) (map[string]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1157,7 +1103,6 @@ func (m *MemStore) States(_ context.Context, chainID uint64) (map[string]string,
 	return out, nil
 }
 
-// Notify records the notification.
 func (m *MemStore) Notify(_ context.Context, channel, payload string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1168,7 +1113,6 @@ func (m *MemStore) Notify(_ context.Context, channel, payload string) error {
 	return nil
 }
 
-// LastNotification returns the most recent notification on a channel.
 func (m *MemStore) LastNotification(channel string) (n db.Notification, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1180,7 +1124,6 @@ func (m *MemStore) LastNotification(channel string) (n db.Notification, ok bool)
 	return db.Notification{}, false
 }
 
-// BucketCount returns the number of stored buckets for a resolution.
 func (m *MemStore) BucketCount(chainID uint64, resolution string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

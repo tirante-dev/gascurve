@@ -1,7 +1,6 @@
-// What the live hero draws: the last two minutes of per-block base fee from
-// the smoothing store's block ring against the wall clock, and which range its chart is set to. Kept
-// pure so the chart component is only a renderer and the axis, the domain and
-// the range control can be tested without a DOM.
+// What the live hero draws: the last two minutes of per-block base fee from the smoothing store's block
+// ring against the wall clock, and which range its chart is set to. Pure, so the chart component is only
+// a renderer and the axis, domain and range control are testable without a DOM.
 
 import { isSeriesRange, SERIES_RANGES } from "@/lib/api/series";
 import { liveNow, placeOf, type BlockPlaces } from "@/lib/smoothing";
@@ -11,30 +10,22 @@ import { gasScale, weiToGweiNumber } from "@/utils/format";
 /** The span the hero reaches back over, in seconds of block timestamp. */
 export const HERO_WINDOW_S = 120;
 
-/** Tick spacings the relative-time axis may use, smallest first. */
 export const HERO_TICK_STEPS = [10, 15, 30, 60];
 
-/** Most ticks the axis carries, the newest one included. */
 const HERO_MAX_TICKS = 5;
 
 /**
- * One block on the hero chart. `x` is seconds before now (the right edge), so
- * the axis runs negative to the left. Blocks that share a timestamp are spread
- * across the second they belong to by the ring's placement, so a burst keeps
- * its shape instead of stacking on one tick, and a block never moves once
- * placed.
+ * One block on the hero chart. `x` is seconds before now, so the axis runs negative to the left. Blocks
+ * sharing a timestamp are spread across their second by the ring's placement, so a burst keeps its shape
+ * and a block never moves once placed.
  */
 export type HeroPoint = { x: number; number: number; ts: number; fee: number; gasUsed: number };
 
 /**
- * The per-block base fee of the blocks within `seconds` of the wall clock
- * `nowMs`, oldest first, in gwei. `places` is the ring's own placement, which
- * the frame store keeps by block number, so a block's place is decided once
- * and this chart and the throughput chart under it draw it in the same spot.
- * The axis is anchored to the clock, not to the newest block's whole-second
- * timestamp, so the chart slides continuously instead of stepping once a
- * second; a block sits left of the edge by its real age, which is also what
- * the freshness pill reports.
+ * The per-block base fee of the blocks within `seconds` of the wall clock `nowMs`, oldest first, in gwei.
+ * `places` is the ring's own placement, kept by block number, so this chart and the throughput chart draw
+ * a block in the same spot. The axis is anchored to the clock, not to the newest block's whole-second
+ * timestamp, so the chart slides continuously instead of stepping once a second.
  */
 export function heroChartData(blocks: readonly BlockPoint[], places: BlockPlaces, nowMs: number, seconds = HERO_WINDOW_S): HeroPoint[] {
   if (blocks.length === 0) return [];
@@ -49,11 +40,8 @@ export function heroChartData(blocks: readonly BlockPoint[], places: BlockPlaces
 }
 
 /**
- * The span the axis covers: always the whole window. A ring that does not
- * yet reach back that far draws over the right part of the axis and fills in
- * as blocks arrive; an axis that grew with the coverage rescaled the whole
- * chart every time the oldest block crossed a tick, which read as the chart
- * jumping back and forth.
+ * The span the axis covers: always the whole window. An axis that grew with the coverage rescaled the
+ * whole chart every time the oldest block crossed a tick, which read as the chart jumping about.
  */
 export function heroSpan(seconds = HERO_WINDOW_S): number {
   return seconds;
@@ -67,7 +55,6 @@ export function heroTickStep(span: number): number {
   return HERO_TICK_STEPS[HERO_TICK_STEPS.length - 1];
 }
 
-/** Ticks from minus the span up to now, evenly spaced, oldest first. */
 export function heroTicks(span: number): number[] {
   const step = heroTickStep(span);
   const out: number[] = [];
@@ -76,7 +63,6 @@ export function heroTicks(span: number): number[] {
   return out;
 }
 
-/** A point on the relative-time axis: "-2:00", "-0:30", and "now" at the right edge. */
 export function heroTimeLabel(x: number): string {
   if (x >= 0) return "now";
   const total = Math.round(Math.abs(x));
@@ -85,17 +71,13 @@ export function heroTimeLabel(x: number): string {
   return `-${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
-/** What the tooltip's heading says for a hovered point: where it sits on the axis, in words. */
 export function heroPointTitle(x: number): string {
   if (x >= -1) return "now";
   return `${Math.round(Math.abs(x))} s ago`;
 }
 
-/**
- * The y domain in gwei: the fees and the floor line together, padded by a
- * twentieth so neither the peak nor the floor sits on the frame. A flat
- * series (every block at the floor) still gets a band to draw in.
- */
+/** The y domain in gwei: the fees and the floor line together, padded by a twentieth so neither the peak
+ * nor the floor sits on the frame. A flat series still gets a band to draw in. */
 export function heroFeeDomain(points: readonly HeroPoint[], floorGwei: number): [number, number] {
   const values = points.map((p) => p.fee);
   const floor = Number.isFinite(floorGwei) ? floorGwei : 0;
@@ -107,10 +89,7 @@ export function heroFeeDomain(points: readonly HeroPoint[], floorGwei: number): 
   return [Math.max(0, min - pad), max + pad];
 }
 
-/**
- * A step the eye reads as round: one, two, two and a half or five times a
- * power of ten, at or above `raw`.
- */
+/** A step the eye reads as round: one, two, two and a half or five times a power of ten, at or above `raw`. */
 export function niceStep(raw: number): number {
   if (!Number.isFinite(raw) || raw <= 0) return 1;
   const base = 10 ** Math.floor(Math.log10(raw));
@@ -120,11 +99,8 @@ export function niceStep(raw: number): number {
   return 10 * base;
 }
 
-/**
- * The gwei axis: the padded band snapped out to round ticks, so the labels
- * read as figures rather than as whatever the extremes happened to be, and
- * every one of them carries the same decimal count and so the same width.
- */
+/** The gwei axis: the padded band snapped out to round ticks, so the labels read as figures and every one
+ * carries the same decimal count and so the same width. */
 export function heroFeeAxis(points: readonly HeroPoint[], floorGwei: number): { domain: [number, number]; ticks: number[] } {
   const [lo, hi] = heroFeeDomain(points, floorGwei);
   const step = niceStep((hi - lo) / 5);
@@ -138,11 +114,9 @@ export function heroFeeAxis(points: readonly HeroPoint[], floorGwei: number): { 
 export type FeeAxis = ReturnType<typeof heroFeeAxis>;
 
 /**
- * The axis to draw this frame, with hysteresis: the previous axis stands while
- * the padded band of the data still fits inside it and still covers at least
- * half of it. Otherwise the axis is recomputed. Without this the domain
- * snapped to a new set of ticks on small moves of the fee, and the whole plot
- * rescaled under the reader several times a minute.
+ * The axis to draw this frame, with hysteresis: the previous axis stands while the padded band still fits
+ * inside it and covers at least half of it. Without this the whole plot rescaled under the reader several
+ * times a minute on small moves of the fee.
  */
 export function stableFeeAxis(previous: FeeAxis | null, points: readonly HeroPoint[], floorGwei: number): FeeAxis {
   if (previous === null) return heroFeeAxis(points, floorGwei);
@@ -152,8 +126,8 @@ export function stableFeeAxis(previous: FeeAxis | null, points: readonly HeroPoi
   const covers = hi - lo >= (phi - plo) / 2;
   if (inside && covers) return previous;
   const fresh = heroFeeAxis(points, floorGwei);
-  // The same axis again (a flat or empty series recomputes to what it had):
-  // hand back the previous object, so a renderer comparing identities settles.
+  // The same axis again (a flat or empty series recomputes to what it had): hand back the previous object,
+  // so a renderer comparing identities settles.
   return sameAxis(previous, fresh) ? previous : fresh;
 }
 
@@ -162,11 +136,9 @@ function sameAxis(a: FeeAxis, b: FeeAxis): boolean {
 }
 
 /**
- * One second of the live throughput chart: all the gas the blocks with that
- * timestamp carried. `x` is seconds before now, as on the fee chart, and the
- * second sits at its own end because that is when its gas is complete. `gas`
- * is null when poster gas was not recorded. `blocks` remains known in that
- * case and is null only where the ring itself has a gap.
+ * One second of the live throughput chart: all the gas the blocks with that timestamp carried. The second
+ * sits at its own end, because that is when its gas is complete. `gas` is null when poster gas was not
+ * recorded; `blocks` is null only where the ring itself has a gap.
  */
 export type ThroughputPoint = { x: number; ts: number; gas: number | null; blocks: number | null };
 
@@ -177,26 +149,12 @@ export function blockComputeGas(block: Pick<BlockPoint, "gasUsed" | "posterGas">
 }
 
 /**
- * Gas per second from the block ring, against the same clock-anchored axis
- * the fee chart uses. Blocks are summed per timestamp second and each second
- * sits at its own end, which is when its gas is complete.
- *
- * Only the seconds the ring holds whole are drawn. The newest is left out
- * whatever the clock says: blocks reach the browser a tick behind the chain,
- * so that second is still being delivered and its sum is a fraction of what it
- * will be, which drew a plunge to near zero at the right edge on every frame.
- * The oldest goes for the same reason at the other end: the ring is bounded by
- * block count, so it usually starts part way through a second, and that half
- * second read as the chain ramping up.
- *
- * Every second between those two ends gets a point, whether or not it holds a
- * block. A second with none is a quiet second and carries zero: leaving it out
- * let the area interpolate a positive rate straight across it, which says the
- * chain kept working through a moment it did not. The exception is a second
- * the ring itself has a hole across, which block numbers give away: consecutive
- * blocks either side means the second really was quiet, a jump in the numbers
- * means blocks are missing from the ring and the second is a null gap rather
- * than a zero.
+ * Gas per second from the block ring, against the same clock-anchored axis the fee chart uses. Blocks are
+ * summed per timestamp second and each second sits at its own end. Only the seconds the ring holds whole
+ * are drawn: the newest is still being delivered and the oldest usually starts part way through, and both
+ * drew a plunge at their edge. Every second in between gets a point, carrying zero when it holds no block,
+ * since leaving it out let the area interpolate a rate across a moment the chain did not work. A second
+ * the ring itself has a hole across is null instead, which a jump in block numbers gives away.
  */
 export function heroThroughputData(blocks: readonly BlockPoint[], places: BlockPlaces, nowMs: number, seconds = HERO_WINDOW_S): ThroughputPoint[] {
   if (blocks.length === 0) return [];
@@ -235,46 +193,37 @@ export function heroThroughputData(blocks: readonly BlockPoint[], places: BlockP
   return out;
 }
 
-/**
- * A y axis in one gas unit: what it spans, where its ticks are, what to divide
- * a value by to label it, and the decimal count every label on it carries.
- */
+/** A y axis in one gas unit: what it spans, where its ticks are, what to divide a value by, and the
+ * decimal count every label carries. */
 export type ThroughputAxis = { top: number; ticks: number[]; divisor: number; decimals: number; unit: string };
 
 /**
- * The throughput axis: a round top above the tallest value with ticks at
- * zero, the middle and the top, and one unit for the whole axis taken from
- * that top. Every label is then a bare figure with the same decimal count, so
- * the plot never shifts sideways as the rate moves; the unit rides on the
- * chart's caption instead, once.
+ * The throughput axis: a round top above the tallest value with ticks at zero, the middle and the top, and
+ * one unit for the whole axis. Every label is then a bare figure of the same decimal count, so the plot
+ * never shifts sideways as the rate moves; the unit rides on the chart's caption instead.
  */
 export function throughputAxis(max: number): ThroughputAxis {
   const peak = Number.isFinite(max) && max > 0 ? max : 1;
   const step = niceStep(peak / 2);
   const top = Math.max(step, Math.ceil((peak * 1.1) / step) * step);
   const { divisor, prefix } = gasScale(top);
-  // The decimal count is the top tick's, not each tick's, so every label on the
-  // axis has the same shape and the plot keeps its left edge.
+  // The decimal count is the top tick's, not each tick's, so every label has the same shape and the plot
+  // keeps its left edge.
   const decimals = divisor === 1 || top / divisor >= 100 ? 0 : 1;
   return { top, ticks: [0, top / 2, top], divisor, decimals, unit: `${prefix}gas/s` };
 }
 
-/** One label on that axis: the figure alone, in the axis's own unit and at the axis's own decimal count. */
 export function throughputTick(value: number, axis: ThroughputAxis): string {
   const scaled = value / axis.divisor;
   return axis.decimals === 0 ? Math.round(scaled).toLocaleString("en-US") : scaled.toFixed(axis.decimals);
 }
 
-/**
- * The range the hero's chart draws: the live block ring, or one of the ranges
- * the api serves buckets for. Live is the default and the fallback.
- */
+/** The range the hero's chart draws: the live block ring, or one of the ranges the api serves buckets
+ * for. Live is the default and the fallback. */
 export type HeroRange = "live" | SeriesRange;
 
-/** The hero's range control, in order: the live view first, then the api's ranges. */
 export const HERO_RANGES: readonly HeroRange[] = ["live", ...SERIES_RANGES];
 
-/** The word on each range tab. */
 export const HERO_RANGE_LABELS: Record<HeroRange, string> = { live: "Live", "1h": "1h", "24h": "24h", "30d": "30d", all: "All" };
 
 /** Where the chosen range is kept, so a reload comes back to the same view. */
@@ -284,10 +233,8 @@ export function isHeroRange(value: string): value is HeroRange {
   return value === "live" || isSeriesRange(value);
 }
 
-/**
- * The range this browser last chose, or Live when it chose none, stored
- * something that is not a range, or has no storage to read at all.
- */
+/** The range this browser last chose, or Live when it chose none, stored something else, or has no
+ * storage to read at all. */
 export function readHeroRange(): HeroRange {
   try {
     const stored = window.localStorage.getItem(HERO_RANGE_KEY);
@@ -297,7 +244,6 @@ export function readHeroRange(): HeroRange {
   }
 }
 
-/** Remembers the chosen range. A browser that refuses storage simply does not remember it. */
 export function storeHeroRange(range: HeroRange): void {
   try {
     window.localStorage.setItem(HERO_RANGE_KEY, range);
@@ -308,11 +254,8 @@ export function storeHeroRange(range: HeroRange): void {
 
 const listeners = new Set<() => void>();
 
-/**
- * The range this tab is on. Storage seeds it the first time it is read and
- * remembers every change, but the value itself lives in memory, so a browser
- * that refuses storage still switches ranges (it just forgets them).
- */
+/** The range this tab is on. Storage seeds it and remembers every change, but the value lives in memory,
+ * so a browser that refuses storage still switches ranges. */
 let current: HeroRange | null = null;
 
 export function heroRange(): HeroRange {
@@ -320,23 +263,17 @@ export function heroRange(): HeroRange {
   return current;
 }
 
-/** Live, always: what the server renders, and what hydration starts from. */
 export function heroRangeOnServer(): HeroRange {
   return "live";
 }
 
-/** Sets the range for this tab and remembers it for the next visit. */
 export function setHeroRange(range: HeroRange): void {
   current = range;
   storeHeroRange(range);
   for (const listener of listeners) listener();
 }
 
-/**
- * Subscribes to the range, this tab's changes and another tab's alike: a
- * choice made next door reaches this page as a storage event, and the two
- * windows agree rather than drifting apart.
- */
+/** Subscribes to the range: a choice made in another tab arrives as a storage event, so the two agree. */
 export function subscribeHeroRange(onChange: () => void): () => void {
   listeners.add(onChange);
   const onStorage = (event: StorageEvent) => {

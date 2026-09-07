@@ -8,9 +8,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Label names. An endpoint is named by its position in the network's
-// endpoint list and never by its URL: endpoint URLs carry credentials,
-// which is why internal/nitro scrubs them from every error it returns.
+// Label names. An endpoint is named by its position in the network's endpoint list and never by its
+// URL: endpoint URLs carry credentials.
 const (
 	labelNetwork  = "network"
 	labelChainID  = "chain_id"
@@ -32,9 +31,8 @@ var (
 	endpointLabels = []string{labelNetwork, labelChainID, labelEndpoint}
 )
 
-// Collector holds the collector's instruments. One Network is handed to
-// each follower; the instruments live here, so a follower that is stuck or
-// restarting still exports its last known values.
+// Collector holds the collector's instruments. One Network is handed to each follower; the instruments
+// live here, so a follower that is stuck or restarting still exports its last known values.
 type Collector struct {
 	heartbeat       prometheus.Gauge
 	databaseOps     prometheus.Counter
@@ -80,7 +78,6 @@ type Collector struct {
 	dbErrs   monotonic
 }
 
-// NewCollector registers the collector's instruments on reg.
 func NewCollector(reg prometheus.Registerer) *Collector {
 	c := &Collector{networks: map[uint64]*Network{}}
 	gauge := func(name, help string) *prometheus.GaugeVec {
@@ -178,9 +175,8 @@ func NewCollector(reg prometheus.Registerer) *Collector {
 	return c
 }
 
-// Network returns the instruments for one network, creating them on the
-// first call. Followers are restarted in place, so the same chain id always
-// gets the same series.
+// Network returns the instruments for one network, creating them on the first call. Followers are
+// restarted in place, so the same chain id always gets the same series.
 func (c *Collector) Network(name string, chainID uint64) *Network {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -230,7 +226,6 @@ func (c *Collector) Network(name string, chainID uint64) *Network {
 	return n
 }
 
-// ObserveHeartbeat records that the collector monitor is running.
 func (c *Collector) ObserveHeartbeat(at time.Time) {
 	c.heartbeat.Set(float64(at.Unix()))
 }
@@ -243,7 +238,6 @@ type DatabaseState struct {
 	LastTime    time.Duration
 }
 
-// ObserveDatabase mirrors the collector's process-wide database accounting.
 func (c *Collector) ObserveDatabase(d DatabaseState) {
 	c.dbMu.Lock()
 	defer c.dbMu.Unlock()
@@ -253,7 +247,6 @@ func (c *Collector) ObserveDatabase(d DatabaseState) {
 	c.databaseLast.Set(d.LastTime.Seconds())
 }
 
-// endpoint holds one endpoint's series.
 type endpoint struct {
 	limits  monotonic
 	off     prometheus.Gauge
@@ -266,8 +259,8 @@ type loopInstruments struct {
 	duration prometheus.Observer
 }
 
-// Network is one follower's view of the collector instruments. Every method
-// is safe for concurrent use and none of them can block on the follower.
+// Network is one follower's view of the collector instruments. Every method is safe for concurrent use
+// and none of them can block on the follower.
 type Network struct {
 	parent  *Collector
 	name    string
@@ -304,19 +297,17 @@ type Network struct {
 	loops       map[string]loopInstruments
 }
 
-// ObserveHead records a committed head: its number, the age of the block it
-// names and when the sample that carried it was taken.
+// ObserveHead records a committed head: its number, the age of the block it names and when the sample
+// that carried it was taken.
 func (n *Network) ObserveHead(block uint64, blockAt, sampledAt, now time.Time) {
 	n.headBlock.Set(float64(block))
 	n.headLag.Set(max(now.Sub(blockAt).Seconds(), 0))
 	n.lastSample.Set(float64(sampledAt.Unix()))
 }
 
-// ObserveTick records how long one fast tick took.
 func (n *Network) ObserveTick(d time.Duration) { n.tickDuration.Observe(d.Seconds()) }
 
-// ObserveProgress records the newest observed head and its distance from
-// the newest committed head.
+// ObserveProgress records the newest observed head and its distance from the newest committed head.
 func (n *Network) ObserveProgress(observed, indexed uint64) {
 	n.observedHead.Set(float64(observed))
 	lag := uint64(0)
@@ -326,8 +317,8 @@ func (n *Network) ObserveProgress(observed, indexed uint64) {
 	n.headLagBlocks.Set(float64(lag))
 }
 
-// ObserveLoop records one loop outcome. Error text stays out of labels to
-// avoid an unbounded series count; the durable status checkpoint carries it.
+// ObserveLoop records one loop outcome. Error text stays out of labels to avoid an unbounded series
+// count; the durable status checkpoint carries it.
 func (n *Network) ObserveLoop(loop string, at time.Time, d time.Duration, failed bool) {
 	instruments, ok := n.loops[loop]
 	if !ok {
@@ -347,23 +338,21 @@ func (n *Network) GapSkipped() { n.gapsSkipped.Inc() }
 // HoleFilled counts a queued range the gap filler completed.
 func (n *Network) HoleFilled() { n.holesFilled.Inc() }
 
-// HolesState summarizes the ranges that are not indexed, exactly as
-// /status reports them.
+// HolesState summarizes the ranges that are not indexed, exactly as /status reports them.
 type HolesState struct {
 	Pending    int
 	Blocks     uint64
 	Unfillable int
 }
 
-// ObserveHoles records the gap filler's queue.
 func (n *Network) ObserveHoles(h HolesState) {
 	n.holesPending.Set(float64(h.Pending))
 	n.holesBlocks.Set(float64(h.Blocks))
 	n.holesUnfillable.Set(float64(h.Unfillable))
 }
 
-// ObserveHoleFreshness records queued work only. Unfillable ranges remain in
-// the compatibility holes metrics but have no pending age or block count.
+// ObserveHoleFreshness records queued work only. Unfillable ranges stay in the compatibility holes
+// metrics but have no pending age or block count.
 func (n *Network) ObserveHoleFreshness(blocks uint64, oldestAge time.Duration) {
 	n.holesPendingBlk.Set(float64(blocks))
 	n.holesOldestAge.Set(max(oldestAge.Seconds(), 0))
@@ -375,13 +364,11 @@ type BackfillState struct {
 	Cursor uint64
 	// Floor is the oldest block the configured depth reaches.
 	Floor uint64
-	// Remaining is how many blocks lie between them, over every segment
-	// still to come.
+	// Remaining is how many blocks lie between them, over every segment still to come.
 	Remaining uint64
 	Done      bool
 }
 
-// ObserveBackfill records the backfill cursor.
 func (n *Network) ObserveBackfill(b BackfillState) {
 	n.backfillCursor.Set(float64(b.Cursor))
 	n.backfillFloor.Set(float64(b.Floor))
@@ -389,9 +376,8 @@ func (n *Network) ObserveBackfill(b BackfillState) {
 	n.backfillDone.Set(boolValue(b.Done))
 }
 
-// EndpointState is one endpoint's observable state. It is identified by its
-// index in the network's endpoint list: a URL is a credential and never
-// becomes a label value.
+// EndpointState is one endpoint's observable state, identified by its index in the network's endpoint
+// list: a URL is a credential and never becomes a label value.
 type EndpointState struct {
 	Index           int
 	Disabled        bool
@@ -399,8 +385,7 @@ type EndpointState struct {
 	RateLimitEvents uint64
 }
 
-// PoolState is the RPC pool's routing state together with the cumulative
-// counters its endpoints keep.
+// PoolState is the RPC pool's routing state together with the cumulative counters its endpoints keep.
 type PoolState struct {
 	Active          int
 	Failovers       uint64
@@ -413,9 +398,8 @@ type PoolState struct {
 	Endpoints       []EndpointState
 }
 
-// ObservePool records the routing state and the pool's cumulative counters.
-// The counters are mirrored as growth since the previous call, so a pool
-// that starts over is counted from zero rather than ignored.
+// ObservePool records the routing state and the pool's cumulative counters. The counters are mirrored
+// as growth since the previous call, so a pool that starts over is counted from zero rather than ignored.
 func (n *Network) ObservePool(p PoolState) {
 	n.activeEndpoint.Set(float64(p.Active))
 	n.mu.Lock()
@@ -437,7 +421,6 @@ func (n *Network) ObservePool(p PoolState) {
 	}
 }
 
-// endpointLocked returns one endpoint's series, creating them on first use.
 func (n *Network) endpointLocked(index int) *endpoint {
 	if ep, ok := n.endpoints[index]; ok {
 		return ep

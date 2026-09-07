@@ -40,6 +40,13 @@ jobs:
       - name: Test tooling preflight
         run: make test-tooling
 
+  comments:
+    name: Comment Budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make comment-check
+
   go-lint:
     name: Go Lint
     runs-on: ubuntu-latest

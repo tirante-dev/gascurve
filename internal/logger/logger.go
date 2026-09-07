@@ -16,8 +16,7 @@ type Logger struct {
 	sugar *zap.SugaredLogger
 }
 
-// New builds a logger. level is one of debug, info, warn, error (case
-// insensitive). dev selects the console encoder instead of JSON.
+// New builds a logger. level is one of debug, info, warn, error. dev selects the console encoder.
 func New(level string, dev bool) (*Logger, error) {
 	lvl, err := ParseLevel(level)
 	if err != nil {
@@ -41,17 +40,14 @@ func New(level string, dev bool) (*Logger, error) {
 	return FromZap(z), nil
 }
 
-// FromZap wraps an existing zap logger.
 func FromZap(z *zap.Logger) *Logger {
 	return &Logger{sugar: z.Sugar()}
 }
 
-// Nop returns a logger that discards everything.
 func Nop() *Logger {
 	return FromZap(zap.NewNop())
 }
 
-// ParseLevel converts a textual level into a zap level.
 func ParseLevel(level string) (zapcore.Level, error) {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "", "info":
@@ -67,28 +63,22 @@ func ParseLevel(level string) (zapcore.Level, error) {
 	}
 }
 
-// With returns a child logger with the given key/value pairs attached.
 func (l *Logger) With(kv ...any) *Logger {
 	return &Logger{sugar: l.sugar.With(kv...)}
 }
 
-// Debug logs at debug level with key/value pairs.
 func (l *Logger) Debug(msg string, kv ...any) { l.sugar.Debugw(msg, kv...) }
 
-// Info logs at info level with key/value pairs.
 func (l *Logger) Info(msg string, kv ...any) { l.sugar.Infow(msg, kv...) }
 
-// Warn logs at warn level with key/value pairs.
 func (l *Logger) Warn(msg string, kv ...any) { l.sugar.Warnw(msg, kv...) }
 
-// Error logs at error level with key/value pairs.
 func (l *Logger) Error(msg string, kv ...any) { l.sugar.Errorw(msg, kv...) }
 
-// Fatal logs at fatal level and exits the process.
 func (l *Logger) Fatal(msg string, kv ...any) { l.sugar.Fatalw(msg, kv...) }
 
-// Sync flushes buffered entries. Errors from syncing stderr are ignored,
-// which is the documented zap behavior on most platforms.
+// Sync flushes buffered entries. Errors from syncing stderr are ignored, which is the documented zap
+// behavior on most platforms.
 func (l *Logger) Sync() {
 	if err := l.sugar.Sync(); err != nil && !isStdErrSyncError(err) {
 		fmt.Fprintf(os.Stderr, "logger sync: %v\n", err)
