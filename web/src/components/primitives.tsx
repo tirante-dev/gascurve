@@ -50,6 +50,49 @@ export function Figure({ children, ch, className = "" }: { children: ReactNode; 
   );
 }
 
+/** Which edge of the tile a HoverNote panel lines up with, so it opens into the card rather than over its edge. */
+export type NoteAlign = "start" | "end";
+
+/**
+ * A figure whose working is a hover away. The browser's own `title` tooltip
+ * was the obvious way to carry it and the wrong one: it gives the reader
+ * nothing to notice, waits about a second, and draws in the platform's chrome
+ * rather than the panel the charts already read out in. So the trigger says it
+ * is inspectable (a dotted rule and a help cursor) and the panel is the one
+ * from ChartTooltip.
+ *
+ * Focus opens it as hover does, so the working is not behind a pointer, and
+ * `description` states the same facts in the accessible name for a reader that
+ * gets neither. The panel is `aria-hidden` because that description already
+ * carries it: announcing both would say everything twice.
+ */
+export function HoverNote({ children, lines, description, align = "start" }: { children: ReactNode; lines: readonly string[]; description: string; align?: NoteAlign }) {
+  return (
+    /* The panel is placed against the tile, not against the figure: a note wider
+       than the digits it explains has the whole tile to open into, which is what
+       keeps the right-hand one of a pair on screen at a phone's width. */
+    <span className="group relative block">
+      {/* A border, not `underline`: the figure inside is an inline-block, which
+          text-decoration does not reach, so an underline would rule the dollar
+          sign and stop there. */}
+      <span tabIndex={0} className="inline-block cursor-help border-b border-dotted border-ink-3 pb-0.5">
+        <span aria-hidden="true">{children}</span>
+        <span className="sr-only">{description}</span>
+      </span>
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none absolute bottom-full z-20 mb-2 hidden w-max max-w-[42ch] rounded-md border border-hairline bg-surface px-3 py-2 text-left text-xs font-normal leading-snug shadow-lg group-focus-within:block group-hover:block ${align === "end" ? "right-0" : "left-0"}`}
+      >
+        {lines.map((line, i) => (
+          <span key={line} className={i === 0 ? "num block text-ink" : "block text-ink-2"}>
+            {line}
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
 export const STATUS_COPY: Record<LiveStatus, { label: string; tone: "good" | "warning" | "critical" | "neutral"; detail: string }> = {
   open: { label: "live", tone: "good", detail: "WebSocket connected, one update per collector tick" },
   connecting: { label: "connecting", tone: "neutral", detail: "Opening the WebSocket" },

@@ -398,10 +398,14 @@ describe("LiveHero", () => {
     expect(screen.getByText("0.25")).toBeInTheDocument();
     // The dollar sign is outside the reserved box, so a changing digit cannot move it.
     expect(screen.getByText("0.04").previousSibling).toHaveTextContent("$");
-    // The ETH figure is never lost, and the quote that priced it is named: hover and the accessible description both carry the working.
-    expect(screen.getByText("0.04").closest("[title]")).toHaveAttribute("title", "0.00000839 ETH × $4,200.0/ETH = $0.04\ncoingecko, 5 min ago");
+    // The ETH figure is never lost, and the quote that priced it is named: the note and the accessible description both carry the working.
+    expect(screen.getByText("0.00000839 ETH × $4,200.0/ETH = $0.04")).toBeInTheDocument();
+    // Both tiles name the quote that priced them.
+    expect(screen.getAllByText("coingecko, 5 min ago")).toHaveLength(2);
     expect(screen.getByText("0.04 US dollars, 0.00000839 ETH at 4,200.0 dollars per ETH, quoted by coingecko 5 min ago")).toBeInTheDocument();
     expect(screen.queryByText("0.00000839")).toBeNull();
+    // The two tiles sit side by side, so the right-hand note opens leftwards to stay inside the card.
+    expect(screen.getByText("0.25").closest(".group")?.querySelector(".right-0")).not.toBeNull();
   });
   it("falls back to ETH when there is no quote at all and when the one there is has gone stale", () => {
     // Eleven minutes old: past the ten minute cutoff, so the fee has moved on and the price has not.
@@ -418,11 +422,20 @@ describe("LiveHero", () => {
     const now = Date.parse("2026-09-06T07:20:00Z");
     const { rerender } = render(<CostTile label="21k transfer" eth={0.0000084} ethUsd={null} nowMs={now} />);
     expect(screen.getByText("0.00000840")).toBeInTheDocument();
+    // No quote, no note: an ETH figure has no arithmetic to show.
+    expect(document.querySelector(".cursor-help")).toBeNull();
     rerender(<CostTile label="21k transfer" eth={0.0000084} ethUsd={{ price: "4200.00", at: "2026-09-06T07:19:26Z", source: "coinbase" }} nowMs={now} />);
-    // The dollars are what is drawn; the multiplication and the quote behind it are a hover away and in the description.
+    // The dollars are what is drawn; the multiplication and the quote behind it
+    // are in the note the trigger opens, not a title the reader cannot see.
     const usd = screen.getByText("0.04");
-    expect(usd.closest("[title]")).toHaveAttribute("title", "0.00000840 ETH × $4,200.0/ETH = $0.04\ncoinbase, 34 s ago");
+    expect(usd.closest("[title]")).toBeNull();
+    expect(screen.getByText("0.00000840 ETH × $4,200.0/ETH = $0.04")).toBeInTheDocument();
+    expect(screen.getByText("coinbase, 34 s ago")).toBeInTheDocument();
     expect(screen.getByText("0.04 US dollars, 0.00000840 ETH at 4,200.0 dollars per ETH, quoted by coinbase 34 s ago")).toBeInTheDocument();
+    // And the figure says it is inspectable rather than leaving the reader to guess.
+    const trigger = usd.closest(".cursor-help");
+    expect(trigger).not.toBeNull();
+    expect(trigger).toHaveAttribute("tabindex", "0");
   });
   it("measures the sample age from the wall clock", () => {
     expect(COLLECTOR_LAG_S).toBe(5);
