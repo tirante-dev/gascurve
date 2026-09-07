@@ -13,6 +13,7 @@ gascurve shows live and historical gas pricing for Arbitrum Nitro chains (Robinh
 ## Commands
 
 ```bash
+make tools              # install the hosted CI versions of required Go tools under .tools/bin
 make ci                 # the CI workflow locally: fmt-check, vet, lint, staticcheck, govulncheck, test-coverage, test-race, build, mod-verify, web-install, web-ci
 make ci-integration     # go-integration job, needs TEST_DB_URL (Postgres)
 make ci-docker          # docker job: build the three images and Trivy-scan them (needs docker, trivy)

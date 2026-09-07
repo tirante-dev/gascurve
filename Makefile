@@ -1,9 +1,16 @@
-.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
+.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify tools tools-check tool-goimports tool-golangci-lint tool-staticcheck tool-govulncheck check-goimports check-golangci-lint check-staticcheck check-govulncheck test-tooling ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
 
 GOCMD=go
 GOBUILD=$(GOCMD) build
 GOTEST=$(GOCMD) test
+GOTOOLCHAIN:=$(shell awk '$$1 == "toolchain" { print $$2; exit }' go.mod)
+export GOTOOLCHAIN
 MODULE=github.com/tirante-dev/gascurve
+TOOLS_BIN_DIR ?= $(CURDIR)/.tools/bin
+GOIMPORTS=$(TOOLS_BIN_DIR)/goimports
+GOLANGCI_LINT=$(TOOLS_BIN_DIR)/golangci-lint
+STATICCHECK=$(TOOLS_BIN_DIR)/staticcheck
+GOVULNCHECK=$(TOOLS_BIN_DIR)/govulncheck
 COLLECTOR_BINARY=gascurve-collector
 API_BINARY=gascurve-api
 MIGRATE_BINARY=gascurve-migrate
@@ -72,23 +79,61 @@ test-race:
 test-integration:
 	$(GOTEST) -tags integration -count=1 -v ./internal/db/... ./internal/collector/... ./internal/api/...
 
-lint:
-	golangci-lint run ./...
+# Install all non-standard Go commands at the exact versions used by hosted CI.
+# They stay inside the repository so unrelated global tools cannot affect checks.
+tools:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh install
 
-lint-fix:
-	golangci-lint run --fix ./...
+tool-goimports:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh install goimports
+
+tool-golangci-lint:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh install golangci-lint
+
+tool-staticcheck:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh install staticcheck
+
+tool-govulncheck:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh install govulncheck
+
+tools-check:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh check
+	@echo "OK: required CI tools are available at their pinned versions"
+
+check-goimports:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh check goimports
+
+check-golangci-lint:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh check golangci-lint
+
+check-staticcheck:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh check staticcheck
+
+check-govulncheck:
+	@TOOLS_BIN_DIR="$(TOOLS_BIN_DIR)" scripts/tools.sh check govulncheck
+
+test-tooling:
+	@sh scripts/tools_test.sh
+
+lint: check-golangci-lint
+	"$(GOLANGCI_LINT)" run --timeout=5m ./...
+
+lint-fix: check-golangci-lint
+	"$(GOLANGCI_LINT)" run --timeout=5m --fix ./...
 
 vet:
 	$(GOCMD) vet ./...
 
-fmt:
-	gofmt -s -w .
-	goimports -w -local $(MODULE) .
+fmt: check-goimports
+	@GOFMT="$$( $(GOCMD) env GOROOT )/bin/gofmt"; "$$GOFMT" -s -w .
+	"$(GOIMPORTS)" -w -local $(MODULE) .
 
 # Same check CI runs; never writes files.
-fmt-check:
-	@GOFMT_FILES="$$(gofmt -l -s .)"; \
-	GOIMPORTS_FILES="$$(goimports -l -local $(MODULE) .)"; \
+fmt-check: check-goimports
+	@set -eu; \
+	GOFMT="$$( $(GOCMD) env GOROOT )/bin/gofmt"; \
+	GOFMT_FILES="$$("$$GOFMT" -l -s .)"; \
+	GOIMPORTS_FILES="$$("$(GOIMPORTS)" -l -local $(MODULE) .)"; \
 	if [ -n "$$GOFMT_FILES" ] || [ -n "$$GOIMPORTS_FILES" ]; then \
 		echo "FAIL: formatting issues, run 'make fmt'"; \
 		echo "gofmt:"; echo "$$GOFMT_FILES"; \
@@ -97,11 +142,11 @@ fmt-check:
 	fi; \
 	echo "OK: formatting"
 
-staticcheck:
-	staticcheck ./...
+staticcheck: check-staticcheck
+	"$(STATICCHECK)" ./...
 
-govulncheck:
-	govulncheck ./...
+govulncheck: check-govulncheck
+	"$(GOVULNCHECK)" ./...
 
 # `go mod tidy -diff` prints what tidy would change and exits non-zero; it
 # never writes go.mod or go.sum.
@@ -196,13 +241,17 @@ web-ci: web-lint web-typecheck web-test-coverage web-build
 # need external services or tools: it never writes tracked files (fmt-check,
 # not fmt; go mod tidy -diff, not tidy), cross-builds the same platform matrix
 # as the go-build job (build-matrix) and is self-contained on a fresh clone
-# (web-install). The remaining CI jobs
+# after `make tools` installs the pinned Go commands (web-install). The
+# remaining CI jobs
 # have their own targets so they can be run when the prerequisites exist:
 #   ci-integration  Postgres in TEST_DB_URL (go-integration job)
 #   ci-docker       docker + trivy (docker job)
 #   ci-chart        helm, optionally ct (chart-test.yml)
 # Secret scanning (secrets-scan.yml, gitleaks) has no local target.
-ci: fmt-check vet lint staticcheck govulncheck test-coverage test-race build-matrix mod-verify web-install web-ci
+# The recursive invocation makes the preflight a strict phase boundary, even
+# under parallel make. No check starts until every required command is present.
+ci: tools-check
+	@$(MAKE) fmt-check vet lint staticcheck govulncheck test-tooling test-coverage test-race build-matrix mod-verify web-install web-ci
 	@echo "All CI checks passed."
 
 ci-integration: test-integration
