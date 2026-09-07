@@ -38,6 +38,7 @@ import {
   shortAddress,
   shortHash,
   toBigInt,
+  usdMath,
   weiToEthNumber,
   unbroken,
   weiToGweiNumber,
@@ -433,5 +434,24 @@ describe("fixed-width formatters", () => {
     expect(freshUsdPrice(quote("not a date"), now)).toBeNull();
     expect(freshUsdPrice(quote("2026-09-06T07:15:00Z", "0"), now)).toBeNull();
     expect(freshUsdPrice(quote("2026-09-06T07:15:00Z", "not a price"), now)).toBeNull();
+  });
+
+  it("shows the working behind a dollar figure: the amount, the quote, the product and the quote's age", () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    const quote = { price: "4182.31", at: "2026-09-06T07:19:26Z", source: "coinbase" };
+    const math = usdMath(0.0000084, quote, now);
+    expect(math).not.toBeNull();
+    expect(math?.line).toBe("0.00000840 ETH × $4,182.3/ETH = $0.04");
+    expect(math?.provenance).toBe("coinbase, 34 s ago");
+    expect(math?.title).toBe("0.00000840 ETH × $4,182.3/ETH = $0.04\ncoinbase, 34 s ago");
+    expect(math?.description).toBe("0.04 US dollars, 0.00000840 ETH at 4,182.3 dollars per ETH, quoted by coinbase 34 s ago");
+    expect(math?.usd).toBe("0.04");
+    // The working quotes the ETH figure the caller draws, so a total shown to four significant digits is not rounded twice.
+    expect(usdMath(12.3456, quote, now, (v) => formatSignificant(v, 4))?.line).toBe("12.35 ETH × $4,182.3/ETH = $51,633.1");
+    // A clock behind the collector's reads as a fresh quote rather than a negative age.
+    expect(usdMath(1, quote, Date.parse("2026-09-06T07:19:00Z"))?.provenance).toBe("coinbase, 0 s ago");
+    // No figure to explain without a usable quote: the caller falls back to ETH on the same null.
+    expect(usdMath(1, null, now)).toBeNull();
+    expect(usdMath(1, { ...quote, at: "2026-09-06T07:09:59Z" }, now)).toBeNull();
   });
 });
