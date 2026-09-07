@@ -35,9 +35,35 @@ describe("coverage", () => {
   });
 });
 
-describe("which end a partial bucket sits at", () => {
-  it("calls the last point the bucket in progress and any earlier one leading", () => {
-    expect(partialKinds([{ coverage: 0.3 }, { coverage: 1 }, { coverage: 0.2 }])).toEqual(["leading", null, "in-progress"]);
+describe("which kind of partial bucket a point is", () => {
+  it("calls a partial bucket at the right edge of the range the one in progress", () => {
+    const points = [
+      { t: 0, coverage: 0.3 },
+      { t: 60, coverage: 1 },
+      { t: 120, coverage: 0.2 },
+    ];
+    expect(partialKinds(points, { to: 180, step: 60 })).toEqual(["leading", null, "in-progress"]);
+    // The bucket runs past the edge, which is what the one in progress does.
+    expect(partialKinds(points, { to: 150, step: 60 })).toEqual(["leading", null, "in-progress"]);
+  });
+  it("calls a final partial bucket that stops short of the edge partly indexed, not in progress", () => {
+    // The collector stopped part way through the bucket at 120 and the range
+    // runs to 3600: the last point is old history, not a bucket still filling.
+    const points = [
+      { t: 0, coverage: 1 },
+      { t: 120, coverage: 0.4 },
+    ];
+    expect(partialKinds(points, { to: 3600, step: 60 })).toEqual([null, "leading"]);
+    expect(partialBands(points, 60, 3600)).toEqual([{ from: 120, to: 180, kind: "leading", coverage: 0.4 }]);
+    expect(partialBandLabel(partialKinds(points, { to: 3600, step: 60 })[1] as PartialKind)).toBe(PARTLY_INDEXED_LABEL);
+  });
+  it("falls back to array position without a usable edge to measure against", () => {
+    const points = [{ t: 0, coverage: 0.3 }, { t: 60, coverage: 0.2 }];
+    expect(partialKinds(points)).toEqual(["leading", "in-progress"]);
+    expect(partialKinds(points, { to: Number.NaN, step: 60 })).toEqual(["leading", "in-progress"]);
+    expect(partialKinds(points, { to: 3600, step: 0 })).toEqual(["leading", "in-progress"]);
+    // A point with no time of its own cannot be measured either.
+    expect(partialKinds([{ coverage: 0.3 }, { coverage: 0.2 }], { to: 3600, step: 60 })).toEqual(["leading", "in-progress"]);
   });
   it("has nothing to say about an empty range or one of whole buckets", () => {
     expect(partialKinds([])).toEqual([]);

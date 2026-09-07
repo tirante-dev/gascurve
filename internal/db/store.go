@@ -22,7 +22,7 @@ type Network struct {
 	UpdatedAt    time.Time      `db:"updated_at"`
 }
 
-// PricingVersion values of a blocks or buckets row (migration 000007).
+// PricingVersion values of a blocks or buckets row.
 const (
 	// PricingUnknown marks history written before the pricing breakdown
 	// existed: no per-constraint exponents, no floor in force, so no exact
@@ -196,6 +196,12 @@ type Store interface {
 	// when unknown.
 	NetworkByRef(ctx context.Context, ref string) (*Network, error)
 	UpdateNetworkHead(ctx context.Context, chainID, headBlock uint64, headAt, sampledAt time.Time) error
+	// SetNetworkHead records the head after a reorg rewind, where every
+	// field may be unknown: a nil headBlock nulls head_block and head_at
+	// (no block survived) and a nil sampledAt nulls last_sample_at (no
+	// state sample survived). Unlike UpdateNetworkHead it does not clear
+	// last_error, since a rewind is not a successful sample.
+	SetNetworkHead(ctx context.Context, chainID uint64, headBlock *uint64, headAt, sampledAt *time.Time) error
 	// SetNetworkError records the last collector error; empty clears it.
 	SetNetworkError(ctx context.Context, chainID uint64, msg string) error
 
@@ -235,6 +241,11 @@ type Store interface {
 	// LatestStateSample returns the newest sample, optionally only among
 	// those carrying L1 data. Nil when none.
 	LatestStateSample(ctx context.Context, chainID uint64, withL1 bool) (*StateSample, error)
+	// StateSampleAt returns the newest sample taken at or below a block,
+	// nil when none. Historical replay needs the pricer parameters that
+	// were really in force there, which the sample carries, never the
+	// live ones.
+	StateSampleAt(ctx context.Context, chainID, block uint64) (*StateSample, error)
 	// L1Samples returns one L1-carrying sample per step over [from, to).
 	L1Samples(ctx context.Context, chainID uint64, from, to time.Time, step time.Duration) ([]StateSample, error)
 	PruneStateSamples(ctx context.Context, chainID uint64, before time.Time) (int64, error)

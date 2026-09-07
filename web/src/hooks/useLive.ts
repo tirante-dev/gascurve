@@ -101,8 +101,12 @@ export function isNewerSnapshot(prev: LiveSnapshot | null, next: LiveSnapshot): 
  * chain-id route and its name keeps the feed. A reorg repairs the ring, the
  * snapshot and the live owner actions in one step, so what is on screen is
  * always one consistent chain.
+ *
+ * `enabled` false opens nothing at all: no socket, no polling, an empty feed.
+ * A page whose charts are all historical takes its network metadata from REST
+ * instead, and holds no subscription open for a feed it never draws.
  */
-export function useLive(network: string): LiveState {
+export function useLive(network: string, enabled = true): LiveState {
   const [feed, setFeed] = useState<Feed>(() => emptyFeed(null));
   const [status, setStatus] = useState<LiveStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -116,6 +120,7 @@ export function useLive(network: string): LiveState {
 
   // One socket for the life of the hook; network changes use subscribe.
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     let client: LiveClient | null = null;
     resolveSocketFactory().then((socketFactory) => {
@@ -191,7 +196,7 @@ export function useLive(network: string): LiveState {
       client?.close();
       clientRef.current = null;
     };
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
     wantedNetwork.current = network;
@@ -205,7 +210,7 @@ export function useLive(network: string): LiveState {
     else client.suspend();
   }, [visible]);
 
-  const polling = visible && (status === "reconnecting" || status === "polling");
+  const polling = enabled && visible && (status === "reconnecting" || status === "polling");
   useEffect(() => {
     if (!polling) return;
     let active = true;

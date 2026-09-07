@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"errors"
+	"math/big"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
+	"github.com/tirante-dev/gascurve/internal/pricer"
 )
 
 // gapHead is the head every skipped-gap test jumps to: 150 blocks past
@@ -324,7 +326,7 @@ func TestFillRestartedByReorg(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
-		return f.rewindHoles(ctx, s, 1010)
+		return f.rewindHoles(ctx, s, 1010, false)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -484,16 +486,36 @@ func TestFillErrors(t *testing.T) {
 	if _, err := newTestFollower(t, rpc, bad).FillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("init: %v", err)
 	}
-	// Before the first sample of the process no pricer shape is known, so
-	// the filler waits rather than guessing one.
+	// A restarted follower that has not sampled yet still fills: the shape
+	// comes from what was recorded before the range, never from the live
+	// sample.
 	f3 := newTestFollower(t, rpc, store)
 	rpc.headerCalls = nil
-	if st, err := f3.FillStep(ctx); err != nil || st != FillNone {
-		t.Fatalf("before the first sample: %v %v", st, err)
+	if st, err := f3.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("a restart fills from the recorded state: %v %v", st, err)
+	}
+	// With no recorded state at all before the range (no sample, no
+	// constraint set) there is nothing to replay from and no call is made.
+	store.SampleRows, store.SetRows = nil, nil
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.saveHoles(ctx, s, []hole{{From: 1001, To: 1149}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f4 := newTestFollower(t, rpc, store)
+	rpc.headerCalls = nil
+	if st, err := f4.FillStep(ctx); err != nil || st != FillNone {
+		t.Fatalf("nothing describes the pricer before the range: %v %v", st, err)
 	}
 	if len(rpc.headerCalls) != 0 {
-		t.Fatalf("no call before the first sample: %v", rpc.headerCalls)
+		t.Fatalf("no call without a state to replay from: %v", rpc.headerCalls)
 	}
+	// A read failure on the state sample surfaces.
+	store.FailOn["StateSampleAt"] = true
+	if _, err := f4.FillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("state sample lookup: %v", err)
+	}
+	store.FailOn["StateSampleAt"] = false
 }
 
 // TestFillWithoutStoredTail: a gap whose following block is no longer
@@ -708,4 +730,361 @@ func TestTickTracksHowFarBehind(t *testing.T) {
 		t.Fatalf("behind after a failed catch-up: %d", f.behind.Load())
 	}
 	delete(rpc.errs, "HeadersByNumbers")
+}
+
+// TestFillBelowTheBoundaryResumes: a hole older than the hour of the first
+// live block stores no block rows at all, so its continuation cannot look
+// one up at the cursor. The hole carries the replay state itself and every
+// batch continues from it, and the stored block after the range, which is
+// below the boundary too, has its row rewritten without its additive
+// bucket being rebuilt from the sparse rows around it.
+func TestFillBelowTheBoundaryResumes(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	f.mu.Lock()
+	f.liveStart = &liveStart{Block: 1150, TS: baseTime.Add(2 * time.Hour).Unix()}
+	f.mu.Unlock()
+	before := blockCountIn(store, db.Resolution1m)
+	if steps := fillAll(t, f, 40); steps != 15 {
+		t.Fatalf("149 blocks in batches of 10 below the boundary: %d steps", steps)
+	}
+	if holesOf(t, store) != nil {
+		t.Fatalf("the hole must be filled: %+v", holesOf(t, store))
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 1075); b != nil {
+		t.Fatal("blocks below the boundary belong to the additive folds, not to rows")
+	}
+	if got := blockCountIn(store, db.Resolution1m); got != before+149 {
+		t.Fatalf("every block of the range counted once: %d -> %d", before, got)
+	}
+	if got := blockCountIn(store, db.Resolution1h); got != before+149 {
+		t.Fatalf("hour buckets: %d -> %d", before, got)
+	}
+	// The stored block after the range still gets the replay's prediction,
+	// so the error of the reconstruction is recorded where it can be seen.
+	tail, _ := store.BlockByNumber(ctx, 4663, 1150)
+	if tail == nil || tail.PredictedBaseFee.Cmp(tail.BaseFee.BigInt()) == 0 {
+		t.Fatalf("the tail keeps its row and gains the replay error: %+v", tail)
+	}
+}
+
+// TestFillFoldsOnceAcrossARewind: a rewind resets a hole's cursor, but the
+// additive buckets it folded below the bucket boundary are not rebuilt
+// from rows, so the refilled batches must not count those blocks a second
+// time. The watermark is cleared only when the rewind deleted the buckets.
+func TestFillFoldsOnceAcrossARewind(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	f.mu.Lock()
+	f.liveStart = &liveStart{Block: 1150, TS: baseTime.Add(2 * time.Hour).Unix()}
+	f.mu.Unlock()
+	before := blockCountIn(store, db.Resolution1m)
+	for i := 0; i < 2; i++ {
+		if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+			t.Fatalf("batch %d: %v %v", i, st, err)
+		}
+	}
+	if got := blockCountIn(store, db.Resolution1m); got != before+20 {
+		t.Fatalf("two batches folded: %d -> %d", before, got)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Next != 1021 || holes[0].Folded != 1021 {
+		t.Fatalf("the fold watermark follows the cursor: %+v", holes)
+	}
+	// A rewind that reaches into what the filler wrote restarts the hole.
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.rewindHoles(ctx, s, 1005, false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].Next != 0 || holes[0].State != nil || holes[0].Folded != 1021 {
+		t.Fatalf("the cursor restarts but the fold watermark survives: %+v", holes)
+	}
+	fillAll(t, f, 40)
+	if got := blockCountIn(store, db.Resolution1m); got != before+149 {
+		t.Fatalf("a refilled range must not be folded twice: %d -> %d", before, got)
+	}
+	// When the rewind deleted the additive buckets themselves, everything
+	// the hole folded into them went with them and the watermark resets.
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		if err := f.saveHoles(ctx, s, []hole{{From: 1001, To: 1149, Next: 1021, Folded: 1021}}); err != nil {
+			return err
+		}
+		return f.rewindHoles(ctx, s, 1005, true)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Folded != 0 {
+		t.Fatalf("deleted buckets clear the watermark: %+v", holes)
+	}
+}
+
+// TestFillStrandedByRetention: the block a hole is anchored to can be
+// pruned. A hole that has not started yet is reclassified rather than left
+// queued for ever, is taken up again if the block comes back, and once it
+// carries its own replay state it fills on even after the rows it was
+// anchored to are gone.
+func TestFillStrandedByRetention(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	anchor := store.BlockRows[4663][1000]
+	delete(store.BlockRows[4663], 1000)
+	rpc.headerCalls = nil
+	if st, err := f.FillStep(ctx); err != nil || st != FillNone {
+		t.Fatalf("nothing to replay from: %v %v", st, err)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Reason != reasonNoState {
+		t.Fatalf("a stranded hole must not stay queued for ever: %+v", holes)
+	}
+	if len(rpc.headerCalls) != 0 {
+		t.Fatalf("a stranded hole costs no call: %v", rpc.headerCalls)
+	}
+	// The anchor reappears (the backfill reached it): the mark comes off.
+	store.BlockRows[4663][1000] = anchor
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("the hole becomes work again: %v %v", st, err)
+	}
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].Reason != "" || holes[0].State == nil || holes[0].State.Block != 1010 {
+		t.Fatalf("the batch commits the replay state with the cursor: %+v", holes)
+	}
+	// Retention now takes the anchor and everything the filler wrote: the
+	// carried state stands on its own and the next batch continues.
+	for n := uint64(1000); n <= 1010; n++ {
+		delete(store.BlockRows[4663], n)
+	}
+	rpc.headerCalls = nil
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("a hole carrying its state survives retention: %v %v", st, err)
+	}
+	if calls := rpc.headerCalls; len(calls) != 1 || calls[0][0] != 1011 {
+		t.Fatalf("the fill continues at the cursor: %v", calls)
+	}
+	// A carried state describing another block at that height than the
+	// stored one came from a fork that is gone: the stored block wins.
+	holes = holesOf(t, store)
+	holes[0].State.Hash = "0xdead"
+	store.BlockRows[4663][1020] = anchor
+	row := store.BlockRows[4663][1020]
+	row.Number, row.Hash, row.TS = 1020, rpc.hashFor(1020), time.Unix(int64(tsFor(1020)), 0).UTC()
+	store.BlockRows[4663][1020] = row
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.saveHoles(ctx, s, holes) }); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("the stored block is preferred: %v %v", st, err)
+	}
+	// Marking a range changes nothing when no entry starts there, and a
+	// checkpoint that cannot be read fails the mark rather than dropping
+	// the ranges it holds.
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.markHoles(ctx, s, map[uint64]string{999: reasonExpired})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Reason != "" {
+		t.Fatalf("a mark for an unknown range must change nothing: %+v", holes)
+	}
+	store.FailOn["GetState"] = true
+	err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.markHoles(ctx, s, map[uint64]string{1001: reasonNoState})
+	})
+	store.FailOn["GetState"] = false
+	if !errors.Is(err, dbtest.ErrInjected) {
+		t.Fatalf("unreadable checkpoint: %v", err)
+	}
+}
+
+// TestHolesAreMergedAndBounded: ranges recorded twice, overlapping or
+// touching become one entry, ranges of different classes stay apart, and
+// neither the queue nor the checkpoint grows without end.
+func TestHolesAreMergedAndBounded(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	f := newTestFollower(t, newFakeRPC(1000), store)
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	record := func(h hole) {
+		t.Helper()
+		if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.recordHole(ctx, s, h) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record(hole{From: 100, To: 199})
+	record(hole{From: 150, To: 249}) // a reorg re-records an overlapping range
+	record(hole{From: 250, To: 299}) // adjacent
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].From != 100 || holes[0].To != 299 {
+		t.Fatalf("overlapping and adjacent ranges merge: %+v", holes)
+	}
+	// A range nothing can be replayed into never swallows queued work.
+	record(hole{From: 300, To: 399, Reason: reasonNoState})
+	holes = holesOf(t, store)
+	if len(holes) != 2 || holes[1].From != 300 || holes[1].Reason != reasonNoState {
+		t.Fatalf("classes stay apart: %+v", holes)
+	}
+	// A merge keeps the progress of the range it starts at and the highest
+	// fold watermark, so nothing is folded into a bucket twice.
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		return f.saveHoles(ctx, s, []hole{{From: 100, To: 199, Next: 150, Folded: 150}, {From: 180, To: 250, Folded: 170}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holes = holesOf(t, store)
+	if len(holes) != 1 || holes[0].To != 250 || holes[0].Next != 150 || holes[0].Folded != 170 {
+		t.Fatalf("merged progress: %+v", holes)
+	}
+	// The queue is bounded: the oldest ranges leave it, their blocks still
+	// counted as not indexed.
+	many := make([]hole, 0, maxPendingHoles+10)
+	for i := 0; i < maxPendingHoles+10; i++ {
+		start := uint64(10_000 + i*10)
+		many = append(many, hole{From: start, To: start + 4})
+	}
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.saveHoles(ctx, s, many) }); err != nil {
+		t.Fatal(err)
+	}
+	holes = holesOf(t, store)
+	summary := model.SummarizeHoles(holes)
+	if len(holes) != maxPendingHoles+10 || summary.Pending != maxPendingHoles || summary.Unfillable != 10 {
+		t.Fatalf("the queue is capped at %d: %+v", maxPendingHoles, summary)
+	}
+	if summary.Blocks != uint64(5*(maxPendingHoles+10)) {
+		t.Fatalf("dropped ranges are still missing blocks: %+v", summary)
+	}
+	for i := 0; i < 10; i++ {
+		if holes[i].Reason != reasonExpired {
+			t.Fatalf("the oldest ranges are the ones dropped: %+v", holes[:12])
+		}
+	}
+	// The checkpoint itself is bounded, expired ranges included.
+	huge := make([]hole, 0, maxHoles+5)
+	for i := 0; i < maxHoles+5; i++ {
+		start := uint64(100_000 + i*10)
+		huge = append(huge, hole{From: start, To: start + 4, Reason: reasonNoState})
+	}
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.saveHoles(ctx, s, huge) }); err != nil {
+		t.Fatal(err)
+	}
+	holes = holesOf(t, store)
+	if len(holes) != maxHoles || holes[0].From != 100_000+5*10 {
+		t.Fatalf("the checkpoint is bounded: %d entries from %d", len(holes), holes[0].From)
+	}
+}
+
+// TestFillLegacyUsesHistoricalParameters: a legacy chain whose speed limit
+// changed after a gap must not have that gap replayed with the parameters
+// in force now. The state before the range comes from the newest state
+// sample taken at or before it, which carries what was really running, not
+// from the live sample: the recorded changes can only be applied forward,
+// never reversed.
+func TestFillLegacyUsesHistoricalParameters(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	was := &nitro.LegacyParams{SpeedLimit: 7_000_000, Inertia: 102, Tolerance: 10, Backlog: 100_000_000}
+	rpc.legacy = was
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The owner lowers the speed limit inside the range that is about to
+	// be skipped, so the live sample reports the new one.
+	if _, err := store.InsertOwnerActions(ctx, []db.OwnerAction{{
+		ChainID: 4663, BlockNumber: 1100, TxHash: "0xlimit", TS: time.Unix(int64(tsFor(1100)), 0).UTC(),
+		Method: methodSetSpeedLimit, Args: db.JSONB(`{"limit":1000000}`),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	err := f.reloadSetsLocked(ctx)
+	f.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := &nitro.LegacyParams{SpeedLimit: 1_000_000, Inertia: 102, Tolerance: 10, Backlog: 100_000_000}
+	rpc.mu.Lock()
+	rpc.legacy = now
+	rpc.mu.Unlock()
+	rpc.setHead(gapHead)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].From != 1001 {
+		t.Fatalf("the gap must be recorded: %+v", holes)
+	}
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("fill step: %v %v", st, err)
+	}
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].State == nil || holes[0].State.Legacy == nil {
+		t.Fatalf("the hole must carry its legacy replay state: %+v", holes)
+	}
+	if got := holes[0].State.Legacy.SpeedLimit; got != was.SpeedLimit {
+		t.Fatalf("the replay must start from the parameters in force before the gap, got speed limit %d", got)
+	}
+	// The blocks before the change are priced with the old parameters.
+	prev, _ := store.BlockByNumber(ctx, 4663, 1000)
+	replayed := func(l *nitro.LegacyParams) pricer.Result {
+		st := &pricer.State{MinBaseFee: new(big.Int).Set(prev.MinBaseFee.Wei.BigInt()),
+			Legacy: &pricer.Legacy{SpeedLimit: l.SpeedLimit, Inertia: l.Inertia, Tolerance: l.Tolerance, Backlog: prev.Backlogs[0]}}
+		return pricer.Replay(st, uint64(prev.TS.Unix()),
+			[]pricer.Block{{Number: 1001, Timestamp: tsFor(1001), GasUsed: gasFor(1001), BaseFee: feeFor(1001)}}, nil)[0]
+	}
+	wantOld, wantNew := replayed(was), replayed(now)
+	if wantOld.Exponent == wantNew.Exponent {
+		t.Fatal("the two parameter sets must price the block differently for this test to mean anything")
+	}
+	row, _ := store.BlockByNumber(ctx, 4663, 1001)
+	if row == nil || row.ExponentBips != int64(wantOld.Exponent) || row.PredictedBaseFee.Cmp(wantOld.Predicted) != 0 {
+		t.Fatalf("block 1001 priced with the parameters of its own time: %+v (want exponent %d)", row, wantOld.Exponent)
+	}
+}
+
+// TestFillStateFromRecords: the records the gap filler rebuilds its replay
+// state from, and the malformed ones it refuses rather than pricing
+// history from a shape it cannot read.
+func TestFillStateFromRecords(t *testing.T) {
+	f := newTestFollower(t, newFakeRPC(1000), dbtest.New())
+	for _, bad := range []*db.StateSample{
+		nil,
+		{Legacy: db.JSONB(`{bad`)},
+		{Constraints: db.JSONB(`{bad`)},
+		{Constraints: db.JSONB(`[]`)},
+	} {
+		if st := f.shapeAtLocked(10, bad); st != nil {
+			t.Fatalf("a sample that describes no shape must be refused: %+v -> %+v", bad, st)
+		}
+	}
+	st := f.shapeAtLocked(10, &db.StateSample{Legacy: db.JSONB(`{"speedLimit":7,"inertia":102,"tolerance":10,"backlog":5}`)})
+	if st == nil || st.Legacy == nil || st.Legacy.SpeedLimit != 7 || st.Legacy.Inertia != 102 || st.Legacy.Tolerance != 10 {
+		t.Fatalf("legacy shape from a sample: %+v", st)
+	}
+	st = f.shapeAtLocked(10, &db.StateSample{Constraints: db.JSONB(`[{"target":60,"window":15,"backlog":9}]`)})
+	if st == nil || len(st.Constraints) != 1 || st.Constraints[0].Target != 60 || st.Constraints[0].Window != 15 || st.Constraints[0].Backlog != 0 {
+		t.Fatalf("constraint shape from a sample, backlogs left to the caller: %+v", st)
+	}
+	for _, bad := range []*model.HoleState{{}, {MinBaseFee: "not a number"}} {
+		if got := carriedFillState(bad); got != nil {
+			t.Fatalf("an unreadable checkpoint must be refused: %+v -> %+v", bad, got)
+		}
+	}
+	legacy := carriedFillState(&model.HoleState{MinBaseFee: "7", Legacy: &model.LegacyParams{SpeedLimit: 1, Inertia: 2, Tolerance: 3, Backlog: 4}})
+	if legacy == nil || legacy.Legacy == nil || legacy.Legacy.Backlog != 4 || legacy.MinBaseFee.Int64() != 7 {
+		t.Fatalf("carried legacy state: %+v", legacy)
+	}
+	cons := carriedFillState(&model.HoleState{Constraints: []model.Constraint{{Target: 1, Window: 2, Backlog: 3}}})
+	if cons == nil || len(cons.Constraints) != 1 || cons.Constraints[0].Backlog != 3 {
+		t.Fatalf("carried constraint state: %+v", cons)
+	}
 }

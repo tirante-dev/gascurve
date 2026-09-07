@@ -338,6 +338,15 @@ func TestValidate(t *testing.T) {
 		"proxy cidr":          func(c *Config) { c.Server.TrustedProxies = []string{"10.0.0.0/33"} },
 		"proxy ip":            func(c *Config) { c.Server.TrustedProxies = []string{"not-an-ip"} },
 		"ws url scheme":       func(c *Config) { c.Networks[0].WSURL = "http://x" },
+		// An RPC URL with the WebSocket scheme, or one with no scheme at
+		// all, fails every call: catch it before the first one.
+		"rpc url scheme":      func(c *Config) { c.Networks[0].RPCURL = "wss://x" },
+		"rpc url bare":        func(c *Config) { c.Networks[0].RPCURL = "node.example" },
+		"rpc url file":        func(c *Config) { c.Networks[0].RPCURL = "file:///etc/passwd" },
+		"rpc url no host":     func(c *Config) { c.Networks[0].RPCURL = "http://" },
+		"ws url no host":      func(c *Config) { c.Networks[0].WSURL = "wss://" },
+		"fallback rpc ws":     func(c *Config) { c.Networks[0].Fallbacks[0].RPCURL = "ws://y" },
+		"rpc url unparsed":    func(c *Config) { c.Networks[0].RPCURL = "http://a b.example" },
 		"anchor interval":     func(c *Config) { c.Collector.BackfillAnchorInterval = 0 },
 		"catch up":            func(c *Config) { c.Collector.MaxCatchUpBatches = 0 },
 		"missing rpc url":     func(c *Config) { c.Networks[0].RPCURL = "" },
@@ -357,6 +366,16 @@ func TestValidate(t *testing.T) {
 		if err := c.Validate(true); err == nil {
 			t.Errorf("%s: expected validation error", name)
 		}
+	}
+	// A rejected URL is never quoted back: it can carry the API key.
+	keyed := base()
+	keyed.Networks[0].RPCURL = "ftp://node.example/s3cret-key"
+	err := keyed.Validate(true)
+	if err == nil {
+		t.Fatal("an ftp rpc_url must be rejected")
+	}
+	if strings.Contains(err.Error(), "s3cret-key") {
+		t.Fatalf("a rejection must not quote the URL: %v", err)
 	}
 	// The minimum itself is accepted.
 	c := base()

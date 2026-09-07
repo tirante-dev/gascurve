@@ -387,9 +387,15 @@ func (p *Pacer) levels() (tokens, reserve float64) {
 	return p.tokens, p.fastTokens
 }
 
+// waitForTimeout is generous on purpose: the condition is normally true
+// within microseconds, and the wait only runs out when the code under test
+// is genuinely stuck. A tight budget instead made the lane test fail on a
+// loaded machine, where the whole package runs beside every other one.
+const waitForTimeout = 60 * time.Second
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitForTimeout)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
@@ -463,7 +469,7 @@ func (c *manualClock) sleeps() []time.Duration {
 func (c *manualClock) expect(t *testing.T, want ...time.Duration) {
 	t.Helper()
 	var got []time.Duration
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitForTimeout)
 	for {
 		got = c.sleeps()
 		if len(got) == len(want) {

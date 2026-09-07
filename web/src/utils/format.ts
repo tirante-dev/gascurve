@@ -73,21 +73,30 @@ const GAS_UNITS: [number, string][] = [
 /**
  * A gas amount scaled into its band, with the decimals that band prescribes
  * (two below 10, one below 100, none above) before any zero stripping, and the
- * SI prefix of the band it landed in. Rounding that carries the value into the
- * next band or prefix ("999.6M", "9.996M") is re-banded, so the result always
- * has the band's character count.
+ * SI prefix of the band it landed in. Rounding is the same exact decimal
+ * rounding the gwei formatter uses (`roundDecimal`), so a value that sits a
+ * fraction below the decimal half in binary (9.995 is stored as
+ * 9.99499999...) still rounds the way it is written. Both the decimal band and
+ * the SI prefix are re-evaluated after that rounding: "999.6M" becomes 1 Ggas,
+ * "9.995M" becomes 10.0 Mgas, and 999,999.5 gas becomes 1 Mgas rather than a
+ * seven-digit figure with no prefix.
  */
 function scaleGas(abs: number): { text: string; prefix: string } {
-  if (abs < 1_000_000) return { text: withThousands(Math.round(abs).toString()), prefix: "" };
-  for (const [scale, prefix] of GAS_UNITS) {
-    if (abs < scale) continue;
-    const scaled = abs / scale;
-    const text = scaled.toFixed(gasDecimals(scaled));
-    const rounded = Number(text);
-    if (rounded >= 1000 && scale < 1e12) return scaleGas(rounded * scale);
-    return { text: gasDecimals(rounded) === gasDecimals(scaled) ? text : rounded.toFixed(gasDecimals(rounded)), prefix };
+  const band = GAS_UNITS.find(([scale]) => abs >= scale);
+  if (band === undefined) {
+    const whole = roundDecimal(abs, 0);
+    // The carry crossed into the next band: re-band rather than print a
+    // seven-digit figure the band above has a two-character name for.
+    if (Number(whole) >= 1_000_000) return scaleGas(Number(whole));
+    return { text: withThousands(whole), prefix: "" };
   }
-  return { text: withThousands(Math.round(abs).toString()), prefix: "" };
+  const [scale, prefix] = band;
+  const scaled = abs / scale;
+  const decimals = gasDecimals(scaled);
+  const first = roundDecimal(scaled, decimals);
+  const rounded = Number(first);
+  if (rounded >= 1000 && scale < 1e12) return scaleGas(rounded * scale);
+  return { text: gasDecimals(rounded) === decimals ? first : roundDecimal(scaled, gasDecimals(rounded)), prefix };
 }
 
 /**

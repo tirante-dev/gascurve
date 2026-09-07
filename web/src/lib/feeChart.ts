@@ -6,7 +6,8 @@
 
 import type { OwnerAction, PricerModel, Series } from "@/types";
 import type { TooltipRow } from "@/components/ChartTooltip";
-import { gapModel, withGapBreaks, NO_GAPS, type GapModel, type GapRow } from "@/lib/gaps";
+import { bucketSeconds as bucketWidth, gapModel, withGapBreaks, NO_GAPS, type GapModel, type GapRow } from "@/lib/gaps";
+import { parseConstraintArg, rawConstraintArg } from "@/lib/ownerActions";
 import { partialRowNote } from "@/lib/partial";
 import { buildChartPoints, FLOOR_COLOR, logDomain, shortConstraintLabel, spanSeconds, withSetBoundaries, type ChartPoint } from "@/utils/chart";
 import { formatGwei, formatInteger, formatSignificant } from "@/utils/format";
@@ -27,12 +28,20 @@ export function actionsInBucket(markers: readonly Marker[], t: number, bucketSec
   return markers.filter((m) => m.t >= t && m.t < t + bucketSeconds);
 }
 
-/** What an owner action did, in one line: the constraint set it installed, the floor it set, or just its name. */
+/**
+ * What an owner action did, in one line: the constraint set it installed, the
+ * floor it set, or just its name. The constraints go through the same parser
+ * the timeline uses, so the objects the api actually sends read as constraints
+ * rather than as "[object Object]".
+ */
 export function describeAction(a: OwnerAction): string {
   if (a.method === "setGasPricingConstraints") {
     const raw = a.args.constraints;
     if (Array.isArray(raw)) {
-      const parts = raw.map((c) => (Array.isArray(c) && c.length >= 2 ? shortConstraintLabel({ target: Number(c[0]), window: Number(c[1]) }) : String(c)));
+      const parts = raw.map((c) => {
+        const parsed = parseConstraintArg(c);
+        return parsed === null ? rawConstraintArg(c) : shortConstraintLabel(parsed);
+      });
       return `setGasPricingConstraints: ${parts.join(", ")}`;
     }
   }
@@ -67,9 +76,22 @@ export function bucketNote(markers: readonly Marker[], bucketSeconds: number, su
   };
 }
 
-/** The log y domain of the fee chart: the band, the average and the floor in force all fit inside it. */
+/**
+ * A floor in gwei as a table or tooltip reads it, and "n/a" for a bucket that
+ * recorded none: a missing floor is not a floor of zero.
+ */
+export function formatFloor(gwei: number | null): string {
+  return gwei === null ? "n/a" : formatSignificant(gwei, 3);
+}
+
+/**
+ * The log y domain of the fee chart: the band, the average and the floor in
+ * force all fit inside it. A bucket with no recorded floor contributes only
+ * its fees: a missing floor is not a floor of zero, and it must not pull the
+ * axis anywhere.
+ */
 export function feeDomain(points: readonly ChartPoint[]): [number, number] {
-  return logDomain(points.flatMap((p) => [p.feeMin, p.feeMax, p.floor]));
+  return logDomain(points.flatMap((p) => (p.floor === null ? [p.feeMin, p.feeMax] : [p.feeMin, p.feeMax, p.floor])));
 }
 
 /** What a hovered bucket says about the fee: the average, the band, the floor under it, x and how many blocks it holds. */
@@ -77,7 +99,7 @@ export function feeTooltipRows(): TooltipRow[] {
   return [
     { label: "base fee, average", color: "var(--series-1)", value: (r) => `${formatSignificant(Number(r.feeAvg), 4)} gwei` },
     { label: "min to max in bucket", value: (r) => `${formatSignificant(Number(r.feeMin), 3)} to ${formatSignificant(Number(r.feeMax), 3)} gwei` },
-    { label: "floor in force", color: FLOOR_COLOR, value: (r) => `${formatSignificant(Number(r.floor), 3)} gwei` },
+    { label: "floor in force", color: FLOOR_COLOR, value: (r) => (typeof r.floor === "number" ? `${formatFloor(r.floor)} gwei` : "n/a") },
     { label: "x", value: (r) => Number(r.x).toFixed(4) },
     { label: "blocks", value: (r) => formatInteger(Number(r.blocks)) },
   ];
@@ -131,7 +153,11 @@ export function feeChartData(series: Series | null, model: PricerModel): FeeChar
     // The axis spans the window, so its ticks are formatted for the range that
     // was asked for and not for the part of it that happens to hold buckets.
     span: gaps.window.to > gaps.window.from ? gaps.window.to - gaps.window.from : spanSeconds(points),
-    bucketSeconds: points.length > 1 ? points[1].t - points[0].t : DEFAULT_BUCKET_SECONDS,
+    // The bucket width is the resolution's own, never the distance between the
+    // first two points: two per-block points sharing a timestamp made a
+    // zero-width bucket, one missing point inflated it to the size of the
+    // hole, and a range with a single bucket read as a minute whatever it was.
+    bucketSeconds: bucketWidth(series.resolution, points),
     gaps,
   };
 }

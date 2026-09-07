@@ -75,6 +75,7 @@ function BaseFeeBody({ live, range, series, model }: { live: SmoothedLive; range
     <HeroChartPanel
       snapshot={snapshot}
       blocks={frame.blocks}
+      places={frame.places}
       nowMs={frame.nowMs}
       range={range}
       series={series.data}
@@ -95,6 +96,7 @@ function ThroughputBody({ live, range, series, model }: { live: SmoothedLive; ra
   return (
     <HeroThroughputPanel
       blocks={frame.blocks}
+      places={frame.places}
       nowMs={frame.nowMs}
       range={range}
       series={series.data}
@@ -113,17 +115,20 @@ function SawtoothBody({ live, index }: { live: SmoothedLive; index: number | nul
   const snapshot = live.display;
   if (!snapshot) return <ChartNote>{live.resyncing ? RESYNC_COPY : WAITING_COPY}</ChartNote>;
   if (index === null) return <ChartNote>This chain has no constraint with a window short enough to draw a sawtooth for.</ChartNote>;
-  return <SawtoothPanel snapshot={snapshot} values={frame.values} blocks={frame.blocks} nowMs={frame.nowMs} index={index} height={DETAIL_FRAME_CLASS} />;
+  return <SawtoothPanel snapshot={snapshot} values={frame.values} blocks={frame.blocks} places={frame.places} nowMs={frame.nowMs} index={index} height={DETAIL_FRAME_CLASS} />;
 }
 
 /**
  * The constraints the chart can be pointed at: the short windows of the live
  * set for the sawtooth, and every slot the history has for the backlogs.
  */
-function constraintChoices(viewId: string | null, takesConstraint: boolean, snapshot: LiveSnapshot | null, series: Series | null): number[] {
+function constraintChoices(viewId: string | null, takesConstraint: boolean, snapshot: LiveSnapshot | null, series: Series | null, model: PricerModel): number[] {
   if (!takesConstraint) return [];
   if (viewId === "backlog-sawtooth") return shortWindowIndices(snapshot);
-  return series ? Array.from({ length: seriesCount(series) }, (_, i) => i) : [];
+  // The slots the range can actually draw, never the shape of a set no point
+  // in it matches: an unusable set would offer switcher slots with nothing
+  // behind them.
+  return series ? Array.from({ length: seriesCount(series, model) }, (_, i) => i) : [];
 }
 
 /** The state a history chart is in before it has buckets to draw. */
@@ -154,9 +159,13 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
   const rawConstraint = searchParams.get("constraint");
   const range = view === null ? null : resolveChartRange(view, rawRange);
 
-  // One socket for the page, whether or not the chart on it is a live one:
-  // the header names the chain from the same hello.
-  const { live, smooth, snapshot } = useNetworkLive(network);
+  // A socket only for a chart that draws the feed. The registry already says
+  // which charts those are, and a page of bucketed history that held a
+  // subscription open ran a smoothing loop nobody was reading. Every page
+  // names its chain from the REST network list, which the live hello refines
+  // when there is one.
+  const needsLive = view?.live ?? false;
+  const { live, smooth, snapshot } = useNetworkLive(network, needsLive);
   const networks = useApi("networks", useCallback((signal: AbortSignal) => listNetworks({ signal }), []), { refetchMs: 300_000 });
   const info = live.networkInfo ?? (networks.data ? findNetwork(networks.data, network) : undefined) ?? null;
   // Which pricer the history belongs to. The series carries no model of its
@@ -172,7 +181,7 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
   const viewId = view === null ? null : view.id;
   // Cheap enough to derive on every render (a handful of indices), and the
   // compiler memoises it with the rest of the component.
-  const choices = constraintChoices(viewId, view !== null && view.constraint, snapshot, series.data);
+  const choices = constraintChoices(viewId, view !== null && view.constraint, snapshot, series.data, model);
   const constraint = resolveConstraint(rawConstraint, choices);
 
   const l1 = useL1Costs(network, seriesRange ?? "24h", series.data, viewId === "l1");

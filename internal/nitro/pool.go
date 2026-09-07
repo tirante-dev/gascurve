@@ -60,6 +60,13 @@ type EndpointStatus struct {
 	Archive  bool
 	Disabled bool
 	Error    string
+	// WSCooling is set while the endpoint's WebSocket is cooled down after
+	// a dial, subscribe or repeated disconnect failure; WSError says why,
+	// sanitized the same way (never a URL or a credential). WebSocket
+	// health is separate from HTTP verification: an endpoint whose
+	// JSON-RPC answers can still have a socket that does not work.
+	WSCooling bool
+	WSError   string
 }
 
 // PoolStatus is the pool's routing state for /status.
@@ -187,7 +194,11 @@ func (p *Pool) Status() PoolStatus {
 	st := PoolStatus{Active: p.active, Failovers: p.failovers, Endpoints: make([]EndpointStatus, len(p.endpoints))}
 	p.mu.Unlock()
 	for i, e := range p.endpoints {
-		st.Endpoints[i] = EndpointStatus{Index: i, WS: e.wsURL != "", Archive: e.archive, Disabled: e.Disabled(), Error: e.Reason()}
+		until, reason := e.wsCooling()
+		st.Endpoints[i] = EndpointStatus{
+			Index: i, WS: e.wsURL != "", Archive: e.archive, Disabled: e.Disabled(), Error: e.Reason(),
+			WSCooling: !until.IsZero(), WSError: reason,
+		}
 	}
 	return st
 }
@@ -221,27 +232,102 @@ func (p *Pool) HasWS() bool {
 	return false
 }
 
-// WSURL resolves the WebSocket endpoint to dial next: the first usable one
-// with a ws_url, verified now when it has not been verified yet. A
-// HeadSubscriber calls it before every connection attempt, so a subscriber
-// rebinds to the next endpoint as soon as the one it followed is disabled
-// or fails verification, and comes back to the primary once it verifies.
-func (p *Pool) WSURL(ctx context.Context) (string, error) {
+// WSLease binds a HeadSubscriber to one endpoint's WebSocket for one
+// connection attempt: what to dial, and where to report what happened. A
+// subscriber that reports back lets the pool track WebSocket health per
+// endpoint, apart from the HTTP verification that only proves the
+// endpoint's JSON-RPC answers, and rebind to another endpoint when a
+// socket cannot be dialed, cannot be subscribed to, or will not stay up.
+type WSLease struct {
+	// URL is the endpoint to dial. It is a credential: never log it.
+	URL string
+	// Index names the endpoint in logs and errors.
+	Index int
+
+	pool  *Pool
+	e     *Endpoint
+	scrub *scrubber
+}
+
+// Connected reports a live subscription on the leased endpoint. A lease
+// that names no endpoint (one a test built by hand) is inert.
+func (l *WSLease) Connected() {
+	if l == nil || l.e == nil {
+		return
+	}
+	l.e.noteWSConnected()
+}
+
+// Failed reports that the leased endpoint's WebSocket could not be
+// dialed, could not be subscribed to, or did not stay up. subscribed says
+// whether the subscription had been acknowledged before it broke.
+func (l *WSLease) Failed(subscribed bool, err error) {
+	if l == nil || l.e == nil || err == nil {
+		return
+	}
+	reason := l.scrub.text(err.Error())
+	if l.e.noteWSFailure(subscribed, l.pool.cooldown, reason) {
+		l.pool.log.Warn("endpoint websocket cooled down, resolving another one",
+			"endpoint", l.e.index, "cooldown", l.pool.cooldown.String(), "err", reason)
+	}
+}
+
+// WSEndpoint resolves the WebSocket endpoint to dial next and leases it:
+// the first usable one with a ws_url whose socket is not cooling down,
+// verified now when it has not been verified yet. A HeadSubscriber calls
+// it before every connection attempt, so a subscriber rebinds to the next
+// endpoint as soon as the one it followed is disabled, fails verification
+// or has a socket that does not work, and comes back to the primary once
+// it recovers. When every WebSocket endpoint is cooling down the one that
+// recovers first is leased anyway: a network with a single WebSocket
+// endpoint must keep trying on the subscriber's own back-off rather than
+// lose heads for a whole cooldown.
+func (p *Pool) WSEndpoint(ctx context.Context) (*WSLease, error) {
 	var errs []error
+	var cooling *Endpoint
+	var coolingUntil time.Time
 	for _, e := range p.endpoints {
 		if e.wsURL == "" || e.Disabled() {
+			continue
+		}
+		if until, _ := e.wsCooling(); !until.IsZero() {
+			if cooling == nil || until.Before(coolingUntil) {
+				cooling, coolingUntil = e, until
+			}
 			continue
 		}
 		if err := p.verify(withCapability(ctx), e); err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		return e.wsURL, nil
+		return p.lease(e), nil
+	}
+	if cooling != nil {
+		err := p.verify(withCapability(ctx), cooling)
+		if err == nil {
+			return p.lease(cooling), nil
+		}
+		errs = append(errs, err)
 	}
 	if len(errs) == 0 {
-		return "", ErrNoEndpoint
+		return nil, ErrNoEndpoint
 	}
-	return "", fmt.Errorf("%w: %w", ErrNoEndpoint, errors.Join(errs...))
+	return nil, fmt.Errorf("%w: %w", ErrNoEndpoint, errors.Join(errs...))
+}
+
+func (p *Pool) lease(e *Endpoint) *WSLease {
+	return &WSLease{URL: e.wsURL, Index: e.index, pool: p, e: e, scrub: e.scrub}
+}
+
+// WSURL resolves the WebSocket endpoint to dial next and returns its URL
+// alone. WSEndpoint is the fuller form: it leases the endpoint, so the
+// subscriber can report whether its socket worked.
+func (p *Pool) WSURL(ctx context.Context) (string, error) {
+	l, err := p.WSEndpoint(ctx)
+	if err != nil {
+		return "", err
+	}
+	return l.URL, nil
 }
 
 // ArchivePool routes historical state calls across the endpoints that
