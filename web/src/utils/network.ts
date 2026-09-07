@@ -14,7 +14,7 @@ export function isUnknownNetwork(networks: readonly Pick<Network, "name" | "chai
 }
 
 /** The canonical route for `param` once the server has confirmed the network: `/4663` resolves to
- * `robinhood`. Null when the route already uses the name. */
+ * `robinhood`. Null when the route already uses the name, or when `param` is not the confirmed chain id. */
 export function canonicalNetworkName(param: string, confirmed: Pick<Network, "name" | "chainId"> | null): string | null {
   if (!confirmed || confirmed.name === param) return null;
   return String(confirmed.chainId) === param ? confirmed.name : null;
