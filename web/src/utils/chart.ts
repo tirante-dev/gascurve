@@ -16,26 +16,6 @@ export function seriesColor(index: number): string {
 /** Colour of the "unknown split" series: the muted ink, never a constraint colour. */
 export const UNKNOWN_COLOR = "var(--ink-3)";
 
-/** Sequential ramp step (1 to 9) for a multiplier over the floor, on a log scale from 1x to 100x. */
-export function rampStep(multiplierBips: number): number {
-  const m = Math.max(1, multiplierBips / 10_000);
-  const f = Math.min(1, Math.log10(m) / 2);
-  return 1 + Math.round(f * 8);
-}
-
-export function rampColor(multiplierBips: number): string {
-  return `var(--seq-${rampStep(multiplierBips)})`;
-}
-
-/**
- * Text colour that clears AA contrast on the given ramp step. Each step has
- * its own ink token because the step at which the ramp flips from light ink
- * to dark ink differs between the light and dark surfaces.
- */
-export function rampInk(step: number): string {
-  return `var(--seq-ink-${Math.max(1, Math.min(9, Math.round(step)))})`;
-}
-
 /** The floor line and its legend swatch: the cyan accent, never a constraint colour. */
 export const FLOOR_COLOR = "var(--floor)";
 

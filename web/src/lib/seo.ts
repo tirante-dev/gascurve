@@ -82,7 +82,7 @@ export function networkDisplayName(param: string): string {
   return SITE_NETWORKS.find((n) => n.name === param)?.displayName ?? networkLabel(param);
 }
 
-export const SITE_TAGLINE = "Nitro base fee telemetry";
+export const SITE_TAGLINE = "Live gas prices for Arbitrum Nitro chains";
 
 /**
  * What the site is, in one sentence, for the default description and the

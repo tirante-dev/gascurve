@@ -48,6 +48,8 @@
   --good: #0f7a4e;
   --warning: #8a4b00;
   --critical: #c0263d;
+  /* The amber band of the fee dial: --warning is tuned for text and reads as brown in a 9 px stroke. Clears 3:1 on the tile it sits on. */
+  --dial-warning: #b8860b;
 
   --series-1: #c0189a;
   --series-2: #0f855c;
@@ -116,6 +118,7 @@
     --good: #3ddc97;
     --warning: #ffb020;
     --critical: #ff5c7a;
+    --dial-warning: #ffb020;
 
     --series-1: #d62aa8;
     --series-2: #1fae78;
@@ -180,6 +183,7 @@
   --good: #3ddc97;
   --warning: #ffb020;
   --critical: #ff5c7a;
+  --dial-warning: #ffb020;
 
   --series-1: #d62aa8;
   --series-2: #1fae78;
@@ -236,6 +240,7 @@
   --color-good: var(--good);
   --color-warning: var(--warning);
   --color-critical: var(--critical);
+  --color-dial-warning: var(--dial-warning);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
   --font-display: var(--font-display);
