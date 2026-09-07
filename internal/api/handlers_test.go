@@ -1320,6 +1320,48 @@ func TestMissingTimelineUnknownAndCursorBounds(t *testing.T) {
 	}
 }
 
+// TestMissingTimelineKeepsBlockPointRates is the regression for applying
+// bucket coverage arithmetic to per-block points. The block before a gap is
+// itself indexed, so it keeps a whole coverage and the gas rate of its second
+// while reporting that the series around it is not whole.
+func TestMissingTimelineKeepsBlockPointRates(t *testing.T) {
+	base := now.Truncate(time.Second)
+	block := func(number uint64, at time.Time, gas uint64) db.Block {
+		return db.Block{
+			Number: number, TS: at, GasUsed: gas, BaseFee: db.WeiFromUint64(1),
+			PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull,
+		}
+	}
+	points := blockPoints([]db.Block{
+		block(98, base, 100), block(99, base, 100), block(110, base.Add(5*time.Second), 200),
+	}, nil)
+	newMissingTimeline([]db.MissingRange{{
+		From: 100, To: 109, Lifecycle: model.MissingRangePending,
+		PredecessorAt: sql.NullTime{Time: base, Valid: true},
+		SuccessorAt:   sql.NullTime{Time: base.Add(5 * time.Second), Valid: true},
+	}}).mark(points, time.Second)
+	for i, p := range points[:2] {
+		// gasPerSecond stays the gas of every block in the second, not the
+		// point's own gas divided by a gap-shortened divisor.
+		if p.Completeness != model.SeriesPartial || p.Coverage == nil || *p.Coverage != 1 || p.GasPerSecond != 200 {
+			t.Fatalf("block %d beside a gap: %+v", i, p)
+		}
+	}
+	if p := points[2]; p.Completeness != model.SeriesPartial || p.Coverage == nil || *p.Coverage != 1 || p.GasPerSecond != 200 {
+		t.Fatalf("block after a gap: %+v", p)
+	}
+
+	away := blockPoints([]db.Block{block(200, base.Add(time.Minute), 300)}, nil)
+	newMissingTimeline([]db.MissingRange{{
+		From: 100, To: 109, Lifecycle: model.MissingRangePending,
+		PredecessorAt: sql.NullTime{Time: base, Valid: true},
+		SuccessorAt:   sql.NullTime{Time: base.Add(5 * time.Second), Valid: true},
+	}}).mark(away, time.Second)
+	if p := away[0]; p.Completeness != model.SeriesComplete || p.Coverage == nil || *p.Coverage != 1 || p.GasPerSecond != 300 {
+		t.Fatalf("block clear of every gap: %+v", p)
+	}
+}
+
 // TestBatchesOneHourBounds: the per-report batch resolution reports the
 // window it was asked for, exactly as the grouped resolutions do, whether
 // or not any report falls inside it.

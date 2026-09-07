@@ -131,7 +131,7 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 		} else {
 			out.Resolution = "block"
 			out.Points = blockPoints(blocks, sets)
-			timeline.apply(out.Points, time.Second)
+			timeline.mark(out.Points, time.Second)
 		}
 		out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 		return out, nil
@@ -243,11 +243,23 @@ func mergeMissingIntervals(intervals []missingInterval) []missingInterval {
 	return merged
 }
 
-// apply qualifies every emitted point. Numeric coverage can be adjusted only
-// when its original boundary span was whole and all overlapping gap envelopes
-// are bounded. Otherwise coverage becomes null rather than combining spans
-// whose overlap is not measurable from the response point alone.
+// apply qualifies aggregate points that span width. Numeric coverage can be
+// adjusted only when its original boundary span was whole and all overlapping
+// gap envelopes are bounded. Otherwise coverage becomes null rather than
+// combining spans whose overlap is not measurable from the response point
+// alone.
 func (m missingTimeline) apply(points []model.SeriesPoint, width time.Duration) {
+	m.qualify(points, width, true)
+}
+
+// mark qualifies per-block points. A block covers itself, and its rate is the
+// gas of every block sharing its second, so a neighboring gap changes neither
+// value: it only makes the point's completeness partial or unknown.
+func (m missingTimeline) mark(points []model.SeriesPoint, width time.Duration) {
+	m.qualify(points, width, false)
+}
+
+func (m missingTimeline) qualify(points []model.SeriesPoint, width time.Duration, measure bool) {
 	for i := range points {
 		point := &points[i]
 		start := time.Unix(point.T, 0).UTC()
@@ -274,6 +286,9 @@ func (m missingTimeline) apply(points []model.SeriesPoint, width time.Duration) 
 			point.Completeness = model.SeriesPartial
 		} else if point.Completeness == model.SeriesComplete {
 			point.Completeness = model.SeriesUnknown
+		}
+		if !measure {
+			continue
 		}
 		if uncertain || point.Coverage == nil || *point.Coverage < 1 {
 			point.Coverage = nil
