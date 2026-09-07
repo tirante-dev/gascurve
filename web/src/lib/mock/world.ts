@@ -160,6 +160,15 @@ const LIVE_TAIL_SECONDS = 120;
 /** Beyond this gap the world catches up with 5 s steps instead of per-block ticks. */
 const CATCH_UP_THRESHOLD = 600;
 
+/**
+ * The floor a block was priced at. The contract allows a null floor for
+ * pricing version 0 history, which the mock never produces, so the fallback is
+ * only here to keep the read total.
+ */
+function floorOf(block: Pick<BlockPoint, "minBaseFee">): bigint {
+  return BigInt(block.minBaseFee ?? "0");
+}
+
 export class MockWorld {
   readonly def: MockNetworkDef;
   readonly startAt: number;
@@ -399,7 +408,7 @@ export class MockWorld {
   private credit(block: BlockPoint, sign: bigint): void {
     const gas = BigInt(block.gasUsed);
     const fee = BigInt(block.baseFee);
-    const minFee = BigInt(block.minBaseFee);
+    const minFee = floorOf(block);
     this.accumulatedInfra += sign * gas * minFee;
     this.accumulatedNetwork += sign * gas * (fee > minFee ? fee - minFee : 0n);
   }
@@ -426,7 +435,7 @@ export class MockWorld {
       feeMax = maxBigInt(feeMax, fee);
       feeSum += fee;
       feesWei += BigInt(b.gasUsed) * fee;
-      floorFeesWei += BigInt(b.gasUsed) * BigInt(b.minBaseFee);
+      floorFeesWei += BigInt(b.gasUsed) * floorOf(b);
       gas += b.gasUsed;
       backlogsMax = b.backlogs.map((v, i) => Math.max(v, backlogsMax[i] ?? 0));
     });
@@ -443,7 +452,7 @@ export class MockWorld {
       constraintBips: last.constraintBips ?? [],
       backlogs: last.backlogs,
       backlogsMax,
-      minFee: BigInt(last.minBaseFee),
+      minFee: floorOf(last),
       floorFeesWei,
       surplusFeesWei: feesWei - floorFeesWei,
       setId: this.currentSetId(),
@@ -646,7 +655,7 @@ export class MockWorld {
 
   private composeSnapshot(args: { block: BlockPoint; fee: bigint; backlogs: number[]; exponent: number; replayError: number; sampledAt: string; now: number }): LiveSnapshot {
     const { block, fee, backlogs, exponent, replayError, sampledAt, now } = args;
-    const minFee = BigInt(block.minBaseFee);
+    const minFee = floorOf(block);
     const congestion = fee > minFee ? fee - minFee : 0n;
     const l1 = this.l1State(now);
     const constraints = this.legacy
@@ -819,8 +828,9 @@ export class MockWorld {
       acc.backlogsMax = acc.backlogsMax.map((v, j) => Math.max(v, r.backlogsMax[j] ?? 0));
       acc.replayErrorBips = Math.max(acc.replayErrorBips, r.replayErrorBips);
     }
-    // Buckets that predate the split migration are served the way the api
-    // serves pre-000006 history: no split, no fee destinations.
+    // Buckets that predate the breakdown are served the way the api serves
+    // pricing version 0 history: no split, no floor in force, no fee
+    // destinations.
     const recordedFrom = this.def.splitRecordedFrom ? isoToUnix(this.def.splitRecordedFrom) : this.startAt;
     const points: SeriesPoint[] = [...buckets.values()]
       .sort((a, b) => a.t - b.t)
@@ -843,7 +853,7 @@ export class MockWorld {
           constraintBips: recorded ? b.constraintBips : null,
           backlogs: b.backlogs,
           backlogsMax: b.backlogsMax,
-          minBaseFee: b.minFee.toString(),
+          minBaseFee: recorded ? b.minFee.toString() : null,
           floorFeesWei: recorded ? b.floorFeesWei.toString() : null,
           surplusFeesWei: recorded ? b.surplusFeesWei.toString() : null,
           constraintSetId: b.setId,

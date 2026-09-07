@@ -139,8 +139,8 @@ func TestMergeBucketsUnknown(t *testing.T) {
 
 // TestBucketPricingVersion: a window holding one block whose pricing
 // breakdown was never recorded reports no floor, no fee split and no
-// exponents at all, instead of summing the placeholder zeros that
-// migration 000005 left and presenting the result as exact.
+// exponents at all, instead of summing zeros for what was never
+// recorded and presenting the result as exact.
 func TestBucketPricingVersion(t *testing.T) {
 	t0 := time.Date(2026, 9, 6, 8, 0, 0, 0, time.UTC)
 	known := mkBlock(1, t0, 100, 10, 40, 5)

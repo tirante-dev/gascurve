@@ -11,6 +11,7 @@ import (
 	"github.com/tirante-dev/gascurve/internal/config"
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
+	"github.com/tirante-dev/gascurve/internal/logger"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
@@ -570,17 +571,17 @@ func TestTickReorgResetsBackfill(t *testing.T) {
 	// A corrupt cursor fails the rewind; so does a failing live start
 	// delete.
 	_ = store.SetState(ctx, 4663, db.StateBackfillCursor, "{bad")
-	if err := f.rewindBackfill(ctx, store, 1, time.Time{}, false); err == nil {
+	if _, err := f.rewindBackfill(ctx, store, 1, time.Time{}, false); err == nil {
 		t.Fatal("corrupt cursor")
 	}
 	_ = store.SetState(ctx, 4663, db.StateBackfillCursor, `{"top":50}`)
 	store.FailOn["DeleteBucketsBefore"] = true
-	if err := f.rewindBackfill(ctx, store, 1, baseTime, true); !errors.Is(err, dbtest.ErrInjected) {
+	if _, err := f.rewindBackfill(ctx, store, 1, baseTime, true); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("bucket delete failure: %v", err)
 	}
 	delete(store.FailOn, "DeleteBucketsBefore")
 	store.FailOn["GetState"] = true
-	if err := f.rewindBackfill(ctx, store, 1, baseTime, true); !errors.Is(err, dbtest.ErrInjected) {
+	if _, err := f.rewindBackfill(ctx, store, 1, baseTime, true); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("cursor read failure: %v", err)
 	}
 	delete(store.FailOn, "GetState")
@@ -1366,5 +1367,116 @@ func TestTickRestartRebuildsState(t *testing.T) {
 	f4.mu.Unlock()
 	if !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("lookup failure: %v", err)
+	}
+}
+
+// TestRewindNetworkHeadStatus: a rewind is not a sample. The network row
+// takes last_sample_at from the newest state sample that survived it, so
+// /status does not report the rewind itself as a fresh successful sample,
+// and a rewind that leaves no block at all nulls the head and its time
+// instead of storing an epoch one.
+func TestRewindNetworkHeadStatus(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := store.LatestStateSample(ctx, 4663, false)
+	surviving := first.SampledAt
+	rpc.setHead(1010)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The chain reorganizes from 1006 on and the replacement sampling
+	// never happens: what the rewind wrote is what /status shows.
+	rpc.fork(1006, "z")
+	if _, err := f.rewindToAncestor(ctx, 1009); err != nil {
+		t.Fatal(err)
+	}
+	n := store.NetworkRows[4663]
+	if !n.HeadBlock.Valid || n.HeadBlock.Int64 != 1005 || !n.HeadAt.Valid || n.HeadAt.Time.Unix() != int64(tsFor(1005)) {
+		t.Fatalf("the head moves to the surviving ancestor: %+v", n)
+	}
+	if !n.LastSampleAt.Valid || !n.LastSampleAt.Time.Equal(surviving) {
+		t.Fatalf("last_sample_at must be the newest surviving sample %v, got %+v", surviving, n.LastSampleAt)
+	}
+	if n.LastSampleAt.Time.Equal(f.now()) {
+		t.Fatal("a rewind must not claim to be a fresh sample")
+	}
+	// Nothing survives at all: the head, its time and the sample time are
+	// null rather than the epoch.
+	store.BlockRows[4663] = map[uint64]db.Block{}
+	store.SampleRows = nil
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.rewindNetworkHead(ctx, s, 0) }); err != nil {
+		t.Fatal(err)
+	}
+	if n := store.NetworkRows[4663]; n.HeadBlock.Valid || n.HeadAt.Valid || n.LastSampleAt.Valid {
+		t.Fatalf("an empty chain has no head and no sample: %+v", n)
+	}
+	// Failures on the way surface instead of leaving a stale row.
+	for _, method := range []string{"LatestStateSample", "SetNetworkHead", "BlockByNumber"} {
+		store.FailOn[method] = true
+		err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.rewindNetworkHead(ctx, s, 5) })
+		store.FailOn[method] = false
+		if !errors.Is(err, dbtest.ErrInjected) {
+			t.Fatalf("%s: %v", method, err)
+		}
+	}
+}
+
+// TestCatchUpReEvaluatesAfterFailover: a catch-up decided on an unlimited
+// endpoint that fails over to a paced one halfway through must not carry
+// the unlimited decision on to the fallback. The budget is decided again
+// against the endpoint that would serve the rest, and the remaining gap is
+// skipped and queued instead of being fetched on the public endpoint.
+func TestCatchUpReEvaluatesAfterFailover(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	pool := &fakePool{fakeRPC: rpc, pol: nitro.Policy{Unlimited: true}}
+	store := dbtest.New()
+	f := NewFollower(Options{
+		Network:   config.NetworkConfig{Name: "robinhood", ChainID: 4663, CallsPerSecond: 4, Enabled: true},
+		Collector: testConfig(), RPC: pool, Store: store, Log: logger.Nop(),
+		Now:   func() time.Time { return baseTime.Add(100 * time.Second) },
+		Sleep: func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
+	})
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A gap far wider than a paced endpoint's budget. The pool moves to a
+	// paced fallback while the first batch is in flight.
+	rpc.setHead(gapHead)
+	rpc.headerCalls = nil
+	rpc.hooks["HeadersByNumbers"] = func() {
+		pool.pol = nitro.Policy{Unlimited: false, Rate: 4}
+		pool.status = nitro.PoolStatus{Active: 1, Failovers: 1}
+	}
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls := len(rpc.headerCalls); calls != 1 {
+		t.Fatalf("the catch-up must stop at the failover, got %d batches", calls)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].From != 1001 || holes[0].To != gapHead-1 {
+		t.Fatalf("the rest of the gap must be queued: %+v", holes)
+	}
+	if f.Head() != gapHead {
+		t.Fatalf("the sampled head is still seeded: %d", f.Head())
+	}
+	// A failover between endpoints with the same policy changes nothing.
+	delete(rpc.hooks, "HeadersByNumbers")
+	pool.pol = nitro.Policy{Unlimited: true}
+	rpc.setHead(gapHead + 150)
+	rpc.headerCalls = nil
+	rpc.hooks["HeadersByNumbers"] = func() {
+		pool.status = nitro.PoolStatus{Active: 0, Failovers: 2}
+	}
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls := len(rpc.headerCalls); calls != 15 {
+		t.Fatalf("an unlimited fallback keeps catching up, got %d batches", calls)
 	}
 }

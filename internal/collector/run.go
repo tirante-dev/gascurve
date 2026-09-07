@@ -178,10 +178,12 @@ func (f *Follower) runSlow(ctx context.Context) {
 // runHistory is the loop that rebuilds history: every iteration fills one
 // batch of the newest fillable hole, and only when nothing is fillable
 // does it spend the iteration on the backfill. Gap filling outlives the
-// backfill, which finishes once and for all, because a paced network
-// keeps skipping ranges as it follows the head.
+// backfill, because a paced network keeps skipping ranges as it follows
+// the head. Completion is never cached here: BackfillStep answers Done
+// from the durable cursor without a call, so a rewind that resets that
+// cursor is picked up by the next iteration instead of leaving the
+// deleted history unrebuilt for the life of the process.
 func (f *Follower) runHistory(ctx context.Context) {
-	backfilled := false
 	for ctx.Err() == nil {
 		status, err := f.FillStep(ctx)
 		if err != nil && ctx.Err() == nil {
@@ -201,12 +203,6 @@ func (f *Follower) runHistory(ctx context.Context) {
 			continue
 		case FillNone:
 		}
-		if backfilled {
-			if err := f.sleep(ctx, backfillIdle); err != nil {
-				return
-			}
-			continue
-		}
 		back, err := f.BackfillStep(ctx)
 		if err != nil && ctx.Err() == nil {
 			f.log.Warn("backfill error", "err", err.Error())
@@ -216,9 +212,10 @@ func (f *Follower) runHistory(ctx context.Context) {
 			continue
 		}
 		switch back {
-		case BackfillDone:
-			backfilled = true
-		case BackfillIdle:
+		case BackfillDone, BackfillIdle:
+			// A finished backfill is polled at the idle cadence: the
+			// cursor answers Done without a call, and a rewind that
+			// resets it puts the job back to work on its own.
 			if err := f.sleep(ctx, backfillIdle); err != nil {
 				return
 			}

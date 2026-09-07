@@ -8,6 +8,7 @@ import { emptyRangeNote, gapModel, withGapBreaks, NO_GAPS, type GapModel } from 
 import { isPartialRow, partialBands, partialRowNote, withFeeStack } from "@/lib/partial";
 import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, formatUsdFixed, freshUsdPrice, shortAddress } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
+import { formatFloor } from "@/lib/feeChart";
 import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { gapBands, GapNote, PartialHatch, PartialNote, partialBandAreas } from "./ChartGaps";
@@ -88,7 +89,7 @@ export function feeFlowRows(unsplit: boolean): TooltipRow[] {
     { label: "floor to infra", color: FLOOR_FILL, kind: "rect", value: (r) => ethCell(r.floorFeesEth), when: (r) => r.unsplitFeesEth === null },
     { label: "congestion to network", color: SURPLUS_FILL, kind: "rect", value: (r) => ethCell(r.surplusFeesEth), when: (r) => r.unsplitFeesEth === null },
     ...(unsplit ? [{ label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR, kind: "hatch" as const, value: (r: Record<string, unknown>) => ethCell(r.unsplitFeesEth), when: (r: Record<string, unknown>) => r.unsplitFeesEth !== null }] : []),
-    { label: "floor in force", value: (r) => `${formatSignificant(Number(r.floor), 3)} gwei` },
+    { label: "floor in force", value: (r) => (typeof r.floor === "number" ? `${formatFloor(r.floor)} gwei` : "n/a") },
   ];
 }
 
@@ -103,7 +104,10 @@ export function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT
   // The stack is a sum over the bucket, so a bucket the collector has only
   // part of would draw as a bucket that collected little. It is hatched
   // instead, and the stack ends at the last whole bucket.
-  const bands = partialBands(points, gaps.step);
+  // Which partial bucket is the one still filling is decided by the window's
+  // right edge, not by array position: a range with a trailing gap ends on a
+  // bucket indexing stopped part way through, which is not in progress.
+  const bands = partialBands(points, gaps.step, window.to);
   // Empty rows inside the holes, so a bucket that was never indexed breaks the
   // stack rather than reading as a bucket that collected nothing.
   const rows = withGapBreaks(withFeeStack(points), gaps.gaps);
@@ -223,7 +227,7 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
                             <td className="py-1 pr-3">{formatSignificant(p.feesEth, 4)}</td>
                             <td className="py-1 pr-3">{formatPart(p.floorFeesEth)}</td>
                             <td className="py-1 pr-3">{formatPart(p.surplusFeesEth)}</td>
-                            <td className="py-1 pr-3">{formatSignificant(p.floor, 3)}</td>
+                            <td className="py-1 pr-3">{formatFloor(p.floor)}</td>
                           </tr>
                         ))}
                       </tbody>

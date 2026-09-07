@@ -514,7 +514,26 @@ describe("shape-aware set resolution", () => {
     const rows = buildChartPoints(series, "constraints");
     expect(rows[0].setKnown).toBe(false);
     expect(rows[0].cUnknown).toBeCloseTo(3.1313, 4);
-    expect(segmentsFor(series, "constraints").map((s) => s.setId)).toEqual([1, 1, 1, 1, 1, 1]);
+    // The six-constraint set matches no point in the range, so it is not
+    // drawable and offers no slots: the switcher would otherwise have shown
+    // C1 to C6 with empty charts behind C3 to C6.
+    expect(segmentsFor(series, "constraints").map((s) => s.setId)).toEqual([]);
+    expect(seriesCount(series, "constraints")).toBe(2);
+  });
+  it("offers no constraint slot the data cannot fill", () => {
+    // The api returns the six-constraint genesis set while the points carry a
+    // two-slot live shape, which the owner-action scan has not caught up with.
+    // The switcher used to offer C1 to C6 with empty charts behind C3 to C6.
+    const series = { range: "1h" as const, resolution: "block" as const, from: 0, to: 0, constraintSets: [genesis], ownerActions: [], points: [point] };
+    expect(seriesCount(series, "constraints")).toBe(2);
+    expect(slotLabel(series, 0, "constraints")).toBe(unknownSlotLabel(0));
+    // The unmatched data is drawn as the unknown split, under the unlabelled slots.
+    const rows = buildChartPoints(series, "constraints");
+    expect(rows[0].splitKnown).toBe(false);
+    expect(rows[0][unknownBacklogKey(0)]).toBe(6042415);
+    expect(rows[0][unknownBacklogKey(1)]).toBe(10822088492758);
+    // With no points at all there is nothing to contradict the set.
+    expect(seriesCount({ ...series, points: [] }, "constraints")).toBe(6);
   });
   it("keeps a set whose shape matches", () => {
     const current = { ...genesis, id: 6, effectiveBlock: 53_578_754, constraints: genesis.constraints.slice(0, 2) };

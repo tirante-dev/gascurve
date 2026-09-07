@@ -27,7 +27,7 @@ import {
   type HeroRange,
   type ThroughputPoint,
 } from "@/lib/hero";
-import { SWAP_GAS, targetValues, TRANSFER_GAS, type LiveValues } from "@/lib/smoothing";
+import { assignPlaces, NO_PLACES, SWAP_GAS, targetValues, TRANSFER_GAS, type BlockPlaces, type LiveValues } from "@/lib/smoothing";
 import type { BlockPoint, LiveSnapshot, LiveStatus, PricerModel, Series } from "@/types";
 import { FLOOR_COLOR, MARKER_COLOR, rampColor, rampInk, rampStep } from "@/utils/chart";
 import {
@@ -52,9 +52,10 @@ import {
 } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
+import { ChartReadout, type ReadoutGroup } from "./ChartReadout";
 import { EnlargeLink } from "./ChartActions";
 import { gapBands, GapNote } from "./ChartGaps";
-import { buildSeriesModel, GasPerSecondChart } from "./SeriesCharts";
+import { buildSeriesModel, bucketRowTitle, GasPerSecondChart } from "./SeriesCharts";
 import { Figure, Label, Stat, StatusPill, TIME_AXIS_RIGHT } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
 
@@ -108,6 +109,16 @@ export function ChartBox({ label, busy, height = HERO_CHART_HEIGHT, children }: 
 /** A word inside the chart box: what there is to say when there is no chart to draw. */
 function ChartNote({ children }: { children: ReactNode }) {
   return <p className="flex h-full items-center justify-center px-6 text-center text-xs text-ink-3">{children}</p>;
+}
+
+/**
+ * The placement to draw with: the ring's own where the caller has one (the
+ * live section always does, and it is the only one that keeps a block's place
+ * fixed across arrivals and evictions), and a placement of these blocks alone
+ * for a caller with none.
+ */
+function usePlaces(blocks: readonly BlockPoint[], places: BlockPlaces | undefined): BlockPlaces {
+  return useMemo(() => places ?? assignPlaces(NO_PLACES, blocks), [places, blocks]);
 }
 
 /** Both hero chart axes reserve the same width, so the plot starts in the same place at every range. */
@@ -216,11 +227,21 @@ export const HERO_THROUGHPUT_HEIGHT = "h-[120px] lg:h-[140px]";
 /** What a hovered second on the live throughput chart says: the gas that second carried, in how many blocks, and when it was. */
 export function throughputTooltipRows(): TooltipRow[] {
   return [
-    { label: "gas in the second", color: THROUGHPUT_COLOR, value: (r) => formatGasPerSecond(Number(r.gas)) },
-    { label: "blocks", value: (r) => formatInteger(Number(r.blocks)) },
+    // A second the ring has a hole across carries no measurement at all, and
+    // "0 gas/s" is a different claim from "nobody can say".
+    { label: "gas in the second", color: THROUGHPUT_COLOR, value: (r) => (typeof r.gas === "number" ? formatGasPerSecond(r.gas) : "n/a") },
+    { label: "blocks", value: (r) => (typeof r.blocks === "number" ? formatInteger(r.blocks) : "n/a") },
     { label: "time", value: (r) => formatTime(Number(r.ts)) },
   ];
 }
+
+/** The peak of a live throughput series, treating an unmeasured second as nothing. */
+export function throughputPeak(points: readonly ThroughputPoint[]): number {
+  return Math.max(0, ...points.map((p) => p.gas ?? 0));
+}
+
+/** What names a second on the live charts, for the inspector and the data table. */
+const livePointTitle = (row: Record<string, unknown>) => heroPointTitle(Number(row.x));
 
 /**
  * Gas per second from the block ring, on the same clock-anchored axis as the
@@ -233,14 +254,17 @@ export function throughputTooltipRows(): TooltipRow[] {
 export const HeroThroughputChart = memo(function HeroThroughputChart({ points, height = HERO_THROUGHPUT_HEIGHT }: { points: ThroughputPoint[]; height?: string }) {
   const span = heroSpan();
   const ticks = useMemo(() => heroTicks(span), [span]);
-  const axis = useMemo(() => throughputAxis(Math.max(0, ...points.map((p) => p.gas))), [points]);
+  const axis = useMemo(() => throughputAxis(throughputPeak(points)), [points]);
+  // Seconds the ring can speak for. A null second is drawn as a break, so it
+  // is not one of the seconds the description counts.
+  const measured = points.filter((p) => p.gas !== null).length;
   const label =
-    points.length < 2
+    measured < 2
       ? "Gas per second, waiting for blocks"
-      : `Gas carried per second over the last ${span} seconds, ${points.length} seconds of blocks, up to ${formatGasPerSecond(Math.max(...points.map((p) => p.gas)))}`;
+      : `Gas carried per second over the last ${span} seconds, ${measured} seconds of blocks, up to ${formatGasPerSecond(throughputPeak(points))}`;
   return (
-    <ChartBox label={label} busy={points.length < 2} height={height}>
-      {points.length < 2 ? (
+    <ChartBox label={label} busy={measured < 2} height={height}>
+      {measured < 2 ? (
         <ChartNote>Waiting for blocks.</ChartNote>
       ) : (
         <ResponsiveContainer width="100%" height="100%">
@@ -265,6 +289,7 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, h
  */
 export function HeroThroughputPanel({
   blocks,
+  places,
   nowMs,
   range,
   series,
@@ -276,6 +301,8 @@ export function HeroThroughputPanel({
   action,
 }: {
   blocks: BlockPoint[];
+  /** The ring's own placement, so this chart puts a block exactly where the fee chart above it does. */
+  places?: BlockPlaces;
   nowMs: number;
   range: HeroRange;
   series: Series | null;
@@ -288,10 +315,11 @@ export function HeroThroughputPanel({
   action?: ReactNode;
 }) {
   const live = range === "live";
-  const points = useMemo(() => (live ? heroThroughputData(blocks, nowMs) : []), [live, blocks, nowMs]);
+  const placed = usePlaces(blocks, places);
+  const points = useMemo(() => (live ? heroThroughputData(blocks, placed, nowMs) : []), [live, blocks, placed, nowMs]);
   const m = useMemo(() => (!live && series ? buildSeriesModel(series, model) : null), [live, series, model]);
   const rangeLabel = HERO_RANGE_LABELS[range];
-  const liveUnit = useMemo(() => throughputAxis(Math.max(0, ...points.map((p) => p.gas))).unit, [points]);
+  const liveUnit = useMemo(() => throughputAxis(throughputPeak(points)).unit, [points]);
   const unit = live ? liveUnit : (m?.gasAxis.unit ?? "Mgas/s");
   const caption = live
     ? `Gas per second across the chain \u00b7 ${unit} \u00b7 the last ${heroSpan()} s of blocks`
@@ -319,9 +347,36 @@ export function HeroThroughputPanel({
         ) : (
           <GasPerSecondChart m={m} height={height} axisWidth={HERO_AXIS_WIDTH} minWidth={minWidth} />
         )}
+        {live ? (
+          <ChartReadout
+            points={points}
+            groups={THROUGHPUT_READOUT}
+            title={livePointTitle}
+            heading="Second inspector"
+            selectLabel="Select a second to read its values"
+            caption="Every whole second of the live throughput chart with the gas it carried and how many blocks carried it"
+            summary="Gas per second, as a table"
+            timeLabel="when"
+          />
+        ) : m !== null && m.points.length > 0 ? (
+          <ChartReadout
+            points={m.points}
+            groups={[{ title: "gas", rows: m.gasRows }]}
+            note={m.note}
+            title={bucketRowTitle}
+            heading="Bucket inspector"
+            selectLabel="Select a bucket to read its values"
+            caption={`Every bucket of the throughput chart over ${rangeLabel} with its rate and the targets in force`}
+            summary={`Gas per second over ${rangeLabel}, as a table`}
+            timeLabel="bucket"
+          />
+        ) : null}
     </>
   );
 }
+
+/** What the live throughput chart reads out without a pointer. */
+const THROUGHPUT_READOUT: ReadoutGroup[] = [{ title: "second", rows: throughputTooltipRows() }];
 
 /** Where a unit of gas's fee goes: the floor to the infra account, the rest to the network account. Memoised on the snapshot. */
 export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: LiveSnapshot }) {
@@ -430,6 +485,7 @@ export function CostTile({ label, eth, usdPerEth }: { label: string; eth: number
 export function HeroChartPanel({
   snapshot,
   blocks,
+  places,
   nowMs,
   range,
   series,
@@ -440,6 +496,8 @@ export function HeroChartPanel({
 }: {
   snapshot: LiveSnapshot;
   blocks: BlockPoint[];
+  /** The ring's own placement, assigned once per block; see lib/smoothing. */
+  places?: BlockPlaces;
   nowMs: number;
   range: HeroRange;
   series: Series | null;
@@ -448,19 +506,23 @@ export function HeroChartPanel({
   model?: PricerModel;
   height?: string;
 }) {
-  // Against the frame's wall clock: the chart slides every frame, and a block keeps its place.
-  const points = useMemo(() => heroChartData(blocks, nowMs), [blocks, nowMs]);
-  const data = useMemo(() => feeChartData(range === "live" ? null : series, model), [range, series, model]);
+  const live = range === "live";
+  // Against the frame's wall clock: the chart slides every frame, and a block
+  // keeps its place. Built only on Live: rebuilding fifteen hundred relative
+  // positions every frame for a chart drawing buckets is work nobody sees.
+  const placed = usePlaces(blocks, places);
+  const points = useMemo(() => (live ? heroChartData(blocks, placed, nowMs) : []), [live, blocks, placed, nowMs]);
+  const data = useMemo(() => feeChartData(live ? null : series, model), [live, series, model]);
   const floorGwei = weiToGweiNumber(snapshot.minBaseFee);
   const rangeLabel = HERO_RANGE_LABELS[range];
-  const caption =
-    range === "live"
-      ? `Base fee per block \u00b7 last ${points.length} blocks \u00b7 ${formatGasFixed(snapshot.block.gasUsed)} in block ${formatInteger(snapshot.block.number)}`
-      : feeChartCaption(rangeLabel, data.points);
+  const caption = live
+    ? `Base fee per block \u00b7 last ${points.length} blocks \u00b7 ${formatGasFixed(snapshot.block.gasUsed)} in block ${formatInteger(snapshot.block.number)}`
+    : feeChartCaption(rangeLabel, data.points);
+  const note = useMemo(() => bucketNote(data.markers, data.bucketSeconds), [data.markers, data.bucketSeconds]);
   return (
     <>
         <p className="text-xs text-ink-3">{caption}</p>
-        {range === "live" ? (
+        {live ? (
           <HeroChart points={points} floorGwei={floorGwei} floorText={formatGwei(snapshot.minBaseFee)} height={height} />
         ) : seriesError !== null && series === null ? (
           <ChartBox label={`Base fee over ${rangeLabel}, unavailable`} height={height}>
@@ -477,9 +539,41 @@ export function HeroChartPanel({
         ) : (
           <HeroHistoryChart data={data} rangeLabel={rangeLabel} height={height} />
         )}
+        {/* The same values without a pointer: one block or bucket at a time in
+            the inspector, all of them in the table. */}
+        {live ? (
+          <ChartReadout
+            points={points}
+            groups={FEE_READOUT}
+            title={livePointTitle}
+            heading="Block inspector"
+            selectLabel="Select a block to read its values"
+            caption="Every block of the live base fee chart with its fee, the gas it carried and its time"
+            summary="Base fee per block, as a table"
+            timeLabel="when"
+          />
+        ) : (
+          <ChartReadout
+            points={data.points}
+            groups={BUCKET_FEE_READOUT}
+            note={note}
+            title={bucketRowTitle}
+            heading="Bucket inspector"
+            selectLabel="Select a bucket to read its values"
+            caption={`Every bucket of the base fee chart over ${rangeLabel} with its average, band, floor and block count`}
+            summary={`Base fee over ${rangeLabel}, as a table`}
+            timeLabel="bucket"
+          />
+        )}
     </>
   );
 }
+
+/** What the live base fee chart reads out without a pointer. */
+const FEE_READOUT: ReadoutGroup[] = [{ title: "block", rows: heroTooltipRows() }];
+
+/** The same for a bucketed range. */
+const BUCKET_FEE_READOUT: ReadoutGroup[] = [{ title: "bucket", rows: feeTooltipRows() }];
 
 /** Copy for an empty hero: a reorg took the last state away, or nothing has arrived yet. */
 export const RESYNC_COPY = "Resyncing after a reorg.";
@@ -504,6 +598,7 @@ export function LiveHero({ network, live, status, model }: { network: string; li
       snapshot={live.display}
       values={frame.values}
       blocks={frame.blocks}
+      places={frame.places}
       nowMs={frame.nowMs}
       status={status}
       resyncing={live.resyncing}
@@ -531,6 +626,7 @@ export function LiveHeroView({
   snapshot,
   values,
   blocks,
+  places,
   nowMs,
   status,
   resyncing = false,
@@ -545,6 +641,8 @@ export function LiveHeroView({
   snapshot: LiveSnapshot | null;
   values: LiveValues | null;
   blocks: BlockPoint[];
+  /** The ring's own placement, so every live chart draws a block in the same spot. */
+  places?: BlockPlaces;
   nowMs: number;
   status: LiveStatus;
   resyncing?: boolean;
@@ -619,11 +717,12 @@ export function LiveHeroView({
               <EnlargeLink network={network} view={chartView("base-fee")} range={range} size="hero" />
             </div>
           </div>
-          <HeroChartPanel snapshot={snapshot} blocks={blocks} nowMs={nowMs} range={range} series={series} seriesLoading={seriesLoading} seriesError={seriesError} model={model} />
+          <HeroChartPanel snapshot={snapshot} blocks={blocks} places={places} nowMs={nowMs} range={range} series={series} seriesLoading={seriesLoading} seriesError={seriesError} model={model} />
           {/* What the chain carried, under what it charged for it, on the same
               range and the same axis: the two questions are one question. */}
           <HeroThroughputPanel
             blocks={blocks}
+            places={places}
             nowMs={nowMs}
             range={range}
             series={series}

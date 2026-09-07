@@ -234,9 +234,23 @@ func buildLiveIn(ctx context.Context, store db.Store, chainID uint64, now time.T
 	return snap, nil
 }
 
+// ethUsdFutureSkew is how far ahead of the serving clock a recorded quote
+// may be stamped before it is unusable. The collector and the API can run
+// on different hosts, so a small difference is expected; a quote from
+// materially later than now says the two clocks disagree, and its age
+// cannot be judged at all.
+const ethUsdFutureSkew = 5 * time.Minute
+
+// staleEthUsd reports whether a quote taken at cannot be served as live:
+// older than maxAge, or stamped materially later than the serving clock.
+func staleEthUsd(at, now time.Time, maxAge time.Duration) bool {
+	return now.Sub(at) > maxAge || at.Sub(now) > ethUsdFutureSkew
+}
+
 // ethUsdFromState reads the ETH/USD spot the collector recorded for a chain
-// and applies the same rule as the tick: a quote older than maxAge is null
-// rather than served as live. The API never fetches a price itself.
+// and applies the same rule as the tick: a quote older than maxAge, or one
+// from materially later than the serving clock, is null rather than served
+// as live. The API never fetches a price itself.
 func ethUsdFromState(ctx context.Context, store db.Store, chainID uint64, now time.Time, maxAge time.Duration) (*model.EthUsd, error) {
 	raw, ok, err := store.GetState(ctx, chainID, db.StateEthUsd)
 	if err != nil || !ok {
@@ -250,7 +264,7 @@ func ethUsdFromState(ctx context.Context, store db.Store, chainID uint64, now ti
 	if err != nil {
 		return nil, fmt.Errorf("decode eth/usd timestamp: %w", err)
 	}
-	if now.Sub(at) > maxAge {
+	if staleEthUsd(at, now, maxAge) {
 		return nil, nil
 	}
 	return &v, nil
@@ -387,6 +401,9 @@ func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {
 				L1BaseFeeAvg: br.L1BaseFee.String(), CalldataBytes: br.CalldataLen,
 			})
 		}
+		// The bounds are the response's window, exactly as the grouped
+		// resolutions report it.
+		out.From, out.To = rng.bounds(from, to, firstBatch(out.Points), len(out.Points) > 0)
 		writeJSON(w, http.StatusOK, rng.cache, out)
 		return
 	}

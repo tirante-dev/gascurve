@@ -4,7 +4,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { PricerModel, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
-import { bucketNote, describeAction, feeChartData, feeTooltipRows, type DrawnRow } from "@/lib/feeChart";
+import { bucketNote, describeAction, feeChartData, feeTooltipRows, formatFloor, type DrawnRow } from "@/lib/feeChart";
 import { emptyRangeNote, type GapModel, type GapWindow } from "@/lib/gaps";
 import { throughputAxis, throughputTick, type ThroughputAxis } from "@/lib/hero";
 import {
@@ -27,7 +27,8 @@ import {
 import { formatDateTime, formatGas, formatGasPerSecond, formatInteger, formatSignificant, formatTick, unbroken } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
 import { gapBands, GapNote } from "./ChartGaps";
-import { ChartTooltip, applicableRows, type TooltipRow } from "./ChartTooltip";
+import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
+import { PointInspector } from "./ChartReadout";
 import { ChartFrame, Legend, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
 
 const SYNC_ID = "history";
@@ -122,7 +123,7 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   // known but its per-constraint split was never recorded.
   const unknown = hasUnknownSets(series, model);
   const unrecorded = hasUnrecordedSplit(series);
-  const count = seriesCount(series);
+  const count = seriesCount(series, model);
   const indices = Array.from({ length: count }, (_, i) => i);
   // Rates and averages are drawn on a partial bucket as they are (the api's
   // gasPerSecond is already the rate over the covered span), so the note is
@@ -218,6 +219,9 @@ function markerLines(markers: SeriesModel["markers"]) {
 }
 
 const bucketTitle = (t: number) => formatDateTime(t);
+
+/** What names a bucket in the inspector and the data table: the time it starts at. */
+export const bucketRowTitle = (row: Record<string, unknown>) => formatDateTime(Number(row.t));
 
 /** Each constraint's share of the exponent, stacked, one series per constraint set. */
 export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
@@ -319,37 +323,6 @@ function ChartBlock({ title, legend, action, children }: { title: string; legend
 }
 
 /**
- * Keyboard access to every point: a slider picks a bucket and the same rows
- * the tooltips show are read out in a live region.
- */
-function PointInspector({ points, groups, note }: { points: ChartPoint[]; groups: { title: string; rows: TooltipRow[] }[]; note: (row: Record<string, unknown>) => string | null }) {
-  const [index, setIndex] = useState(points.length - 1);
-  const clamped = Math.max(0, Math.min(points.length - 1, index));
-  const row = points[clamped] as unknown as Record<string, unknown>;
-  const extra = note(row);
-  return (
-    <div className="vw-card p-3 text-xs text-ink-2">
-      <label className="flex flex-wrap items-center gap-3">
-        <span className="font-semibold text-ink">Point inspector</span>
-        <input type="range" min={0} max={points.length - 1} value={clamped} onChange={(e) => setIndex(Number(e.target.value))} aria-label="Select a bucket to read its values" className="min-w-[160px] flex-1" />
-        <span className="num text-ink">{formatDateTime(points[clamped].t)}</span>
-      </label>
-      <dl className="num mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5" aria-live="polite">
-        {groups.flatMap((g) =>
-          applicableRows(g.rows, row).map((r) => (
-            <div key={`${g.title}-${r.label}`} className="contents">
-              <dt className="text-ink-3">{r.label}</dt>
-              <dd className="text-ink">{r.value(row)}</dd>
-            </div>
-          )),
-        )}
-      </dl>
-      {extra ? <p className="mt-1 border-t border-hairline pt-1">{extra}</p> : null}
-    </div>
-  );
-}
-
-/**
  * History charts. `model` is the network's pricer (from the api's Network or
  * the live snapshot): the series carries none of its own, and an empty
  * constraint-set list means "no set known", never "legacy". Every card links
@@ -420,6 +393,8 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
 
       <PointInspector
         points={m.points}
+        title={bucketRowTitle}
+        selectLabel="Select a bucket to read its values"
         groups={[
           { title: "fee", rows: m.feeRows },
           { title: "split", rows: m.contributionRows },
@@ -463,7 +438,7 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
                     <td className="py-1 pr-3">{formatSignificant(p.feeAvg, 4)}</td>
                     <td className="py-1 pr-3">{formatSignificant(p.feeMin, 3)}</td>
                     <td className="py-1 pr-3">{formatSignificant(p.feeMax, 3)}</td>
-                    <td className="py-1 pr-3">{formatSignificant(p.floor, 3)}</td>
+                    <td className="py-1 pr-3">{formatFloor(p.floor)}</td>
                     <td className="py-1 pr-3">{p.x.toFixed(4)}</td>
                     <td className="py-1 pr-3">
                       {describeSplit(p, m.segments)} ({p.setKnown ? `set ${p.constraintSetId}` : "unknown set"})

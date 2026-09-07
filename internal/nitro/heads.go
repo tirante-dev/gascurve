@@ -41,7 +41,11 @@ type Head struct {
 // to polling while the socket is down. The URL is never logged: it can
 // carry a key.
 type HeadSubscriber struct {
-	url          func(context.Context) (string, error)
+	url func(context.Context) (string, error)
+	// lease, when set, resolves the endpoint and takes the report of what
+	// happened with its socket, so a WebSocket that does not work moves
+	// the subscription to another endpoint.
+	lease        func(context.Context) (*WSLease, error)
 	userAgent    string
 	log          *logger.Logger
 	httpClient   *http.Client
@@ -65,6 +69,15 @@ func WithHeadLogger(l *logger.Logger) HeadOption { return func(s *HeadSubscriber
 // keeps it retrying with its back-off.
 func WithHeadURL(fn func(context.Context) (string, error)) HeadOption {
 	return func(s *HeadSubscriber) { s.url = fn }
+}
+
+// WithHeadLease replaces the URL resolver with one that leases an
+// endpoint: the subscriber then reports every dial, subscribe and
+// disconnect failure back, so an endpoint whose WebSocket does not work is
+// cooled down and the next attempt resolves another one. This is the form
+// a Pool provides (Pool.WSEndpoint).
+func WithHeadLease(fn func(context.Context) (*WSLease, error)) HeadOption {
+	return func(s *HeadSubscriber) { s.lease = fn }
 }
 
 // WithHeadHTTPClient sets the HTTP client used for the WebSocket handshake.
@@ -135,14 +148,47 @@ func (s *HeadSubscriber) Run(ctx context.Context, fn func(Head)) {
 	}
 }
 
+// target resolves the endpoint of one connection attempt: its URL, the
+// scrubber that keeps that URL out of every error, and the lease that
+// reports the outcome (nil when the subscriber was built with a plain URL).
+type target struct {
+	url   string
+	scrub *scrubber
+	lease *WSLease
+}
+
+func (s *HeadSubscriber) target(ctx context.Context) (target, error) {
+	if s.lease != nil {
+		l, err := s.lease(ctx)
+		if err != nil {
+			return target{}, err
+		}
+		return target{url: l.URL, scrub: l.scrub, lease: l}, nil
+	}
+	u, err := s.url(ctx)
+	if err != nil {
+		return target{}, err
+	}
+	return target{url: u, scrub: newScrubber(0, u)}, nil
+}
+
 // runOnce dials, subscribes and delivers heads until the connection ends.
-// subscribed reports whether the subscription was acknowledged.
+// subscribed reports whether the subscription was acknowledged. Every
+// error it returns is sanitized: the dialer reports a transport failure as
+// a *url.Error carrying the whole URL, which is a credential, and a
+// provider can quote the request back in a subscribe error.
 func (s *HeadSubscriber) runOnce(ctx context.Context, fn func(Head)) (subscribed bool, err error) {
-	url, err := s.url(ctx)
+	t, err := s.target(ctx)
 	if err != nil {
 		return false, fmt.Errorf("resolve endpoint: %w", err)
 	}
-	conn, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+	defer func() {
+		// A failure the endpoint is responsible for: shutdown is not.
+		if err != nil && ctx.Err() == nil {
+			t.lease.Failed(subscribed, err)
+		}
+	}()
+	conn, resp, err := websocket.Dial(ctx, t.url, &websocket.DialOptions{
 		HTTPClient: s.httpClient,
 		HTTPHeader: http.Header{"User-Agent": {s.userAgent}},
 	})
@@ -150,18 +196,19 @@ func (s *HeadSubscriber) runOnce(ctx context.Context, fn func(Head)) (subscribed
 		_ = resp.Body.Close()
 	}
 	if err != nil {
-		return false, fmt.Errorf("dial: %w", err)
+		return false, fmt.Errorf("dial: %w", t.scrub.wrap(err))
 	}
 	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(headsReadLimit)
 
 	subID, err := s.subscribe(ctx, conn)
 	if err != nil {
-		return false, err
+		return false, t.scrub.wrap(err)
 	}
+	t.lease.Connected()
 	s.connected.Store(true)
 	defer s.connected.Store(false)
-	s.log.Info("newHeads subscription connected", "subscription", subID)
+	s.log.Info("newHeads subscription connected", "endpoint", t.endpoint(), "subscription", subID)
 
 	pingCtx, stopPing := context.WithCancel(ctx)
 	defer stopPing()
@@ -170,7 +217,7 @@ func (s *HeadSubscriber) runOnce(ctx context.Context, fn func(Head)) (subscribed
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
-			return true, fmt.Errorf("read: %w", err)
+			return true, fmt.Errorf("read: %w", t.scrub.wrap(err))
 		}
 		head, ok, err := parseHeadNotification(data, subID)
 		if err != nil {
@@ -181,6 +228,15 @@ func (s *HeadSubscriber) runOnce(ctx context.Context, fn func(Head)) (subscribed
 			fn(head)
 		}
 	}
+}
+
+// endpoint names the leased endpoint for a log line, -1 when the
+// subscriber follows a plain URL and has no index to report.
+func (t target) endpoint() int {
+	if t.lease == nil {
+		return -1
+	}
+	return t.lease.Index
 }
 
 // subscribe sends eth_subscribe and waits for its acknowledgement within

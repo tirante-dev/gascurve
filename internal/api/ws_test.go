@@ -351,7 +351,9 @@ func TestWebSocketErrors(t *testing.T) {
 	if typ != "hello" || !strings.Contains(string(data), `"snapshot":null`) || !strings.Contains(string(data), `"recentBlocks":[]`) {
 		t.Fatalf("empty hello: %s %s", typ, data)
 	}
-	// A slow consumer is closed instead of blocking the hub.
+	// A slow consumer is dropped instead of blocking the hub, and nothing
+	// more is queued for it: a closing client accepts no further messages,
+	// so the write loop's flush is bounded by what is already there.
 	slow := &client{send: make(chan []byte, 1), closed: make(chan struct{})}
 	slow.enqueue([]byte("a"))
 	slow.enqueue([]byte("b"))
@@ -359,6 +361,16 @@ func TestWebSocketErrors(t *testing.T) {
 	case <-slow.closed:
 	default:
 		t.Fatal("slow consumer not closed")
+	}
+	if !slow.dropped.Load() {
+		t.Fatal("an overflowed queue must mark the client dropped")
+	}
+	<-slow.send
+	slow.enqueue([]byte("c"))
+	select {
+	case msg := <-slow.send:
+		t.Fatalf("a closing client must accept nothing more: %s", msg)
+	default:
 	}
 	slow.close() // idempotent
 	// Handshake validation covers HTTP/1.0 too.
@@ -1008,5 +1020,95 @@ func TestHubReorgRewindsOwnerCursor(t *testing.T) {
 	var action model.OwnerAction
 	if typ != "owner_action" || json.Unmarshal(data, &action) != nil || action.TxHash != "0xnew" || action.Block != 53 {
 		t.Fatalf("the replacement action must be delivered: %s %s", typ, data)
+	}
+}
+
+// TestWebSocketHelloReAgesEthUsd: the hub keeps the last tick it published
+// and serves it to the next client's hello. That snapshot's ETH/USD quote
+// must be re-aged against the serving clock, so a quote that expired since
+// the tick was published, or one stamped materially later than the serving
+// clock, reaches the client as null rather than as live.
+func TestWebSocketHelloReAgesEthUsd(t *testing.T) {
+	helloQuote := func(t *testing.T, at time.Time) *model.EthUsd {
+		t.Helper()
+		store := seed(t)
+		h := newWSHarness(t, store, time.Hour)
+		snap := model.LiveSnapshot{
+			ChainID: robinhood, SampledAt: now.Format(time.RFC3339), BaseFee: "42", Constraints: []model.Constraint{},
+			EthUsd: &model.EthUsd{Price: "4523.40", At: at.Format(time.RFC3339), Source: "coinbase"},
+		}
+		payload, err := json.Marshal(snap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.hub.Handle(context.Background(), db.Notification{Channel: db.ChannelLive, Payload: string(payload)})
+		typ, data := readMsg(t, h.dial(t, "robinhood"))
+		if typ != "hello" {
+			t.Fatalf("first message %s", typ)
+		}
+		var hello struct {
+			Snapshot model.LiveSnapshot `json:"snapshot"`
+		}
+		if err := json.Unmarshal(data, &hello); err != nil {
+			t.Fatal(err)
+		}
+		return hello.Snapshot.EthUsd
+	}
+	if q := helloQuote(t, now.Add(-time.Minute)); q == nil || q.Price != "4523.40" {
+		t.Fatalf("a fresh quote is served: %+v", q)
+	}
+	if q := helloQuote(t, now.Add(-2*config.DefaultEthUsdMaxAge)); q != nil {
+		t.Fatalf("a quote that aged out must be null: %+v", q)
+	}
+	if q := helloQuote(t, now.Add(ethUsdFutureSkew+time.Minute)); q != nil {
+		t.Fatalf("a quote from the serving clock's future must be null: %+v", q)
+	}
+}
+
+// TestWebSocketSlowClientDropped: a peer that never reads fills its
+// outbound queue. The hub must stop queueing for it, close the socket and
+// give up its connection slot rather than keep it registered while the
+// write loop drains stale messages into a socket nobody reads.
+func TestWebSocketSlowClientDropped(t *testing.T) {
+	store := seed(t)
+	hub := NewHub(store, logger.Nop(), WithPingInterval(time.Hour), WithOrigins([]string{"http://localhost:3000"}), withClientQueue(2))
+	cfg := config.ServerConfig{CORSOrigins: []string{"http://localhost:3000"}, RateLimitPerSecond: 1000, RateLimitBurst: 1000}
+	srv := New(store, cfg, hub, logger.Nop(), WithClock(func() time.Time { return now }))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/v1/ws?network=robinhood"
+	conn, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{"http://localhost:3000"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	// The peer never reads a single frame from here on.
+	defer func() { _ = conn.CloseNow() }()
+	deadline := time.Now().Add(5 * time.Second)
+	for hub.ClientCount(robinhood) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	// Ticks big enough to fill the peer's socket buffers, so the write
+	// loop blocks and the queue overflows.
+	filler := strings.Repeat("x", 64<<10)
+	payload := `{"chainId":` + strconv.FormatUint(robinhood, 10) + `,"sampledAt":"` + now.Format(time.RFC3339) + `","filler":"` + filler + `"}`
+	for range 400 {
+		if hub.Connections() == 0 {
+			break
+		}
+		hub.Handle(context.Background(), db.Notification{Channel: db.ChannelLive, Payload: payload})
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for hub.Connections() != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if hub.Connections() != 0 || hub.ClientCount(robinhood) != 0 {
+		t.Fatalf("a peer that never reads must be dropped: connections %d clients %d", hub.Connections(), hub.ClientCount(robinhood))
 	}
 }

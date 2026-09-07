@@ -58,8 +58,8 @@ func blockNumbers(logs []Log) []uint64 {
 // TestEndpointLogRangeLearned: an endpoint that refuses wide ranges (here
 // with QuickNode's wording, though the wording plays no part) is asked for
 // narrower and narrower pieces until it answers, the logs come back in
-// block order, the accepted width is kept for the next call, and every
-// refusal is followed by a growing pause.
+// block order, the accepted width is kept for the next call, and the piece
+// pays one pause however many halvings it takes.
 func TestEndpointLogRangeLearned(t *testing.T) {
 	f := newFakeRPC(t)
 	refused := rangeLimitedLogs(f, 10_000, &RPCError{Code: -32614, Message: "eth_getLogs is limited to a 10,000 range"}, 16, 25_000, 60_000, 99_999)
@@ -79,7 +79,9 @@ func TestEndpointLogRangeLearned(t *testing.T) {
 	if *refused != 4 || f.requests != 20 || e.LogRange() != 6_250 {
 		t.Fatalf("refused %d requests %d range %d", *refused, f.requests, e.LogRange())
 	}
-	if sleeps := clock.Sleeps(); fmt.Sprint(sleeps) != "[1s 2s 4s 8s]" {
+	// One pause for the piece, not one per halving: the narrower asks that
+	// follow a refusal are smaller work, not the same request again.
+	if sleeps := clock.Sleeps(); fmt.Sprint(sleeps) != "[1s]" {
 		t.Fatalf("back-off between refusals: %v", sleeps)
 	}
 	// Remembered: the next wide call is split up front and never refused.
@@ -142,24 +144,33 @@ func TestEndpointLogRangeRecovers(t *testing.T) {
 	}
 }
 
-// TestEndpointLogRangeErrors: a refusal narrows only when narrower is on
-// offer; a rate limit the client could not wait out counts as a refusal;
-// transport and context failures go straight back to the caller.
+// TestEndpointLogRangeErrors: the range narrows all the way to a single
+// block; a refusal there is the endpoint failing rather than the caller
+// asking too much, so it comes back as an EndpointError (the pool tries
+// the next endpoint) with the provider's own error still underneath. A
+// rate limit the client could not wait out counts as a refusal; transport
+// and context failures go straight back to the caller.
 func TestEndpointLogRangeErrors(t *testing.T) {
 	ctx := context.Background()
-	// A single block refused surfaces the endpoint's error.
+	// A single block refused is an endpoint failure that still surfaces
+	// the endpoint's own error.
 	f := newFakeRPC(t)
 	refused := rangeLimitedLogs(f, 0, &RPCError{Code: -32614, Message: "nothing for you"})
 	e, _ := rangeEndpoint(t, f)
 	var rpcErr *RPCError
-	if _, err := e.OwnerActsLogs(ctx, 7, 7); !errors.As(err, &rpcErr) || rpcErr.Code != -32614 || *refused != 1 {
+	_, err := e.OwnerActsLogs(ctx, 7, 7)
+	if !errors.As(err, &rpcErr) || rpcErr.Code != -32614 || *refused != 1 {
 		t.Fatalf("single block refusal must surface: %v", err)
 	}
-	// So does a refusal at the floor width.
+	if !IsEndpointError(err) {
+		t.Fatalf("a single block refusal must let the pool fail over: %v", err)
+	}
+	// The learned range goes all the way down to one block before that.
 	g := newFakeRPC(t)
 	rangeLimitedLogs(g, 0, &RPCError{Code: -32000, Message: "no"})
 	e2, _ := rangeEndpoint(t, g)
-	if _, err := e2.OwnerActsLogs(ctx, 0, 99_999); !errors.As(err, &rpcErr) || e2.LogRange() != minLogRange {
+	_, err = e2.OwnerActsLogs(ctx, 0, 99_999)
+	if !errors.As(err, &rpcErr) || !IsEndpointError(err) || e2.LogRange() != 1 || minLogRange != 1 {
 		t.Fatalf("floor: %v range %d", err, e2.LogRange())
 	}
 	// A rate limit the client gave up on narrows the range like any refusal.

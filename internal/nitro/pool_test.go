@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -773,4 +774,79 @@ func TestPoolFastLane(t *testing.T) {
 	if e := p.Endpoints()[0]; e.Pacer().MaxBatch() != 7 || e.Pacer().Reserve() != 1 {
 		t.Fatalf("bulk batches leave the reserve: maxBatch %d reserve %v", e.Pacer().MaxBatch(), e.Pacer().Reserve())
 	}
+}
+
+// TestPoolWSHealthRebinds: an endpoint whose JSON-RPC answers can still
+// have a WebSocket that cannot be dialed or subscribed to. HTTP
+// verification says nothing about that, so WebSocket health is tracked per
+// endpoint: a reported failure cools the endpoint's socket down, the next
+// resolution leases the following verified WS-capable endpoint, and
+// /status says which socket is cooling and why.
+func TestPoolWSHealthRebinds(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	a, b := chainFake(t, testChainIDHex), chainFake(t, testChainIDHex)
+	p := newTestPool(t, clock, time.Minute,
+		config.EndpointConfig{RPCURL: a.server.URL, WSURL: "wss://a/ws?key=" + theKey, CallsPerSecond: 100},
+		config.EndpointConfig{RPCURL: b.server.URL, WSURL: "wss://b/ws", CallsPerSecond: 100},
+	)
+	if err := p.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := p.WSEndpoint(ctx)
+	if err != nil || lease.Index != 0 || lease.URL != "wss://a/ws?key="+theKey {
+		t.Fatalf("first lease: %+v %v", lease, err)
+	}
+	// A dial failure quoting the URL cools the endpoint down at once, and
+	// the reason kept for /status names the endpoint, not the key.
+	lease.Failed(false, errors.New("dial wss://a/ws?key="+theKey+": connection refused"))
+	st := p.Status()
+	if !st.Endpoints[0].WSCooling || st.Endpoints[1].WSCooling {
+		t.Fatalf("websocket cooldown not reported: %+v", st.Endpoints)
+	}
+	if strings.Contains(st.Endpoints[0].WSError, theKey) || !strings.Contains(st.Endpoints[0].WSError, "endpoint 0") {
+		t.Fatalf("the reported reason must not carry the key: %q", st.Endpoints[0].WSError)
+	}
+	if st.Endpoints[0].Disabled || p.ActiveEndpoint() != 0 {
+		t.Fatal("a broken websocket must not disable the endpoint's JSON-RPC")
+	}
+	// The subscriber now resolves the next verified WS-capable endpoint.
+	if lease, err = p.WSEndpoint(ctx); err != nil || lease.Index != 1 || lease.URL != "wss://b/ws" {
+		t.Fatalf("rebound lease: %+v %v", lease, err)
+	}
+	// A subscription that connects and drops once is not held against an
+	// endpoint: only repeated drops soon after connecting cool it down.
+	for range wsDropLimit - 1 {
+		lease.Connected()
+		lease.Failed(true, errors.New("read: unexpected EOF"))
+	}
+	if until, _ := p.Endpoints()[1].wsCooling(); !until.IsZero() {
+		t.Fatal("an occasional reconnect must not cool an endpoint down")
+	}
+	lease.Connected()
+	lease.Failed(true, errors.New("read: unexpected EOF"))
+	if until, _ := p.Endpoints()[1].wsCooling(); until.IsZero() {
+		t.Fatal("repeated drops must cool the endpoint down")
+	}
+	// Every socket is cooling: the one that recovers first is leased
+	// anyway, so a single-endpoint network keeps trying.
+	if lease, err = p.WSEndpoint(ctx); err != nil || lease.Index != 0 {
+		t.Fatalf("all cooling: %+v %v", lease, err)
+	}
+	// Once the cooldown passes the primary is resolved normally again.
+	clock.Advance(2 * time.Minute)
+	if lease, err = p.WSEndpoint(ctx); err != nil || lease.Index != 0 {
+		t.Fatalf("after the cooldown: %+v %v", lease, err)
+	}
+	// A subscription that held for a while resets the drop count.
+	lease.Connected()
+	clock.Advance(wsHealthyFor)
+	lease.Failed(true, errors.New("read: unexpected EOF"))
+	if until, _ := p.Endpoints()[0].wsCooling(); !until.IsZero() {
+		t.Fatal("a long lived subscription must not count against the endpoint")
+	}
+	// A nil lease (a subscriber built with a plain URL) reports nothing.
+	var none *WSLease
+	none.Connected()
+	none.Failed(true, errors.New("x"))
 }

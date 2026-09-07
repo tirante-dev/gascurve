@@ -4,7 +4,7 @@
 // the range control can be tested without a DOM.
 
 import { isSeriesRange, SERIES_RANGES } from "@/lib/api/series";
-import { liveNow, placeBlocks } from "@/lib/smoothing";
+import { liveNow, placeOf, type BlockPlaces } from "@/lib/smoothing";
 import type { BlockPoint, SeriesRange } from "@/types";
 import { gasScale, weiToGweiNumber } from "@/utils/format";
 
@@ -20,27 +20,31 @@ const HERO_MAX_TICKS = 5;
 /**
  * One block on the hero chart. `x` is seconds before now (the right edge), so
  * the axis runs negative to the left. Blocks that share a timestamp are spread
- * across the second they belong to by `placeBlocks`, so a burst keeps its
- * shape instead of stacking on one tick, and a block never moves once placed.
+ * across the second they belong to by the ring's placement, so a burst keeps
+ * its shape instead of stacking on one tick, and a block never moves once
+ * placed.
  */
 export type HeroPoint = { x: number; number: number; ts: number; fee: number; gasUsed: number };
 
 /**
  * The per-block base fee of the blocks within `seconds` of the wall clock
- * `nowMs`, oldest first, in gwei. The axis is anchored to the clock, not to
- * the newest block's whole-second timestamp, so the chart slides continuously
- * instead of stepping once a second; a block sits left of the edge by its
- * real age, which is also what the freshness pill reports.
+ * `nowMs`, oldest first, in gwei. `places` is the ring's own placement, which
+ * the frame store keeps by block number, so a block's place is decided once
+ * and this chart and the throughput chart under it draw it in the same spot.
+ * The axis is anchored to the clock, not to the newest block's whole-second
+ * timestamp, so the chart slides continuously instead of stepping once a
+ * second; a block sits left of the edge by its real age, which is also what
+ * the freshness pill reports.
  */
-export function heroChartData(blocks: readonly BlockPoint[], nowMs: number, seconds = HERO_WINDOW_S): HeroPoint[] {
-  const places = placeBlocks(blocks);
-  const now = liveNow(nowMs, places[places.length - 1]);
+export function heroChartData(blocks: readonly BlockPoint[], places: BlockPlaces, nowMs: number, seconds = HERO_WINDOW_S): HeroPoint[] {
+  if (blocks.length === 0) return [];
+  const now = liveNow(nowMs, placeOf(places, blocks[blocks.length - 1]));
   const out: HeroPoint[] = [];
-  blocks.forEach((b, i) => {
-    const x = places[i] - now;
-    if (x < -seconds) return;
+  for (const b of blocks) {
+    const x = placeOf(places, b) - now;
+    if (x < -seconds) continue;
     out.push({ x, number: b.number, ts: b.ts, fee: weiToGweiNumber(b.baseFee), gasUsed: b.gasUsed });
-  });
+  }
   return out;
 }
 
@@ -160,9 +164,11 @@ function sameAxis(a: FeeAxis, b: FeeAxis): boolean {
 /**
  * One second of the live throughput chart: all the gas the blocks with that
  * timestamp carried. `x` is seconds before now, as on the fee chart, and the
- * second sits at its own end because that is when its gas is complete.
+ * second sits at its own end because that is when its gas is complete. `gas`
+ * and `blocks` are null for a second the ring cannot speak for, which breaks
+ * the line rather than drawing a rate nobody measured.
  */
-export type ThroughputPoint = { x: number; ts: number; gas: number; blocks: number };
+export type ThroughputPoint = { x: number; ts: number; gas: number | null; blocks: number | null };
 
 /**
  * Gas per second from the block ring, against the same clock-anchored axis
@@ -176,11 +182,19 @@ export type ThroughputPoint = { x: number; ts: number; gas: number; blocks: numb
  * The oldest goes for the same reason at the other end: the ring is bounded by
  * block count, so it usually starts part way through a second, and that half
  * second read as the chain ramping up.
+ *
+ * Every second between those two ends gets a point, whether or not it holds a
+ * block. A second with none is a quiet second and carries zero: leaving it out
+ * let the area interpolate a positive rate straight across it, which says the
+ * chain kept working through a moment it did not. The exception is a second
+ * the ring itself has a hole across, which block numbers give away: consecutive
+ * blocks either side means the second really was quiet, a jump in the numbers
+ * means blocks are missing from the ring and the second is a null gap rather
+ * than a zero.
  */
-export function heroThroughputData(blocks: readonly BlockPoint[], nowMs: number, seconds = HERO_WINDOW_S): ThroughputPoint[] {
+export function heroThroughputData(blocks: readonly BlockPoint[], places: BlockPlaces, nowMs: number, seconds = HERO_WINDOW_S): ThroughputPoint[] {
   if (blocks.length === 0) return [];
-  const places = placeBlocks(blocks);
-  const now = liveNow(nowMs, places[places.length - 1]);
+  const now = liveNow(nowMs, placeOf(places, blocks[blocks.length - 1]));
   const newest = blocks[blocks.length - 1].ts;
   const oldest = blocks[0].ts;
   const perSecond = new Map<number, { gas: number; blocks: number }>();
@@ -192,10 +206,23 @@ export function heroThroughputData(blocks: readonly BlockPoint[], nowMs: number,
     perSecond.set(b.ts, acc);
   }
   const out: ThroughputPoint[] = [];
-  for (const [ts, acc] of [...perSecond.entries()].sort((a, b) => a[0] - b[0])) {
+  // A pointer into the ring: the last block at or before the second in hand,
+  // so the continuity test either side of an empty second costs one step.
+  let before = 0;
+  // Only the seconds the axis actually shows: x is ts + 1 - now, so the window
+  // is [now - seconds - 1, now - 1] intersected with the ring's whole seconds.
+  const from = Math.max(oldest + 1, Math.ceil(now - seconds - 1));
+  const to = Math.min(newest - 1, Math.floor(now - 1));
+  for (let ts = from; ts <= to; ts++) {
+    while (before + 1 < blocks.length && blocks[before + 1].ts <= ts) before += 1;
     const x = ts + 1 - now;
-    if (x < -seconds || x > 0) continue;
-    out.push({ x, ts, gas: acc.gas, blocks: acc.blocks });
+    const acc = perSecond.get(ts);
+    if (acc !== undefined) {
+      out.push({ x, ts, gas: acc.gas, blocks: acc.blocks });
+      continue;
+    }
+    const complete = before + 1 < blocks.length && blocks[before + 1].number === blocks[before].number + 1;
+    out.push({ x, ts, gas: complete ? 0 : null, blocks: complete ? 0 : null });
   }
   return out;
 }

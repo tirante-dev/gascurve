@@ -5,10 +5,11 @@ import type { LiveState } from "./useLive";
 
 // The feed itself is tested against a socket in hooks.test.tsx; here it stands
 // in, so what is under test is the one hook a page opens it through.
-const feed = vi.hoisted(() => ({ calls: [] as string[], state: null as LiveState | null }));
+const feed = vi.hoisted(() => ({ calls: [] as string[], enabled: [] as boolean[], state: null as LiveState | null }));
 vi.mock("./useLive", () => ({
-  useLive: (network: string) => {
+  useLive: (network: string, enabled = true) => {
     feed.calls.push(network);
+    feed.enabled.push(enabled);
     return feed.state;
   },
 }));
@@ -55,6 +56,7 @@ describe("useNetworkLive", () => {
   beforeEach(() => {
     frames = [];
     feed.calls = [];
+    feed.enabled = [];
     feed.state = state();
     vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
       frames.push(cb);
@@ -86,6 +88,15 @@ describe("useNetworkLive", () => {
     const first = result.current;
     rerender({ network: "robinhood" });
     expect(result.current).toBe(first);
+  });
+
+  it("opens no feed and runs no frame loop for a page that draws no live chart", () => {
+    const { result } = renderHook(() => useNetworkLive("robinhood", false));
+    expect(feed.enabled).toEqual([false]);
+    // No loop was scheduled, so nothing is committed and the page takes its
+    // network metadata from REST instead.
+    expect(frames).toHaveLength(0);
+    expect(result.current.snapshot).toBeNull();
   });
 
   it("passes a network change on to the feed", () => {
