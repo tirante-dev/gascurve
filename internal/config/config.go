@@ -303,7 +303,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.ws_max_total", 2000)
 	v.SetDefault("database.max_open", 25)
 	v.SetDefault("database.max_idle", 10)
-	v.SetDefault("collector.tick_interval", "1s")
+	v.SetDefault("collector.tick_interval", "3s")
 	v.SetDefault("collector.slow_interval", "60s")
 	v.SetDefault("collector.header_batch_size", 100)
 	v.SetDefault("collector.block_retention", "48h")

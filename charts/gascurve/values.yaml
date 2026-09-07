@@ -141,7 +141,7 @@ config:
     max_idle: 10
     run_migrations: false
   collector:
-    tick_interval: 1s
+    tick_interval: 3s
     slow_interval: 60s
     header_batch_size: 100
     block_retention: 48h

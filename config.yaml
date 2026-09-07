@@ -19,7 +19,9 @@ database:
   run_migrations: false
 
 collector:
-  tick_interval: 1s          # live sample cadence per network
+  tick_interval: 3s          # live sample cadence on a polled network: a sample costs five calls, so at the
+                             # public budget of four per second a 1 s tick starved the header catch-up and
+                             # skipped gaps; dedicated endpoints override this per network (500ms with newHeads)
   slow_interval: 60s         # L1 pricer, balances, owner-action log scan
   header_batch_size: 100     # blocks per JSON-RPC batch when catching up
   block_retention: 48h       # per-block rows kept before pruning to buckets
