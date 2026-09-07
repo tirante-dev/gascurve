@@ -33,7 +33,7 @@ Non-goals: wallet integration, per-transaction fee estimation UI, anything needi
 | Live constraints | `[60 M gas/s, 15 s]` and `[40 M gas/s, 86 400 s]` | `getGasPricingConstraints` |
 | Legacy params (dormant) | speed limit 7 M, inertia 102, tolerance 10, `getGasBacklog()` = 0 | precompile |
 | Tips | `getCollectTips()` = false; `eth_maxPriorityFeePerGas` = 0; FCFS sequencer | precompile, docs |
-| L1 price per unit | ~0.0024 gwei (`getL1BaseFeeEstimate` = 2,369,608 wei) → L1 data fee ≈ 0; receipts show `gasUsedForL1 = 0` | precompile, receipt |
+| L1 price per unit | ~0.0024 gwei (`getL1BaseFeeEstimate` = 2,369,608 wei); receipt `gasUsedForL1` remains the authoritative poster-gas charge | precompile, receipt |
 | Fee accounts | infra (floor part): `0x5a2B80a9…9BE7` (402 ETH); network (congestion part): `0xbC5C3a7A…F067` (10,706 ETH); L1 reward: `0x8F516B99…82ea`; batch posters: sequencer alias + `0xDaa52608…87F4` | `ArbOwnerPublic`, `ArbAggregator`, `eth_getBalance` |
 | Chain owner | `0x2A153c6A…5C09` (single owner) | `getAllChainOwners` |
 
@@ -46,6 +46,7 @@ Non-goals: wallet integration, per-transaction fee estimation UI, anything needi
 | User agent | Cloudflare WAF returns **403** for Python's default UA. Browsers and curl are fine. Collector must send a real UA. |
 | Batch requests | Supported. 100 items OK; 250 items → 429. |
 | Rate limit | Counts **JSON-RPC calls, not HTTP requests**, per client IP. Two apparent limits: a burst cap (15 parallel batches × 20 = 300 calls in <1 s → 14 of 15 rejected; a single 250-item batch rejected) and a rolling quota of roughly **4,000 calls/min** (100-item header batches every 1.5 s ran fine for ~40 batches, then every batch was rejected). Sustained ~4 calls/s for minutes: never limited. Full-transaction block fetches (`eth_getBlockByNumber(n, true)`) appear to be weighted heavier: a 100-item full-tx batch was rejected outright while 20-item ones passed. Recovery is seconds. No `Retry-After` header. |
+| `eth_getBlockReceipts` | Supported by the configured public RPCs. Each receipt includes `gasUsedForL1`; block 1,000,000 has 767 poster gas across two receipts. |
 | `eth_feeHistory` | Max **1024** blocks/call (larger counts are silently clamped). `baseFeePerGas` matches headers exactly. **`gasUsedRatio` is not usable** (values like 1.0 for a 402 k-gas block; denominator is not 32 M). No timestamps. |
 | Archive state | `eth_call` at historical blocks works only for roughly the last **~1,000–20,000 blocks** (a few minutes); older → `metadata is not found`. So precompile state (backlogs, L1 pricer, balances) **cannot be back-filled**. |
 | `eth_getLogs` | Full-range (block 0 → latest) query on a sparse address returned in 2.4 s. Owner-action history is fully recoverable. |
@@ -57,9 +58,11 @@ Budget derived from this: **≤ 5 calls/s sustained per IP, ≤ 100 calls per HT
 
 ## 3. The mechanics the page must explain
 
-### 3.1 Two-part fee
+### 3.1 Three-destination fee
 
-`fee = gasUsed × baseFee` where `gasUsed` includes an L1 data component (`gasUsedForL1` in the receipt). The L1 pricer (§3.5) currently prices data so low that `gasUsedForL1` rounds to 0, so in practice the whole fee is the L2 base fee. No priority fee is collected; higher bids don't reorder anything.
+`fee = gasUsed × baseFee` remains the total a user pays. Nitro records poster gas as receipt `gasUsedForL1` and computes `computeGas = gasUsed - posterGas`. Infrastructure receives `computeGas × min(baseFee, minBaseFee)`, the network account receives `computeGas × (baseFee - min(baseFee, minBaseFee))`, and the L1 pricer funds pool receives `posterGas × baseFee`. The three destinations sum exactly to the total. No priority fee is collected; higher bids don't reorder anything.
+
+Source of truth: Nitro `arbos/tx_processor.go`, where `FillReceiptInfo` records `posterGas` as `GasUsedForL1` and `EndTxHook` performs the three transfers. Robinhood block 1,000,000 is a nonzero vector: `gasUsed=422716`, `posterGas=767`, `baseFee=20036000`, and `minBaseFee=20000000`. It yields `computeGas=421949`, total `8469537776000` wei, infrastructure `8438980000000` wei, network `15190164000` wei, and L1 poster `15367612000` wei.
 
 ### 3.2 Multi-constraint pricer (the core)
 
@@ -73,7 +76,7 @@ for each constraint i:
     x_i = B_i / (T_i * W_i)                    # exponent contribution (bips internally)
 x = Σ x_i
 baseFee = minBaseFee * P4(x)                   # if x > 0, else minBaseFee
-after each tx: B_i += gasUsed                  # every constraint absorbs every tx
+after each tx: B_i += gasUsed - gasUsedForL1   # every constraint absorbs compute gas
 ```
 
 `P4` is `ApproxExpBasisPoints(x, 4)`, which is **not** `e^x`: it is the degree-4 Taylor polynomial `1 + x + x²/2 + x³/6 + x⁴/24`. Live check on 2026-09-06: backlogs gave `x = 3.24`; `P4(3.24) = 19.8`; observed base fee was 19.99× the floor (0.3997 gwei). True `e^3.24` would be 25.6×. Above `x ≈ 2` the fee grows like `x⁴/24`, i.e. polynomially. The page should say this plainly and plot both curves.
@@ -102,7 +105,7 @@ Public launch was 2026-07-01, so the genesis 6-constraint set ran for the first 
 
 ### 3.4 Where the fees go
 
-Per unit of gas: `minBaseFee` → infra fee account; `(baseFee − minBaseFee)` → network fee account; L1 data portion → batch poster's fee collector plus a 10 wei/unit reward to the L1 reward recipient. On 2026-09-06 that meant ~95% of every fee was "congestion surplus" flowing to `0xbC5C…F067`. Show the split live as a stacked bar, and the two accounts' balances as sampled counters (balance drops = withdrawals; annotate rather than hide).
+For compute gas, `min(baseFee, minBaseFee)` goes to the infrastructure fee account and the remainder goes to the network fee account. Poster gas is paid at `baseFee` to the L1 pricer funds pool. The separate batch-poster reimbursements and L1 reward are L1-pricer mechanics, not part of the two compute destinations. Show all three L2 base-fee destinations live as a stacked bar, and the sampled account balances as counters (balance drops are withdrawals; annotate rather than hide).
 
 ### 3.5 L1 pricer (secondary section, collapsible)
 
@@ -184,7 +187,7 @@ Repo: `tirante-dev/gascurve`, single repository, Go collector + api, Next.js web
 
 ## 7. Replay: reconstructing per-constraint backlogs
 
-Inputs: per-block `(timestamp, gasUsed)`, the constraint set in force (with its starting backlogs) from `owner-actions.json`, the min base fee history.
+Inputs: per-block `(timestamp, gasUsed)`, receipt `gasUsedForL1`, the constraint set in force (with its starting backlogs) from `owner-actions.json`, the min base fee history.
 
 ```
 state = startingBacklogs at the last owner action ≤ block
@@ -193,12 +196,12 @@ for block in order:
     for i: B_i = max(0, B_i - T_i*dt); x_i = B_i/(T_i*W_i)
     predictedBaseFee = minFee * P4(Σx_i)
     record B_i, x_i, predictedBaseFee, header.baseFee
-    for i: B_i += gasUsed                     # header gasUsed, see caveat
+    for i: B_i += gasUsed - gasUsedForL1      # Nitro compute gas
 ```
 
 Known error sources, all to be surfaced in the "Data & method" footer:
 
-1. Nitro grows backlogs by *compute* gas (gasUsed − gasUsedForL1), the replay uses header gasUsed. Today `gasUsedForL1 = 0`, so no error; earlier in the chain's life the L1 price was higher. Mitigation: the collector re-anchors to sampled backlogs every 5 s going forward; for backfilled history, report the replayed-vs-observed base fee error per bucket and, where it exceeds 2%, mark the decomposition as estimated.
+1. Receipt completeness: the collector validates every block receipt set and refuses to treat missing `gasUsedForL1` as zero. Historical destination accounting remains unknown until the receipt-backed replay replaces that bucket.
 2. Owner actions inside a block: the replay uses the log's transaction index and the action transaction's receipt. Gas before the action transaction is added to the old backlogs, then the reset is applied, then the action transaction and later gas are added to the reset backlogs.
 3. Old headers without state: the decomposition before the collector's start is a pure replay validated only through base fee agreement. Because the two constraints have very different time constants, an alternative estimator exists: `x_24h ≈ rolling 60-s minimum of x` (the 15-s backlog drains to zero within seconds whenever demand < 60 M gas/s). Use it as a cross-check.
 4. Blocks with equal timestamps get `dt = 0`; that is how ArbOS behaves too (`startBlock.timePassed` is the timestamp delta), so no correction and no interpolation is needed as long as per-block headers are used.
@@ -207,7 +210,7 @@ Known error sources, all to be surfaced in the "Data & method" footer:
 
 ## 8. Risks and open questions
 
-- **Collector budget on the public RPC**: the limiter counts calls, and the collector needs ~10 header calls/s. Test a 100-item batch every 10 s for an hour before committing. If it trips, options: (a) fetch headers with `eth_getBlockByNumber` for only every 2nd block and interpolate (halves the budget, small error), (b) run the collector against a free-tier dedicated endpoint, (c) run a Nitro follower node (the docs give the Docker image; needs an L1 RPC + beacon endpoint).
+- **Collector budget on the public RPC**: the limiter counts calls, and exact reconstruction needs one header call plus one receipt call per block. Public endpoints are paced sequentially, so deep recomputation can take substantially longer than wall-clock history. Use a dedicated archive endpoint for a timely full repair, or run a Nitro follower node.
 - **Limiter semantics** are inferred, not documented. Log every 429 with timestamp and calls-in-last-10-s so the real window can be fitted from data.
 - **Constraint set changes** must be handled without redeploy: the page reads the constraint set from `meta.json` and the live call, renders N cards, and shows a "parameters changed at block …" banner within a minute.
 - **ArbOS upgrades** could change `P4` or the model (multi-gas constraints are already in the code). Pin the model to ArbOS version; the collector alerts if `arbOSVersion()` changes.

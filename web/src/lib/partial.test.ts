@@ -157,13 +157,13 @@ describe("the bands", () => {
 });
 
 describe("the fee stack", () => {
-  const row = (partial: PartialKind | null) => ({ t: 0, partial, coverage: partial === null ? 1 : 0.5, floorFeesEth: 2, surplusFeesEth: 3, unsplitFeesEth: null });
+  const row = (partial: PartialKind | null) => ({ t: 0, partial, coverage: partial === null ? 1 : 0.5, floorFeesEth: 2, surplusFeesEth: 3, posterFeesEth: 1, unsplitFeesEth: null });
   it("carries a whole bucket's parts through to the keys the stack is drawn from", () => {
-    expect(withFeeStack([row(null)])[0]).toMatchObject({ stackFloorEth: 2, stackSurplusEth: 3, stackUnsplitEth: null });
+    expect(withFeeStack([row(null)])[0]).toMatchObject({ stackFloorEth: 2, stackSurplusEth: 3, stackPosterEth: 1, stackUnsplitEth: null });
   });
   it("leaves a partial bucket out of the stack while keeping what it has collected so far", () => {
     const drawn = withFeeStack([row("in-progress")])[0];
-    expect(drawn).toMatchObject({ stackFloorEth: null, stackSurplusEth: null, stackUnsplitEth: null });
+    expect(drawn).toMatchObject({ stackFloorEth: null, stackSurplusEth: null, stackPosterEth: null, stackUnsplitEth: null });
     expect(drawn.floorFeesEth).toBe(2);
     expect(drawn.surplusFeesEth).toBe(3);
   });

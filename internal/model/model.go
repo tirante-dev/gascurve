@@ -77,11 +77,12 @@ type ConstraintSet struct {
 
 // LiveBlock is the head block summary inside a LiveSnapshot.
 type LiveBlock struct {
-	Number  uint64 `json:"number"`
-	TS      uint64 `json:"ts"`
-	GasUsed uint64 `json:"gasUsed"`
-	BaseFee string `json:"baseFee"`
-	TxCount int    `json:"txCount"`
+	Number    uint64  `json:"number"`
+	TS        uint64  `json:"ts"`
+	GasUsed   uint64  `json:"gasUsed"`
+	PosterGas *uint64 `json:"posterGas"`
+	BaseFee   string  `json:"baseFee"`
+	TxCount   int     `json:"txCount"`
 }
 
 // LegacyParams is the legacy pricer state.
@@ -106,6 +107,13 @@ type Prices struct {
 type GasPerSecond struct {
 	S10 uint64 `json:"s10"`
 	S60 uint64 `json:"s60"`
+}
+
+// NullableGasPerSecond holds rolling rates that are unknown until every
+// source block has authoritative receipt data.
+type NullableGasPerSecond struct {
+	S10 *uint64 `json:"s10"`
+	S60 *uint64 `json:"s60"`
 }
 
 // L1 holds the L1 pricer getters.
@@ -147,21 +155,23 @@ type EthUsd struct {
 // LiveSnapshot is the per-tick state, published with NOTIFY and served by
 // /live and the WebSocket tick message.
 type LiveSnapshot struct {
-	ChainID         uint64        `json:"chainId"`
-	SampledAt       string        `json:"sampledAt"`
-	Block           LiveBlock     `json:"block"`
-	BaseFee         string        `json:"baseFee"`
-	MinBaseFee      string        `json:"minBaseFee"`
-	MultiplierBips  int64         `json:"multiplierBips"`
-	ExponentBips    int64         `json:"exponentBips"`
-	Model           string        `json:"model"`
-	Constraints     []Constraint  `json:"constraints"`
-	Legacy          *LegacyParams `json:"legacy,omitempty"`
-	Prices          Prices        `json:"prices"`
-	GasPerSecond    GasPerSecond  `json:"gasPerSecond"`
-	L1              *L1           `json:"l1,omitempty"`
-	Accounts        *Accounts     `json:"accounts,omitempty"`
-	ReplayErrorBips int64         `json:"replayErrorBips"`
+	ChainID        uint64        `json:"chainId"`
+	SampledAt      string        `json:"sampledAt"`
+	Block          LiveBlock     `json:"block"`
+	BaseFee        string        `json:"baseFee"`
+	MinBaseFee     string        `json:"minBaseFee"`
+	MultiplierBips int64         `json:"multiplierBips"`
+	ExponentBips   int64         `json:"exponentBips"`
+	Model          string        `json:"model"`
+	Constraints    []Constraint  `json:"constraints"`
+	Legacy         *LegacyParams `json:"legacy,omitempty"`
+	Prices         Prices        `json:"prices"`
+	// GasPerSecond retains the original total-gas API contract.
+	GasPerSecond        GasPerSecond         `json:"gasPerSecond"`
+	ComputeGasPerSecond NullableGasPerSecond `json:"computeGasPerSecond"`
+	L1                  *L1                  `json:"l1,omitempty"`
+	Accounts            *Accounts            `json:"accounts,omitempty"`
+	ReplayErrorBips     int64                `json:"replayErrorBips"`
 	// EthUsd is null when no spot was fetched or the last one is stale.
 	EthUsd *EthUsd `json:"ethUsd"`
 }
@@ -176,6 +186,7 @@ type BlockPoint struct {
 	Number           uint64   `json:"number"`
 	TS               uint64   `json:"ts"`
 	GasUsed          uint64   `json:"gasUsed"`
+	PosterGas        *uint64  `json:"posterGas"`
 	BaseFee          string   `json:"baseFee"`
 	PredictedBaseFee string   `json:"predictedBaseFee"`
 	Backlogs         []uint64 `json:"backlogs"`
@@ -186,38 +197,41 @@ type BlockPoint struct {
 }
 
 // SeriesPoint is one bucket of a Series. ExponentBips, ConstraintBips,
-// Backlogs and MinBaseFee describe the bucket's last block; FloorFeesWei
-// is the sum of gasUsed times the minimum base fee per block and
-// SurplusFeesWei is FeesWei minus that. ConstraintBips, MinBaseFee,
-// FloorFeesWei and SurplusFeesWei are null for history whose pricing
-// breakdown was never recorded (pricing version 0),
-// including a bucket any of whose source blocks is such history; they are
-// never null otherwise.
+// Backlogs and MinBaseFee describe the bucket's last block. FloorFeesWei is
+// compute gas times min(base fee, minimum base fee), SurplusFeesWei is the
+// remaining compute fee, and PosterFeesWei is poster gas times base fee.
+// Pricing fields are null for pricing version 0. PosterGas, PosterFeesWei and
+// ComputeGasPerSecond are independently null until every source block has
+// authoritative receipt poster gas. The compute destination sums also need
+// the pricing floor.
 type SeriesPoint struct {
-	T       int64  `json:"t"`
-	Blocks  int64  `json:"blocks"`
-	GasUsed uint64 `json:"gasUsed"`
+	T         int64   `json:"t"`
+	Blocks    int64   `json:"blocks"`
+	GasUsed   uint64  `json:"gasUsed"`
+	PosterGas *uint64 `json:"posterGas"`
 	// GasPerSecond is the rate over the covered span of the bucket. Coverage
 	// is the share of the bucket that span is after subtracting bounded missing
 	// intervals, or null when the missing-range time bounds cannot measure it.
 	// Completeness distinguishes a whole aggregate, a known partial aggregate
 	// and an aggregate whose completeness cannot be located in time.
-	GasPerSecond    uint64   `json:"gasPerSecond"`
-	Coverage        *float64 `json:"coverage"`
-	Completeness    string   `json:"completeness"`
-	FeesWei         string   `json:"feesWei"`
-	BaseFeeMin      string   `json:"baseFeeMin"`
-	BaseFeeAvg      string   `json:"baseFeeAvg"`
-	BaseFeeMax      string   `json:"baseFeeMax"`
-	ExponentBips    int64    `json:"exponentBips"`
-	ConstraintBips  []int64  `json:"constraintBips"`
-	Backlogs        []uint64 `json:"backlogs"`
-	BacklogsMax     []uint64 `json:"backlogsMax"`
-	MinBaseFee      *string  `json:"minBaseFee"`
-	FloorFeesWei    *string  `json:"floorFeesWei"`
-	SurplusFeesWei  *string  `json:"surplusFeesWei"`
-	ConstraintSetID int64    `json:"constraintSetId"`
-	ReplayErrorBips int64    `json:"replayErrorBips"`
+	GasPerSecond        uint64   `json:"gasPerSecond"`
+	ComputeGasPerSecond *uint64  `json:"computeGasPerSecond"`
+	Coverage            *float64 `json:"coverage"`
+	Completeness        string   `json:"completeness"`
+	FeesWei             string   `json:"feesWei"`
+	PosterFeesWei       *string  `json:"posterFeesWei"`
+	BaseFeeMin          string   `json:"baseFeeMin"`
+	BaseFeeAvg          string   `json:"baseFeeAvg"`
+	BaseFeeMax          string   `json:"baseFeeMax"`
+	ExponentBips        int64    `json:"exponentBips"`
+	ConstraintBips      []int64  `json:"constraintBips"`
+	Backlogs            []uint64 `json:"backlogs"`
+	BacklogsMax         []uint64 `json:"backlogsMax"`
+	MinBaseFee          *string  `json:"minBaseFee"`
+	FloorFeesWei        *string  `json:"floorFeesWei"`
+	SurplusFeesWei      *string  `json:"surplusFeesWei"`
+	ConstraintSetID     int64    `json:"constraintSetId"`
+	ReplayErrorBips     int64    `json:"replayErrorBips"`
 }
 
 // Reorg is the WebSocket reorg message: the collector replaced blocks at

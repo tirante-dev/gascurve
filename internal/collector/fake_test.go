@@ -60,6 +60,7 @@ type fakeRPC struct {
 	backlogsAt    func(uint64) []uint64
 	constraintsAt func(uint64) []nitro.Constraint
 	txCount       func(uint64) int
+	posterGas     func(uint64) uint64
 	// parentOverride replaces the parent hash a header reports, so a test
 	// can break the links a fetched range has to satisfy without moving
 	// the blocks themselves onto a fork.
@@ -97,6 +98,7 @@ func newFakeRPC(head uint64) *fakeRPC {
 		calls:      map[string]int{},
 		classes:    map[string]nitro.Class{},
 		txCount:    func(uint64) int { return 3 },
+		posterGas:  func(uint64) uint64 { return 0 },
 		sampledAt:  baseTime,
 	}
 }
@@ -161,8 +163,9 @@ func (f *fakeRPC) header(n uint64) nitro.Header {
 	if h, ok := f.parentOverride[n]; ok {
 		parent = h
 	}
+	posterGas := f.posterGas(n)
 	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50,
-		ArbOSVersion: f.arbos, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)]}
+		ArbOSVersion: f.arbos, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)], PosterGas: &posterGas}
 }
 
 func (f *fakeRPC) ChainID(context.Context) (uint64, error) {
@@ -187,6 +190,28 @@ func (f *fakeRPC) FastSample(ctx context.Context) (*nitro.Sample, error) {
 func (f *fakeRPC) FastSampleAt(ctx context.Context, n uint64) (*nitro.Sample, error) {
 	f.note(ctx, "FastSampleAt")
 	if err := f.fail("FastSampleAt"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sampleAt = append(f.sampleAt, n)
+	if n > f.head {
+		return nil, fmt.Errorf("block %d not found", n)
+	}
+	var backlogs []uint64
+	if f.backlogsAt != nil {
+		backlogs = f.backlogsAt(n)
+	}
+	constraints := f.constraints
+	if f.constraintsAt != nil {
+		constraints = f.constraintsAt(n)
+	}
+	return f.sampleLocked(n, constraints, backlogs), nil
+}
+
+func (f *fakeRPC) PricingSampleAt(ctx context.Context, n uint64) (*nitro.Sample, error) {
+	f.note(ctx, "PricingSampleAt")
+	if err := f.fail("PricingSampleAt"); err != nil {
 		return nil, err
 	}
 	f.mu.Lock()

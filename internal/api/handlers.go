@@ -221,17 +221,18 @@ func buildLiveIn(ctx context.Context, store db.Store, chainID uint64, now time.T
 		}
 	}
 	if block != nil {
-		snap.Block = model.LiveBlock{Number: block.Number, TS: uint64(block.TS.Unix()), GasUsed: block.GasUsed, BaseFee: block.BaseFee.String(), TxCount: block.TxCount}
+		snap.Block = model.LiveBlock{Number: block.Number, TS: uint64(block.TS.Unix()), GasUsed: block.GasUsed, PosterGas: uint64Ptr(block.PosterGas), BaseFee: block.BaseFee.String(), TxCount: block.TxCount}
 		snap.ReplayErrorBips = replayError(*block)
-		g10, err := store.GasUsedBetween(ctx, chainID, block.TS.Add(-10*time.Second), block.TS)
+		g10, c10, err := store.GasBetween(ctx, chainID, block.TS.Add(-10*time.Second), block.TS)
 		if err != nil {
 			return nil, err
 		}
-		g60, err := store.GasUsedBetween(ctx, chainID, block.TS.Add(-60*time.Second), block.TS)
+		g60, c60, err := store.GasBetween(ctx, chainID, block.TS.Add(-60*time.Second), block.TS)
 		if err != nil {
 			return nil, err
 		}
 		snap.GasPerSecond = model.GasPerSecond{S10: g10 / 10, S60: g60 / 60}
+		snap.ComputeGasPerSecond = model.NullableGasPerSecond{S10: dividedPtr(c10, 10), S60: dividedPtr(c60, 60)}
 	} else {
 		snap.Block = model.LiveBlock{Number: sample.BlockNumber, BaseFee: sample.BaseFee.String()}
 	}
@@ -715,10 +716,25 @@ func intParam(r *http.Request, name string, def, lo, hi int) int {
 
 func blockPoint(b db.Block) model.BlockPoint {
 	return model.BlockPoint{
-		Number: b.Number, TS: uint64(b.TS.Unix()), GasUsed: b.GasUsed, BaseFee: b.BaseFee.String(),
+		Number: b.Number, TS: uint64(b.TS.Unix()), GasUsed: b.GasUsed, PosterGas: uint64Ptr(b.PosterGas), BaseFee: b.BaseFee.String(),
 		PredictedBaseFee: b.PredictedBaseFee.String(), Backlogs: b.Backlogs.Uint64s(), ConstraintBips: int64s(b.ConstraintBips),
 		ExponentBips: b.ExponentBips, MinBaseFee: b.MinBaseFee.StringPtr(), Anchored: b.Anchored,
 	}
+}
+
+func uint64Ptr(v sql.NullInt64) *uint64 {
+	if !v.Valid || v.Int64 < 0 {
+		return nil
+	}
+	u := uint64(v.Int64)
+	return &u
+}
+
+func dividedPtr(v *uint64, divisor uint64) *uint64 {
+	if v == nil {
+		return nil
+	}
+	return uint64ValuePtr(*v / divisor)
 }
 
 // int64s copies a BIGINT[]: a stored array (even empty) becomes a JSON

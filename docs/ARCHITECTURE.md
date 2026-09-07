@@ -68,7 +68,7 @@ Step(state, dt seconds, minBaseFee):
         if c.Backlog > 0: exponent += bips(c.Backlog) / bips(c.Window*c.Target)   // integer division, in bips
     baseFee = exponent > 0 ? minBaseFee * approxExpBips(exponent) / 10_000 : minBaseFee
 
-AddGas(state, gasUsed): for each c: c.Backlog += gasUsed
+AddGas(state, computeGas): for each c: c.Backlog += computeGas
 
 Legacy (no constraints): speedLimit, inertia, tolerance, backlog
     backlog = saturatingSub(backlog, dt*speedLimit)
@@ -78,7 +78,7 @@ Legacy (no constraints): speedLimit, inertia, tolerance, backlog
     else baseFee = minBaseFee
 ```
 
-Block processing order (as ArbOS does it): `Step(dt)` at the start of the block, which sets that block's base fee, then `AddGas(gasUsed)` for the block's transactions. `dt` is the header timestamp minus the previous header timestamp (0 for most Nitro blocks).
+Block processing order (as ArbOS does it): `Step(dt)` at the start of the block, which sets that block's base fee, then `AddGas(gasUsed - posterGas)` for the block's transactions. `posterGas` is the sum of receipt `gasUsedForL1`. `dt` is the header timestamp minus the previous header timestamp (0 for most Nitro blocks).
 
 Replay validation vector (Robinhood, 2026-09-06): constraints `[60e6,15,3_111_506]`, `[40e6,86400,11_194_391_810_886]`, minBaseFee 20_000_000 wei. Exponent 34 + 32_391 = 32_425 bips. Base fee 395_8xx_xxx wei (observed 399_726_000 a few seconds later).
 
@@ -91,21 +91,21 @@ Replay comparison: ArbOS computes the fee in block N's `startBlock` and it appli
 All tables are keyed by `chain_id` first. Wei values are `NUMERIC(40,0)`. Gas values are `BIGINT`. Backlogs are `NUMERIC(20,0)[]`: a backlog is a `uint64` in the pricer and saturates at 2^64-1, which does not fit in a `BIGINT`. A nullable column means unknown, never zero, and `pricing_version` says which rows carry the full pricing breakdown (1) and which are history recorded without it (0).
 
 Production release `v1.0.1` established schema version 1 from `000001_init`. Released migrations are immutable, and every correction uses a new forward migration. CI verifies both empty-schema installation and upgrades from the last production schema. See [MIGRATIONS.md](MIGRATIONS.md) for authoring, release, rollback, and concurrent pull request rules.
-Forward migration `000002_state_samples_chain_block` adds the state-sample lookup index, `000003_owner_action_tx_index` adds the owner-action transaction index column, and `000004_missing_ranges` adds durable recovery records for skipped history.
+Forward migration `000002_state_samples_chain_block` adds the state-sample lookup index, `000003_owner_action_tx_index` adds the owner-action transaction index column, `000004_missing_ranges` adds durable recovery records for skipped history, and `000005_batch_report_attributed_cost` records ArbOS-attributed batch costs. Migration `000006_poster_gas_fee_accounting` adds receipt-backed fee-accounting fields without inventing values for existing history.
 
 ```sql
 networks            (chain_id PK, name, display_name, explorer_url, enabled, head_block, head_at, last_sample_at, last_error, updated_at)
-blocks              (chain_id, number, hash, parent_hash, ts, gas_used, base_fee NUMERIC, l1_block, tx_count, pricing_version SMALLINT /* 1 = full breakdown, 0 = unknown history */,
+blocks              (chain_id, number, hash, parent_hash, ts, gas_used, poster_gas BIGINT NULL, base_fee NUMERIC, l1_block, tx_count, pricing_version SMALLINT /* 1 = full breakdown, 0 = unknown history */,
                      backlogs NUMERIC(20,0)[], exponent_bips BIGINT, predicted_base_fee NUMERIC, anchored BOOL,
                      constraint_bips BIGINT[] NULL, min_base_fee NUMERIC NULL /* both null for pricing_version 0 */,
                      PK(chain_id, number))                       -- rolling, pruned after collector.block_retention
 buckets             (chain_id, resolution TEXT /* '1m'|'15m'|'1h' */, bucket_start TIMESTAMPTZ,
-                     blocks INT, gas_used BIGINT, fees_wei NUMERIC,
+                     blocks INT, gas_used BIGINT, poster_gas BIGINT NULL, fees_wei NUMERIC, poster_fees_wei NUMERIC NULL,
                      base_fee_min/avg/max NUMERIC, base_fee_sum NUMERIC NULL /* exact sum, null when unknown */,
                      exponent_end_bips BIGINT, pricing_version SMALLINT,
                      backlogs_end NUMERIC(20,0)[], backlogs_max NUMERIC(20,0)[], constraint_set_id INT,
                      constraint_bips_end BIGINT[] NULL, min_base_fee NUMERIC NULL,
-                     floor_fees_wei NUMERIC NULL, surplus_fees_wei NUMERIC NULL /* all null for pricing_version 0 */,
+                     floor_fees_wei NUMERIC NULL, surplus_fees_wei NUMERIC NULL /* destination fields null when any source block lacks poster gas or pricing data */,
                      replay_error_bips BIGINT /* max |predicted-actual| in bips over the bucket */,
                      last_block BIGINT /* highest block folded in; the backfill never overwrites *_end fields written by newer blocks */,
                      PK(chain_id, resolution, bucket_start))     -- kept forever
@@ -128,6 +128,22 @@ missing_ranges      (chain_id, from_block, to_block, detected_at, lifecycle /* p
 collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor_v2, endpoints, generation (bumped by every rewind and by a history rebuild; writers that fetched outside the lock re-check it before committing), rpc_capacity, eth_usd, history_epoch, telemetry (collector heartbeat, loop outcomes, head progress and cumulative RPC/database accounting). A legacy holes key is deleted only after its JSON has been imported into missing_ranges successfully
 ```
 
+### 4.1 Poster-gas migration and historical recomputation
+
+Migration 6 leaves existing `blocks.poster_gas`, `buckets.poster_gas`, and `buckets.poster_fees_wei` null and clears the old two-way destination sums. Existing total `gas_used` and `fees_wei`, pricing fields, and constraint fields stay intact. This is deliberate: zero poster gas is a fact that can only come from receipts.
+
+Stop every old collector before applying migration 6. An old binary can otherwise write the obsolete two-way split back into buckets after the migration clears it. Apply the migration, deploy the API, web, and collector together, perform the replacement reset below while collectors remain stopped, then start the new collectors. During the transition, destination fields are null and the web shows the split as unavailable. The new collector requires `eth_getBlockReceipts` on ordinary endpoints. It validates receipts and records exact destination accounting for every new or replayed block.
+
+Historical repair is a replacement replay, not an additive fold. Before maintenance, record the oldest bucket timestamp the API serves and configure `collector.backfill_depth` to reach at least that timestamp from the current head. Stop collectors, take a database backup, and perform the following per network in one maintenance transaction:
+
+1. Delete that network's retained block rows and all bucket rows.
+2. Clear its `head`, `live_start`, `backfill_cursor`, `owner_log_cursor`, `owner_scan_through`, `owner_scan_origin`, and `history_epoch` checkpoints, delete its `missing_ranges` rows, and null its `networks.head_block`, `head_at`, and `last_sample_at` fields.
+3. Commit, restart the collector, and let the configured full backfill run from receipts.
+
+The first collector tick seeds a fresh receipt-backed live head. That block becomes the exclusive upper bound of a new full backfill, which reconstructs every older bucket and replays backlogs with compute gas. Do not retain old block rows: the backfill normally begins below the oldest retained row, so keeping them would leave that retained interval unrecomputed. Do not reset the cursor without deleting buckets first, since old additive buckets would be counted twice. Resetting the owner scan checkpoints is required when the configured depth reaches earlier than its prior origin. Keep the API in maintenance mode while buckets are empty if a temporary history gap is unacceptable. Before ending maintenance, confirm `backfill_cursor.done` is true, the expected earliest timestamp is present or represented by a documented missing range, no unexpected missing ranges remain, and every served bucket has non-null `poster_gas` and all three destination sums. Checking only the currently present buckets can report success after the first replacement batch. Receipt fetching adds one metered call per block, so use a dedicated endpoint or allow for the public endpoint's configured pacing.
+
+The down migration deliberately marks all pricing and destination history unknown before dropping poster gas. This prevents an older API from presenting a corrected compute-only pair as a complete two-way split, but it discards recorded minimum fees and constraint bips. Reapplying migration 6 after a rollback therefore requires the same full historical replacement replay. Migration `000006_poster_gas_fee_accounting` depends on migrations 2 through 5 already being present. The data reset must run only after every required schema migration is present.
+
 `NOTIFY gascurve_live, '<json>'` is issued by the collector after each tick with the `LiveSnapshot` below (payloads stay under 8 kB; `recentBlocks` is not included in the notify payload, the API keeps its own ring buffer from `blocks` rows).
 
 `NOTIFY gascurve_owner_action, '{"chainId": …, "action": OwnerAction}'` is issued when the slow loop stores a new owner action; the API turns it into the WebSocket `owner_action` message.
@@ -146,12 +162,12 @@ Correctness rules the follower must keep:
 - **Capability endpoints are verified before use.** Archive calls go through a managed archive pool with its own failover; the `newHeads` subscriber re-resolves its endpoint at every connection attempt and reports back what happened with it, so WebSocket health is tracked per endpoint apart from the HTTP verification and a socket that cannot be dialed, cannot be subscribed to or will not stay up is cooled down while its JSON-RPC keeps serving. A range with no independently known pricer state is recorded as a hole, never replayed from the live model.
 - **Minimum base fee history.** The fee in force at a block comes from recorded `setMinimumL2BaseFee` actions, with nitro's genesis default (0.1 gwei, `InitialMinimumBaseFeeWei`) before the first recorded change, never the live value.
 
-Fast loop, every `collector.tick_interval` (3 s by default: a sample costs five calls, so at a public budget of four per second a 1 s tick starved the header catch-up and skipped gaps), or on every `newHeads` event when `ws_url` is configured (then state calls are made at that head's block number so samples align exactly with headers):
+Fast loop, every `collector.tick_interval` (3 s by default: a sample costs six calls including the head lookup and receipts), or on every `newHeads` event when `ws_url` is configured (then state calls are made at that head's block number so samples align exactly with headers):
 
 With `ws_url` the follower starts on the timer, pauses timer sampling once the `newHeads` subscription is up, and resumes it the moment the subscription drops (the subscriber reconnects on its own with 1 s to 30 s back-off and a 15 s ping watchdog). Heads arriving mid-tick collapse into one tick at the newest head; catch-up fetches the rest.
 
-1. Resolve the head number first (`eth_blockNumber`), then one JSON-RPC batch at that exact block tag: `eth_getBlockByNumber(n, false)`, `getGasPricingConstraints()`, `getPricesInWei()`, `getMinimumGasPrice()`, so a sample never mixes two blocks. If the constraints call reverts or returns empty, also `getGasBacklog()`, `getPricingInertia()`, `getGasBacklogTolerance()`, `getGasAccountingParams()` (legacy model).
-2. Fetch headers for every block between the stored head and the new head, in batches of `header_batch_size`, respecting the per-network budget. On a paced network (`calls_per_second > 0`) a gap larger than `max_catch_up_batches` × `header_batch_size` blocks is skipped (logged) and the replay restarts from the sampled backlogs, because a 4 calls/s budget cannot follow a ~10 blocks/s chain block by block; unlimited (dedicated node) networks always fetch every block.
+1. Resolve the head number first (`eth_blockNumber`), then one JSON-RPC batch at that exact block tag: `eth_getBlockByNumber(n, false)`, `eth_getBlockReceipts(n)`, `getGasPricingConstraints()`, `getPricesInWei()`, `getMinimumGasPrice()`, so a sample never mixes two blocks. If the constraints call reverts or returns empty, also `getGasBacklog()`, `getPricingInertia()`, `getGasBacklogTolerance()`, `getGasAccountingParams()` (legacy model).
+2. Fetch headers and block receipts for every block between the stored head and the new head, in batches of `header_batch_size`, respecting the per-network budget. Receipt count, transaction hashes and indexes, block identity, cumulative gas, total gas, and poster gas are validated before a block is accepted. Missing `gasUsedForL1` is an error, never zero. On a paced network (`calls_per_second > 0`) a gap larger than `max_catch_up_batches` × `header_batch_size` blocks is skipped (logged) and the replay restarts from the sampled backlogs; unlimited (dedicated node) networks always fetch every block.
 3. Replay each block through the pricer. When the sampled state's block number equals a replayed block, overwrite the backlogs with the sampled values (`anchored = true`) so drift never accumulates.
 4. Upsert `blocks`, fold into `buckets` (1m, 15m, 1h), insert `state_samples`, update `networks.head_block`, `NOTIFY`.
 
@@ -167,7 +183,7 @@ History rebuild (`history_epoch`, per network): enabling `archive` changes nothi
 
 Rate limiting: a token bucket per endpoint, `calls_per_second` tokens/s, burst 2× that. Every JSON-RPC call consumes one token, including each item inside a batch. Batches never exceed 100 items, never exceed the endpoint's pacer burst minus the fast reserve on a budgeted endpoint, and are never sent concurrently for the same network. The pacer never spends tokens the bucket does not hold and has two lanes: the head or timer tick's state sample is `Fast` and draws from a reserve of `max(1, rate/4)` tokens per second without queueing; whatever a fast caller needs beyond the reserve queues first come, first served with `Bulk` (everything else), so a demanding tick on a small budget cannot starve the slow loop or backfill. `tick_interval` can be set per network (`NETWORK_<NAME>_TICK_INTERVAL`); dedicated endpoints run at 500 ms, public ones stay at 3 s.
 
-Endpoint throughput must exceed live ingress demand if missing-range recovery is expected to converge. For a constraints chain polled every `T` seconds while the chain produces `B` blocks/s, live demand is approximately `(5 + max(B×T - 1, 0)) / T` calls/s: five calls resolve and sample the head, and every intervening header is one metered batch item. With reliable `newHeads`, the steady requirement is approximately `4×B` calls/s because each pinned sample costs four calls. Legacy pricing adds four calls to every sample. Slow-loop traffic, retries and recovery need headroom above those figures. `/status.capacity` reports the configured budget, the required rate calculated from the latest observed interval, the ten-second observed rate, finite headroom and whether the budget was saturated. `/status.degraded` is true while capacity is saturated, history is missing or a recovery checkpoint cannot be decoded.
+Endpoint throughput must exceed live ingress demand if missing-range recovery is expected to converge. For a constraints chain polled every `T` seconds while the chain produces `B` blocks/s, live demand is approximately `(6 + 2×max(B×T - 1, 0)) / T` calls/s: six calls resolve and sample the head, and every intervening block needs one header and one receipt call. With reliable `newHeads`, the steady requirement is approximately `5×B` calls/s because each pinned sample costs five calls. Legacy pricing adds four calls to every sample. Slow-loop traffic, retries and recovery need headroom above those figures. `/status.capacity` reports the configured budget, the required rate calculated from the latest observed interval, the ten-second observed rate, finite headroom and whether the budget was saturated. `/status.degraded` is true while capacity is saturated, history is missing or a recovery checkpoint cannot be decoded.
 
 Rate limiting is recognised from HTTP 429 and from JSON-RPC errors with codes -32005 or -32007 or a message naming a rate or request limit (QuickNode reports its 50 requests per second as `-32007`); all of these back off with the same exponential schedule (2 s to 60 s), share the endpoint's cooldown, halve the endpoint's batch cap, and drive failover when persistent. Because the burst is twice the rate, a provider with a strict per-second window is configured at half that window (QuickNode: `calls_per_second: 25`), otherwise the one-second peaks trip it and every back-off stalls the history work. All requests send `User-Agent: gascurve/<version>`.
 
@@ -210,14 +226,15 @@ type ConstraintSet = {
 
 type LiveSnapshot = {
   chainId: number; sampledAt: string;
-  block: { number: number; ts: number; gasUsed: number; baseFee: string; txCount: number };
+  block: { number: number; ts: number; gasUsed: number; posterGas: number | null; baseFee: string; txCount: number };
   baseFee: string; minBaseFee: string; multiplierBips: number; exponentBips: number;
   model: 'constraints' | 'legacy';
   constraints: Constraint[];               // empty for legacy
   legacy?: { speedLimit: number; inertia: number; tolerance: number; backlog: number };
   prices: { perL2Tx: string; perL1CalldataByte: string; perL2Storage: string;
             perArbGasBase: string; perArbGasCongestion: string; perArbGasTotal: string };
-  gasPerSecond: { s10: number; s60: number };
+  gasPerSecond: { s10: number; s60: number }; // total gas, retained for API compatibility
+  computeGasPerSecond: { s10: number | null; s60: number | null }; // receipt-backed pricer input, null when any source block lacks poster gas
   l1?: { baseFeeEstimate: string; surplus: string; feesAvailable: string; unitsSinceUpdate: number;
          lastUpdateAt: string; equilibrationUnits: number; perBatchGasCharge: number; rewardRate: number };
   accounts?: { infra: Account; network: Account; l1Reward: Account };
@@ -227,7 +244,7 @@ type LiveSnapshot = {
 type Account = { address: string; balance: string }
 
 type BlockPoint = {
-  number: number; ts: number; gasUsed: number; baseFee: string; predictedBaseFee: string;
+  number: number; ts: number; gasUsed: number; posterGas: number | null; baseFee: string; predictedBaseFee: string;
   backlogs: number[];        // end-of-block backlogs (after AddGas)
   constraintBips: number[] | null;  // start-of-block per-constraint exponent, the values that priced this block; sums to exponentBips; null only for pricing version 0 rows (history recorded before the breakdown existed)
   exponentBips: number; minBaseFee: string | null; anchored: boolean;   // minBaseFee null for pricing version 0 (history without the breakdown)
@@ -242,15 +259,16 @@ type Series = {
 }
 type SeriesPoint = {
   t: number;                               // unix seconds, bucket start
-  blocks: number; gasUsed: number; gasPerSecond: number; feesWei: string;
-  // minBaseFee, floorFeesWei and surplusFeesWei are null together, under one condition: any block in the bucket was written at pricing version 0.
-  coverage: number | null;                 // share of the bucket the collector indexed when the time span is measurable. Bounded missing intervals reduce it; it is null when missing-range time bounds are insufficient. gasPerSecond is a usable rate only when coverage is positive and non-null. Sums (gasUsed, feesWei, blocks) always include indexed blocks only
-  completeness: 'complete' | 'partial' | 'unknown'; // complete means every block in the covered bucket is indexed; partial means the API can place a missing range in this bucket or the bucket is still in progress, even when equal block timestamps leave coverage at 1; unknown means a missing range lacks enough time bounds to decide whether it overlaps this bucket
+  blocks: number; gasUsed: number; posterGas: number | null; gasPerSecond: number; computeGasPerSecond: number | null; feesWei: string;
+  // gasPerSecond retains the total-gas API value. computeGasPerSecond is the pricer input rate and is null when receipt poster gas is unavailable for any source block.
+  // minBaseFee follows pricing_version. The destination split is independently unknown until both pricing and receipt inputs are available.
+  coverage: number | null;                 // share of the bucket the collector indexed when the time span is measurable. Bounded missing intervals reduce it; it is null when missing-range time bounds are insufficient. Both gas rates are usable only when coverage is positive and non-null. Sums (gasUsed, feesWei, blocks) always include indexed blocks only
+  completeness: 'complete' | 'partial' | 'unknown'; // complete means every block is indexed; partial means the API can place a missing range in this bucket or the bucket is still in progress, even when equal block timestamps leave coverage at 1; unknown means a missing range lacks enough time bounds to decide whether it overlaps this bucket
   baseFeeMin: string; baseFeeAvg: string; baseFeeMax: string;
   exponentBips: number; constraintBips: number[] | null;   // start-of-block values of the bucket's last block; null for pricing version 0 history
   backlogs: number[]; backlogsMax: number[];
   minBaseFee: string | null;                        // floor in force at the bucket's last block; null when any block in the bucket has pricing version 0
-  floorFeesWei: string | null; surplusFeesWei: string | null;     // Σ gasUsed × minBaseFee and feesWei minus that, per block, exact; null when any block in the bucket has pricing version 0
+  floorFeesWei: string | null; surplusFeesWei: string | null; posterFeesWei: string | null; // computeGas × min(baseFee,minBaseFee), compute congestion, and posterGas × baseFee. When known, the three sum to feesWei
   constraintSetId: number; replayErrorBips: number;
 }
 

@@ -246,7 +246,7 @@ func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64) erro
 	origin := &scanOrigin{Block: cutoff}
 	var set *db.ConstraintSet
 	if f.archive != nil {
-		sample, err := f.archive.FastSampleAt(ctx, cutoff)
+		sample, err := f.archive.PricingSampleAt(ctx, cutoff)
 		if err != nil {
 			return fmt.Errorf("origin state at %d: %w", cutoff, err)
 		}

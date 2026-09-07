@@ -169,6 +169,26 @@ func TestBackfillSegments(t *testing.T) {
 	if calls := rpc.headerCalls; len(calls) == 0 || len(calls[len(calls)-1]) != minBackfillBatch {
 		t.Fatalf("the smallest batch goes without spare budget: %v", calls)
 	}
+	rpc.available = 14
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("receipt-weighted spare budget: %v %v", st, err)
+	}
+	if calls := rpc.headerCalls; len(calls[len(calls)-1]) != 7 {
+		t.Fatalf("14 spare calls must fetch 7 blocks: %v", calls)
+	}
+	cross, _ := f.loadCursor(ctx)
+	rpc.mu.Lock()
+	if rpc.parentOverride == nil {
+		rpc.parentOverride = map[uint64]string{}
+	}
+	rpc.parentOverride[cross.Next] = "0xwrong"
+	rpc.mu.Unlock()
+	if _, err := f.BackfillStep(ctx); err == nil {
+		t.Fatal("a batch that does not link to the prior backfill batch must fail")
+	}
+	rpc.mu.Lock()
+	delete(rpc.parentOverride, cross.Next)
+	rpc.mu.Unlock()
 	rpc.available = 1000
 
 	steps := runBackfill(t, f, 200)
@@ -547,6 +567,11 @@ func TestBackfillErrors(t *testing.T) {
 		t.Fatalf("headers: %v", err)
 	}
 	delete(rpc.errs, "HeadersByNumbers")
+	rpc.headerShift = 1
+	if _, err := f.BackfillStep(ctx); err == nil {
+		t.Fatal("headers for other block numbers must fail")
+	}
+	rpc.headerShift = 0
 	for _, method := range []string{"FoldBuckets", "UpsertBlocks", "RebuildBuckets"} {
 		store.FailOn[method] = true
 		if _, err := f.BackfillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
@@ -812,7 +837,7 @@ func replayErrorAt(t *testing.T, f *Follower, number uint64) int64 {
 		numbers = append(numbers, n)
 	}
 	headers, _ := f.rpc.HeadersByNumbers(ctx, numbers)
-	anchor, fees, err := f.backfillAnchors(ctx, st, numbers)
+	anchor, fees, err := f.backfillAnchors(ctx, st, headers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,7 +867,8 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 	}
 	st := &pricer.State{MinBaseFee: big.NewInt(1), Constraints: []pricer.Constraint{{Target: 60_000_000, Window: 15}, {Target: 40_000_000, Window: 86_400}}}
 	numbers := []uint64{98, 99, 100, 101, 102, 103, 104, 105}
-	anchor, fees, err := f.backfillAnchors(ctx, st, numbers)
+	headers, _ := rpc.HeadersByNumbers(ctx, numbers)
+	anchor, fees, err := f.backfillAnchors(ctx, st, headers)
 	if err != nil || anchor == nil || fees[100].Int64() != 20_000_000 {
 		t.Fatalf("anchors: %v %v", fees, err)
 	}
@@ -852,7 +878,6 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 	if _, ok := anchor(101); ok {
 		t.Fatal("101 is not an anchor block")
 	}
-	headers, _ := rpc.HeadersByNumbers(ctx, numbers)
 	rows, err := f.replaySegment(context.Background(), st, &backfillCursor{}, headers, anchor, fees)
 	if err != nil {
 		t.Fatal(err)
@@ -868,21 +893,23 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 	}
 	// No anchor block in range: nil anchor, no calls.
 	rpc.sampleAt = nil
-	if a, _, err := f.backfillAnchors(ctx, st, []uint64{101, 102}); err != nil || a != nil || len(rpc.sampleAt) != 0 {
+	plain, _ := rpc.HeadersByNumbers(ctx, []uint64{101, 102})
+	if a, _, err := f.backfillAnchors(ctx, st, plain); err != nil || a != nil || len(rpc.sampleAt) != 0 {
 		t.Fatalf("out of range: %v %v %v", a, err, rpc.sampleAt)
 	}
 	// A sample whose model differs from the segment is skipped.
 	rpc.mu.Lock()
 	rpc.constraints = rpc.constraints[:1]
 	rpc.mu.Unlock()
-	if a, _, err := f.backfillAnchors(ctx, st, []uint64{100}); err != nil || a != nil {
+	header100, _ := rpc.HeadersByNumbers(ctx, []uint64{100})
+	if a, _, err := f.backfillAnchors(ctx, st, header100); err != nil || a != nil {
 		t.Fatalf("shape mismatch: %v %v", a, err)
 	}
 	// Legacy chains anchor the single backlog.
 	lp := legacyParams()
 	rpc.legacy = &lp
 	lst := &pricer.State{MinBaseFee: big.NewInt(1), Legacy: &pricer.Legacy{SpeedLimit: lp.SpeedLimit, Inertia: lp.Inertia, Tolerance: lp.Tolerance}}
-	a, _, err := f.backfillAnchors(ctx, lst, []uint64{100})
+	a, _, err := f.backfillAnchors(ctx, lst, header100)
 	if err != nil || a == nil {
 		t.Fatalf("legacy anchors: %v", err)
 	}
@@ -890,12 +917,18 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 		t.Fatalf("legacy anchor: %v %v", b, ok)
 	}
 	// A failing archive call fails the step so it is retried.
-	rpc.errs["FastSampleAt"] = errRPC
-	if _, _, err := f.backfillAnchors(ctx, lst, []uint64{100}); !errors.Is(err, errRPC) {
+	rpc.errs["PricingSampleAt"] = errRPC
+	if _, _, err := f.backfillAnchors(ctx, lst, header100); !errors.Is(err, errRPC) {
 		t.Fatalf("anchor error: %v", err)
 	}
 	scanned(f)
 	if _, err := f.BackfillStep(ctx); !errors.Is(err, errRPC) {
 		t.Fatalf("step with failing anchor: %v", err)
+	}
+	other := newFakeRPC(1000)
+	other.fork(100, "other")
+	f.archive = other
+	if _, _, err := f.backfillAnchors(ctx, lst, header100); err == nil {
+		t.Fatal("archive state from another fork must fail")
 	}
 }

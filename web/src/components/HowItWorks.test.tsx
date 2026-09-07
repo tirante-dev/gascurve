@@ -78,7 +78,7 @@ describe("HowItWorks", () => {
     render(<HowItWorks network="robinhood" />);
     expect(screen.getByRole("heading", { name: "How the fee works", level: 2 })).toBeInTheDocument();
     // The prose, with this chain's floor filled into it.
-    expect(screen.getByRole("heading", { name: "Two parts, one fee" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Three destinations, one fee" })).toBeInTheDocument();
     expect(screen.getByText(/the floor \(0.02 gwei\) multiplied by/)).toBeInTheDocument();
     // The quoted floor and the set in force, from the api.
     expect(screen.getByText("0.02 gwei")).toBeInTheDocument();

@@ -215,7 +215,7 @@ func TestFollowerBindsPoolCapabilities(t *testing.T) {
 	if _, err := bad.WSURL(ctx); !errors.Is(err, nitro.ErrNoEndpoint) {
 		t.Fatalf("a disabled WebSocket endpoint is never dialed: %v", err)
 	}
-	if _, err := h.archive.FastSampleAt(ctx, 1); !errors.Is(err, nitro.ErrNoEndpoint) {
+	if _, err := h.archive.PricingSampleAt(ctx, 1); !errors.Is(err, nitro.ErrNoEndpoint) {
 		t.Fatalf("a disabled archive endpoint is never sampled: %v", err)
 	}
 	// A pool with no capability endpoint at all binds neither.

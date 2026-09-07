@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"math/big"
 	"sort"
@@ -299,10 +300,16 @@ func (m missingTimeline) qualify(points []model.SeriesPoint, width time.Duration
 		point.Coverage = &share
 		if covered <= 0 {
 			point.GasPerSecond = 0
+			if point.ComputeGasPerSecond != nil {
+				point.ComputeGasPerSecond = uint64ValuePtr(0)
+			}
 			continue
 		}
 		seconds := max(uint64(covered/time.Second), 1)
 		point.GasPerSecond = point.GasUsed / seconds
+		if point.ComputeGasPerSecond != nil && point.PosterGas != nil && *point.PosterGas <= point.GasUsed {
+			point.ComputeGasPerSecond = uint64ValuePtr((point.GasUsed - *point.PosterGas) / seconds)
+		}
 	}
 }
 
@@ -374,7 +381,7 @@ func setSize(cs db.ConstraintSet) int {
 
 // bucketPoint renders a bucket. The average comes from the exact sum when
 // the bucket carries one and from the stored average otherwise; the fee
-// split and the exponents are null when the bucket predates them.
+// split and the exponents are null when the required inputs were not recorded.
 // liveStart is when the collector's live loop started storing this chain,
 // from the live_start checkpoint; the zero time when there is none.
 func liveStart(ctx context.Context, store db.Store, chainID uint64) (time.Time, error) {
@@ -458,38 +465,68 @@ func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) (mo
 	if b.BaseFeeSum.Valid && b.Blocks > 0 {
 		avg = new(big.Int).Div(b.BaseFeeSum.Wei.BigInt(), big.NewInt(b.Blocks)).String()
 	}
+	floorFees, surplusFees, posterFees := b.FloorFeesWei.StringPtr(), b.SurplusFeesWei.StringPtr(), b.PosterFeesWei.StringPtr()
+	if !b.PosterGas.Valid {
+		floorFees, surplusFees, posterFees = nil, nil, nil
+	}
 	return model.SeriesPoint{
-		T: b.BucketStart.Unix(), Blocks: b.Blocks, GasUsed: b.GasUsed, GasPerSecond: b.GasUsed / secs, Coverage: pointCoverage, Completeness: completeness,
+		T: b.BucketStart.Unix(), Blocks: b.Blocks, GasUsed: b.GasUsed, PosterGas: uint64Ptr(b.PosterGas), GasPerSecond: b.GasUsed / secs,
+		ComputeGasPerSecond: computeRate(b.GasUsed, b.PosterGas, secs), Coverage: pointCoverage, Completeness: completeness,
 		FeesWei: b.FeesWei.String(), BaseFeeMin: b.BaseFeeMin.String(), BaseFeeAvg: avg, BaseFeeMax: b.BaseFeeMax.String(),
 		ExponentBips: b.ExponentEndBips, ConstraintBips: int64s(b.ConstraintBipsEnd), Backlogs: b.BacklogsEnd.Uint64s(), BacklogsMax: b.BacklogsMax.Uint64s(),
-		MinBaseFee: b.MinBaseFee.StringPtr(), FloorFeesWei: b.FloorFeesWei.StringPtr(), SurplusFeesWei: b.SurplusFeesWei.StringPtr(),
+		MinBaseFee: b.MinBaseFee.StringPtr(), FloorFeesWei: floorFees, SurplusFeesWei: surplusFees, PosterFeesWei: posterFees,
 		ConstraintSetID: setID, ReplayErrorBips: b.ReplayErrorBips,
 	}, true
 }
 
 // blockPoints renders one point per block. gasPerSecond is the total gas of
-// all blocks sharing the block's timestamp second. A block stored before
+// all blocks sharing the block's timestamp second; computeGasPerSecond is
+// the receipt-backed pricer input for that second. A block stored before
 // its exponents and floor were recorded (pricing version 0) has no known
 // floor and therefore no known fee split.
 func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint {
 	perSecond := map[int64]uint64{}
+	computePerSecond := map[int64]uint64{}
+	unknownPoster := map[int64]bool{}
 	for _, b := range blocks {
-		perSecond[b.TS.Unix()] += b.GasUsed
+		second := b.TS.Unix()
+		perSecond[second] += b.GasUsed
+		if b.PosterGas.Valid && b.PosterGas.Int64 >= 0 && uint64(b.PosterGas.Int64) <= b.GasUsed {
+			computePerSecond[second] += b.GasUsed - uint64(b.PosterGas.Int64)
+		} else {
+			unknownPoster[second] = true
+		}
 	}
 	out := make([]model.SeriesPoint, 0, len(blocks))
 	for _, b := range blocks {
 		gas := new(big.Int).SetUint64(b.GasUsed)
 		fees := new(big.Int).Mul(b.BaseFee.BigInt(), gas)
 		pointCoverage, completeness := measuredCoverage(1)
+		var computeGasPerSecond *uint64
+		if !unknownPoster[b.TS.Unix()] {
+			computeGasPerSecond = uint64ValuePtr(computePerSecond[b.TS.Unix()])
+		}
 		p := model.SeriesPoint{
-			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, GasPerSecond: perSecond[b.TS.Unix()], Coverage: pointCoverage, Completeness: completeness,
-			FeesWei: fees.String(), BaseFeeMin: b.BaseFee.String(), BaseFeeAvg: b.BaseFee.String(), BaseFeeMax: b.BaseFee.String(),
+			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, PosterGas: uint64Ptr(b.PosterGas), GasPerSecond: perSecond[b.TS.Unix()], Coverage: pointCoverage, Completeness: completeness,
+			ComputeGasPerSecond: computeGasPerSecond,
+			FeesWei:             fees.String(), BaseFeeMin: b.BaseFee.String(), BaseFeeAvg: b.BaseFee.String(), BaseFeeMax: b.BaseFee.String(),
 			ExponentBips: b.ExponentBips, ConstraintBips: int64s(b.ConstraintBips), Backlogs: b.Backlogs.Uint64s(), BacklogsMax: b.Backlogs.Uint64s(),
 			MinBaseFee: b.MinBaseFee.StringPtr(), ConstraintSetID: setIDAt(sets, b.Number, len(b.Backlogs)), ReplayErrorBips: replayError(b),
 		}
-		if b.Known() {
-			floor := new(big.Int).Mul(b.MinBaseFee.Wei.BigInt(), gas)
-			p.FloorFeesWei, p.SurplusFeesWei = stringPtr(floor), stringPtr(new(big.Int).Sub(fees, floor))
+		if b.DestinationsKnown() {
+			posterGas := new(big.Int).SetInt64(b.PosterGas.Int64)
+			compute := new(big.Int).Sub(gas, posterGas)
+			rate := new(big.Int).Set(b.MinBaseFee.Wei.BigInt())
+			if b.BaseFee.BigInt().Cmp(rate) < 0 {
+				rate.Set(b.BaseFee.BigInt())
+			}
+			floor := new(big.Int).Mul(rate, compute)
+			computeFees := new(big.Int).Mul(b.BaseFee.BigInt(), compute)
+			posterFees := new(big.Int).Mul(b.BaseFee.BigInt(), posterGas)
+			p.FloorFeesWei, p.SurplusFeesWei, p.PosterFeesWei = stringPtr(floor), stringPtr(new(big.Int).Sub(computeFees, floor)), stringPtr(posterFees)
+		} else if b.PosterGas.Valid && b.PosterGas.Int64 >= 0 && uint64(b.PosterGas.Int64) <= b.GasUsed {
+			posterGas := new(big.Int).SetInt64(b.PosterGas.Int64)
+			p.PosterFeesWei = stringPtr(new(big.Int).Mul(b.BaseFee.BigInt(), posterGas))
 		}
 		out = append(out, p)
 	}
@@ -500,6 +537,15 @@ func stringPtr(v *big.Int) *string {
 	s := v.String()
 	return &s
 }
+
+func computeRate(gas uint64, poster sql.NullInt64, secs uint64) *uint64 {
+	if !poster.Valid || poster.Int64 < 0 || uint64(poster.Int64) > gas || secs == 0 {
+		return nil
+	}
+	return uint64ValuePtr((gas - uint64(poster.Int64)) / secs)
+}
+
+func uint64ValuePtr(v uint64) *uint64 { return &v }
 
 // stepDown folds blocks into fixed width buckets, taking each step's rate
 // over the span it covers exactly as a stored bucket does.
@@ -513,7 +559,7 @@ func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration, n
 			if cur != nil {
 				out = append(out, cur.point(width, now))
 			}
-			cur = &acc{start: start, sum: new(big.Int), fees: new(big.Int), floor: new(big.Int)}
+			cur = &acc{start: start, sum: new(big.Int), fees: new(big.Int), floor: new(big.Int), posterFees: new(big.Int)}
 		}
 		cur.add(b, setIDAt(sets, b.Number, len(b.Backlogs)))
 	}
@@ -529,21 +575,24 @@ type acc struct {
 	// blocks reach the serving clock, or pass it when the collector's
 	// clock runs ahead, is covered to the end of that second rather than
 	// truncated to nothing.
-	last           int64
-	blocks         int64
-	gas            uint64
-	sum, fees      *big.Int
-	floor          *big.Int
-	unknownFloor   bool // a block without a recorded floor makes the split unknown
-	minFee         *big.Int
-	maxFee         *big.Int
-	exponent       int64
-	constraintBips []int64
-	backlogs       []uint64
-	maxBacklog     []uint64
-	minBaseFee     *string
-	setID          int64
-	errBips        int64
+	last                int64
+	blocks              int64
+	gas                 uint64
+	posterGas           uint64
+	unknownPoster       bool
+	sum, fees           *big.Int
+	floor, posterFees   *big.Int
+	unknownDestinations bool
+	unknownPricing      bool
+	minFee              *big.Int
+	maxFee              *big.Int
+	exponent            int64
+	constraintBips      []int64
+	backlogs            []uint64
+	maxBacklog          []uint64
+	minBaseFee          *string
+	setID               int64
+	errBips             int64
 }
 
 func (a *acc) add(b db.Block, setID int64) {
@@ -557,11 +606,27 @@ func (a *acc) add(b db.Block, setID int64) {
 	a.blocks++
 	a.last = max(a.last, b.TS.Unix())
 	a.gas += b.GasUsed
+	if b.PosterGas.Valid && b.PosterGas.Int64 >= 0 && uint64(b.PosterGas.Int64) <= b.GasUsed {
+		a.posterGas += uint64(b.PosterGas.Int64)
+		a.posterFees.Add(a.posterFees, new(big.Int).Mul(fee, new(big.Int).SetInt64(b.PosterGas.Int64)))
+	} else {
+		a.unknownPoster = true
+	}
 	a.sum.Add(a.sum, fee)
 	gas := new(big.Int).SetUint64(b.GasUsed)
 	a.fees.Add(a.fees, new(big.Int).Mul(fee, gas))
-	a.floor.Add(a.floor, new(big.Int).Mul(b.MinBaseFee.Wei.BigInt(), gas))
-	a.unknownFloor = a.unknownFloor || !b.Known()
+	if b.DestinationsKnown() {
+		posterGas := new(big.Int).SetInt64(b.PosterGas.Int64)
+		compute := new(big.Int).Sub(gas, posterGas)
+		rate := new(big.Int).Set(b.MinBaseFee.Wei.BigInt())
+		if fee.Cmp(rate) < 0 {
+			rate.Set(fee)
+		}
+		a.floor.Add(a.floor, new(big.Int).Mul(rate, compute))
+	} else {
+		a.unknownDestinations = true
+	}
+	a.unknownPricing = a.unknownPricing || !b.Known()
 	a.exponent = b.ExponentBips
 	a.constraintBips = int64s(b.ConstraintBips)
 	a.minBaseFee = b.MinBaseFee.StringPtr()
@@ -599,6 +664,9 @@ func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
 	if a.floor == nil {
 		a.floor = new(big.Int)
 	}
+	if a.posterFees == nil {
+		a.posterFees = new(big.Int)
+	}
 	pointCoverage, completeness := measuredCoverage(share)
 	p := model.SeriesPoint{
 		T: a.start, Blocks: a.blocks, GasUsed: a.gas, GasPerSecond: a.gas / secs, Coverage: pointCoverage, Completeness: completeness,
@@ -606,12 +674,19 @@ func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
 		ExponentBips: a.exponent, ConstraintBips: a.constraintBips, Backlogs: a.backlogs, BacklogsMax: a.maxBacklog,
 		MinBaseFee: a.minBaseFee, ConstraintSetID: a.setID, ReplayErrorBips: a.errBips,
 	}
-	if a.unknownFloor {
+	if !a.unknownPoster {
+		p.PosterGas = &a.posterGas
+		p.PosterFeesWei = stringPtr(a.posterFees)
+		p.ComputeGasPerSecond = uint64ValuePtr((a.gas - a.posterGas) / secs)
+	}
+	if a.unknownPricing {
 		// One block of history without a recorded floor makes the whole
 		// step's floor, split and exponents unknown.
 		p.MinBaseFee, p.ConstraintBips = nil, nil
-	} else {
-		p.FloorFeesWei, p.SurplusFeesWei = stringPtr(a.floor), stringPtr(new(big.Int).Sub(a.fees, a.floor))
+	}
+	if !a.unknownDestinations {
+		p.FloorFeesWei = stringPtr(a.floor)
+		p.SurplusFeesWei = stringPtr(new(big.Int).Sub(new(big.Int).Sub(a.fees, a.floor), a.posterFees))
 	}
 	return p
 }

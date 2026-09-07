@@ -24,7 +24,8 @@ type BucketBuilder struct {
 func NewBucketBuilder(chainID uint64, resolution string, start time.Time) *BucketBuilder {
 	return &BucketBuilder{b: Bucket{
 		ChainID: chainID, Resolution: resolution, BucketStart: start,
-		FeesWei: NewWei(nil), BaseFeeMin: NewWei(nil), BaseFeeAvg: NewWei(nil), BaseFeeMax: NewWei(nil), BaseFeeSum: NewNullWei(nil),
+		PosterGas: sql.NullInt64{Valid: true}, FeesWei: NewWei(nil), PosterFeesWei: NewNullWei(nil),
+		BaseFeeMin: NewWei(nil), BaseFeeAvg: NewWei(nil), BaseFeeMax: NewWei(nil), BaseFeeSum: NewNullWei(nil),
 		MinBaseFee: NewNullWei(nil), FloorFeesWei: NewNullWei(nil), SurplusFeesWei: NewNullWei(nil),
 		BacklogsEnd: Uint64Array{}, BacklogsMax: Uint64Array{}, ConstraintBipsEnd: pq.Int64Array{},
 		PricingVersion: PricingFull,
@@ -53,9 +54,30 @@ func (a *BucketBuilder) Add(blk Block, setID sql.NullInt64) {
 	gas := new(big.Int).SetUint64(blk.GasUsed)
 	fees := new(big.Int).Mul(fee, gas)
 	a.b.FeesWei = NewWei(new(big.Int).Add(fees, a.b.FeesWei.BigInt()))
-	floor := new(big.Int).Mul(blk.MinBaseFee.Wei.BigInt(), gas)
-	a.b.FloorFeesWei = NewNullWei(new(big.Int).Add(floor, a.b.FloorFeesWei.Wei.BigInt()))
-	a.b.SurplusFeesWei = NewNullWei(new(big.Int).Sub(a.b.FeesWei.BigInt(), a.b.FloorFeesWei.Wei.BigInt()))
+	posterKnown := blk.PosterGas.Valid && blk.PosterGas.Int64 >= 0 && uint64(blk.PosterGas.Int64) <= blk.GasUsed
+	if posterKnown && a.b.PosterGas.Valid {
+		posterGas := uint64(blk.PosterGas.Int64)
+		a.b.PosterGas.Int64 += blk.PosterGas.Int64
+		posterFees := new(big.Int).Mul(fee, new(big.Int).SetUint64(posterGas))
+		a.b.PosterFeesWei = NewNullWei(new(big.Int).Add(posterFees, a.b.PosterFeesWei.Wei.BigInt()))
+	} else {
+		a.b.PosterGas = sql.NullInt64{}
+		a.b.PosterFeesWei = NullWei{}
+	}
+	if blk.DestinationsKnown() && a.b.FloorFeesWei.Valid && a.b.SurplusFeesWei.Valid {
+		posterGas := uint64(blk.PosterGas.Int64)
+		compute := new(big.Int).SetUint64(blk.GasUsed - posterGas)
+		rate := new(big.Int).Set(blk.MinBaseFee.Wei.BigInt())
+		if fee.Cmp(rate) < 0 {
+			rate.Set(fee)
+		}
+		floor := new(big.Int).Mul(rate, compute)
+		computeFees := new(big.Int).Mul(fee, compute)
+		a.b.FloorFeesWei = NewNullWei(new(big.Int).Add(floor, a.b.FloorFeesWei.Wei.BigInt()))
+		a.b.SurplusFeesWei = NewNullWei(new(big.Int).Add(new(big.Int).Sub(computeFees, floor), a.b.SurplusFeesWei.Wei.BigInt()))
+	} else {
+		a.b.FloorFeesWei, a.b.SurplusFeesWei = NullWei{}, NullWei{}
+	}
 	if blk.Number >= a.b.LastBlock {
 		a.b.LastBlock = blk.Number
 		a.b.ExponentEndBips = blk.ExponentBips
@@ -86,7 +108,7 @@ func (a *BucketBuilder) Bucket() Bucket {
 		a.b.BaseFeeAvg = NewWei(new(big.Int).Div(a.b.BaseFeeSum.Wei.BigInt(), big.NewInt(a.b.Blocks)))
 	}
 	if a.b.PricingVersion == PricingUnknown {
-		a.b.FloorFeesWei, a.b.SurplusFeesWei, a.b.MinBaseFee = NullWei{}, NullWei{}, NullWei{}
+		a.b.MinBaseFee, a.b.FloorFeesWei, a.b.SurplusFeesWei = NullWei{}, NullWei{}, NullWei{}
 		a.b.ConstraintBipsEnd = nil
 	}
 	return a.b
@@ -169,7 +191,13 @@ func MergeBuckets(old, b Bucket) Bucket {
 	merged := old
 	merged.Blocks = old.Blocks + b.Blocks
 	merged.GasUsed += b.GasUsed
+	if old.PosterGas.Valid && b.PosterGas.Valid {
+		merged.PosterGas = sql.NullInt64{Int64: old.PosterGas.Int64 + b.PosterGas.Int64, Valid: true}
+	} else {
+		merged.PosterGas = sql.NullInt64{}
+	}
 	merged.FeesWei = NewWei(new(big.Int).Add(old.FeesWei.BigInt(), b.FeesWei.BigInt()))
+	merged.PosterFeesWei = addNullWei(old.PosterFeesWei, b.PosterFeesWei)
 	merged.BaseFeeSum = addNullWei(old.BaseFeeSum, b.BaseFeeSum)
 	merged.FloorFeesWei = addNullWei(old.FloorFeesWei, b.FloorFeesWei)
 	merged.SurplusFeesWei = addNullWei(old.SurplusFeesWei, b.SurplusFeesWei)
@@ -197,7 +225,7 @@ func MergeBuckets(old, b Bucket) Bucket {
 		merged.LastBlock = b.LastBlock
 	}
 	if merged.PricingVersion == PricingUnknown {
-		merged.FloorFeesWei, merged.SurplusFeesWei, merged.MinBaseFee = NullWei{}, NullWei{}, NullWei{}
+		merged.MinBaseFee, merged.FloorFeesWei, merged.SurplusFeesWei = NullWei{}, NullWei{}, NullWei{}
 		merged.ConstraintBipsEnd = nil
 	}
 	n := max(len(old.BacklogsMax), len(b.BacklogsMax))

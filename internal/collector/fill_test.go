@@ -389,6 +389,14 @@ func TestFillYieldsWhileCatchingUp(t *testing.T) {
 	if calls := rpc.headerCalls; len(calls) != 1 || len(calls[0]) != minBackfillBatch {
 		t.Fatalf("the smallest batch goes without spare budget: %v", calls)
 	}
+	rpc.available = 14
+	rpc.headerCalls = nil
+	if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+		t.Fatalf("receipt-weighted spare budget: %v %v", st, err)
+	}
+	if calls := rpc.headerCalls; len(calls) != 1 || len(calls[0]) != 7 {
+		t.Fatalf("14 spare calls must fetch 7 blocks: %v", calls)
+	}
 }
 
 // TestFillRetryLifecycle persists the failure count, error, attempt time and

@@ -81,7 +81,7 @@ export type L1State = {
 export type LiveSnapshot = {
   chainId: number;
   sampledAt: string;
-  block: { number: number; ts: number; gasUsed: number; baseFee: string; txCount: number };
+  block: { number: number; ts: number; gasUsed: number; /** Null until receipt poster gas is available. Absent only during a rolling api upgrade. */ posterGas?: number | null; baseFee: string; txCount: number };
   baseFee: string;
   minBaseFee: string;
   multiplierBips: number;
@@ -90,7 +90,10 @@ export type LiveSnapshot = {
   constraints: Constraint[];
   legacy?: LegacyParams;
   prices: Prices;
+  /** Total gas rates retained for API compatibility. */
   gasPerSecond: { s10: number; s60: number };
+  /** Receipt-backed Nitro pricer input rates. Absent only during a rolling API upgrade. */
+  computeGasPerSecond?: { s10: number | null; s60: number | null };
   l1?: L1State;
   accounts?: { infra: Account; network: Account; l1Reward: Account };
   replayErrorBips: number;
@@ -102,6 +105,8 @@ export type BlockPoint = {
   number: number;
   ts: number;
   gasUsed: number;
+  /** Receipt-backed L1 poster gas. Absent only during a rolling api upgrade. */
+  posterGas?: number | null;
   baseFee: string;
   predictedBaseFee: string;
   /** End-of-block backlogs (after AddGas). */
@@ -121,10 +126,16 @@ export type SeriesPoint = {
   t: number;
   blocks: number;
   gasUsed: number;
+  /** Sum of receipt gasUsedForL1. Null or absent until historical receipt recomputation. */
+  posterGas?: number | null;
+  /** Total gas rate retained for API compatibility. */
   gasPerSecond: number;
+  /** Nitro pricer input rate. Null until receipt poster gas is available; absent only during a rolling api upgrade. */
+  computeGasPerSecond?: number | null;
   /**
    * The share of the bucket the collector indexed when it can be measured.
    * Bounded missing intervals reduce it. Insufficient time bounds make it null.
+   * Both gas rates cover the measured span, so rates and averages read normally.
    */
   coverage: number | null;
   /** Complete when all blocks are present, partial when an omission is known, and unknown when the available time bounds cannot locate a missing range. */
@@ -140,10 +151,12 @@ export type SeriesPoint = {
   backlogsMax: number[];
   /** Floor in force at the bucket's last block; null when any block in the bucket has pricing version 0. */
   minBaseFee: string | null;
-  /** Sum of gasUsed times minBaseFee per block, exact; null for pricing version 0 history. */
+  /** Compute gas times min(baseFee, minBaseFee), paid to infrastructure. */
   floorFeesWei: string | null;
-  /** feesWei minus floorFeesWei, exact; null whenever floorFeesWei is. */
+  /** Compute congestion fees paid to the network account. */
   surplusFeesWei: string | null;
+  /** Poster gas times baseFee, paid to the L1 pricer funds pool. Absent only during a rolling api upgrade. */
+  posterFeesWei?: string | null;
   constraintSetId: number;
   replayErrorBips: number;
 };

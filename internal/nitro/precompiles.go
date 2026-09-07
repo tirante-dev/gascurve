@@ -8,6 +8,7 @@ import (
 // JSON-RPC method names and tags.
 const (
 	methodGetBlockByNumber = "eth_getBlockByNumber"
+	methodGetBlockReceipts = "eth_getBlockReceipts"
 	latestTag              = "latest"
 )
 

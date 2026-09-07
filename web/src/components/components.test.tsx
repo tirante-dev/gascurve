@@ -57,6 +57,7 @@ const snapshot: LiveSnapshot = {
   ],
   prices: { perL2Tx: "0", perL1CalldataByte: "0", perL2Storage: "0", perArbGasBase: "20000000", perArbGasCongestion: "379726000", perArbGasTotal: "399726000" },
   gasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
+  computeGasPerSecond: { s10: 38_000_000, s60: 40_500_000 },
   // The shared fixture carries no quote, so the cost tiles read in ETH; the USD cases below supply their own.
   replayErrorBips: 2,
   ethUsd: null,
@@ -68,7 +69,7 @@ function sawtoothBlocks(seconds: number, lastTs: number): BlockPoint[] {
   let n = 1;
   for (let ts = lastTs - seconds + 1; ts <= lastTs; ts++) {
     for (let k = 0; k < 10; k++) {
-      out.push({ number: n++, ts, gasUsed: 4_000_000, baseFee: "399726000", predictedBaseFee: "399726000", backlogs: [(k + 1) * 4_000_000, 11_194_391_810_886], constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: k === 0 });
+      out.push({ number: n++, ts, gasUsed: 4_000_000, posterGas: 0, baseFee: "399726000", predictedBaseFee: "399726000", backlogs: [(k + 1) * 4_000_000, 11_194_391_810_886], constraintBips: [], exponentBips: 0, minBaseFee: "20000000", anchored: k === 0 });
     }
   }
   return out;
@@ -83,8 +84,8 @@ const history: Series = {
   constraintSets: [],
   ownerActions: [{ block: 20, at: "2026-09-06T07:21:00Z", txHash: "0x" + "ab".repeat(32), method: "setMinimumL2BaseFee", selector: "0xa0188cdb", args: { priceInWei: "20000000" } }],
   points: [
-    { t: 1788679200, blocks: 12, gasUsed: 100, gasPerSecond: 1, coverage: 1, completeness: "complete", feesWei: "0", baseFeeMin: "100000000", baseFeeAvg: "300000000", baseFeeMax: "400000000", exponentBips: 10_000, constraintBips: [10_000, 0], backlogs: [1, 2], backlogsMax: [1, 2], minBaseFee: "100000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
-    { t: 1788679260, blocks: 30, gasUsed: 100, gasPerSecond: 1, coverage: 1, completeness: "complete", feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "395726000", baseFeeMax: "400000000", exponentBips: 32_425, constraintBips: [32_425, 0], backlogs: [3, 4], backlogsMax: [3, 4], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
+    { t: 1788679200, blocks: 12, gasUsed: 100, posterGas: 0, gasPerSecond: 1, computeGasPerSecond: 1, coverage: 1, completeness: "complete", feesWei: "0", baseFeeMin: "100000000", baseFeeAvg: "300000000", baseFeeMax: "400000000", exponentBips: 10_000, constraintBips: [10_000, 0], backlogs: [1, 2], backlogsMax: [1, 2], minBaseFee: "100000000", floorFeesWei: "0", surplusFeesWei: "0", posterFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
+    { t: 1788679260, blocks: 30, gasUsed: 100, posterGas: 0, gasPerSecond: 1, computeGasPerSecond: 1, coverage: 1, completeness: "complete", feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "395726000", baseFeeMax: "400000000", exponentBips: 32_425, constraintBips: [32_425, 0], backlogs: [3, 4], backlogsMax: [3, 4], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", posterFeesWei: "0", constraintSetId: 0, replayErrorBips: 0 },
   ],
 };
 
@@ -127,6 +128,11 @@ describe("LiveHero", () => {
     expect(screen.getByText(/4.02 Mgas in block 55,812,345/)).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("live");
     expect(screen.getByRole("img", { name: /Floor 5.0% to the infra account/ })).toBeInTheDocument();
+  });
+  it("does not relabel total throughput as compute throughput against an old api", () => {
+    render(<LiveHeroView network="robinhood" snapshot={{ ...snapshot, computeGasPerSecond: undefined }} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(screen.getByText("Compute gas/s (10 s)").parentElement).toHaveTextContent("n/a");
+    expect(screen.getByText("Compute gas/s (60 s)").parentElement).toHaveTextContent("n/a");
   });
   it("renders the eased figures rather than the sample when a frame has them", () => {
     const values = { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.5, multiplier: 25, gasPerSecond10: 41_000_000, transferEth: 1.05e-5, exponent: 3.3 };
@@ -186,17 +192,17 @@ describe("LiveHero", () => {
     const blocks = sawtoothBlocks(6, snapshot.block.ts);
     const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="live" />);
     // Live: whole seconds of blocks from the ring, in one unit named beside the chart.
-    const throughput = screen.getByRole("figure", { name: /^Gas carried per second over the last 120 seconds/ });
+    const throughput = screen.getByRole("figure", { name: /^Compute gas carried per second over the last 120 seconds/ });
     expect(throughput.firstElementChild).toHaveClass("h-[120px]");
     expect(throughput.firstElementChild).toHaveClass("lg:h-[140px]");
-    expect(screen.getByText(/^Gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
+    expect(screen.getByText(/^Compute gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
     // Its own enlarge control, at the range on screen.
     expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=live");
 
     // A history range: the bucketed rate against every target in force.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" series={history} model="constraints" />);
-    expect(screen.getByRole("figure", { name: /^Gas used per second in .* with each constraint target/ })).toBeInTheDocument();
-    expect(screen.getByText(/^Gas per second per bucket against each target in force ·/)).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /^Compute gas used per second in .* with each constraint target/ })).toBeInTheDocument();
+    expect(screen.getByText(/^Compute gas per second per bucket against each target in force ·/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=24h");
   });
   it("draws the canonical blocks after a reorg, not the orphaned ones", () => {

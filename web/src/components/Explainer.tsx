@@ -14,16 +14,16 @@ export function Explainer({ snapshot }: { snapshot: LiveSnapshot | null }) {
   const shortCapacity = shortest ? shortest.target * shortest.window : 900_000_000;
   return (
     <Prose>
-      <h3>Two parts, one fee</h3>
+      <h3>Three destinations, one fee</h3>
       <p>
-        A transaction pays <code>gasUsed × baseFee</code>. The gas figure includes an L1 data component, but the L1 pricer currently charges so little per byte that this rounds to zero, so in
-        practice the whole fee is the L2 base fee. There is no priority fee: bidding more does not move a transaction forward.
+        A transaction pays <code>gasUsed × baseFee</code>. Receipt <code>gasUsedForL1</code> is poster gas paid to the L1 pricer pool. The remaining compute gas is split between the infrastructure
+        floor and network congestion fees. There is no priority fee: bidding more does not move a transaction forward.
       </p>
 
       <h3>Constraints are backlogs</h3>
       <p>
-        Instead of one gas target, the chain keeps several constraints. Each has a target rate (gas per second), a window (seconds) and a backlog (gas). Every block, each backlog is first paid
-        down at its target rate for the seconds that passed, then every transaction&apos;s gas is added to every backlog. The exponent is the sum over constraints of backlog divided by target
+        Instead of one gas target, the chain keeps several constraints. Each has a target rate (compute gas per second), a window (seconds) and a backlog (gas). Every block, each backlog is first paid
+        down at its target rate for the seconds that passed, then every transaction&apos;s compute gas is added to every backlog. The exponent is the sum over constraints of backlog divided by target
         times window, and the base fee is the floor ({floor} gwei) multiplied by <code>P4(x)</code>.
       </p>
 

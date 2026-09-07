@@ -71,17 +71,10 @@ func (c *Client) HeaderByNumber(ctx context.Context, number uint64) (*Header, er
 	return &b.Header, nil
 }
 
-// HeadersByNumbers fetches headers in batches of at most MaxBatch, in order.
+// HeadersByNumbers fetches headers and their receipt-backed poster gas in
+// batches of at most MaxBatch RPC items, in order.
 func (c *Client) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
-	blocks, err := blocksByNumbers(ctx, numbers, false, c.chunk)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Header, len(blocks))
-	for i := range blocks {
-		out[i] = blocks[i].Header
-	}
-	return out, nil
+	return headersByNumbers(ctx, numbers, c.chunk)
 }
 
 // BlockWithTxs fetches a block including full transactions.
@@ -147,6 +140,9 @@ func blocksByNumbers(ctx context.Context, numbers []uint64, full bool, send batc
 		if err != nil {
 			return nil, fmt.Errorf("block %d: %w", numbers[i], err)
 		}
+		if b.Number != numbers[i] {
+			return nil, fmt.Errorf("block %d: response is block %d", numbers[i], b.Number)
+		}
 		out = append(out, *b)
 	}
 	return out, nil
@@ -174,6 +170,51 @@ func transactionReceipts(ctx context.Context, hashes []string, send batcher) ([]
 			return nil, fmt.Errorf("receipt %s: %w", hashes[i], err)
 		}
 		out = append(out, *receipt)
+	}
+	return out, nil
+}
+
+// headersByNumbers fetches each header beside eth_getBlockReceipts and joins
+// them only after the receipt set has been validated against that header.
+func headersByNumbers(ctx context.Context, numbers []uint64, send batcher) ([]Header, error) {
+	reqs := make([]Request, 0, len(numbers)*2)
+	for _, n := range numbers {
+		tag := blockTag(n)
+		reqs = append(reqs,
+			Request{Method: methodGetBlockByNumber, Params: []any{tag, false}},
+			Request{Method: methodGetBlockReceipts, Params: []any{tag}},
+		)
+	}
+	results, err := send(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != len(reqs) {
+		return nil, fmt.Errorf("headers: got %d results for %d requests", len(results), len(reqs))
+	}
+	out := make([]Header, 0, len(numbers))
+	for i, n := range numbers {
+		blockResult, receiptResult := results[i*2], results[i*2+1]
+		if blockResult.Err != nil {
+			return nil, fmt.Errorf("block %d: %w", n, blockResult.Err)
+		}
+		block, err := parseHeader(blockResult.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("block %d: %w", n, err)
+		}
+		if block.Number != n {
+			return nil, fmt.Errorf("block %d: response is block %d", n, block.Number)
+		}
+		if receiptResult.Err != nil {
+			return nil, fmt.Errorf("block %d receipts: %w", n, receiptResult.Err)
+		}
+		posterGas, computeGasBefore, err := parseReceiptGas(receiptResult.Raw, block.Header)
+		if err != nil {
+			return nil, err
+		}
+		block.PosterGas = &posterGas
+		block.computeGasBefore = computeGasBefore
+		out = append(out, block.Header)
 	}
 	return out, nil
 }
@@ -241,8 +282,8 @@ func decodeArbOSVersion(data []byte) (uint64, error) {
 }
 
 // FastSample performs the fast tick: it resolves the head number first
-// (eth_blockNumber) and then samples header, constraints, prices and
-// minimum base fee pinned to that block, so a batch whose items execute
+// (eth_blockNumber) and then samples header, receipts, constraints, prices
+// and minimum base fee pinned to that block, so a batch whose items execute
 // at different "latest" heights can never mix two blocks. When the
 // constraints call reverts or returns an empty list a second batch reads
 // the legacy pricer parameters at the same block.
@@ -261,9 +302,61 @@ func (c *Client) FastSampleAt(ctx context.Context, number uint64) (*Sample, erro
 	return c.sampleAt(ctx, blockTag(number))
 }
 
+// PricingSampleAt reads only the block and pricer state needed for a
+// historical anchor. Receipt poster gas is fetched with the ordinary header
+// path, so an archive anchor does not duplicate that metered call.
+func (c *Client) PricingSampleAt(ctx context.Context, number uint64) (*Sample, error) {
+	tag := blockTag(number)
+	results, err := c.chunk(ctx, []Request{
+		{Method: methodGetBlockByNumber, Params: []any{tag, false}},
+		SelectorCallAt(ArbGasInfoAddress, SigGetGasPricingConstraints, tag),
+		SelectorCallAt(ArbGasInfoAddress, SigGetMinimumGasPrice, tag),
+	})
+	if err != nil {
+		return nil, err
+	}
+	s := &Sample{SampledAt: c.now()}
+	if results[0].Err != nil {
+		return nil, fmt.Errorf("block %s: %w", tag, results[0].Err)
+	}
+	b, err := parseHeader(results[0].Raw)
+	if err != nil {
+		return nil, err
+	}
+	if b.Number != number {
+		return nil, fmt.Errorf("block %d: response is block %d", number, b.Number)
+	}
+	s.Header = b.Header
+	if results[1].Err == nil {
+		data, err := callBytes(results[1])
+		if err != nil {
+			return nil, err
+		}
+		if s.Constraints, err = DecodeConstraints(data); err != nil {
+			return nil, err
+		}
+	} else if !IsRevert(results[1].Err) {
+		return nil, fmt.Errorf("getGasPricingConstraints: %w", results[1].Err)
+	}
+	data, err := callBytes(results[2])
+	if err != nil {
+		return nil, fmt.Errorf("getMinimumGasPrice: %w", err)
+	}
+	if s.MinBaseFee, err = DecodeUint256(data); err != nil {
+		return nil, fmt.Errorf("getMinimumGasPrice: %w", err)
+	}
+	if len(s.Constraints) == 0 {
+		if s.Legacy, err = c.legacyParamsAt(ctx, tag); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
 func (c *Client) sampleAt(ctx context.Context, tag string) (*Sample, error) {
 	results, err := c.chunk(ctx, []Request{
 		{Method: methodGetBlockByNumber, Params: []any{tag, false}},
+		{Method: methodGetBlockReceipts, Params: []any{tag}},
 		SelectorCallAt(ArbGasInfoAddress, SigGetGasPricingConstraints, tag),
 		SelectorCallAt(ArbGasInfoAddress, SigGetPricesInWei, tag),
 		SelectorCallAt(ArbGasInfoAddress, SigGetMinimumGasPrice, tag),
@@ -279,21 +372,36 @@ func (c *Client) sampleAt(ctx context.Context, tag string) (*Sample, error) {
 	if err != nil {
 		return nil, err
 	}
+	if tag != latestTag {
+		want, err := HexUint64(tag)
+		if err != nil || b.Number != want {
+			return nil, fmt.Errorf("block %s: response is block %d", tag, b.Number)
+		}
+	}
+	if results[1].Err != nil {
+		return nil, fmt.Errorf("block %s receipts: %w", tag, results[1].Err)
+	}
+	posterGas, computeGasBefore, err := parseReceiptGas(results[1].Raw, b.Header)
+	if err != nil {
+		return nil, err
+	}
+	b.PosterGas = &posterGas
+	b.computeGasBefore = computeGasBefore
 	s.Header = b.Header
 
-	if results[1].Err == nil {
-		data, err := callBytes(results[1])
+	if results[2].Err == nil {
+		data, err := callBytes(results[2])
 		if err != nil {
 			return nil, err
 		}
 		if s.Constraints, err = DecodeConstraints(data); err != nil {
 			return nil, err
 		}
-	} else if !IsRevert(results[1].Err) {
-		return nil, fmt.Errorf("getGasPricingConstraints: %w", results[1].Err)
+	} else if !IsRevert(results[2].Err) {
+		return nil, fmt.Errorf("getGasPricingConstraints: %w", results[2].Err)
 	}
 
-	data, err := callBytes(results[2])
+	data, err := callBytes(results[3])
 	if err != nil {
 		return nil, fmt.Errorf("getPricesInWei: %w", err)
 	}
@@ -303,7 +411,7 @@ func (c *Client) sampleAt(ctx context.Context, tag string) (*Sample, error) {
 	}
 	s.Prices = *prices
 
-	data, err = callBytes(results[3])
+	data, err = callBytes(results[4])
 	if err != nil {
 		return nil, fmt.Errorf("getMinimumGasPrice: %w", err)
 	}

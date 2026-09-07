@@ -36,6 +36,7 @@ import (
 type RPC interface {
 	FastSample(ctx context.Context) (*nitro.Sample, error)
 	FastSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
+	PricingSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
 	HeadersByNumbers(ctx context.Context, numbers []uint64) ([]nitro.Header, error)
 	HeaderByNumber(ctx context.Context, number uint64) (*nitro.Header, error)
 	BlocksWithTxs(ctx context.Context, numbers []uint64) ([]nitro.Block, error)
@@ -52,12 +53,12 @@ type RPC interface {
 
 var _ RPC = (*nitro.Client)(nil)
 
-// ArchiveRPC serves historical state: FastSampleAt at any block, not just
-// the last few minutes. The backfill anchors and the archive minimum fee
-// samples go through it.
+// ArchiveRPC serves historical pricing state at any block, not just the last
+// few minutes. The backfill anchors and archive origin samples go through it.
 type ArchiveRPC interface {
 	FastSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
 	L1SampleAt(ctx context.Context, number uint64) (*nitro.L1Sample, error)
+	PricingSampleAt(ctx context.Context, number uint64) (*nitro.Sample, error)
 }
 
 // EndpointPool is what a nitro.Pool adds to RPC: chain id verification of

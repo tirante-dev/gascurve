@@ -46,15 +46,15 @@ func TestPostgresStats(t *testing.T) {
 var (
 	now        = time.Date(2026, 9, 6, 7, 20, 0, 0, time.UTC)
 	errBoom    = errors.New("boom")
-	blockCols  = []string{"chain_id", "number", "hash", "parent_hash", "ts", "gas_used", "base_fee", "l1_block", "tx_count", "backlogs", "constraint_bips", "exponent_bips", "predicted_base_fee", "min_base_fee", "anchored", "pricing_version"}
+	blockCols  = []string{"chain_id", "number", "hash", "parent_hash", "ts", "gas_used", "poster_gas", "base_fee", "l1_block", "tx_count", "backlogs", "constraint_bips", "exponent_bips", "predicted_base_fee", "min_base_fee", "anchored", "pricing_version"}
 	netCols    = []string{"chain_id", "name", "display_name", "explorer_url", "enabled", "head_block", "head_at", "last_sample_at", "last_error", "updated_at"}
-	bucketCol  = []string{"chain_id", "resolution", "bucket_start", "blocks", "gas_used", "fees_wei", "base_fee_min", "base_fee_avg", "base_fee_max", "base_fee_sum", "exponent_end_bips", "backlogs_end", "backlogs_max", "constraint_bips_end", "min_base_fee", "floor_fees_wei", "surplus_fees_wei", "constraint_set_id", "replay_error_bips", "last_block", "pricing_version"}
+	bucketCol  = []string{"chain_id", "resolution", "bucket_start", "blocks", "gas_used", "poster_gas", "fees_wei", "poster_fees_wei", "base_fee_min", "base_fee_avg", "base_fee_max", "base_fee_sum", "exponent_end_bips", "backlogs_end", "backlogs_max", "constraint_bips_end", "min_base_fee", "floor_fees_wei", "surplus_fees_wei", "constraint_set_id", "replay_error_bips", "last_block", "pricing_version"}
 	sampleCol  = []string{"chain_id", "sampled_at", "block_number", "base_fee", "min_base_fee", "constraints", "legacy", "prices", "l1", "accounts"}
 	missingCol = []string{"chain_id", "from_block", "to_block", "detected_at", "lifecycle", "reason", "cursor", "replay_state", "folded", "retry_count", "last_attempt_at", "next_retry_at", "last_error", "predecessor_at", "successor_at", "cursor_at", "created_at", "updated_at"}
 )
 
 func blockRow() *sqlmock.Rows {
-	return sqlmock.NewRows(blockCols).AddRow(4663, 100, "0xh", "0xp", now, 1000, "20000000", 5, 2, "{1,18446744073709551615}", "{3,31}", 34, "20000001", "20000000", true, 1)
+	return sqlmock.NewRows(blockCols).AddRow(4663, 100, "0xh", "0xp", now, 1000, 7, "20000000", 5, 2, "{1,18446744073709551615}", "{3,31}", 34, "20000001", "20000000", true, 1)
 }
 
 func TestPostgresQueries(t *testing.T) {
@@ -139,9 +139,9 @@ func TestPostgresQueries(t *testing.T) {
 	if bs, err := p.BlocksBetween(ctx, 4663, now, now); err != nil || len(bs) != 1 {
 		t.Fatalf("BlocksBetween: %+v %v", bs, err)
 	}
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(gas_used\\)").WillReturnRows(sqlmock.NewRows([]string{"sum"}).AddRow(12345))
-	if g, err := p.GasUsedBetween(ctx, 4663, now, now); err != nil || g != 12345 {
-		t.Fatalf("GasUsedBetween: %d %v", g, err)
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(gas_used\\), 0\\)").WillReturnRows(sqlmock.NewRows([]string{"total", "compute"}).AddRow(13000, 12345))
+	if total, compute, err := p.GasBetween(ctx, 4663, now, now); err != nil || total != 13000 || compute == nil || *compute != 12345 {
+		t.Fatalf("GasBetween: %d %v %v", total, compute, err)
 	}
 	mock.ExpectQuery("SELECT number FROM blocks WHERE chain_id = \\$1 AND tx_count = 2").WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(7).AddRow(9))
 	if nums, err := p.TwoTxBlocks(ctx, 4663, 0, 10); err != nil || len(nums) != 2 || nums[1] != 9 {
@@ -168,17 +168,17 @@ func TestPostgresQueries(t *testing.T) {
 	if n, err := p.DeleteBucketsBefore(ctx, 4663, now); err != nil || n != 4 {
 		t.Fatalf("DeleteBucketsBefore: %d %v", n, err)
 	}
-	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, "5", "1", "2", "3", "20", 34, "{1,2}", "{3,4}", "{5,6}", "7", "8", "9", 1, 50, 100, 1))
+	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, 0, "5", "0", "1", "2", "3", "20", 34, "{1,2}", "{3,4}", "{5,6}", "7", "8", "9", 1, 50, 100, 1))
 	bk, err := p.Buckets(ctx, 4663, "1m", now, now)
 	if err != nil || len(bk) != 1 || bk[0].BacklogsMax[1] != 4 || bk[0].ConstraintSetID.Int64 != 1 || bk[0].LastBlock != 100 {
 		t.Fatalf("Buckets: %+v %v", bk, err)
 	}
-	if bk[0].BaseFeeSum.Wei.Int64() != 20 || bk[0].ConstraintBipsEnd[1] != 6 || bk[0].MinBaseFee.Wei.Int64() != 7 || bk[0].FloorFeesWei.Wei.Int64() != 8 || bk[0].SurplusFeesWei.Wei.Int64() != 9 {
+	if bk[0].BaseFeeSum.Wei.Int64() != 20 || !bk[0].PosterGas.Valid || bk[0].PosterFeesWei.Wei.Sign() != 0 || bk[0].ConstraintBipsEnd[1] != 6 || bk[0].MinBaseFee.Wei.Int64() != 7 || bk[0].FloorFeesWei.Wei.Int64() != 8 || bk[0].SurplusFeesWei.Wei.Int64() != 9 {
 		t.Fatalf("Buckets new fields: %+v", bk[0])
 	}
 	// A bucket written before the sum and fee split existed scans as
 	// unknown, not zero, and a NULL exponent array as nil.
-	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, "5", "1", "2", "3", nil, 34, "{1,2}", "{3,4}", nil, nil, nil, nil, 1, 50, 100, 0))
+	mock.ExpectQuery("SELECT .* FROM buckets").WillReturnRows(sqlmock.NewRows(bucketCol).AddRow(4663, "1m", now, 10, 1000, nil, "5", nil, "1", "2", "3", nil, 34, "{1,2}", "{3,4}", nil, nil, nil, nil, 1, 50, 100, 0))
 	bk, err = p.Buckets(ctx, 4663, "1m", now, now)
 	if err != nil || len(bk) != 1 || bk[0].BaseFeeSum.Valid || bk[0].FloorFeesWei.Valid || bk[0].SurplusFeesWei.Valid || bk[0].ConstraintBipsEnd != nil {
 		t.Fatalf("Buckets unknown fields: %+v %v", bk, err)
@@ -348,7 +348,7 @@ func TestPostgresErrors(t *testing.T) {
 		{"RecentBlocks", true, func() error { _, err := p.RecentBlocks(ctx, 1, 1); return err }},
 		{"BlocksAfter", true, func() error { _, err := p.BlocksAfter(ctx, 1, 1, 1); return err }},
 		{"BlocksBetween", true, func() error { _, err := p.BlocksBetween(ctx, 1, now, now); return err }},
-		{"GasUsedBetween", true, func() error { _, err := p.GasUsedBetween(ctx, 1, now, now); return err }},
+		{"GasBetween", true, func() error { _, _, err := p.GasBetween(ctx, 1, now, now); return err }},
 		{"TwoTxBlocks", true, func() error { _, err := p.TwoTxBlocks(ctx, 1, 1, 1); return err }},
 		{"PruneBlocks", false, func() error { _, err := p.PruneBlocks(ctx, 1, now); return err }},
 		{"FoldBuckets", false, func() error { return p.FoldBuckets(ctx, []Bucket{{}}) }},

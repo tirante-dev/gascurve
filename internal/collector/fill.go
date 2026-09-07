@@ -670,7 +670,7 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	}
 	remaining := h.To - from + 1
 	n := min(uint64(f.cfg.HeaderBatchSize), remaining)
-	if avail := uint64(max(f.rpc.Available(), 0)); avail < n {
+	if avail := uint64(max(f.rpc.Available(), 0)) / 2; avail < n {
 		n = max(avail, min(minBackfillBatch, remaining))
 	}
 	numbers := make([]uint64, 0, n)
@@ -786,10 +786,15 @@ func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Bl
 }
 
 func headerOf(block db.Block) nitro.Header {
-	return nitro.Header{
+	header := nitro.Header{
 		Number: block.Number, Hash: block.Hash, ParentHash: block.ParentHash, Timestamp: uint64(block.TS.Unix()),
 		GasUsed: block.GasUsed, BaseFee: block.BaseFee.BigInt(), L1BlockNumber: block.L1Block, TxCount: block.TxCount,
 	}
+	if block.PosterGas.Valid {
+		posterGas := uint64(block.PosterGas.Int64)
+		header.PosterGas = &posterGas
+	}
+	return header
 }
 
 // commitFill writes one batch of a hole and its progress in one chain

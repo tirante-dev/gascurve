@@ -81,8 +81,8 @@ export function bipsFor(definition: PricingDefinition, backlogs: readonly number
 export type LiveValues = {
   baseFeeGwei: number;
   multiplier: number;
-  gasPerSecond10: number;
-  gasPerSecond60: number;
+  gasPerSecond10: number | null;
+  gasPerSecond60: number | null;
   transferEth: number;
   swapEth: number;
   /** The exponent that priced the sampled block, as x. */
@@ -330,8 +330,8 @@ export function targetValues(snapshot: LiveSnapshot, blocks: readonly BlockPoint
   const base = {
     baseFeeGwei: weiToGweiNumber(fee),
     multiplier: snapshot.multiplierBips / 10_000,
-    gasPerSecond10: snapshot.gasPerSecond.s10,
-    gasPerSecond60: snapshot.gasPerSecond.s60,
+    gasPerSecond10: snapshot.computeGasPerSecond?.s10 ?? null,
+    gasPerSecond60: snapshot.computeGasPerSecond?.s60 ?? null,
     transferEth: weiToEthNumber(costWei(TRANSFER_GAS, fee)),
     swapEth: weiToEthNumber(costWei(SWAP_GAS, fee)),
     exponent: snapshot.exponentBips / 10_000,
@@ -389,12 +389,19 @@ export function tweenValues(current: LiveValues | null, target: LiveValues, dtMs
     if (v !== a) moved = true;
     return v;
   };
+  const easeNullable = (a: number | null, b: number | null): number | null => {
+    if (a === null || b === null) {
+      if (a !== b) moved = true;
+      return b;
+    }
+    return ease(a, b);
+  };
   const backlogs = current.backlogs.map((v, i) => ease(v, target.backlogs[i]));
   const next: LiveValues = {
     baseFeeGwei: ease(current.baseFeeGwei, target.baseFeeGwei),
     multiplier: ease(current.multiplier, target.multiplier),
-    gasPerSecond10: ease(current.gasPerSecond10, target.gasPerSecond10),
-    gasPerSecond60: ease(current.gasPerSecond60, target.gasPerSecond60),
+    gasPerSecond10: easeNullable(current.gasPerSecond10, target.gasPerSecond10),
+    gasPerSecond60: easeNullable(current.gasPerSecond60, target.gasPerSecond60),
     transferEth: ease(current.transferEth, target.transferEth),
     swapEth: ease(current.swapEth, target.swapEth),
     exponent: ease(current.exponent, target.exponent),
