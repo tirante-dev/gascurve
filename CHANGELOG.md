@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.1.0](https://github.com/tirante-dev/gascurve/compare/v1.0.1...v1.1.0) (2026-09-07)
+
+
+### Features
+
+* **collector:** add freshness observability ([#40](https://github.com/tirante-dev/gascurve/issues/40)) ([d8fb93b](https://github.com/tirante-dev/gascurve/commit/d8fb93b80626d53428964cecc07fc07b25e9fabf))
+* **collector:** rebuild reconstructed history on a raised history_epoch ([#29](https://github.com/tirante-dev/gascurve/issues/29)) ([0be07c4](https://github.com/tirante-dev/gascurve/commit/0be07c4abc1d7e2ba3c4d18d288b3267b91853c5))
+* **web:** lead with Robinhood Chain in search metadata, and ship a real icon set ([#26](https://github.com/tirante-dev/gascurve/issues/26)) ([f6efde9](https://github.com/tirante-dev/gascurve/commit/f6efde93526e374771f5e9c2d981ac53cef629f4))
+* **web:** show the math behind every USD figure on hover ([#25](https://github.com/tirante-dev/gascurve/issues/25)) ([ea2b905](https://github.com/tirante-dev/gascurve/commit/ea2b9052260ac59a793d1496fb36648bc811e516))
+
+
+### Bug Fixes
+
+* account poster gas separately from compute fees ([#45](https://github.com/tirante-dev/gascurve/issues/45)) ([21c8f91](https://github.com/tirante-dev/gascurve/commit/21c8f91306c957802b8a9bc1bdcfdf0a600cf8dc))
+* **api:** shed replicas whose notification listener is down ([#38](https://github.com/tirante-dev/gascurve/issues/38)) ([68f0b19](https://github.com/tirante-dev/gascurve/commit/68f0b194b0fef634ca9a0e5ec283446c24af7c16))
+* close the gaps an adversarial review found in the metrics ([#36](https://github.com/tirante-dev/gascurve/issues/36)) ([277bc08](https://github.com/tirante-dev/gascurve/commit/277bc087e2189d1f6dec0e1faa1051c68a322dcb))
+* **collector:** persist missing ranges durably ([#42](https://github.com/tirante-dev/gascurve/issues/42)) ([72ac271](https://github.com/tirante-dev/gascurve/commit/72ac2714b61b66c677f2f1a0e6667f1d39507f11))
+* **collector:** replay owner actions at transaction boundaries ([#41](https://github.com/tirante-dev/gascurve/issues/41)) ([ac422a3](https://github.com/tirante-dev/gascurve/commit/ac422a3ebf6adfc0d24567c84531420bb97e5dc2))
+* correct ArbOS batch posting cost accounting ([#44](https://github.com/tirante-dev/gascurve/issues/44)) ([1c1d2d5](https://github.com/tirante-dev/gascurve/commit/1c1d2d542c7084a99689f4aa34be8bbd05a350e2))
+* **helm:** preserve client IPs behind ingress ([#37](https://github.com/tirante-dev/gascurve/issues/37)) ([a6b564d](https://github.com/tirante-dev/gascurve/commit/a6b564db928eb99098562a257238569339be9cf6))
+* **series:** report incomplete populated buckets ([#43](https://github.com/tirante-dev/gascurve/issues/43)) ([27734f2](https://github.com/tirante-dev/gascurve/commit/27734f226de441806e59184c0cf2cc4bb26a47b9))
+* **web:** correct sampling cadence copy ([#31](https://github.com/tirante-dev/gascurve/issues/31)) ([4364f6f](https://github.com/tirante-dev/gascurve/commit/4364f6f16b70eaf0b845a18874c22901872f7ee7))
+
+
+### Performance Improvements
+
+* **db:** batch block and bucket writes ([#34](https://github.com/tirante-dev/gascurve/issues/34)) ([106e3b3](https://github.com/tirante-dev/gascurve/commit/106e3b3b2e186a9811f1c8d8cac7da64c571ef56))
+* **db:** index state sample block queries ([#33](https://github.com/tirante-dev/gascurve/issues/33)) ([61d9cbf](https://github.com/tirante-dev/gascurve/commit/61d9cbfb29f5f4fc1e9fda69205608dd25212e18))
+
 ## [1.0.1](https://github.com/tirante-dev/gascurve/compare/v1.0.0...v1.0.1) (2026-09-07)
 
 
