@@ -63,7 +63,7 @@ func (r seriesRange) window(now time.Time) (from, to time.Time) {
 // requested window for a bounded range; for the all range, which has no
 // start of its own, the first indexed point (or the end when there is
 // none), so a chart never draws an axis from 1970.
-func (r seriesRange) bounds(from, to time.Time, first int64, indexed bool) (int64, int64) {
+func (r seriesRange) bounds(from, to time.Time, first int64, indexed bool) (start, end int64) {
 	if r.duration == 0 {
 		if !indexed {
 			return to.Unix(), to.Unix()
