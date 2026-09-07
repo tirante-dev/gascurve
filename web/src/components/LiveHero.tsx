@@ -5,7 +5,28 @@ import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, Res
 import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
 import { useSeries } from "@/hooks/useSeries";
 import { feeChartCaption, feeChartData, feeChartLabel, feeTooltipRows, ownerActionNote, type FeeChartData } from "@/lib/feeChart";
-import { heroChartData, heroFeeAxis, heroPointTitle, stableFeeAxis, heroRange, heroRangeOnServer, heroSpan, heroTicks, heroTimeLabel, setHeroRange, subscribeHeroRange, HERO_RANGE_LABELS, HERO_RANGES, type HeroPoint, type HeroRange } from "@/lib/hero";
+import { emptyRangeNote } from "@/lib/gaps";
+import {
+  heroChartData,
+  heroFeeAxis,
+  heroPointTitle,
+  heroThroughputData,
+  stableFeeAxis,
+  heroRange,
+  heroRangeOnServer,
+  heroSpan,
+  heroTicks,
+  heroTimeLabel,
+  setHeroRange,
+  subscribeHeroRange,
+  throughputAxis,
+  throughputTick,
+  HERO_RANGE_LABELS,
+  HERO_RANGES,
+  type HeroPoint,
+  type HeroRange,
+  type ThroughputPoint,
+} from "@/lib/hero";
 import { SWAP_GAS, targetValues, TRANSFER_GAS, type LiveValues } from "@/lib/smoothing";
 import type { BlockPoint, LiveSnapshot, LiveStatus, PricerModel, Series } from "@/types";
 import { FLOOR_COLOR, MARKER_COLOR, rampColor, rampInk, rampStep } from "@/utils/chart";
@@ -15,6 +36,7 @@ import {
   formatEthFixed,
   formatGas,
   formatGasFixed,
+  formatGasPerSecond,
   formatGwei,
   formatGweiFixed,
   formatInteger,
@@ -31,7 +53,9 @@ import {
 import { chartView } from "@/lib/chartViews";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { EnlargeLink } from "./ChartActions";
-import { Figure, Label, Stat, StatusPill } from "./primitives";
+import { gapBands, GapNote } from "./ChartGaps";
+import { buildSeriesModel, GasPerSecondChart } from "./SeriesCharts";
+import { Figure, Label, Stat, StatusPill, TIME_AXIS_RIGHT } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
 
 export { SWAP_GAS, TRANSFER_GAS };
@@ -116,7 +140,7 @@ export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText,
         <ChartNote>Waiting for blocks.</ChartNote>
       ) : (
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={points} margin={{ top: 8, right: 10, bottom: 2, left: 0 }}>
+          <AreaChart data={points} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
             {/* Horizontal only: the time axis has its own ticks and a vertical grid would compete with the marks. */}
             <CartesianGrid vertical={false} />
             <XAxis
@@ -157,25 +181,147 @@ export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabe
   const rows = useMemo(() => feeTooltipRows(), []);
   const note = useMemo(() => ownerActionNote(data.markers, data.bucketSeconds), [data.markers, data.bucketSeconds]);
   return (
-    <ChartBox label={feeChartLabel(rangeLabel, data.points)} height={height}>
-      <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={data.drawn} margin={{ top: 8, right: 10, bottom: 2, left: 0 }}>
-          <CartesianGrid vertical={false} />
-          <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => formatTick(t, data.span)} tickLine axisLine={false} height={18} minTickGap={48} />
-          <YAxis scale="log" domain={data.domain} tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={HERO_AXIS_WIDTH} />
-          <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={rows} note={note} />} />
-          <Area type="monotone" dataKey="feeMax" stroke="none" fill="var(--series-1)" fillOpacity={0.12} isAnimationActive={false} activeDot={false} />
-          <Area type="monotone" dataKey="feeMin" stroke="none" fill="var(--chart)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
-          <Line type="monotone" dataKey="feeAvg" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} />
-          <Line type="stepAfter" dataKey="floor" stroke={FLOOR_COLOR} strokeWidth={1.5} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
-          {data.markers.map((m) => (
-            <ReferenceLine key={`${m.t}-${m.action.txHash}`} x={m.t} stroke={MARKER_COLOR} strokeWidth={1} strokeDasharray="2 3" />
-          ))}
-        </ComposedChart>
-      </ResponsiveContainer>
+    <>
+      <ChartBox label={feeChartLabel(rangeLabel, data.points)} height={height}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={data.drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
+            <CartesianGrid vertical={false} />
+            {gapBands(data.gaps.gaps, data.gaps.window)}
+            {/* The axis is the window that was asked for, so the buckets that
+                exist sit where they happened rather than filling the frame. */}
+            <XAxis dataKey="t" type="number" domain={[data.gaps.window.from, data.gaps.window.to]} tickFormatter={(t: number) => formatTick(t, data.span)} tickLine axisLine={false} height={18} minTickGap={48} />
+            <YAxis scale="log" domain={data.domain} tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={HERO_AXIS_WIDTH} />
+            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={rows} note={note} />} />
+            <Area type="monotone" dataKey="feeMax" connectNulls={false} stroke="none" fill="var(--series-1)" fillOpacity={0.12} isAnimationActive={false} activeDot={false} />
+            <Area type="monotone" dataKey="feeMin" connectNulls={false} stroke="none" fill="var(--chart)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
+            <Line type="monotone" dataKey="feeAvg" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} />
+            <Line type="stepAfter" dataKey="floor" connectNulls={false} stroke={FLOOR_COLOR} strokeWidth={1.5} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+            {data.markers.map((m) => (
+              <ReferenceLine key={`${m.t}-${m.action.txHash}`} x={m.t} stroke={MARKER_COLOR} strokeWidth={1} strokeDasharray="2 3" />
+            ))}
+          </ComposedChart>
+        </ResponsiveContainer>
+      </ChartBox>
+      <GapNote gaps={data.gaps} />
+    </>
+  );
+});
+
+/** The throughput line: the first series colour, the same one the bucketed view draws its rate in. */
+const THROUGHPUT_COLOR = "var(--series-1)";
+
+/** The height the throughput chart stands at under the hero's base fee chart; the enlarged view passes its own. */
+export const HERO_THROUGHPUT_HEIGHT = "h-[120px] lg:h-[140px]";
+
+/** What a hovered second on the live throughput chart says: the gas that second carried, in how many blocks, and when it was. */
+export function throughputTooltipRows(): TooltipRow[] {
+  return [
+    { label: "gas in the second", color: THROUGHPUT_COLOR, value: (r) => formatGasPerSecond(Number(r.gas)) },
+    { label: "blocks", value: (r) => formatInteger(Number(r.blocks)) },
+    { label: "time", value: (r) => formatTime(Number(r.ts)) },
+  ];
+}
+
+/**
+ * Gas per second from the block ring, on the same clock-anchored axis as the
+ * base fee above it: each whole second's blocks summed and placed at the
+ * second's end. The y axis carries one unit for the whole scale, named in the
+ * caption, so its labels are bare figures of the same width and the plot
+ * never shifts sideways. Memoised on the points, which move with the frame
+ * clock.
+ */
+export const HeroThroughputChart = memo(function HeroThroughputChart({ points, height = HERO_THROUGHPUT_HEIGHT }: { points: ThroughputPoint[]; height?: string }) {
+  const span = heroSpan();
+  const ticks = useMemo(() => heroTicks(span), [span]);
+  const axis = useMemo(() => throughputAxis(Math.max(0, ...points.map((p) => p.gas))), [points]);
+  const label =
+    points.length < 2
+      ? "Gas per second, waiting for blocks"
+      : `Gas carried per second over the last ${span} seconds, ${points.length} seconds of blocks, up to ${formatGasPerSecond(Math.max(...points.map((p) => p.gas)))}`;
+  return (
+    <ChartBox label={label} busy={points.length < 2} height={height}>
+      {points.length < 2 ? (
+        <ChartNote>Waiting for blocks.</ChartNote>
+      ) : (
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={points} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
+            <CartesianGrid vertical={false} />
+            <XAxis dataKey="x" type="number" domain={[-span, 0]} ticks={ticks} tickFormatter={heroTimeLabel} tickLine axisLine={false} height={18} />
+            <YAxis domain={[0, axis.top]} ticks={axis.ticks} tickFormatter={(v: number) => throughputTick(v, axis)} tickLine={false} axisLine={false} width={HERO_AXIS_WIDTH} />
+            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={heroPointTitle} rows={throughputTooltipRows()} />} />
+            <Area type="monotone" dataKey="gas" stroke={THROUGHPUT_COLOR} strokeWidth={1.5} fill={THROUGHPUT_COLOR} fillOpacity={0.12} dot={false} activeDot={{ r: 2.5 }} isAnimationActive={false} />
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
     </ChartBox>
   );
 });
+
+/**
+ * The throughput chart under the hero's base fee, at the hero's own range:
+ * gas per second from the block ring on Live, and the same figure per bucket
+ * against every constraint target in force on a history range. The bucketed
+ * view is the history chart itself, not a second implementation of it.
+ */
+export function HeroThroughputPanel({
+  blocks,
+  nowMs,
+  range,
+  series,
+  seriesLoading = false,
+  seriesError = null,
+  model = "unknown",
+  height = HERO_THROUGHPUT_HEIGHT,
+  minWidth = 280,
+  action,
+}: {
+  blocks: BlockPoint[];
+  nowMs: number;
+  range: HeroRange;
+  series: Series | null;
+  seriesLoading?: boolean;
+  seriesError?: string | null;
+  model?: PricerModel;
+  height?: string;
+  minWidth?: number;
+  /** The control the caption row carries, the enlarge link on the network page and nothing on the chart's own page. */
+  action?: ReactNode;
+}) {
+  const live = range === "live";
+  const points = useMemo(() => (live ? heroThroughputData(blocks, nowMs) : []), [live, blocks, nowMs]);
+  const m = useMemo(() => (!live && series ? buildSeriesModel(series, model) : null), [live, series, model]);
+  const rangeLabel = HERO_RANGE_LABELS[range];
+  const liveUnit = useMemo(() => throughputAxis(Math.max(0, ...points.map((p) => p.gas))).unit, [points]);
+  const unit = live ? liveUnit : (m?.gasAxis.unit ?? "Mgas/s");
+  const caption = live
+    ? `Gas per second across the chain \u00b7 ${unit} \u00b7 the last ${heroSpan()} s of blocks`
+    : `Gas per second per bucket against each target in force \u00b7 ${unit} \u00b7 ${rangeLabel}`;
+  return (
+    <>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-ink-3">{caption}</p>
+          {action}
+        </div>
+        {live ? (
+          <HeroThroughputChart points={points} height={height} />
+        ) : seriesError !== null && series === null ? (
+          <ChartBox label={`Gas per second over ${rangeLabel}, unavailable`} height={height}>
+            <ChartNote>Could not load {rangeLabel}: {seriesError}</ChartNote>
+          </ChartBox>
+        ) : m === null ? (
+          <ChartBox label={`Gas per second over ${rangeLabel}, loading`} busy height={height}>
+            <ChartNote>{seriesLoading ? `Loading ${rangeLabel}.` : `No history for ${rangeLabel} yet.`}</ChartNote>
+          </ChartBox>
+        ) : m.points.length === 0 ? (
+          <ChartBox label={`Gas per second over ${rangeLabel}, nothing indexed`} height={height}>
+            <ChartNote>{emptyRangeNote(m.gaps.first)}</ChartNote>
+          </ChartBox>
+        ) : (
+          <GasPerSecondChart m={m} height={height} axisWidth={HERO_AXIS_WIDTH} minWidth={minWidth} />
+        )}
+    </>
+  );
+}
 
 /** Where a unit of gas's fee goes: the floor to the infra account, the rest to the network account. Memoised on the snapshot. */
 export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: LiveSnapshot }) {
@@ -313,24 +459,24 @@ export function HeroChartPanel({
       : feeChartCaption(rangeLabel, data.points);
   return (
     <>
-      <p className="text-xs text-ink-3">{caption}</p>
-      {range === "live" ? (
-        <HeroChart points={points} floorGwei={floorGwei} floorText={formatGwei(snapshot.minBaseFee)} height={height} />
-      ) : seriesError !== null && series === null ? (
-        <ChartBox label={`Base fee over ${rangeLabel}, unavailable`} height={height}>
-          <ChartNote>Could not load {rangeLabel}: {seriesError}</ChartNote>
-        </ChartBox>
-      ) : series === null ? (
-        <ChartBox label={`Base fee over ${rangeLabel}, loading`} busy height={height}>
-          <ChartNote>{seriesLoading ? `Loading ${rangeLabel}.` : `No history for ${rangeLabel} yet.`}</ChartNote>
-        </ChartBox>
-      ) : data.points.length === 0 ? (
-        <ChartBox label={feeChartLabel(rangeLabel, data.points)} height={height}>
-          <ChartNote>No buckets in {rangeLabel} yet.</ChartNote>
-        </ChartBox>
-      ) : (
-        <HeroHistoryChart data={data} rangeLabel={rangeLabel} height={height} />
-      )}
+        <p className="text-xs text-ink-3">{caption}</p>
+        {range === "live" ? (
+          <HeroChart points={points} floorGwei={floorGwei} floorText={formatGwei(snapshot.minBaseFee)} height={height} />
+        ) : seriesError !== null && series === null ? (
+          <ChartBox label={`Base fee over ${rangeLabel}, unavailable`} height={height}>
+            <ChartNote>Could not load {rangeLabel}: {seriesError}</ChartNote>
+          </ChartBox>
+        ) : series === null ? (
+          <ChartBox label={`Base fee over ${rangeLabel}, loading`} busy height={height}>
+            <ChartNote>{seriesLoading ? `Loading ${rangeLabel}.` : `No history for ${rangeLabel} yet.`}</ChartNote>
+          </ChartBox>
+        ) : data.points.length === 0 ? (
+          <ChartBox label={feeChartLabel(rangeLabel, data.points)} height={height}>
+            <ChartNote>{emptyRangeNote(data.gaps.first)}</ChartNote>
+          </ChartBox>
+        ) : (
+          <HeroHistoryChart data={data} rangeLabel={rangeLabel} height={height} />
+        )}
     </>
   );
 }
@@ -474,6 +620,18 @@ export function LiveHeroView({
             </div>
           </div>
           <HeroChartPanel snapshot={snapshot} blocks={blocks} nowMs={nowMs} range={range} series={series} seriesLoading={seriesLoading} seriesError={seriesError} model={model} />
+          {/* What the chain carried, under what it charged for it, on the same
+              range and the same axis: the two questions are one question. */}
+          <HeroThroughputPanel
+            blocks={blocks}
+            nowMs={nowMs}
+            range={range}
+            series={series}
+            seriesLoading={seriesLoading}
+            seriesError={seriesError}
+            model={model}
+            action={<EnlargeLink network={network} view={chartView("gas-per-second")} range={range} size="hero" />}
+          />
         </div>
       </div>
     </div>

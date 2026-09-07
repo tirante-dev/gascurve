@@ -2,7 +2,7 @@
 
 import { saturatingCastToBips, saturatingUMul, toUint64 } from "@/lib/pricer";
 import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesPoint } from "@/types";
-import { formatDuration, formatGasPerSecond, weiToEthNumber, weiToGweiNumber } from "./format";
+import { formatDuration, formatGas, formatGasPerSecond, formatInteger, weiToEthNumber, weiToGweiNumber } from "./format";
 
 export const MAX_SERIES = 6;
 
@@ -404,6 +404,9 @@ export function gaugeMarks(scale: number, max = MAX_GAUGE_MARKS): number[] {
   return out;
 }
 
+/** What one constraint's backlog gauge spans, and where the backlog sits on it. */
+export type ConstraintGauge = { scale: number; fraction: number; marks: number[]; denominator: number };
+
 /**
  * What a constraint's backlog gauge spans: `scale` windows of target, marks at
  * each window boundary. The window of target is the pricer's own divisor,
@@ -411,12 +414,52 @@ export function gaugeMarks(scale: number, max = MAX_GAUGE_MARKS): number[] {
  * that saturates in nitro saturates here too and the gauge cannot promise a
  * free region the pricer does not give.
  */
-export function constraintGauge(c: { target: number; window: number }, backlog: number): { scale: number; fraction: number; marks: number[]; denominator: number } {
+export function constraintGauge(c: { target: number; window: number }, backlog: number): ConstraintGauge {
   const denominator = saturatingCastToBips(saturatingUMul(toUint64(c.window), toUint64(c.target)));
   if (denominator <= 0n) return { scale: 1, fraction: 0, marks: [], denominator: 0 };
   const gas = toUint64(backlog);
   const scale = ceilScale(gas, denominator);
   return { scale: Number(scale), fraction: bigFraction(gas, denominator * scale), marks: gaugeMarks(Number(scale)), denominator: Number(denominator) };
+}
+
+/**
+ * The right-hand end of a backlog gauge, in the reader's terms rather than in
+ * the model's: how many windows of target the bar spans, and the gas that
+ * comes to. "4 windows of target (13.8 Tgas)" says what the far end is
+ * without asking anyone to multiply two parameters together first.
+ */
+export function gaugeSpanLabel(count: number, unitGas: number, one: string, many: string): string {
+  return `${formatInteger(count)} ${count === 1 ? one : many} (${formatGas(count * unitGas)})`;
+}
+
+/** The right-hand end of a constraint's gauge: whole windows of target. */
+export function constraintGaugeSpanLabel(gauge: Pick<ConstraintGauge, "scale" | "denominator">): string {
+  return gaugeSpanLabel(gauge.scale, gauge.denominator, "window of target", "windows of target");
+}
+
+/**
+ * What one window is, on the gauge itself: the pricer's own divisor and what
+ * a full one does to x, so the scale is readable without the equation.
+ */
+export function constraintGaugeTitle(denominator: number): string {
+  return `one window = target × window = ${formatGas(denominator)}; each full window adds 1.0 to x`;
+}
+
+/**
+ * The right-hand end of the legacy gauge: whole tolerance thresholds where
+ * the pricer has a free region, whole units of x where it has none.
+ */
+export function legacyGaugeSpanLabel(gauge: LegacyGauge): string {
+  if (gauge.free > 0) return gaugeSpanLabel(Math.round(gauge.span / gauge.free), gauge.free, "tolerance threshold", "tolerance thresholds");
+  if (gauge.unit > 0) return gaugeSpanLabel(Math.round(gauge.span / gauge.unit), gauge.unit, "unit of x", "units of x");
+  return "no scale (zero inertia or speed limit)";
+}
+
+/** What one step of the legacy gauge is, and what it does to the fee. */
+export function legacyGaugeTitle(gauge: LegacyGauge): string {
+  if (gauge.free > 0) return `one threshold = tolerance × speed limit = ${formatGas(gauge.free)}; below it the pricer charges nothing at all`;
+  if (gauge.unit > 0) return `one unit = inertia × speed limit = ${formatGas(gauge.unit)}; each full unit adds 1.0 to x`;
+  return "no scale: the inertia or the speed limit is zero";
 }
 
 export type LegacyGauge = {

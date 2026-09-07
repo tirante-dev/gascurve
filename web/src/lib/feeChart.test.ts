@@ -12,6 +12,7 @@ import {
   markersFor,
   ownerActionNote,
 } from "./feeChart";
+import { isGapRow, NO_GAPS } from "@/lib/gaps";
 
 function point(overrides: Partial<SeriesPoint>): SeriesPoint {
   return {
@@ -49,6 +50,8 @@ const setConstraints: OwnerAction = {
 const series: Series = {
   range: "24h",
   resolution: "1m",
+  from: 1788679200,
+  to: 1788679320,
   constraintSets: [
     { id: 5, effectiveBlock: 10, effectiveAt: "2026-09-01T16:33:00Z", source: "owner_action", constraints: [{ target: 60_000_000, window: 15, startingBacklog: 0 }, { target: 30_000_000, window: 86_400, startingBacklog: 0 }] },
     { id: 6, effectiveBlock: 20, effectiveAt: "2026-09-03T17:08:00Z", source: "owner_action", constraints: [{ target: 60_000_000, window: 15, startingBacklog: 0 }, { target: 40_000_000, window: 86_400, startingBacklog: 0 }] },
@@ -78,18 +81,49 @@ describe("feeChartData", () => {
 
   it("draws nothing at all without a series, and still names a bucket width", () => {
     const data = feeChartData(null, "constraints");
-    expect(data).toEqual({ points: [], drawn: [], markers: [], domain: [0.001, 1], span: 0, bucketSeconds: DEFAULT_BUCKET_SECONDS });
+    expect(data).toEqual({ points: [], drawn: [], markers: [], domain: [0.001, 1], span: 0, bucketSeconds: DEFAULT_BUCKET_SECONDS, gaps: NO_GAPS });
   });
 
   it("measures a single bucket by the fallback width rather than by nothing", () => {
-    const data = feeChartData({ ...series, points: [series.points[0]] }, "constraints");
+    const data = feeChartData({ ...series, points: [series.points[0]], from: series.points[0].t, to: series.points[0].t + 60 }, "constraints");
     expect(data.bucketSeconds).toBe(DEFAULT_BUCKET_SECONDS);
-    expect(data.span).toBe(1);
+    // The axis is the window the range asked for, not the one bucket in it.
+    expect(data.span).toBe(60);
   });
 
   it("keeps the whole band inside the log domain", () => {
     expect(feeDomain([])).toEqual([0.001, 1]);
     expect(feeDomain(feeChartData(series, "constraints").points)).toEqual([0.01, 1]);
+  });
+});
+
+describe("a range with holes in it", () => {
+  it("keeps the window as the axis and shades what was never indexed", () => {
+    // A day was asked for, two buckets came back: the rest is not history that
+    // was flat, it is history that does not exist.
+    const first = series.points[0].t;
+    const data = feeChartData({ ...series, from: first - 86_400, to: first + 120 }, "constraints");
+    expect(data.gaps.window).toEqual({ from: first - 86_400, to: first + 120 });
+    expect(data.gaps.gaps).toEqual([{ from: first - 86_400, to: first, kind: "leading" }]);
+    expect(data.gaps.first).toBe(first);
+    expect(data.span).toBe(86_520);
+    // A leading span needs no break row: the line simply starts where the data does.
+    expect(data.drawn.some((row) => isGapRow(row as Record<string, unknown>))).toBe(false);
+  });
+
+  it("breaks the line over a missing bucket rather than bridging it", () => {
+    const [a, b] = series.points;
+    const late = { ...b, t: b.t + 600 };
+    const data = feeChartData({ ...series, points: [a, late], from: a.t, to: late.t + 60 }, "constraints");
+    expect(data.gaps.gaps).toEqual([{ from: a.t + 60, to: late.t, kind: "interior" }]);
+    const breaks = data.drawn.filter((row) => isGapRow(row as Record<string, unknown>));
+    expect(breaks).toHaveLength(1);
+    expect(breaks[0].t).toBe(a.t + 60);
+    // Nothing on the break row carries a value: a zero would be a bucket that
+    // collected nothing, which is a different fact.
+    const row = breaks[0] as Record<string, unknown>;
+    expect(row.feeAvg).toBeNull();
+    expect(Object.entries(row).filter(([key]) => key !== "t" && key !== "gapRow").every(([, value]) => value === null)).toBe(true);
   });
 });
 

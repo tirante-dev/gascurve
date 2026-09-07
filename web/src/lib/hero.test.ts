@@ -11,6 +11,9 @@ import {
   heroFeeDomain,
   heroPointTitle,
   heroSpan,
+  heroThroughputData,
+  throughputAxis,
+  throughputTick,
   stableFeeAxis,
   heroTickStep,
   heroTicks,
@@ -269,5 +272,70 @@ describe("the hero range", () => {
     expect(() => storeHeroRange("24h")).not.toThrow();
     if (storage) Object.defineProperty(window, "localStorage", storage);
     expect(readHeroRange()).toBe("live");
+  });
+});
+
+describe("the live throughput series", () => {
+  it("sums each whole second's blocks and places the second at its own end", () => {
+    // Three blocks a second for five seconds, 4 Mgas each: 12 Mgas a second.
+    const points = heroThroughputData(ring(5, 3), NOW_MS);
+    // The seconds at either end of the ring are partial and are left out.
+    expect(points.map((p) => p.ts)).toEqual([LAST_TS - 3, LAST_TS - 2, LAST_TS - 1]);
+    expect(points.map((p) => p.gas)).toEqual([12_000_000, 12_000_000, 12_000_000]);
+    expect(points.map((p) => p.blocks)).toEqual([3, 3, 3]);
+    // Placed at the end of its own second, and the right edge is the newest
+    // block's place when the clock is behind it, so the newest whole second
+    // sits two thirds of a second inside the edge.
+    expect(points[points.length - 1].x).toBeCloseTo(-2 / 3, 5);
+    expect(points[0].x).toBeCloseTo(-2 - 2 / 3, 5);
+  });
+
+  it("leaves out the second that is still being delivered, however far behind the clock is", () => {
+    // The newest second has three of its ten blocks so far, and the clock has
+    // already moved past it: without the rule it would read as a chain that
+    // stopped carrying gas.
+    const partial = [...ring(4, 10, LAST_TS - 1), ...ring(1, 3, LAST_TS)];
+    const points = heroThroughputData(partial, (LAST_TS + 2) * 1000);
+    expect(points.map((p) => p.ts)).toEqual([LAST_TS - 3, LAST_TS - 2, LAST_TS - 1]);
+    expect(points.every((p) => p.blocks === 10)).toBe(true);
+  });
+
+  it("reaches back over the window and no further, and has nothing to say about an empty ring", () => {
+    expect(heroThroughputData([], NOW_MS)).toEqual([]);
+    const long = heroThroughputData(ring(HERO_WINDOW_S + 30, 1), NOW_MS);
+    expect(long).toHaveLength(HERO_WINDOW_S);
+    expect(long[0].x).toBeGreaterThanOrEqual(-HERO_WINDOW_S);
+    // A shorter window keeps only what fits in it.
+    expect(heroThroughputData(ring(20, 1), NOW_MS, 5)).toHaveLength(5);
+    // A ring with nothing whole in it draws nothing rather than a fraction.
+    expect(heroThroughputData(ring(2, 3), NOW_MS)).toEqual([]);
+  });
+});
+
+describe("the throughput axis", () => {
+  it("puts a round top above the peak and carries one unit for every label", () => {
+    const axis = throughputAxis(41_000_000);
+    expect(axis.top).toBe(50_000_000);
+    expect(axis.ticks).toEqual([0, 25_000_000, 50_000_000]);
+    expect(axis.unit).toBe("Mgas/s");
+    expect(axis.ticks.map((t) => throughputTick(t, axis))).toEqual(["0.0", "25.0", "50.0"]);
+  });
+
+  it("takes its unit from its own top, so a busy chain reads in Ggas/s and a quiet one in gas/s", () => {
+    const big = throughputAxis(1_400_000_000);
+    expect(big.unit).toBe("Ggas/s");
+    expect(big.ticks.map((t) => throughputTick(t, big))).toEqual(["0.0", "1.0", "2.0"]);
+    const small = throughputAxis(800);
+    expect(small.unit).toBe("gas/s");
+    expect(small.ticks.map((t) => throughputTick(t, small))).toEqual(["0", "500", "1,000"]);
+    // Above a hundred in the band the decimal buys nothing.
+    const wide = throughputAxis(250_000_000);
+    expect(wide.top).toBe(400_000_000);
+    expect(wide.ticks.map((t) => throughputTick(t, wide))).toEqual(["0", "200", "400"]);
+  });
+
+  it("still draws a band for a chain that carried nothing at all", () => {
+    expect(throughputAxis(0).top).toBeGreaterThan(0);
+    expect(throughputAxis(Number.NaN).top).toBeGreaterThan(0);
   });
 });

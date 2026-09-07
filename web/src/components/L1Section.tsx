@@ -8,10 +8,12 @@ import { getL1 } from "@/lib/api/l1";
 import type { BatchSeries, L1Series, LiveSnapshot, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
 import { joinCosts, logDomain, resampleFees, spanSeconds, type CostRow } from "@/utils/chart";
+import { gapModel, irregularStep, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
 import { formatDateTime, formatDuration, formatEth, formatGas, formatGwei, formatInteger, formatSignificant, formatTick } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip } from "./ChartTooltip";
-import { Card, ChartFrame, Legend, Stat, type ChartHeight } from "./primitives";
+import { gapBands, GapNote } from "./ChartGaps";
+import { Card, ChartFrame, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
 
 // "batch" is exactly one point per posting report (every 12 to 24 s on Robinhood).
 // Both reports and L2 fees are grouped into 15 s buckets before the join, so a
@@ -26,6 +28,8 @@ export type L1Costs = {
   rows: CostRow[];
   span: number;
   domain: [number, number];
+  /** The window the batch range asked for, and the stretches of it with no report at all. */
+  gaps: GapModel;
   totals: { l1Eth: number; l2Eth: number; count: number; interval: number };
   batches: ReturnType<typeof useApi<BatchSeries>>;
   l1: ReturnType<typeof useApi<L1Series>>;
@@ -47,7 +51,14 @@ export function useL1Costs(network: string, range: SeriesRange, series: Series |
     const bucket = RESOLUTION_SECONDS[batches.data.resolution] ?? 3600;
     return joinCosts(batches.data.points, resampleFees(series.points, bucket), bucket);
   }, [batches.data, series]);
-  const span = spanSeconds(rows);
+  // Reports arrive on their own cadence, so an empty bucket between two of
+  // them is ordinary; only a stretch several intervals long is a gap.
+  const gaps = useMemo(() => {
+    if (!batches.data) return NO_GAPS;
+    const bucket = RESOLUTION_SECONDS[batches.data.resolution] ?? 3600;
+    return gapModel(batches.data, rows, irregularStep(rows, bucket));
+  }, [batches.data, rows]);
+  const span = gaps.window.to > gaps.window.from ? gaps.window.to - gaps.window.from : spanSeconds(rows);
   const totals = useMemo(() => {
     const l1Eth = rows.reduce((s, r) => s + r.l1Eth, 0);
     const l2Eth = rows.reduce((s, r) => s + r.l2Eth, 0);
@@ -55,7 +66,7 @@ export function useL1Costs(network: string, range: SeriesRange, series: Series |
     return { l1Eth, l2Eth, count, interval: count > 0 && span > 0 ? span / count : 0 };
   }, [rows, span]);
   const domain = useMemo(() => logDomain(rows.flatMap((r) => [r.l1Eth, r.l2Eth])), [rows]);
-  return { rows, span, domain, totals, batches, l1 };
+  return { rows, span, domain, gaps, totals, batches, l1 };
 }
 
 /** The legend the cost chart carries: each line with what it came to over the range. */
@@ -67,40 +78,47 @@ export function l1CostLegend(totals: L1Costs["totals"]) {
 }
 
 /** What users paid against what the chain paid Ethereum, per bucket, on a log scale. */
-export function L1CostChart({ rows, span, domain, height = L1_CHART_HEIGHT }: { rows: CostRow[]; span: number; domain: [number, number]; height?: ChartHeight }) {
+export function L1CostChart({ rows, span, domain, gaps = NO_GAPS, height = L1_CHART_HEIGHT }: { rows: CostRow[]; span: number; domain: [number, number]; gaps?: GapModel; height?: ChartHeight }) {
+  const window = gaps.window.to > gaps.window.from ? gaps.window : { from: rows[0]?.t ?? 0, to: rows[rows.length - 1]?.t ?? 0 };
   return (
-    <ChartFrame height={height} label="L2 fees and L1 posting cost per bucket on a log scale">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={rows} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
-          <CartesianGrid vertical={false} />
-          <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
-          <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
-          <Tooltip
-            isAnimationActive={false}
-            content={(props) => (
-              <ChartTooltip
-                {...props}
-                title={(t) => formatDateTime(t)}
-                rows={[
-                  { label: "L2 fees", color: "var(--series-1)", value: (r) => `${formatSignificant(Number(r.l2Eth), 4)} ETH` },
-                  { label: "L1 posting cost", color: "var(--series-2)", value: (r) => `${formatSignificant(Number(r.l1Eth), 4)} ETH` },
-                  { label: "batches", value: (r) => formatInteger(Number(r.batches)) },
-                ]}
-              />
-            )}
-          />
-          <Line type="monotone" dataKey="l2Eth" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
-          <Line type="monotone" dataKey="l1Eth" stroke="var(--series-2)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
-        </LineChart>
-      </ResponsiveContainer>
-    </ChartFrame>
+    <>
+      <ChartFrame height={height} label="L2 fees and L1 posting cost per bucket on a log scale">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={withGapBreaks(rows, gaps.gaps)} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+            <CartesianGrid vertical={false} />
+            {gapBands(gaps.gaps, window)}
+            <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
+            <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
+            <Tooltip
+              isAnimationActive={false}
+              content={(props) => (
+                <ChartTooltip
+                  {...props}
+                  title={(t) => formatDateTime(t)}
+                  rows={[
+                    { label: "L2 fees", color: "var(--series-1)", value: (r) => `${formatSignificant(Number(r.l2Eth), 4)} ETH` },
+                    { label: "L1 posting cost", color: "var(--series-2)", value: (r) => `${formatSignificant(Number(r.l1Eth), 4)} ETH` },
+                    { label: "batches", value: (r) => formatInteger(Number(r.batches)) },
+                  ]}
+                />
+              )}
+            />
+            {/* A bucket with no report is a hole in the record, so the line
+                breaks over it rather than bridging it. */}
+            <Line type="monotone" dataKey="l2Eth" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
+            <Line type="monotone" dataKey="l1Eth" stroke="var(--series-2)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </ChartFrame>
+      <GapNote gaps={gaps} />
+    </>
   );
 }
 
 /** L1 pricer values and what the chain pays Ethereum against what users pay. Collapsed by default. */
 export function L1Section({ network, range, snapshot, series }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null }) {
   const [open, setOpen] = useState(false);
-  const { rows, span, domain, totals, batches, l1 } = useL1Costs(network, range, series, open);
+  const { rows, span, domain, gaps, totals, batches, l1 } = useL1Costs(network, range, series, open);
   const l1State = snapshot?.l1;
   const [tableOpen, setTableOpen] = useState(false);
 
@@ -145,8 +163,10 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
           {batches.error ? <p className="text-sm text-critical">Could not load batches: {batches.error}</p> : null}
           {l1.error ? <p className="text-sm text-critical">Could not load L1 series: {l1.error}</p> : null}
           {rows.length > 0 ? (
-            <L1CostChart rows={rows} span={span} domain={domain} />
+            <L1CostChart rows={rows} span={span} domain={domain} gaps={gaps} />
           ) : (
+            // "No reports" is what the record says: a chain can be indexed for
+            // the range and still have posted nothing in it.
             <Card className="text-sm text-ink-2">{batches.loading ? "Loading batch reports." : "No batch reports in this range."}</Card>
           )}
           {rows.length > 0 ? (

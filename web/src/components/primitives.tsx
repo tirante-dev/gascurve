@@ -129,6 +129,13 @@ export function Legend({ items }: { items: { label: string; color: string; kind?
 }
 
 /**
+ * Room at the right of a time axis for half of its last tick label. The axis
+ * spans the window a range asked for, so its last tick sits exactly at the
+ * right edge and would otherwise be cut in half by the frame.
+ */
+export const TIME_AXIS_RIGHT = 22;
+
+/**
  * How tall a chart frame stands: a number of pixels, or the utility classes
  * that size it. An enlarged chart is sized against the viewport, which is a
  * class and not a number.

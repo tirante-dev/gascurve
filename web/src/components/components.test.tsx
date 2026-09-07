@@ -78,6 +78,8 @@ function sawtoothBlocks(seconds: number, lastTs: number): BlockPoint[] {
 const history: Series = {
   range: "24h",
   resolution: "1m",
+  from: 1788679200,
+  to: 1788679320,
   constraintSets: [],
   ownerActions: [{ block: 20, at: "2026-09-06T07:21:00Z", txHash: "0x" + "ab".repeat(32), method: "setMinimumL2BaseFee", selector: "0xa0188cdb", args: { priceInWei: "20000000" } }],
   points: [
@@ -155,6 +157,37 @@ describe("LiveHero", () => {
     // keeps the one big chart.
     expect(screen.queryByRole("img", { name: /Gas used per block/ })).toBeNull();
   });
+  it("shades the part of a range that was never indexed, over the whole window", () => {
+    // A day's window with two minutes of buckets in it: the axis is the window,
+    // and the hour before the first bucket is shaded and labelled.
+    const early = { ...history, from: history.points[0].t - 3600 };
+    const { container } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" series={early} model="constraints" />);
+    const band = container.querySelector(".recharts-reference-area-rect");
+    expect(band).not.toBeNull();
+    expect(band).toHaveAttribute("fill", "var(--ink-3)");
+    expect(band).toHaveAttribute("fill-opacity", "0.1");
+    expect(screen.getAllByText("not indexed yet").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Shaded: not indexed yet, history before 2026-09-06 02:20 CDT").length).toBeGreaterThan(0);
+  });
+  it("draws the chain's throughput under the fee, on the hero's own range", () => {
+    // Six seconds of blocks: the newest second is still being delivered and is
+    // left out, so a shorter ring has nothing complete to draw.
+    const blocks = sawtoothBlocks(6, snapshot.block.ts);
+    const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="live" />);
+    // Live: whole seconds of blocks from the ring, in one unit named beside the chart.
+    const throughput = screen.getByRole("figure", { name: /^Gas carried per second over the last 120 seconds/ });
+    expect(throughput.firstElementChild).toHaveClass("h-[120px]");
+    expect(throughput.firstElementChild).toHaveClass("lg:h-[140px]");
+    expect(screen.getByText(/^Gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
+    // Its own enlarge control, at the range on screen.
+    expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=live");
+
+    // A history range: the bucketed rate against every target in force.
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" series={history} model="constraints" />);
+    expect(screen.getByRole("figure", { name: /^Gas used per second in .* with each constraint target/ })).toBeInTheDocument();
+    expect(screen.getByText(/^Gas per second per bucket against each target in force ·/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=24h");
+  });
   it("draws the canonical blocks after a reorg, not the orphaned ones", () => {
     const ring = sawtoothBlocks(2, snapshot.block.ts);
     const head = ring[ring.length - 1].number;
@@ -207,19 +240,26 @@ describe("LiveHero", () => {
   });
 
   it("keeps the chart box at one height while a range loads, when it is empty and when it fails", () => {
-    const box = () => screen.getByRole("figure").firstElementChild;
+    // The hero holds two charts now, the base fee and the throughput under it;
+    // the first figure is the base fee's box.
+    const box = () => screen.getAllByRole("figure")[0].firstElementChild;
     const props = { network: "robinhood", snapshot, values: null, blocks: [], nowMs: Date.parse(snapshot.sampledAt), status: "open" as const, range: "30d" as const, model: "constraints" as const };
+    // Both boxes say the same thing while the range loads: the base fee and the
+    // throughput under it are one range control.
+    const throughputBox = () => screen.getAllByRole("figure")[1].firstElementChild;
     const { rerender } = render(<LiveHeroView {...props} series={null} seriesLoading />);
-    expect(screen.getByText("Loading 30d.")).toBeInTheDocument();
+    expect(screen.getAllByText("Loading 30d.")).toHaveLength(2);
     expect(box()).toHaveClass("h-[180px]");
     expect(box()).toHaveClass("lg:h-[260px]");
+    expect(throughputBox()).toHaveClass("h-[120px]");
+    expect(throughputBox()).toHaveClass("lg:h-[140px]");
 
     rerender(<LiveHeroView {...props} series={{ ...history, points: [] }} />);
-    expect(screen.getByText("No buckets in 30d yet.")).toBeInTheDocument();
+    expect(screen.getAllByText("Nothing indexed for this range yet.").length).toBeGreaterThan(0);
     expect(box()).toHaveClass("h-[180px]");
 
     rerender(<LiveHeroView {...props} series={null} seriesError="boom" />);
-    expect(screen.getByText(/Could not load 30d: boom/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Could not load 30d: boom/)).toHaveLength(2);
     expect(box()).toHaveClass("h-[180px]");
     expect(box()).toHaveClass("lg:h-[260px]");
   });

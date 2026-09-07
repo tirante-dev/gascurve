@@ -90,6 +90,19 @@ function scaleGas(abs: number): { text: string; prefix: string } {
   return { text: withThousands(Math.round(abs).toString()), prefix: "" };
 }
 
+/**
+ * The band a gas figure of this size is shown in: what to divide by, and the
+ * SI prefix that goes on the unit. An axis takes its band from its top tick,
+ * so every label on it is a bare figure in one unit.
+ */
+export function gasScale(gas: number): { divisor: number; prefix: string } {
+  const abs = Math.abs(gas);
+  for (const [scale, prefix] of GAS_UNITS) {
+    if (abs >= scale) return { divisor: scale, prefix };
+  }
+  return { divisor: 1, prefix: "" };
+}
+
 function gasDecimals(scaled: number): number {
   return scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
 }

@@ -504,7 +504,7 @@ describe("useApi and useSeries", () => {
   });
 
   it("fetches, keeps previous data while loading, refetches on an interval and surfaces errors", async () => {
-    const series = (range: string): Series => ({ range: range as Series["range"], resolution: "5s", constraintSets: [], ownerActions: [], points: [] });
+    const series = (range: string): Series => ({ range: range as Series["range"], resolution: "5s", from: 0, to: 0, constraintSets: [], ownerActions: [], points: [] });
     getSeriesMock.mockImplementation(async (_n: unknown, range: string) => series(range));
     const { result, rerender } = renderHook(({ range }) => useSeries("robinhood", range), {
       initialProps: { range: "1h" as Series["range"] },
@@ -544,7 +544,7 @@ describe("useApi and useSeries", () => {
 
   it("shares one request per network and range, and holds nothing once it settles", async () => {
     const resolvers: ((value: Series) => void)[] = [];
-    const answer: Series = { range: "24h", resolution: "1m", constraintSets: [], ownerActions: [], points: [] };
+    const answer: Series = { range: "24h", resolution: "1m", from: 0, to: 0, constraintSets: [], ownerActions: [], points: [] };
     getSeriesMock.mockImplementation(() => new Promise<Series>((resolve) => resolvers.push(resolve)));
     expect(seriesKey("robinhood", "24h")).toBe("robinhood:24h");
     // Two views on the same range wait on one request.
@@ -564,7 +564,7 @@ describe("useApi and useSeries", () => {
   });
 
   it("does not hold on to a request that failed", async () => {
-    const answer: Series = { range: "30d", resolution: "1h", constraintSets: [], ownerActions: [], points: [] };
+    const answer: Series = { range: "30d", resolution: "1h", from: 0, to: 0, constraintSets: [], ownerActions: [], points: [] };
     getSeriesMock.mockRejectedValueOnce(new Error("boom"));
     await expect(fetchSharedSeries("robinhood", "30d")).rejects.toThrow("boom");
     getSeriesMock.mockResolvedValueOnce(answer);
@@ -572,7 +572,7 @@ describe("useApi and useSeries", () => {
   });
 
   it("makes one request when the hero and the history section land on the same range", async () => {
-    getSeriesMock.mockResolvedValue({ range: "24h", resolution: "1m", constraintSets: [], ownerActions: [], points: [] });
+    getSeriesMock.mockResolvedValue({ range: "24h", resolution: "1m", from: 0, to: 0, constraintSets: [], ownerActions: [], points: [] });
     renderHook(() => {
       useSeries("robinhood", "24h");
       useSeries("robinhood", "24h");
@@ -584,7 +584,7 @@ describe("useApi and useSeries", () => {
   });
 
   it("asks for nothing at all without a range, which is how the hero says it is live", async () => {
-    getSeriesMock.mockResolvedValue({ range: "24h", resolution: "1m", constraintSets: [], ownerActions: [], points: [] });
+    getSeriesMock.mockResolvedValue({ range: "24h", resolution: "1m", from: 0, to: 0, constraintSets: [], ownerActions: [], points: [] });
     const { result, rerender } = renderHook(({ range }) => useSeries("robinhood", range), { initialProps: { range: null as Series["range"] | null } });
     expect(getSeriesMock).not.toHaveBeenCalled();
     expect(result.current.data).toBeNull();
@@ -595,7 +595,7 @@ describe("useApi and useSeries", () => {
   });
 
   it("does nothing without a network and pauses the interval while hidden", async () => {
-    getSeriesMock.mockResolvedValue({ range: "24h", resolution: "1m", constraintSets: [], ownerActions: [], points: [] });
+    getSeriesMock.mockResolvedValue({ range: "24h", resolution: "1m", from: 0, to: 0, constraintSets: [], ownerActions: [], points: [] });
     const { result, rerender } = renderHook(({ network }) => useSeries(network, "24h"), {
       initialProps: { network: null as string | null },
     });

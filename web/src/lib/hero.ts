@@ -6,7 +6,7 @@
 import { isSeriesRange, SERIES_RANGES } from "@/lib/api/series";
 import { liveNow, placeBlocks } from "@/lib/smoothing";
 import type { BlockPoint, SeriesRange } from "@/types";
-import { weiToGweiNumber } from "@/utils/format";
+import { gasScale, weiToGweiNumber } from "@/utils/format";
 
 /** The span the hero reaches back over, in seconds of block timestamp. */
 export const HERO_WINDOW_S = 120;
@@ -155,6 +155,79 @@ export function stableFeeAxis(previous: FeeAxis | null, points: readonly HeroPoi
 
 function sameAxis(a: FeeAxis, b: FeeAxis): boolean {
   return a.domain[0] === b.domain[0] && a.domain[1] === b.domain[1] && a.ticks.length === b.ticks.length && a.ticks.every((t, i) => t === b.ticks[i]);
+}
+
+/**
+ * One second of the live throughput chart: all the gas the blocks with that
+ * timestamp carried. `x` is seconds before now, as on the fee chart, and the
+ * second sits at its own end because that is when its gas is complete.
+ */
+export type ThroughputPoint = { x: number; ts: number; gas: number; blocks: number };
+
+/**
+ * Gas per second from the block ring, against the same clock-anchored axis
+ * the fee chart uses. Blocks are summed per timestamp second and each second
+ * sits at its own end, which is when its gas is complete.
+ *
+ * Only the seconds the ring holds whole are drawn. The newest is left out
+ * whatever the clock says: blocks reach the browser a tick behind the chain,
+ * so that second is still being delivered and its sum is a fraction of what it
+ * will be, which drew a plunge to near zero at the right edge on every frame.
+ * The oldest goes for the same reason at the other end: the ring is bounded by
+ * block count, so it usually starts part way through a second, and that half
+ * second read as the chain ramping up.
+ */
+export function heroThroughputData(blocks: readonly BlockPoint[], nowMs: number, seconds = HERO_WINDOW_S): ThroughputPoint[] {
+  if (blocks.length === 0) return [];
+  const places = placeBlocks(blocks);
+  const now = liveNow(nowMs, places[places.length - 1]);
+  const newest = blocks[blocks.length - 1].ts;
+  const oldest = blocks[0].ts;
+  const perSecond = new Map<number, { gas: number; blocks: number }>();
+  for (const b of blocks) {
+    if (b.ts >= newest || b.ts <= oldest) continue;
+    const acc = perSecond.get(b.ts) ?? { gas: 0, blocks: 0 };
+    acc.gas += b.gasUsed;
+    acc.blocks += 1;
+    perSecond.set(b.ts, acc);
+  }
+  const out: ThroughputPoint[] = [];
+  for (const [ts, acc] of [...perSecond.entries()].sort((a, b) => a[0] - b[0])) {
+    const x = ts + 1 - now;
+    if (x < -seconds || x > 0) continue;
+    out.push({ x, ts, gas: acc.gas, blocks: acc.blocks });
+  }
+  return out;
+}
+
+/**
+ * A y axis in one gas unit: what it spans, where its ticks are, what to divide
+ * a value by to label it, and the decimal count every label on it carries.
+ */
+export type ThroughputAxis = { top: number; ticks: number[]; divisor: number; decimals: number; unit: string };
+
+/**
+ * The throughput axis: a round top above the tallest value with ticks at
+ * zero, the middle and the top, and one unit for the whole axis taken from
+ * that top. Every label is then a bare figure with the same decimal count, so
+ * the plot never shifts sideways as the rate moves; the unit rides on the
+ * chart's caption instead, once.
+ */
+export function throughputAxis(max: number): ThroughputAxis {
+  const peak = Number.isFinite(max) && max > 0 ? max : 1;
+  const step = niceStep(peak / 2);
+  const top = Math.max(step, Math.ceil((peak * 1.1) / step) * step);
+  const { divisor, prefix } = gasScale(top);
+  // The decimal count is the top tick's, not each tick's, so every label on the
+  // axis has the same shape and the plot keeps its left edge.
+  const decimals = divisor === 1 || top / divisor >= 100 ? 0 : 1;
+  return { top, ticks: [0, top / 2, top], divisor, decimals, unit: `${prefix}gas/s` };
+}
+
+/** One label on that axis: the figure alone, in the axis's own unit and at the axis's own decimal count. */
+export function throughputTick(value: number, axis: ThroughputAxis): string {
+  const scaled = value / axis.divisor;
+  return axis.decimals === 0 ? Math.round(scaled).toLocaleString("en-US") : scaled.toFixed(axis.decimals);
 }
 
 /**

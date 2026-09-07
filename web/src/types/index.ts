@@ -149,6 +149,13 @@ export type OwnerAction = {
 export type Series = {
   range: SeriesRange;
   resolution: SeriesResolution;
+  /**
+   * The window the range asked for, in unix seconds: the axis's own extent,
+   * not the extent of the buckets. For `all`, `from` is the first indexed
+   * point's time, and equals `to` when nothing is indexed at all.
+   */
+  from: number;
+  to: number;
   constraintSets: ConstraintSet[];
   ownerActions: OwnerAction[];
   points: SeriesPoint[];
@@ -167,7 +174,8 @@ export type BatchPoint = {
 
 export type BatchResolution = "batch" | "1m" | "15m" | "1h";
 
-export type BatchSeries = { range: string; resolution: BatchResolution; points: BatchPoint[] };
+/** `from` and `to` are the requested window, as on Series. */
+export type BatchSeries = { range: string; resolution: BatchResolution; from: number; to: number; points: BatchPoint[] };
 
 export type L1Point = {
   t: number;
@@ -177,7 +185,8 @@ export type L1Point = {
   unitsSinceUpdate: number;
 };
 
-export type L1Series = { range: string; points: L1Point[] };
+/** `from` and `to` are the requested window, as on Series. */
+export type L1Series = { range: string; from: number; to: number; points: L1Point[] };
 
 export type NetworkStatus = {
   name: string;

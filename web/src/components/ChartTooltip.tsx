@@ -1,6 +1,7 @@
 "use client";
 
 import type { TooltipContentProps } from "recharts";
+import { isGapRow } from "@/lib/gaps";
 import { Swatch, type SwatchKind } from "./primitives";
 
 export type TooltipRow = {
@@ -25,6 +26,9 @@ export function applicableRows(rows: readonly TooltipRow[], row: Record<string, 
 export function ChartTooltip({ active, payload, label, rows, title, note }: Partial<TooltipContentProps> & { rows: TooltipRow[]; title: (label: number) => string; note?: (row: Record<string, unknown>) => string | null }) {
   if (!active || !payload || payload.length === 0) return null;
   const row = (payload[0]?.payload ?? {}) as Record<string, unknown>;
+  // A gap carries no values, so there is nothing to read out: the shaded band
+  // and its caption already say what the span is.
+  if (isGapRow(row)) return null;
   const extra = note?.(row) ?? null;
   return (
     <div className="rounded-md border border-hairline bg-surface px-3 py-2 text-xs shadow-lg">

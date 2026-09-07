@@ -4,7 +4,9 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { PricerModel, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
-import { describeAction, feeChartData, feeTooltipRows, ownerActionNote } from "@/lib/feeChart";
+import { describeAction, feeChartData, feeTooltipRows, ownerActionNote, type DrawnRow } from "@/lib/feeChart";
+import { emptyRangeNote, type GapModel, type GapWindow } from "@/lib/gaps";
+import { throughputAxis, throughputTick, type ThroughputAxis } from "@/lib/hero";
 import {
   hasUnknownSets,
   hasUnrecordedSplit,
@@ -24,13 +26,18 @@ import {
 } from "@/utils/chart";
 import { formatDateTime, formatGas, formatGasPerSecond, formatInteger, formatSignificant, formatTick, unbroken } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
+import { gapBands, GapNote } from "./ChartGaps";
 import { ChartTooltip, applicableRows, type TooltipRow } from "./ChartTooltip";
-import { ChartFrame, Legend, type ChartHeight } from "./primitives";
+import { ChartFrame, Legend, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
 
 const SYNC_ID = "history";
 
-/** Gas ticks carry their unit ("30 Mgas"), so the axis reserves the width for one. */
-const GAS_AXIS_WIDTH = 62;
+/**
+ * Gas ticks carry their unit ("30 Mgas"), so the axis reserves the width for
+ * one, at the widest a backlog tick gets ("1.05 Ggas") rather than the
+ * narrowest: a clipped tick label is not a label.
+ */
+const GAS_AXIS_WIDTH = 74;
 
 /** The heights the history charts stand at on the network page; the enlarged views pass their own. */
 export const SERIES_CHART_HEIGHT = 220;
@@ -77,9 +84,13 @@ function formatFeePart(eth: number | null): string {
  */
 export type SeriesModel = {
   points: ChartPoint[];
-  drawn: ChartPoint[];
+  drawn: DrawnRow[];
   markers: ReturnType<typeof feeChartData>["markers"];
   span: number;
+  /** The window the range asked for and the spans of it with nothing indexed. */
+  gaps: GapModel;
+  /** The gas-per-second axis: one unit for every label, shared by the live and the bucketed view. */
+  gasAxis: ThroughputAxis;
   segments: Segment[];
   /** True when some point's constraint set is not known, so its backlogs go under the unlabelled slots. */
   unknown: boolean;
@@ -104,7 +115,7 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   // across the bucket; `points` is one row per bucket, for the table and the
   // inspector. The base fee itself is drawn by the hero, at every range, so
   // it is not here.
-  const { points, drawn, markers, span, bucketSeconds } = feeChartData(series, model);
+  const { points, drawn, markers, span, bucketSeconds, gaps } = feeChartData(series, model);
   const segments = segmentsFor(series, model);
   // Two ways a point ends up in the unknown-split series: its set is not
   // known (backlogs then go under the unlabelled slots too), or its set is
@@ -156,13 +167,19 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
     ...(unrecorded ? [{ label: NULL_SPLIT_LABEL, color: UNKNOWN_COLOR }] : []),
   ];
   const hasTargets = segments.some((s) => s.constraint !== null);
-  const gasLegend = [{ label: "gas/s", color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
+  // The targets are drawn as thresholds on the same axis as the rate, so the
+  // axis has to hold the taller of the two. Its unit is named once, in the
+  // legend, because every tick on it is a bare figure.
+  const gasAxis = throughputAxis(Math.max(0, ...points.map((p) => p.gps), ...points.flatMap((p) => indices.map((i) => p[targetKey(i)] ?? 0))));
+  const gasLegend = [{ label: `gas per second (${gasAxis.unit})`, color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
 
   return {
     points,
     drawn,
     markers,
     span,
+    gaps,
+    gasAxis,
     segments,
     unknown,
     unrecorded,
@@ -180,9 +197,14 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   };
 }
 
-/** The time axis every history chart shares, so hovering one lines up with the rest. */
-function timeAxis(span: number) {
-  return <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />;
+/**
+ * The time axis every history chart shares, so hovering one lines up with the
+ * rest. It spans the window the range asked for, never the extent of the
+ * buckets that happen to exist: two hours of history on a 24h range draw over
+ * the last twelfth of the axis, which is where they happened.
+ */
+function timeAxis(span: number, window: GapWindow) {
+  return <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />;
 }
 
 /** Owner actions as dashed rules, numbered chronologically; the list under the charts decodes them. */
@@ -197,65 +219,83 @@ const bucketTitle = (t: number) => formatDateTime(t);
 /** Each constraint's share of the exponent, stacked, one series per constraint set. */
 export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
   return (
-    <ChartFrame height={height} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
-          <CartesianGrid vertical={false} />
-          {timeAxis(m.span)}
-          <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
-          <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.contributionRows} note={m.note} />} />
-          {m.segments.map((s) => (
-            <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
-          ))}
-          {m.unknown || m.unrecorded ? (
-            <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
-          ) : null}
-          {markerLines(m.markers)}
-        </AreaChart>
-      </ResponsiveContainer>
-    </ChartFrame>
+    <>
+      <ChartFrame height={height} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+            <CartesianGrid vertical={false} />
+            {gapBands(m.gaps.gaps, m.gaps.window)}
+            {timeAxis(m.span, m.gaps.window)}
+            <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
+            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.contributionRows} note={m.note} />} />
+            {m.segments.map((s) => (
+              <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
+            ))}
+            {m.unknown || m.unrecorded ? (
+              <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
+            ) : null}
+            {markerLines(m.markers)}
+          </AreaChart>
+        </ResponsiveContainer>
+      </ChartFrame>
+      <GapNote gaps={m.gaps} />
+    </>
   );
 }
 
-/** Gas carried per second against the target of every constraint in force. */
-export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
+/**
+ * Gas carried per second against the target of every constraint in force, at
+ * whatever size its frame is: the hero draws it under the base fee, its own
+ * page draws it large, and both read the same rows and the same axis. The
+ * axis carries one unit for the whole scale, named in the caption beside the
+ * chart, so every label is a bare figure of the same width.
+ */
+export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth = GAS_AXIS_WIDTH, minWidth }: { m: SeriesModel; height?: ChartHeight; axisWidth?: number; minWidth?: number }) {
   return (
-    <ChartFrame height={height} label="Gas used per second with each constraint target in force drawn as a stepped line">
-      <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
-          <CartesianGrid vertical={false} />
-          {timeAxis(m.span)}
-          <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
-          <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.note} />} />
-          <Area type="monotone" dataKey="gps" stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
-          {m.hasTargets ? m.indices.map((i) => <Line key={i} type="stepAfter" dataKey={targetKey(i)} stroke={seriesColor(i)} strokeDasharray="4 3" dot={false} isAnimationActive={false} />) : null}
-        </ComposedChart>
-      </ResponsiveContainer>
-    </ChartFrame>
+    <>
+      <ChartFrame height={height} minWidth={minWidth} label={`Gas used per second in ${m.gasAxis.unit} with each constraint target in force drawn as a stepped line`}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+            <CartesianGrid vertical={false} />
+            {gapBands(m.gaps.gaps, m.gaps.window)}
+            {timeAxis(m.span, m.gaps.window)}
+            <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
+            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.note} />} />
+            <Area type="monotone" dataKey="gps" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+            {m.hasTargets ? m.indices.map((i) => <Line key={i} type="stepAfter" dataKey={targetKey(i)} connectNulls={false} stroke={seriesColor(i)} strokeDasharray="4 3" dot={false} isAnimationActive={false} />) : null}
+          </ComposedChart>
+        </ResponsiveContainer>
+      </ChartFrame>
+      <GapNote gaps={m.gaps} />
+    </>
   );
 }
 
 /** One slot's backlog over time, on its own scale. A replaced constraint starts a new series. */
 export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }: { m: SeriesModel; index: number; label: string; height?: ChartHeight }) {
   return (
-    <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
-          <CartesianGrid vertical={false} />
-          {timeAxis(m.span)}
-          <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
-          <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.note} />} />
-          {m.segments
-            .filter((s) => s.index === index)
-            .map((s) => (
-              <Area key={s.backlogKey} type="monotone" dataKey={s.backlogKey} connectNulls={false} stroke={s.color} strokeWidth={2} fill={s.color} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
-            ))}
-          {m.unknown ? (
-            <Area type="monotone" dataKey={unknownBacklogKey(index)} connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={2} strokeDasharray="4 3" fill={UNKNOWN_COLOR} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
-          ) : null}
-        </AreaChart>
-      </ResponsiveContainer>
-    </ChartFrame>
+    <>
+      <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+            <CartesianGrid vertical={false} />
+            {gapBands(m.gaps.gaps, m.gaps.window)}
+            {timeAxis(m.span, m.gaps.window)}
+            <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
+            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.note} />} />
+            {m.segments
+              .filter((s) => s.index === index)
+              .map((s) => (
+                <Area key={s.backlogKey} type="monotone" dataKey={s.backlogKey} connectNulls={false} stroke={s.color} strokeWidth={2} fill={s.color} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+              ))}
+            {m.unknown ? (
+              <Area type="monotone" dataKey={unknownBacklogKey(index)} connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={2} strokeDasharray="4 3" fill={UNKNOWN_COLOR} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+            ) : null}
+          </AreaChart>
+        </ResponsiveContainer>
+      </ChartFrame>
+      <GapNote gaps={m.gaps} />
+    </>
   );
 }
 
@@ -324,7 +364,7 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
     );
   }
   if (m.points.length === 0) {
-    return <div className="vw-card p-6 text-sm text-ink-2">No buckets in this range yet.</div>;
+    return <div className="vw-card p-6 text-sm text-ink-2">{emptyRangeNote(m.gaps.first)}</div>;
   }
 
   return (
@@ -335,10 +375,6 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
         action={<EnlargeLink network={network} view={chartView("contribution")} range={range} />}
       >
         <ContributionChart m={m} />
-      </ChartBlock>
-
-      <ChartBlock title="Gas per second against each target" legend={m.gasLegend} action={<EnlargeLink network={network} view={chartView("gas-per-second")} range={range} />}>
-        <GasPerSecondChart m={m} />
       </ChartBlock>
 
       <div className="vw-card p-3">

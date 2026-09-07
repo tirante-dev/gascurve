@@ -65,6 +65,8 @@ const blocks: BlockPoint[] = [1, 2, 3, 4].map((k) => ({
 const series: Series = {
   range: "24h",
   resolution: "1m",
+  from: 1788679200,
+  to: 1788679320,
   constraintSets: [{ id: 6, effectiveBlock: 10, effectiveAt: "2026-09-01T16:33:00Z", source: "owner_action", constraints: [{ target: 60_000_000, window: 15, startingBacklog: 0 }, { target: 40_000_000, window: 86_400, startingBacklog: 0 }] }],
   ownerActions: [],
   points: [1788679200, 1788679260].map((t) => ({
@@ -127,7 +129,8 @@ describe("the enlarge control on every chart card", () => {
 
     // The history charts carry the section's range.
     expect(enlarge("Contribution to x per constraint")).toHaveAttribute("href", "/robinhood/charts/contribution?range=24h");
-    expect(enlarge("Gas per second against each target")).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=24h");
+    // Throughput sits in the hero now, on the hero's range and not the history section's.
+    expect(enlarge("Gas throughput")).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=live");
     // One per slot, each naming the slot it enlarges.
     expect(enlarge(/^Open the C1 .* backlog enlarged$/)).toHaveAttribute("href", "/robinhood/charts/backlogs?range=24h&constraint=0");
     expect(enlarge(/^Open the C2 .* backlog enlarged$/)).toHaveAttribute("href", "/robinhood/charts/backlogs?range=24h&constraint=1");

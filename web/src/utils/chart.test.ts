@@ -5,6 +5,8 @@ import {
   backlogKey,
   buildChartPoints,
   constraintGauge,
+  constraintGaugeSpanLabel,
+  constraintGaugeTitle,
   constraintLabel,
   contributionKey,
   contributionRampStep,
@@ -14,6 +16,9 @@ import {
   hasUnrecordedSplit,
   joinCosts,
   legacyGauge,
+  legacyGaugeSpanLabel,
+  legacyGaugeTitle,
+  gaugeSpanLabel,
   MAX_GAUGE_MARKS,
   latestSet,
   logDomain,
@@ -72,6 +77,8 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
 const series: Series = {
   range: "1h",
   resolution: "5s",
+  from: 1788679200,
+  to: 1788679215,
   constraintSets: [
     {
       id: 6,
@@ -501,7 +508,7 @@ describe("shape-aware set resolution", () => {
   const genesis = { id: 1, effectiveBlock: 28, effectiveAt: "2026-04-30T20:37:23Z", source: "genesis" as const, constraints: [60e6, 41e6, 29e6, 20e6, 14e6, 10e6].map((target, i) => ({ target, window: [9, 52, 329, 2105, 13485, 86400][i], startingBacklog: 0 })) };
   const point = { t: 1, blocks: 1, gasUsed: 1, gasPerSecond: 1, feesWei: "0", baseFeeMin: "20000000", baseFeeAvg: "20000000", baseFeeMax: "20000000", exponentBips: 31313, constraintBips: [0, 31313], backlogs: [6042415, 10822088492758], backlogsMax: [6042415, 10822088492758], minBaseFee: "20000000", floorFeesWei: "0", surplusFeesWei: "0", constraintSetId: 1, replayErrorBips: 0 };
   it("treats a set whose constraint count differs from the point's data as unknown", () => {
-    const series = { range: "1h" as const, resolution: "block" as const, constraintSets: [genesis], ownerActions: [], points: [point] };
+    const series = { range: "1h" as const, resolution: "block" as const, from: 0, to: 0, constraintSets: [genesis], ownerActions: [], points: [point] };
     expect(hasUnknownSets(series, "constraints")).toBe(true);
     const rows = buildChartPoints(series, "constraints");
     expect(rows[0].setKnown).toBe(false);
@@ -510,7 +517,7 @@ describe("shape-aware set resolution", () => {
   });
   it("keeps a set whose shape matches", () => {
     const current = { ...genesis, id: 6, effectiveBlock: 53_578_754, constraints: genesis.constraints.slice(0, 2) };
-    const series = { range: "1h" as const, resolution: "block" as const, constraintSets: [genesis, current], ownerActions: [], points: [{ ...point, constraintSetId: 6 }] };
+    const series = { range: "1h" as const, resolution: "block" as const, from: 0, to: 0, constraintSets: [genesis, current], ownerActions: [], points: [{ ...point, constraintSetId: 6 }] };
     expect(hasUnknownSets(series, "constraints")).toBe(false);
     expect(segmentsFor(series, "constraints").map((s) => s.setId)).toEqual([6, 6]);
     expect(buildChartPoints(series, "constraints")[0].setKnown).toBe(true);
@@ -599,5 +606,30 @@ describe("gauges", () => {
     expect(gauge.unit).toBe(Number(saturatingCastToBips(saturatingUMul(102n, BigInt(speedLimit)))));
     expect(gauge.fraction).toBeGreaterThan(0);
     expect(gauge.fraction).toBeLessThanOrEqual(1);
+  });
+
+  it("says what a gauge's far end is in words, and what one step of it is worth", () => {
+    // Robinhood's two constraints: 60 Mgas/s over 15 s, and 40 Mgas/s over a day.
+    const short = constraintGauge({ target: 60_000_000, window: 15 }, 450_000_000);
+    expect(constraintGaugeSpanLabel(short)).toBe("1 window of target (900 Mgas)");
+    expect(constraintGaugeTitle(short.denominator)).toBe("one window = target × window = 900 Mgas; each full window adds 1.0 to x");
+    const long = constraintGauge({ target: 40_000_000, window: 86_400 }, 11_194_391_810_886);
+    expect(constraintGaugeSpanLabel(long)).toBe("4 windows of target (13.8 Tgas)");
+    expect(constraintGaugeTitle(long.denominator)).toBe("one window = target × window = 3.46 Tgas; each full window adds 1.0 to x");
+    // The plural follows the count, and the gas is the whole span.
+    expect(gaugeSpanLabel(1, 900_000_000, "window of target", "windows of target")).toBe("1 window of target (900 Mgas)");
+    expect(gaugeSpanLabel(3, 900_000_000, "window of target", "windows of target")).toBe("3 windows of target (2.7 Ggas)");
+  });
+
+  it("says the same of the legacy gauge, in the legacy pricer's own terms", () => {
+    const tolerance = legacyGauge({ speedLimit: 7_000_000, inertia: 102, tolerance: 10 }, 90_000_000);
+    expect(legacyGaugeSpanLabel(tolerance)).toBe("3 tolerance thresholds (210 Mgas)");
+    expect(legacyGaugeTitle(tolerance)).toBe("one threshold = tolerance × speed limit = 70 Mgas; below it the pricer charges nothing at all");
+    const zero = legacyGauge({ speedLimit: 7_000_000, inertia: 102, tolerance: 0 }, 1_000_000_000);
+    expect(legacyGaugeSpanLabel(zero)).toBe("2 units of x (1.43 Ggas)");
+    expect(legacyGaugeTitle(zero)).toBe("one unit = inertia × speed limit = 714 Mgas; each full unit adds 1.0 to x");
+    const nothing = legacyGauge({ speedLimit: 0, inertia: 0, tolerance: 0 }, 5);
+    expect(legacyGaugeSpanLabel(nothing)).toBe("no scale (zero inertia or speed limit)");
+    expect(legacyGaugeTitle(nothing)).toBe("no scale: the inertia or the speed limit is zero");
   });
 });

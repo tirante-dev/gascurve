@@ -45,9 +45,10 @@ describe("the chart registry", () => {
 
   it("only asks for a constraint where one chart is drawn per constraint", () => {
     expect(CHART_VIEWS.filter((v) => v.constraint).map((v) => v.id)).toEqual(["backlog-sawtooth", "backlogs"]);
-    expect(CHART_VIEWS.filter((v) => v.live).map((v) => v.id)).toEqual(["base-fee", "backlog-sawtooth", "taylor"]);
-    expect(CHART_VIEWS.filter((v) => v.range === "series").map((v) => v.id)).toEqual(["contribution", "gas-per-second", "backlogs", "fee-flows", "l1"]);
-    expect(CHART_VIEWS.filter((v) => v.range === "hero").map((v) => v.id)).toEqual(["base-fee"]);
+    expect(CHART_VIEWS.filter((v) => v.live).map((v) => v.id)).toEqual(["base-fee", "backlog-sawtooth", "gas-per-second", "taylor"]);
+    expect(CHART_VIEWS.filter((v) => v.range === "series").map((v) => v.id)).toEqual(["contribution", "backlogs", "fee-flows", "l1"]);
+    // Both hero charts take the hero's ranges: the block ring first, then the api's.
+    expect(CHART_VIEWS.filter((v) => v.range === "hero").map((v) => v.id)).toEqual(["base-fee", "gas-per-second"]);
   });
 
   it("looks a chart up by id and knows when there is none", () => {

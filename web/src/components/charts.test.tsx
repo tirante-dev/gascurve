@@ -49,6 +49,8 @@ function point(overrides: Partial<SeriesPoint>): SeriesPoint {
 const series: Series = {
   range: "24h",
   resolution: "1m",
+  from: 1788679200,
+  to: 1788679380,
   constraintSets: [
     { id: 5, effectiveBlock: 10, effectiveAt: "2026-09-01T16:33:00Z", source: "owner_action", constraints: [{ target: 60_000_000, window: 15, startingBacklog: 0 }, { target: 30_000_000, window: 86_400, startingBacklog: 0 }] },
     { id: 6, effectiveBlock: 20, effectiveAt: "2026-09-03T17:08:00Z", source: "owner_action", constraints: [{ target: 60_000_000, window: 15, startingBacklog: 0 }, { target: 40_000_000, window: 86_400, startingBacklog: 0 }] },
@@ -86,10 +88,28 @@ describe("SeriesCharts", () => {
     expect(screen.getAllByText("C2 · 30 Mgas/s · 24 h · set 5 (from block 10)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("C2 · 40 Mgas/s · 24 h · set 6 (from block 20)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("unknown split (total x, constraint set unknown)").length).toBeGreaterThan(0);
-        expect(screen.getByText("target C2 (stepped, per set)")).toBeInTheDocument();
+    // The rate against each target is drawn in the hero now, on the hero's own
+    // range, so the history section no longer repeats it.
+    expect(screen.queryByText("Gas per second against each target")).toBeNull();
     expect(screen.getByText("C2 · 30 Mgas/s · 24 h (set 5) then 40 Mgas/s · 24 h (set 6)")).toBeInTheDocument();
     // The owner action is listed with a zoned timestamp.
     expect(screen.getByText("2026-09-06 02:21 CDT")).toBeInTheDocument();
+  });
+
+  it("draws the window that was asked for and shades what was never indexed", () => {
+    // An hour of window with only the last three minutes indexed: the buckets
+    // must not spread over the whole axis as though the hour were flat.
+    const early = { ...series, from: series.points[0].t - 3600, to: series.points[2].t + 60 };
+    render(<SeriesCharts network="robinhood" range="24h" series={early} loading={false} model="constraints" />);
+    // One caption per chart, saying what the shading is and where the record starts.
+    expect(screen.getAllByText("Shaded: not indexed yet, history before 2026-09-06 02:20 CDT").length).toBeGreaterThan(0);
+  });
+
+  it("breaks a line over a bucket that was never indexed rather than bridging it", () => {
+    const [a, b, c] = series.points;
+    const holed = { ...series, from: a.t, to: c.t + 3600, points: [a, b, { ...c, t: c.t + 3600 }] };
+    render(<SeriesCharts network="robinhood" range="24h" series={holed} loading={false} model="constraints" />);
+    expect(screen.getAllByText("Shaded: 1 gap with no buckets").length).toBeGreaterThan(0);
   });
 
   it("exposes every bucket in a table and lets the keyboard inspect any point", () => {
@@ -126,7 +146,7 @@ describe("SeriesCharts", () => {
     const { rerender } = render(<SeriesCharts network="robinhood" range="24h" series={null} loading model="constraints" />);
     expect(screen.getByText("Loading history.")).toBeInTheDocument();
     rerender(<SeriesCharts network="robinhood" range="24h" series={{ ...series, points: [] }} loading={false} model="constraints" />);
-    expect(screen.getByText("No buckets in this range yet.")).toBeInTheDocument();
+    expect(screen.getByText("Nothing indexed for this range yet.")).toBeInTheDocument();
     rerender(<SeriesCharts network="robinhood" range="24h" series={{ ...series, constraintSets: [], ownerActions: [], points: [point({ t: 1, exponentBips: 1260, constraintBips: [1260], backlogs: [7], backlogsMax: [7] })] }} loading={false} model="legacy" />);
     expect(screen.getAllByText("legacy backlog").length).toBeGreaterThan(0);
   });
@@ -366,7 +386,9 @@ describe("ConstraintCards", () => {
     const meter = screen.getByRole("meter");
     expect(meter.querySelectorAll("span").length).toBeLessThanOrEqual(24);
     expect(meter).toHaveAttribute("aria-valuenow", "100");
-    expect(screen.getByText("1,000,000,000 × 1 gas")).toBeInTheDocument();
+    // The far end says what it is, not what to multiply out.
+    expect(screen.getByText("1,000,000,000 windows of target (1 Ggas)")).toBeInTheDocument();
+    expect(meter).toHaveAttribute("title", "one window = target × window = 1 gas; each full window adds 1.0 to x");
     expect(screen.getByRole("meter", { name: /1,000,000,000 windows/ })).toBeInTheDocument();
   });
 
@@ -374,15 +396,15 @@ describe("ConstraintCards", () => {
     const { rerender } = render(<ConstraintCardsView network="robinhood" snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 0, backlog: 1_000_000_000 } }} values={null} blocks={[]} />);
     expect(screen.getByText("no free gas: every unit prices")).toBeInTheDocument();
     expect(screen.getByText("x = 1 at 714 Mgas")).toBeInTheDocument();
-    expect(screen.getByText("1.43 Ggas")).toBeInTheDocument();
+    expect(screen.getByText("2 units of x (1.43 Ggas)")).toBeInTheDocument();
     const meter = screen.getByRole("meter", { name: /units of inertia/ });
     expect(meter).toHaveAttribute("aria-valuenow", "70");
     expect(meter.querySelectorAll("span")).toHaveLength(1);
     // (1B * 10000) / 714M = 14005 bips.
     expect(screen.getByText(/x = 1.4005/)).toBeInTheDocument();
     rerender(<ConstraintCardsView network="robinhood" snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 0, tolerance: 0, backlog: 5 } }} values={null} blocks={[]} />);
+    expect(screen.getByText("no scale")).toBeInTheDocument();
     expect(screen.getByText("no scale (zero inertia or speed limit)")).toBeInTheDocument();
-    expect(screen.getByText("n/a")).toBeInTheDocument();
     expect(screen.getByRole("meter")).toHaveAttribute("aria-valuenow", "0");
     expect(screen.getByText(/x = 0.0000/)).toBeInTheDocument();
   });
@@ -441,17 +463,19 @@ describe("L1Section", () => {
   function costPoint(t: number, feesWei: string): SeriesPoint {
     return point({ t, feesWei, floorFeesWei: feesWei });
   }
-  const costSeries: Series = { range: "1h", resolution: "5s", constraintSets: [], ownerActions: [], points: [costPoint(1788679200, "250000000000000000"), costPoint(1788679205, "0")] };
+  const costSeries: Series = { range: "1h", resolution: "5s", from: 1788679200, to: 1788679210, constraintSets: [], ownerActions: [], points: [costPoint(1788679200, "250000000000000000"), costPoint(1788679205, "0")] };
   const batches: BatchSeries = {
     range: "1h",
     resolution: "batch",
+    from: 1788679200,
+    to: 1788679215,
     points: [
       { t: 1788679200, batches: 1, gasSpent: 1, weiSpent: "6000000000000", l1BaseFeeAvg: "1", calldataBytes: 1 },
       { t: 1788679212, batches: 1, gasSpent: 1, weiSpent: "4000000000000", l1BaseFeeAvg: "1", calldataBytes: 1 },
       { t: 1788679230, batches: 1, gasSpent: 1, weiSpent: "500000000000", l1BaseFeeAvg: "1", calldataBytes: 1 },
     ],
   };
-  const l1: L1Series = { range: "1h", points: [{ t: 1788679200, baseFeeEstimate: "2369608", surplus: "1", feesAvailable: "1", unitsSinceUpdate: 1 }] };
+  const l1: L1Series = { range: "1h", from: 1788679200, to: 1788679215, points: [{ t: 1788679200, baseFeeEstimate: "2369608", surplus: "1", feesAvailable: "1", unitsSinceUpdate: 1 }] };
   const l1Snapshot = {
     ...snapshot,
     l1: { baseFeeEstimate: "2369608", surplus: "190000000000000", feesAvailable: "1240000000000000", unitsSinceUpdate: 100, lastUpdateAt: "2026-09-06T07:20:00Z", equilibrationUnits: 160_000_000, perBatchGasCharge: 210_000, rewardRate: 10 },
@@ -483,8 +507,8 @@ describe("L1Section", () => {
   });
 
   it("shows the waiting copy before the slow sample and the empty state", () => {
-    getBatchesMock.mockResolvedValue({ range: "1h", resolution: "batch", points: [] });
-    getL1Mock.mockResolvedValue({ range: "1h", points: [] });
+    getBatchesMock.mockResolvedValue({ range: "1h", resolution: "batch", from: 1788679200, to: 1788679215, points: [] });
+    getL1Mock.mockResolvedValue({ range: "1h", from: 1788679200, to: 1788679215, points: [] });
     render(<L1Section network="robinhood" range="1h" snapshot={null} series={null} />);
     expect(screen.getByText(/L1 values arrive with the slow/)).toBeInTheDocument();
     expect(screen.getByText("No batch reports in this range.")).toBeInTheDocument();

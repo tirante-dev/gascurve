@@ -17,6 +17,7 @@ import {
   resolveChartRange,
   resolveConstraint,
 } from "@/lib/chartViews";
+import { emptyRangeNote } from "@/lib/gaps";
 import type { HeroRange } from "@/lib/hero";
 import type { ApiState } from "@/hooks/useApi";
 import type { LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
@@ -27,11 +28,11 @@ import { SawtoothPanel, shortWindowIndices } from "./ConstraintCards";
 import { FeeFlowChart, feeFlowLegend } from "./FeeFlows";
 import { HISTORY_OPTIONS } from "./HistoryTabs";
 import { L1CostChart, l1CostLegend, useL1Costs } from "./L1Section";
-import { HERO_RANGE_OPTIONS, HeroChartPanel, RESYNC_COPY, WAITING_COPY } from "./LiveHero";
+import { HERO_RANGE_OPTIONS, HeroChartPanel, HeroThroughputPanel, RESYNC_COPY, WAITING_COPY } from "./LiveHero";
 import { PageHeader } from "./PageHeader";
 import { Legend, Section, StatusPill } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
-import { BacklogChart, buildSeriesModel, ContributionChart, GasPerSecondChart } from "./SeriesCharts";
+import { BacklogChart, buildSeriesModel, ContributionChart } from "./SeriesCharts";
 import { TaylorChart } from "./TaylorChart";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -85,6 +86,27 @@ function BaseFeeBody({ live, range, series, model }: { live: SmoothedLive; range
   );
 }
 
+/**
+ * The throughput chart, enlarged: the live per-second view or a bucketed
+ * range, the same panel the hero draws under its base fee chart.
+ */
+function ThroughputBody({ live, range, series, model }: { live: SmoothedLive; range: HeroRange; series: ApiState<Series>; model: PricerModel }) {
+  const frame = useLiveFrame(live.frame);
+  return (
+    <HeroThroughputPanel
+      blocks={frame.blocks}
+      nowMs={frame.nowMs}
+      range={range}
+      series={series.data}
+      seriesLoading={series.loading}
+      seriesError={series.error}
+      model={model}
+      height={DETAIL_FRAME_CLASS}
+      minWidth={560}
+    />
+  );
+}
+
 /** One short window's backlog, enlarged, following the frame the way the card does. */
 function SawtoothBody({ live, index }: { live: SmoothedLive; index: number | null }) {
   const frame = useLiveFrame(live.frame);
@@ -108,7 +130,9 @@ function constraintChoices(viewId: string | null, takesConstraint: boolean, snap
 function seriesNote(series: ApiState<Series>): string | null {
   if (series.error !== null && series.data === null) return `Could not load history: ${series.error}`;
   if (series.data === null) return series.loading ? "Loading history." : "No history yet.";
-  if (series.data.points.length === 0) return "No buckets in this range yet.";
+  // An empty range says nothing about when indexing began, so the note is the
+  // bare one: the api's window carries no first point to name.
+  if (series.data.points.length === 0) return emptyRangeNote(null);
   return null;
 }
 
@@ -182,7 +206,9 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
       case "contribution":
         return { legend: m ? <Legend items={m.contributionLegend} /> : null, chart: m && note === null ? <ContributionChart m={m} height={DETAIL_FRAME_CLASS} /> : <ChartNote>{note}</ChartNote> };
       case "gas-per-second":
-        return { legend: m ? <Legend items={m.gasLegend} /> : null, chart: m && note === null ? <GasPerSecondChart m={m} height={DETAIL_FRAME_CLASS} /> : <ChartNote>{note}</ChartNote> };
+        // On Live the chart is the block ring, which has no constraint
+        // targets on it and so nothing for a legend to name.
+        return { legend: m && range !== "live" ? <Legend items={m.gasLegend} /> : null, chart: <ThroughputBody live={smooth} range={(range ?? "live") as HeroRange} series={series} model={model} /> };
       case "backlogs":
         return {
           chart:
@@ -195,14 +221,14 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
       case "fee-flows":
         return {
           legend: m ? <Legend items={feeFlowLegend(m.points.some((p) => p.unsplitFeesEth !== null))} /> : null,
-          chart: m && note === null ? <FeeFlowChart points={m.points} height={DETAIL_FRAME_CLASS} /> : <ChartNote>{note}</ChartNote>,
+          chart: m && note === null ? <FeeFlowChart points={m.points} gaps={m.gaps} height={DETAIL_FRAME_CLASS} /> : <ChartNote>{note}</ChartNote>,
         };
       case "l1":
         return {
           legend: <Legend items={l1CostLegend(l1.totals)} />,
           chart:
             l1.rows.length > 0 ? (
-              <L1CostChart rows={l1.rows} span={l1.span} domain={l1.domain} height={DETAIL_FRAME_CLASS} />
+              <L1CostChart rows={l1.rows} span={l1.span} domain={l1.domain} gaps={l1.gaps} height={DETAIL_FRAME_CLASS} />
             ) : (
               <ChartNote>{l1.batches.error !== null ? `Could not load batches: ${l1.batches.error}` : l1.batches.loading || series.loading ? "Loading batch reports." : "No batch reports in this range."}</ChartNote>
             ),

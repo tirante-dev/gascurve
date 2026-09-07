@@ -31,6 +31,7 @@ import {
   formatZone,
   formatX,
   gasParts,
+  gasScale,
   gasPerSecondParts,
   roundDecimal,
   secondsOfTarget,
@@ -96,6 +97,13 @@ describe("formatGas", () => {
     // held together by a non-breaking one.
     expect(unbroken(formatGas(60_000_000))).toBe("60\u00a0Mgas");
     expect(unbroken("402,113 gas")).toBe("402,113\u00a0gas");
+  });
+  it("names the band a figure sits in, so an axis can label every tick in one unit", () => {
+    expect(gasScale(41_000_000)).toEqual({ divisor: 1e6, prefix: "M" });
+    expect(gasScale(2_000_000_000)).toEqual({ divisor: 1e9, prefix: "G" });
+    expect(gasScale(11_194_391_810_886)).toEqual({ divisor: 1e12, prefix: "T" });
+    expect(gasScale(812_345)).toEqual({ divisor: 1, prefix: "" });
+    expect(gasScale(0)).toEqual({ divisor: 1, prefix: "" });
   });
   it("puts the rate on the unit too, so no letter is ever stranded beside a number", () => {
     expect(formatGasPerSecond(60_000_000)).toBe("60 Mgas/s");

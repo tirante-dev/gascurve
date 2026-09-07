@@ -30,6 +30,8 @@ const networks: Network[] = [
 const batches: BatchSeries = {
   range: "24h",
   resolution: "1m",
+  from: 1788679200,
+  to: 1788679320,
   points: [
     { t: 1788679200, weiSpent: "1000000000000000", batches: 1, gasSpent: 1, l1BaseFeeAvg: "1000000000", calldataBytes: 1 },
     { t: 1788679260, weiSpent: "2000000000000000", batches: 1, gasSpent: 1, l1BaseFeeAvg: "1000000000", calldataBytes: 1 },
@@ -98,6 +100,8 @@ const constraintSet = {
 const series: Series = {
   range: "24h",
   resolution: "1m",
+  from: 1788679200,
+  to: 1788679320,
   constraintSets: [constraintSet],
   ownerActions: [],
   points: [1788679200, 1788679260].map((t) => ({
@@ -191,7 +195,8 @@ describe("a chart on a page of its own", () => {
     query = "range=30d";
     render(<ChartDetail network="robinhood" chart="contribution" />);
     expect(within(screen.getByRole("tablist", { name: "History range" })).getByRole("tab", { name: "30d" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("link", { name: "Gas per second" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=30d");
+    // The throughput chart takes the hero's ranges, and 30d is one of them.
+    expect(screen.getByRole("link", { name: "Gas/s" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=30d");
     expect(seriesCalls.at(-1)).toEqual(["robinhood", "30d"]);
   });
 
@@ -259,11 +264,14 @@ describe("a chart on a page of its own", () => {
   });
 
   it("says what is missing rather than drawing an empty chart", () => {
+    // A bucketed range, not Live: the throughput chart draws the block ring on
+    // Live and so has nothing to say about buckets there.
+    query = "range=24h";
     seriesData = null;
     render(<ChartDetail network="robinhood" chart="contribution" />);
     expect(screen.getByText("No history yet.")).toBeInTheDocument();
     seriesData = { ...series, points: [] };
     render(<ChartDetail network="robinhood" chart="gas-per-second" />);
-    expect(screen.getByText("No buckets in this range yet.")).toBeInTheDocument();
+    expect(screen.getAllByText("Nothing indexed for this range yet.").length).toBeGreaterThan(0);
   });
 });

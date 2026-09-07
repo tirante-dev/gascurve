@@ -849,6 +849,11 @@ export class MockWorld {
     return {
       range,
       resolution: spec.resolution,
+      // The window that was asked for, so a chart spans it whatever the
+      // collector has indexed of it. `all` reaches back to the first indexed
+      // point, and to `now` alone when nothing is indexed.
+      from: range === "all" ? (points[0]?.t ?? now) : from,
+      to: now,
       constraintSets: this.constraintSetsFor(from, now),
       ownerActions: this.ownerActionsFor(from, now),
       points,
@@ -877,7 +882,7 @@ export class MockWorld {
         calldataBytes: batches * batch.calldataBytes,
       });
     }
-    return { range, resolution: spec.resolution, points };
+    return { range, resolution: spec.resolution, from: range === "all" ? (points[0]?.t ?? now) : from, to: now, points };
   }
 
   l1Series(range: SeriesRange, now: number): L1Series {
@@ -894,7 +899,7 @@ export class MockWorld {
         unitsSinceUpdate: s.unitsSinceUpdate,
       });
     }
-    return { range, points };
+    return { range, from: range === "all" ? (points[0]?.t ?? now) : from, to: now, points };
   }
 
   /** Exponent from the live backlogs, for tests that check consistency with the pricer. */

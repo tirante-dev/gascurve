@@ -4,11 +4,13 @@ import { useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
 import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL, type ChartPoint } from "@/utils/chart";
+import { emptyRangeNote, gapModel, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
 import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, formatUsdFixed, freshUsdPrice, shortAddress } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
 import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
-import { Card, ChartFrame, HatchPattern, Label, Legend, Stat, type ChartHeight } from "./primitives";
+import { gapBands, GapNote } from "./ChartGaps";
+import { Card, ChartFrame, HatchPattern, Label, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
 
 const FLOOR_FILL = "var(--seq-2)";
 const SURPLUS_FILL = "var(--seq-8)";
@@ -90,28 +92,36 @@ export function feeFlowRows(unsplit: boolean): TooltipRow[] {
  * Fees per bucket in ETH, stacked by destination. Buckets whose split
  * predates the record are hatched rather than assigned to either account.
  */
-export function FeeFlowChart({ points, height = FEE_CHART_HEIGHT }: { points: ChartPoint[]; height?: ChartHeight }) {
-  const span = spanSeconds(points);
+export function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT }: { points: ChartPoint[]; gaps?: GapModel; height?: ChartHeight }) {
+  const window = gaps.window.to > gaps.window.from ? gaps.window : { from: points[0]?.t ?? 0, to: (points[points.length - 1]?.t ?? 0) + gaps.step };
+  const span = window.to > window.from ? window.to - window.from : spanSeconds(points);
   const unsplit = points.some((p) => p.unsplitFeesEth !== null);
+  // Empty rows inside the holes, so a bucket that was never indexed breaks the
+  // stack rather than reading as a bucket that collected nothing.
+  const rows = withGapBreaks(points, gaps.gaps);
   return (
-    <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as the floor part and the congestion part, hatched where the split predates the record">
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={points} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
-          <defs>
-            <HatchPattern id={UNSPLIT_PATTERN_ID} color={UNKNOWN_COLOR} />
-          </defs>
-          <CartesianGrid vertical={false} />
-          <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
-          <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
-          <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={feeFlowRows(unsplit)} />} />
-          <Area type="monotone" dataKey="floorFeesEth" stackId="fees" connectNulls={false} stroke={FLOOR_FILL} strokeWidth={1} fill={FLOOR_FILL} fillOpacity={0.6} isAnimationActive={false} activeDot={false} />
-          <Area type="monotone" dataKey="surplusFeesEth" stackId="fees" connectNulls={false} stroke={SURPLUS_FILL} strokeWidth={1} fill={SURPLUS_FILL} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
-          {unsplit ? (
-            <Area type="monotone" dataKey="unsplitFeesEth" stackId="fees" connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={1} strokeDasharray="4 3" fill={`url(#${UNSPLIT_PATTERN_ID})`} isAnimationActive={false} activeDot={false} />
-          ) : null}
-        </AreaChart>
-      </ResponsiveContainer>
-    </ChartFrame>
+    <>
+      <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as the floor part and the congestion part, hatched where the split predates the record">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={rows} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+            <defs>
+              <HatchPattern id={UNSPLIT_PATTERN_ID} color={UNKNOWN_COLOR} />
+            </defs>
+            <CartesianGrid vertical={false} />
+            {gapBands(gaps.gaps, window)}
+            <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
+            <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
+            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={feeFlowRows(unsplit)} />} />
+            <Area type="monotone" dataKey="floorFeesEth" stackId="fees" connectNulls={false} stroke={FLOOR_FILL} strokeWidth={1} fill={FLOOR_FILL} fillOpacity={0.6} isAnimationActive={false} activeDot={false} />
+            <Area type="monotone" dataKey="surplusFeesEth" stackId="fees" connectNulls={false} stroke={SURPLUS_FILL} strokeWidth={1} fill={SURPLUS_FILL} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
+            {unsplit ? (
+              <Area type="monotone" dataKey="unsplitFeesEth" stackId="fees" connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={1} strokeDasharray="4 3" fill={`url(#${UNSPLIT_PATTERN_ID})`} isAnimationActive={false} activeDot={false} />
+            ) : null}
+          </AreaChart>
+        </ResponsiveContainer>
+      </ChartFrame>
+      <GapNote gaps={gaps} />
+    </>
   );
 }
 
@@ -129,6 +139,7 @@ export function feeFlowLegend(unsplit: boolean) {
 /** Fee account balances as sampled counters, and fees per bucket from the history split by the floor in force at each block. */
 export function FeeFlows({ network, range, snapshot, series, explorerUrl, model = "unknown", nowMs }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null; explorerUrl?: string; model?: PricerModel; /** Wall clock of the page's ticker: what the quote's age is measured against. */ nowMs: number }) {
   const points = useMemo(() => (series ? buildChartPoints(series, model) : []), [series, model]);
+  const gaps = useMemo(() => (series ? gapModel(series, points) : NO_GAPS), [series, points]);
   // The same rule the live tiles follow: no quote, or one older than ten minutes, and the totals stay in ETH alone.
   const usdPerEth = freshUsdPrice(snapshot?.ethUsd, nowMs);
   const totals = useMemo(() => (series ? feeTotals(series) : null), [series]);
@@ -178,7 +189,7 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
           </div>
           {points.length > 0 ? (
             <>
-              <FeeFlowChart points={points} />
+              <FeeFlowChart points={points} gaps={gaps} />
               <details className="mt-2 text-xs text-ink-2" onToggle={(e) => setTableOpen((e.currentTarget as HTMLDetailsElement).open)}>
                 <summary className="cursor-pointer select-none">Data table ({formatInteger(points.length)} buckets)</summary>
                 {tableOpen ? (
@@ -211,7 +222,7 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
               </details>
             </>
           ) : (
-            <div className="text-sm text-ink-2">No history loaded.</div>
+            <div className="text-sm text-ink-2">{series ? emptyRangeNote(gaps.first) : "No history loaded."}</div>
           )}
         </div>
       </Card>

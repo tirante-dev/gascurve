@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api/core";
 import { baseFeeFromExponent, constraintExponentBips, contributionsBips, step, toState } from "@/lib/pricer";
-import type { BlockPoint, ConstraintsResponse, LiveSnapshot, Network, OwnerAction, Series, ServerMessage, StatusResponse } from "@/types";
+import type { BatchSeries, BlockPoint, ConstraintsResponse, L1Series, LiveSnapshot, Network, OwnerAction, Series, ServerMessage, StatusResponse } from "@/types";
 import { findMockDef, findMockWorld, MOCK_NETWORKS, MockWebSocket, mockNow, mockRequest, resetMockWorlds } from "./index";
 import { Demand, hash01, isoToUnix, MockWorld } from "./world";
 import { ROBINHOOD } from "./defs";
@@ -495,6 +495,29 @@ describe("mockRequest", () => {
     expect(status.networks).toHaveLength(3);
     expect(status.version).toBe("0.0.0-mock");
     expect(await mockRequest("/health")).toEqual({ ok: true });
+  });
+
+  it("answers with the window it was asked for, so a chart can span it", async () => {
+    const now = Math.floor(NOW_MS / 1000);
+    const day = await mockRequest<Series>("/networks/robinhood/series", { range: "24h" });
+    expect(day.to).toBe(now);
+    expect(day.from).toBe(now - 86_400);
+    expect(day.points[0].t).toBeGreaterThanOrEqual(day.from);
+    // "all" reaches back to the first indexed bucket, not to a fixed span.
+    const all = await mockRequest<Series>("/networks/robinhood/series", { range: "all" });
+    expect(all.from).toBe(all.points[0].t);
+    expect(all.to).toBe(now);
+    // The batch and L1 series carry the same window.
+    const batches = await mockRequest<BatchSeries>("/networks/robinhood/batches", { range: "1h" });
+    expect(batches.from).toBe(now - 3600);
+    expect(batches.to).toBe(now);
+    const allBatches = await mockRequest<BatchSeries>("/networks/robinhood/batches", { range: "all" });
+    expect(allBatches.from).toBe(allBatches.points[0].t);
+    const l1 = await mockRequest<L1Series>("/networks/robinhood/l1", { range: "24h" });
+    expect(l1.from).toBe(now - 86_400);
+    expect(l1.to).toBe(now);
+    const allL1 = await mockRequest<L1Series>("/networks/robinhood/l1", { range: "all" });
+    expect(allL1.from).toBe(allL1.points[0].t);
   });
 
   it("returns typed errors", async () => {
