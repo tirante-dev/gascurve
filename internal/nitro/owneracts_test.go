@@ -176,6 +176,11 @@ func TestDecodeOwnerCalldata(t *testing.T) {
 	if err != nil || method != "setPerBatchGasCharge" || args["cost"] != int64(-1) {
 		t.Fatalf("int64: %s %v %v", method, args, err)
 	}
+	sel = Selector(SigSetParentGasFloorPerToken)
+	method, args, _, _, err = DecodeOwnerCalldata(append(sel[:], encodeUint64(10)...))
+	if err != nil || method != "setParentGasFloorPerToken" || args["gasFloorPerToken"] != uint64(10) {
+		t.Fatalf("parent floor: %s %v %v", method, args, err)
+	}
 	sel = Selector("setL1PricingEquilibrationUnits(uint256)")
 	method, args, _, mbf, err := DecodeOwnerCalldata(append(sel[:], encodeUint64(5)...))
 	if err != nil || method != "setL1PricingEquilibrationUnits" || args["equilibrationUnits"] != "5" || mbf != nil {

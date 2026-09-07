@@ -943,7 +943,7 @@ func (m *MemStore) BatchReports(_ context.Context, chainID uint64, from, to time
 	}
 	var out []db.BatchReport
 	for _, r := range m.ReportRows {
-		if r.ChainID == chainID && !r.BatchTS.Before(from) && r.BatchTS.Before(to) {
+		if r.CostCalculationVersion == 1 && r.ChainID == chainID && !r.BatchTS.Before(from) && r.BatchTS.Before(to) {
 			out = append(out, r)
 		}
 	}
@@ -967,7 +967,7 @@ func (m *MemStore) BatchBuckets(_ context.Context, chainID uint64, from, to time
 	agg := map[int64]*db.BatchBucket{}
 	sums := map[int64]*big.Int{}
 	for _, r := range m.ReportRows {
-		if r.ChainID != chainID || r.BatchTS.Before(from) || !r.BatchTS.Before(to) {
+		if r.CostCalculationVersion != 1 || r.ChainID != chainID || r.BatchTS.Before(from) || !r.BatchTS.Before(to) {
 			continue
 		}
 		k := (r.BatchTS.Unix() / secs) * secs

@@ -111,6 +111,7 @@ func setupChain(f *fakeRPC) {
 	f.setCall(SigGetInfraFeeAccount, addrWord("0x5a2b80a9b7effc06129bd5462d77bc20a8a59be7"))
 	f.setCall(SigGetNetworkFeeAccount, addrWord("0xbc5c3a7adecf54d34169fd90dbd1b7d3142df067"))
 	f.setCall(SigArbOSVersion, wordsOf(116))
+	f.setCall(SigGetParentGasFloorPerToken, wordsOf(10))
 }
 
 func TestTypedCalls(t *testing.T) {
@@ -352,9 +353,27 @@ func TestL1SampleAndFeeAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if l1.BaseFeeEstimate.Int64() != 2_369_608 || l1.Surplus.Int64() != -1 || l1.FeesAvailable.Int64() != 190_000_000_000_000 ||
-		l1.UnitsSinceUpdate != 1234 || l1.LastUpdateTime != 1_700_000_000 || l1.EquilibrationUnits != 160_000_000 || l1.PerBatchGasCharge != 210_000 || l1.RewardRate != 10 {
+		l1.UnitsSinceUpdate != 1234 || l1.LastUpdateTime != 1_700_000_000 || l1.EquilibrationUnits != 160_000_000 || l1.PerBatchGasCharge != 210_000 || l1.RewardRate != 10 ||
+		l1.ArbOSVersion != 61 || l1.ParentGasFloorPerToken != 10 {
 		t.Fatalf("l1: %+v", l1)
 	}
+	f.callTags = nil
+	if _, err := c.L1SampleAt(ctx, 123); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range f.callTags {
+		if tag != blockTag(123) {
+			t.Fatalf("L1SampleAt call tag = %q", tag)
+		}
+	}
+	f.setCall(SigArbOSVersion, wordsOf(104))
+	f.setCallErr(SigGetParentGasFloorPerToken, &RPCError{Code: -32601, Message: "not available"})
+	pre50, err := c.L1Sample(ctx)
+	if err != nil || pre50.ArbOSVersion != 49 || pre50.ParentGasFloorPerToken != 0 {
+		t.Fatalf("pre-50 L1 sample: %+v %v", pre50, err)
+	}
+	delete(f.callErrs, SelectorHex(SigGetParentGasFloorPerToken))
+	f.setCall(SigArbOSVersion, wordsOf(116))
 	acc, err := c.FeeAccounts(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -365,7 +384,7 @@ func TestL1SampleAndFeeAccounts(t *testing.T) {
 
 	sigs := []string{
 		SigGetL1BaseFeeEstimate, SigGetL1PricingSurplus, SigGetL1FeesAvailable, SigGetL1PricingUnitsSinceUpdate,
-		SigGetLastL1PricingUpdateTime, SigGetL1PricingEquilibrationUnit, SigGetPerBatchGasCharge, SigGetL1RewardRate,
+		SigGetLastL1PricingUpdateTime, SigGetL1PricingEquilibrationUnit, SigGetPerBatchGasCharge, SigGetL1RewardRate, SigArbOSVersion, SigGetParentGasFloorPerToken,
 	}
 	for _, sig := range sigs {
 		f.setCallErr(sig, &RPCError{Code: 1, Message: "x"})
@@ -482,6 +501,13 @@ func TestParseHeaderErrors(t *testing.T) {
 	if err != nil || b.BaseFee.Sign() != 0 || b.TxCount != 0 {
 		t.Fatalf("minimal header: %+v %v", b, err)
 	}
+	b, err = parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1","mixHash":"0x00000000000000000000000000000000000000000000003d0000000000000000"}`))
+	if err != nil || b.ArbOSVersion != 61 {
+		t.Fatalf("ArbOS version from mixHash: %+v %v", b, err)
+	}
+	if _, err := parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1","mixHash":"0x01"}`)); err == nil {
+		t.Fatal("short mixHash")
+	}
 	for _, c := range []string{
 		`[{"data":"0xzz"}]`,
 		`[{"data":"0x","blockNumber":"zz"}]`,
@@ -508,7 +534,7 @@ func TestParseHeaderErrors(t *testing.T) {
 }
 
 // TestTypedBatchesAreChunked: every typed request list goes through the
-// endpoint's chunker, not straight to Batch, so an eight-call L1 sample on
+// endpoint's chunker, not straight to Batch, so a ten-call L1 sample on
 // a four calls per second budget is split into what the bulk share holds
 // rather than overdrawing the bucket and eating the fast reserve.
 func TestTypedBatchesAreChunked(t *testing.T) {
@@ -535,10 +561,10 @@ func TestTypedBatchesAreChunked(t *testing.T) {
 	if _, err := p.L1Sample(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Eight getters, seven of which the bulk share holds: two requests, no
+	// Ten getters, seven of which the bulk share holds: two requests, no
 	// throttling, and the fast reserve untouched.
 	if n := f.requestCount() - before; n != 2 {
-		t.Fatalf("the eight L1 getters must be split: %d requests", n)
+		t.Fatalf("the ten L1 getters must be split: %d requests", n)
 	}
 	if p.Stats().RateLimitEvents != 0 {
 		t.Fatalf("chunked batches must not be refused: %+v", p.Stats())

@@ -89,9 +89,9 @@ func seed(t *testing.T) *dbtest.MemStore {
 	})
 	must(err)
 	must(s.UpsertBatchReports(ctx, []db.BatchReport{
-		{ChainID: robinhood, BlockNumber: 1005, BatchNumber: 1, BatchTS: now.Add(-10 * time.Minute), Poster: "0xp", CalldataLen: 100, GasSpent: 1000, WeiSpent: db.WeiFromUint64(5000), L1BaseFee: db.WeiFromUint64(5)},
-		{ChainID: robinhood, BlockNumber: 1015, BatchNumber: 2, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 50, GasSpent: 500, WeiSpent: db.WeiFromUint64(1500), L1BaseFee: db.WeiFromUint64(3)},
-		{ChainID: robinhood, BlockNumber: 1016, BatchNumber: 3, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 8, GasSpent: 7, WeiSpent: db.WeiFromUint64(77), L1BaseFee: db.WeiFromUint64(9)},
+		{ChainID: robinhood, BlockNumber: 1005, BatchNumber: 1, BatchTS: now.Add(-10 * time.Minute), Poster: "0xp", CalldataLen: 100, GasSpent: 1000, WeiSpent: db.WeiFromUint64(5000), L1BaseFee: db.WeiFromUint64(5), CostCalculationVersion: 1},
+		{ChainID: robinhood, BlockNumber: 1015, BatchNumber: 2, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 50, GasSpent: 500, WeiSpent: db.WeiFromUint64(1500), L1BaseFee: db.WeiFromUint64(3), CostCalculationVersion: 1},
+		{ChainID: robinhood, BlockNumber: 1016, BatchNumber: 3, BatchTS: now.Add(-9 * time.Minute), Poster: "0xp", CalldataLen: 8, GasSpent: 7, WeiSpent: db.WeiFromUint64(77), L1BaseFee: db.WeiFromUint64(9), CostCalculationVersion: 1},
 	}))
 	must(s.SetState(ctx, robinhood, db.StateRateLimitEvents, "4"))
 	must(s.SetState(ctx, robinhood, db.StateLast429At, "2026-09-06T07:00:00Z"))
@@ -1387,7 +1387,7 @@ func TestBatchesOneHourBounds(t *testing.T) {
 		t.Fatalf("empty one hour window: %d..%d %+v", s.From, s.To, s.Points)
 	}
 	if err := store.UpsertBatchReports(ctx, []db.BatchReport{{ChainID: robinhood, BlockNumber: 10, BatchNumber: 1, BatchTS: now.Add(-time.Minute),
-		Poster: "0x1", CalldataLen: 8, L1BaseFee: db.WeiFromUint64(9), GasSpent: 3, WeiSpent: db.WeiFromUint64(77)}}); err != nil {
+		Poster: "0x1", CalldataLen: 8, L1BaseFee: db.WeiFromUint64(9), GasSpent: 3, WeiSpent: db.WeiFromUint64(77), CostCalculationVersion: 1}}); err != nil {
 		t.Fatal(err)
 	}
 	if s := batches(t); len(s.Points) != 1 || s.From != from || s.To != to {

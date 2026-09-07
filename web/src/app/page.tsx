@@ -20,7 +20,7 @@ export default function IndexPage() {
       <h1 className="vw-wordmark text-2xl sm:text-3xl">gascurve</h1>
       <p className="mt-2 text-[11px] uppercase tracking-[0.18em] text-label">{SITE_TAGLINE}</p>
       <p className="mt-6 max-w-[70ch] text-ink-2">
-        Live and historical gas prices for {PRIMARY_NETWORK_NAME}: the multi-constraint base fee pricer, its backlogs, owner parameter changes, fee destinations and L1 posting costs.
+        Live and historical gas prices for {PRIMARY_NETWORK_NAME}: the multi-constraint base fee pricer, its backlogs, owner parameter changes, fee destinations and ArbOS-attributed batch costs.
       </p>
       <p className="mt-6">
         <Link href={`/${PRIMARY_NETWORK}`} className="text-accent-2-text underline">

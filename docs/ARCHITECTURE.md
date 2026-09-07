@@ -84,7 +84,7 @@ Replay validation vector (Robinhood, 2026-09-06): constraints `[60e6,15,3_111_50
 
 `Exponent` per constraint (`c.Backlog / (c.Window*c.Target)` in bips) is exposed to the API as `exponentBips` so the UI can show each constraint's share.
 
-Replay comparison: ArbOS computes the fee in block N's `startBlock` and it applies to header N+1's `baseFeePerGas`; the replay compares `predicted(N)` with header N, so `replayErrorBips` carries at most one block of lag. The EIP-7623 floor is not applied to batch-report `gasSpent`.
+Replay comparison: ArbOS computes the fee in block N's `startBlock` and it applies to header N+1's `baseFeePerGas`; the replay compares `predicted(N)` with header N, so `replayErrorBips` carries at most one block of lag. Batch-report `gasSpent` is separate and reproduces Nitro's report-version path, including the effective per-batch charge and the ArbOS 50+ parent calldata floor.
 
 ## 4. Database (PostgreSQL 16, migrations in `internal/db/migrations`)
 
@@ -118,11 +118,14 @@ owner_actions       (chain_id, block_number, tx_hash, tx_index INT NULL /* null 
                      PK(chain_id, tx_hash, log_index))
 constraint_sets     (id SERIAL PK, chain_id, effective_block, effective_at, constraints JSONB, source TEXT /* 'genesis'|'owner_action'|'observed' */)
 batch_reports       (chain_id, block_number, batch_number, batch_ts, poster, calldata_len, calldata_nonzero,
-                     extra_gas, l1_base_fee NUMERIC, gas_spent BIGINT, wei_spent NUMERIC, PK(chain_id, block_number))
+                     extra_gas, l1_base_fee NUMERIC, gas_spent BIGINT and wei_spent NUMERIC /* compatibility columns */,
+                     report_version, arbos_version, per_batch_gas_charge, parent_gas_floor_per_token,
+                     cost_calculation_version, attributed_gas_spent BIGINT, attributed_wei_spent NUMERIC,
+                     PK(chain_id, block_number))
 missing_ranges      (chain_id, from_block, to_block, detected_at, lifecycle /* pending|retrying|blocked */, reason,
                      cursor, replay_state JSONB, folded, retry_count, last_attempt_at, next_retry_at, last_error,
                      predecessor_at, successor_at, cursor_at, created_at, updated_at, PK(chain_id, from_block))
-collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor, endpoints, generation (bumped by every rewind and by a history rebuild; writers that fetched outside the lock re-check it before committing), rpc_capacity, eth_usd, history_epoch. A legacy holes key is deleted only after its JSON has been imported into missing_ranges successfully
+collector_state     (chain_id, key, value TEXT, updated_at, PK(chain_id, key))   -- checkpoints: head, live_start, backfill_cursor (with top), owner_log_cursor, owner_scan_through, owner_scan_origin, batch_scan_cursor_v2, endpoints, generation (bumped by every rewind and by a history rebuild; writers that fetched outside the lock re-check it before committing), rpc_capacity, eth_usd, history_epoch. A legacy holes key is deleted only after its JSON has been imported into missing_ranges successfully
 ```
 
 `NOTIFY gascurve_live, '<json>'` is issued by the collector after each tick with the `LiveSnapshot` below (payloads stay under 8 kB; `recentBlocks` is not included in the notify payload, the API keeps its own ring buffer from `blocks` rows).
@@ -184,7 +187,7 @@ Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_orig
 | `GET /networks/{network}/series?range=1h\|24h\|30d\|all` | `Series` (see below) |
 | `GET /networks/{network}/constraints` | `{ current: ConstraintSet \| null, history: ConstraintSet[] }` (`null` whenever the latest state sample's model is not `constraints`, or before any set is known; `history` is still returned) |
 | `GET /networks/{network}/owner-actions` | `OwnerAction[]` newest first |
-| `GET /networks/{network}/batches?range=…` | `BatchSeries` (L1 cost per bucket, batch cadence) |
+| `GET /networks/{network}/batches?range=…` | `BatchSeries` (ArbOS-attributed batch-posting cost per bucket, not Ethereum receipt totals, plus batch cadence) |
 | `GET /networks/{network}/l1?range=…` | `L1Series` (pricer getters over time, from state samples) |
 | `GET /status` | `{ version, listener: { ready, reconnects, lastError }, networks: [{ name, chainId, enabled, headBlock, headAt, lagSeconds, lastSampleAt, lastError, rateLimitEvents, last429At, backfillCursor, arbosVersion, degraded, capacity: { configuredCallsPerSecond, requiredCallsPerSecond, observedCallsPerSecond, headroomCallsPerSecond, saturated, at, checkpointError }, holes: { pending, blocks, unfillable, retrying, oldestAgeSeconds, checkpointError }, activeEndpoint, failovers, endpoints: [{ index, ws, archive, disabled, error: string | null, wsCooling, wsError: string | null }] }] }` (`listener.lastError` is null while its PostgreSQL LISTEN connection is ready. `listener.reconnects` counts successful recoveries after startup. `headAt`, `lagSeconds`, `lastSampleAt`, `last429At`, `backfillCursor`, `arbosVersion`, `capacity.at` and unlimited capacity headroom are nullable; `endpoints` is `[]` when unknown; endpoint URLs are never exposed, in `error` and `wsError` either. `wsCooling` reports an endpoint whose WebSocket is cooled down after a dial, subscribe or repeated disconnect failure: its JSON-RPC keeps serving ordinary calls while the head subscription moves to another endpoint. `holes.pending` counts pending and retrying rows, `holes.unfillable` counts blocked rows, `holes.blocks` is the remaining block count, and `holes.oldestAgeSeconds` exposes the age of the oldest range. A checkpoint decode failure sets the related `checkpointError` instead of reporting no gaps.) |
 | `GET /ws?network=…` | WebSocket, see §7 |
@@ -256,7 +259,7 @@ type OwnerAction = {
   args: Record<string, unknown>;           // decoded when the selector is known, else { raw: '0x…' }. setGasPricingConstraints: { constraints: [{ gasTargetPerSecond, adjustmentWindowSeconds, startingBacklog }] }; setMinimumL2BaseFee: { priceInWei: string }
 }
 
-type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; from: number; to: number; /* window as in Series */ /* 'batch' = exactly one point per report, never grouped, used for 1h */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
+type BatchSeries = { range: string; resolution: 'batch' | '1m' | '15m' | '1h'; from: number; to: number; /* window as in Series */ /* 'batch' = exactly one point per report, never grouped, used for 1h; gasSpent and weiSpent are ArbOS-attributed values, not receipt totals */ points: { t: number; batches: number; gasSpent: number; weiSpent: string; l1BaseFeeAvg: string; calldataBytes: number }[] }
 type L1Series = { range: string; from: number; to: number; /* window as in Series */ points: { t: number; baseFeeEstimate: string; surplus: string; feesAvailable: string; unitsSinceUpdate: number }[] }
 ```
 

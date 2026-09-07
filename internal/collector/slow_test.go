@@ -190,7 +190,7 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	if err := f.SlowTick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if rpc.calledTimes("BlockNumber") != 1 || rpc.logRanges[0][0] != 70_000_000 {
+	if rpc.calledTimes("BlockNumber") != 2 || rpc.logRanges[0][0] != 70_000_000 {
 		t.Fatalf("large chain scan start: %v", rpc.logRanges)
 	}
 	if v, _, _ := store.GetState(ctx, 4663, db.StateOwnerScanOrigin); v != `{"block":70000000,"archive":false}` || f.scanOrigin == nil || f.scanOrigin.Archive {
@@ -221,7 +221,7 @@ func TestSlowTickLargeChainAndLegacy(t *testing.T) {
 	if len(archive.sampleAt) != 1 || archive.sampleAt[0] != 70_000_000 {
 		t.Fatalf("origin sample = %v", archive.sampleAt)
 	}
-	if v, _, _ := storeA.GetState(ctx, 4663, db.StateOwnerScanOrigin); v != `{"block":70000000,"minBaseFee":"30000000","archive":true}` {
+	if v, _, _ := storeA.GetState(ctx, 4663, db.StateOwnerScanOrigin); v != `{"block":70000000,"minBaseFee":"30000000","archive":true,"batchCost":{"arbosVersion":61,"perBatchGasCharge":210000,"parentGasFloorPerToken":10}}` {
 		t.Fatalf("origin with archive: %q", v)
 	}
 	if fa.scanOrigin.replayFrom() != 70_000_001 || !fa.scanOrigin.fullState() {
@@ -393,7 +393,8 @@ func TestSlowTickBatchReportsAndPrune(t *testing.T) {
 		t.Fatalf("batch reports = %d", len(store.ReportRows))
 	}
 	r := store.ReportRows["4663/995"]
-	if r.BatchNumber != 201_900 || r.GasSpent != 29_036 || r.WeiSpent.Int64() != 73_500_000*29_036 || r.CalldataNonzero != 113 || r.BatchTS.Unix() != baseTime.Unix() {
+	if r.BatchNumber != 201_900 || r.GasSpent != 279_096 || r.WeiSpent.Int64() != 73_500_000*279_096 || r.CalldataNonzero != 113 || r.BatchTS.Unix() != baseTime.Unix() ||
+		r.ReportVersion != 2 || r.ArbOSVersion != 61 || r.PerBatchGasCharge != 210_000 || r.ParentGasFloorPerToken != 10 || r.CostCalculationVersion != 1 {
 		t.Fatalf("report row: %+v", r)
 	}
 	if v, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); v != "998" {
@@ -466,7 +467,7 @@ func TestSlowTickErrors(t *testing.T) {
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, method := range []string{"L1Sample", "FeeAccounts", "ArbOSVersion", "OwnerActsLogs", "HeaderByNumber", "BlocksWithTxs"} {
+	for _, method := range []string{"L1SampleAt", "FeeAccounts", "ArbOSVersion", "OwnerActsLogs", "HeaderByNumber", "BlocksWithTxs"} {
 		// Reset the cursors so every step has work to do.
 		delete(store.StateRows, "4663/"+db.StateOwnerLogCursor)
 		delete(store.StateRows, "4663/"+db.StateBatchScanCursor)
@@ -584,18 +585,117 @@ func TestSlowTickErrors(t *testing.T) {
 }
 
 func TestBatchReportOf(t *testing.T) {
-	b := nitro.Block{Txs: []nitro.Tx{
+	resolver := &batchCostResolver{anchor: batchCostAnchor{block: 10, params: nitro.BatchPostingCostParams{PerBatchGasCharge: 210_000}}}
+	b := nitro.Block{Header: nitro.Header{Number: 10, ArbOSVersion: 49}, Txs: []nitro.Tx{
 		{Type: 2, To: nitro.ArbosAddress, Input: []byte{1}},
 		{Type: nitro.InternalTxType, To: nitro.ArbosAddress, Input: []byte{1, 2}},
 		{Type: nitro.InternalTxType, To: nitro.ArbosAddress, Input: nitro.EncodeStartBlock(nitro.StartBlock{L1BaseFee: big.NewInt(1)})},
 	}}
-	if batchReportOf(1, b) != nil {
+	if r, err := batchReportOf(1, b, resolver); err != nil || r != nil {
 		t.Fatal("no report expected")
 	}
 	b.Txs = append(b.Txs, nitro.Tx{Type: nitro.InternalTxType, To: nitro.ArbosAddress, Input: nitro.EncodeBatchPostingReport(nitro.BatchPostingReport{Version: 1, BatchNumber: 4, L1BaseFee: big.NewInt(2), ExtraGas: 3})})
-	r := batchReportOf(1, b)
-	if r == nil || r.BatchNumber != 4 || r.GasSpent != 3 || r.WeiSpent.Int64() != 6 {
+	r, err := batchReportOf(1, b, resolver)
+	if err != nil || r == nil || r.BatchNumber != 4 || r.GasSpent != 210_003 || r.WeiSpent.Int64() != 420_006 {
 		t.Fatalf("report: %+v", r)
+	}
+}
+
+func TestBatchCostResolverHistoricalParameters(t *testing.T) {
+	perBatch100 := int64(100)
+	floor10 := uint64(10)
+	changes := []batchCostChange{
+		{block: 100, perBatchGas: &perBatch100},
+		{block: 150, parentFloor: &floor10},
+	}
+	r := &batchCostResolver{
+		anchor:  batchCostAnchor{block: 200, params: nitro.BatchPostingCostParams{PerBatchGasCharge: 100, ParentGasFloorPerToken: 10}},
+		changes: changes,
+	}
+	tests := []struct {
+		block     uint64
+		wantBatch int64
+		wantFloor uint64
+	}{
+		{50, 210_000, 0},
+		{120, 100, 0},
+		{175, 100, 10},
+	}
+	for _, tt := range tests {
+		got, err := r.paramsAt(tt.block, 61)
+		if err != nil || got.PerBatchGasCharge != tt.wantBatch || got.ParentGasFloorPerToken != tt.wantFloor || got.ArbOSVersion != 61 {
+			t.Fatalf("block %d: %+v %v", tt.block, got, err)
+		}
+	}
+
+	// A current snapshot also anchors a custom genesis value when no setter
+	// lies between the report and the snapshot.
+	r.changes = nil
+	r.anchor.params = nitro.BatchPostingCostParams{PerBatchGasCharge: 77, ParentGasFloorPerToken: 12}
+	if got, err := r.paramsAt(100, 61); err != nil || got.PerBatchGasCharge != 77 || got.ParentGasFloorPerToken != 12 {
+		t.Fatalf("current anchor: %+v %v", got, err)
+	}
+
+	// Without an archive origin, a setter after the report makes the value
+	// before it unknowable. Pre-ArbOS-50 reports do not need the floor.
+	r.origin = &scanOrigin{Block: 50}
+	r.changes = changes[1:]
+	if _, err := r.paramsAt(100, 61); err == nil || !strings.Contains(err.Error(), "parent gas floor") {
+		t.Fatalf("unknown pre-setter floor: %v", err)
+	} else if !errors.Is(err, errBatchCostUnreconstructable) {
+		t.Fatalf("unknown parameter error: %v", err)
+	}
+	if _, err := r.paramsAt(100, 49); err != nil {
+		t.Fatalf("pre-50 floor is irrelevant: %v", err)
+	}
+
+	// An archive snapshot supplies the exact baseline before later setters.
+	r.anchor.params.PerBatchGasCharge = 50
+	r.origin.BatchCost = &nitro.BatchPostingCostParams{PerBatchGasCharge: 50, ParentGasFloorPerToken: 5}
+	if got, err := r.paramsAt(100, 61); err != nil || got.PerBatchGasCharge != 50 || got.ParentGasFloorPerToken != 5 {
+		t.Fatalf("archive origin: %+v %v", got, err)
+	}
+	if _, err := r.paramsAt(201, 61); err == nil {
+		t.Fatal("report above anchor")
+	}
+}
+
+func TestDefaultPerBatchGasCharge(t *testing.T) {
+	// Nitro initializes the field at ArbOS 6 and replaces it during the
+	// ArbOS 11 upgrade. These are the baselines before owner setters.
+	for _, tt := range []struct {
+		version uint64
+		want    int64
+	}{
+		{5, 0},
+		{6, 100_000},
+		{10, 100_000},
+		{11, 210_000},
+	} {
+		if got := defaultPerBatchGasCharge(tt.version); got != tt.want {
+			t.Fatalf("ArbOS %d default = %d, want %d", tt.version, got, tt.want)
+		}
+	}
+}
+
+func TestBatchCostChangeOf(t *testing.T) {
+	if c, ok := batchCostChangeOf(10, "setPerBatchGasCharge", db.JSONB(`{"cost":-1}`)); !ok || c.perBatchGas == nil || *c.perBatchGas != -1 {
+		t.Fatalf("per-batch change: %+v %v", c, ok)
+	}
+	if c, ok := batchCostChangeOf(11, "setParentGasFloorPerToken", db.JSONB(`{"gasFloorPerToken":10}`)); !ok || c.parentFloor == nil || *c.parentFloor != 10 {
+		t.Fatalf("floor change: %+v %v", c, ok)
+	}
+	for _, tc := range []struct {
+		method string
+		args   db.JSONB
+	}{
+		{"setPerBatchGasCharge", db.JSONB(`{}`)},
+		{"setParentGasFloorPerToken", db.JSONB(`{bad`)},
+		{"setL1PricePerUnit", db.JSONB(`{"pricePerUnit":"1"}`)},
+	} {
+		if _, ok := batchCostChangeOf(1, tc.method, tc.args); ok {
+			t.Fatalf("unexpected change for %s/%s", tc.method, tc.args)
+		}
 	}
 }
 
@@ -676,6 +776,45 @@ func TestScanBatchReportsUnlimited(t *testing.T) {
 	}
 }
 
+func TestBatchScanSkipsOnlyUnreconstructableHistory(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(990)
+	report := func(number uint64) nitro.Block {
+		r := nitro.BatchPostingReport{Version: 2, BatchTimestamp: uint64(baseTime.Unix()), BatchNumber: number, CalldataLen: 1, CalldataNonZeros: 1, L1BaseFee: big.NewInt(1)}
+		return nitro.Block{Header: rpc.header(number), Txs: []nitro.Tx{
+			{Type: nitro.InternalTxType, To: nitro.ArbosAddress, Input: nitro.EncodeStartBlock(nitro.StartBlock{L1BaseFee: big.NewInt(0)})},
+			{Type: nitro.InternalTxType, To: nitro.ArbosAddress, Input: nitro.EncodeBatchPostingReport(r)},
+		}}
+	}
+	rpc.fullBlocks[995] = report(995)
+	rpc.fullBlocks[997] = report(997)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.net.CallsPerSecond = 0
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.setHead(1000)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	perBatch, floor := int64(210_000), uint64(10)
+	f.scanOrigin = &scanOrigin{Block: 990}
+	f.batchCostChanges = []batchCostChange{{block: 996, perBatchGas: &perBatch, parentFloor: &floor}}
+	if err := f.scanBatchReports(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.ReportRows["4663/995"]; ok {
+		t.Fatal("unreconstructable pre-setter report must not be stored")
+	}
+	if got, ok := store.ReportRows["4663/997"]; !ok || got.BatchNumber != 997 || got.CostCalculationVersion != 1 {
+		t.Fatalf("reconstructable report after setter: %+v", got)
+	}
+	if cursor, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); cursor != "1000" {
+		t.Fatalf("cursor = %q", cursor)
+	}
+}
+
 // TestBatchScanReEvaluatesAfterFailover: a batch scan decided on an
 // unlimited endpoint that fails over to a paced one stops reading every
 // block with full transactions and goes back to the two-transaction
@@ -692,6 +831,9 @@ func TestBatchScanReEvaluatesAfterFailover(t *testing.T) {
 		Now:   func() time.Time { return baseTime.Add(140 * time.Second) },
 		Sleep: func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
 	})
+	f.batchCostAnchor = &batchCostAnchor{block: ^uint64(0), params: nitro.BatchPostingCostParams{
+		ArbOSVersion: 61, PerBatchGasCharge: 210_000, ParentGasFloorPerToken: 10,
+	}}
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
