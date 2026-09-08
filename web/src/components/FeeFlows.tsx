@@ -203,8 +203,8 @@ export const FeeFlowChart = memo(function FeeFlowChart({ points, gaps = NO_GAPS,
               <PartialHatch />
             </defs>
             <CartesianGrid vertical={false} />
-            <GapBands gaps={gaps.gaps} window={window} />
-            <PartialBands bands={bands} window={window} />
+            <GapBands gaps={gaps.gaps} />
+            <PartialBands bands={bands} />
             <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={feeFlowRows(unsplit)} note={(r) => partialRowNote(r, true)} />} />

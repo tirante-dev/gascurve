@@ -23,7 +23,7 @@ import { L1Section } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
 import { buildSeriesModel, describeSplit, GasPerSecondChart, SeriesCharts } from "./SeriesCharts";
 import { LineChart, XAxis, YAxis } from "recharts";
-import { GAP_LABEL_MIN_SHARE, GapBands, PartialBands, PartialNote } from "./ChartGaps";
+import { BAND_CLASS, GAP_LABEL_MIN_SHARE, GapBands, MISSING_DASH, MISSING_FILL_OPACITY, MISSING_PATTERN_ID, MissingBands, PartialBands, PartialNote } from "./ChartGaps";
 import { partialBands } from "@/lib/partial";
 import type { Gap } from "@/lib/gaps";
 
@@ -790,7 +790,7 @@ describe("the band layer", () => {
 
   const rects = (container: HTMLElement, kind: string) => [...container.querySelectorAll(`rect[data-band="${kind}"]`)];
 
-  const gapChart = (gaps: Gap[]) => bandChart(<GapBands gaps={gaps} window={WINDOW} />);
+  const gapChart = (gaps: Gap[]) => bandChart(<GapBands gaps={gaps} />);
 
   it("clamps a band that runs past the window to the plot area", () => {
     const wide = rects(gapChart([{ from: -600, to: 1200, kind: "interior" }]), "gap");
@@ -813,15 +813,41 @@ describe("the band layer", () => {
     expect(within(gapChart([{ from: 0, to: 300, kind: "interior" }])).getByText("gap")).toBeInTheDocument();
   });
 
+  it("judges a band wide enough for its word by what is on screen, not by its own span", () => {
+    // A band running far off the left of the axis draws as a sliver. Its own
+    // span is most of a day, so the word has to be refused on the clamped width.
+    const sliver = gapChart([{ from: -100_000, to: 1, kind: "leading" }]);
+    expect(rects(sliver, "gap")).toHaveLength(1);
+    expect(within(sliver).queryByText("not indexed yet")).toBeNull();
+  });
+
+  it("puts the word in the label layer, above every mark, as the reference areas did", () => {
+    // A target line drawn through a band must not cross out what the band says.
+    const container = gapChart([{ from: 0, to: 600, kind: "interior" }]);
+    const label = within(container).getByText("gap").closest("text") as SVGTextElement;
+    expect(label.getAttribute("class")).toContain("recharts-label");
+    expect(label.closest(`g.${BAND_CLASS}s`)).toBeNull();
+  });
+
   it("coalesces hundreds of partial buckets into a handful of rects and one short caption", () => {
     // Four hundred one-second buckets, half partly indexed and half of unknown
     // completeness, in eight stretches: eight rects, not four hundred.
     const points = Array.from({ length: 400 }, (_, i) => ({ t: i, coverage: i % 100 < 50 ? 0.5 : null }));
     const bands = partialBands(points, 1, 4000);
     expect(bands).toHaveLength(400);
-    const container = bandChart(<PartialBands bands={bands} window={{ from: 0, to: 400 }} />);
+    const container = bandChart(<PartialBands bands={bands} />);
     expect(rects(container, "partial")).toHaveLength(8);
+    expect(container.querySelectorAll(`g.${BAND_CLASS}s`)).toHaveLength(1);
     render(<PartialNote bands={bands} />);
     expect(screen.getByText("Hatched and left out: partly indexed for 200 buckets in 4 stretches · coverage unknown for 200 buckets in 4 stretches")).toBeInTheDocument();
+  });
+
+  it("dots a missing run with the pattern and the dashed edge it has always worn", () => {
+    const container = bandChart(<MissingBands runs={[{ from: 0, to: 600, kind: "receipts", buckets: 10 }]} />);
+    const [band] = rects(container, "missing");
+    expect(band).toHaveAttribute("fill", `url(#${MISSING_PATTERN_ID})`);
+    expect(band).toHaveAttribute("fill-opacity", String(MISSING_FILL_OPACITY));
+    expect(band).toHaveAttribute("stroke-dasharray", MISSING_DASH);
+    expect(within(container).getByText("no receipt data")).toBeInTheDocument();
   });
 });

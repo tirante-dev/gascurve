@@ -282,7 +282,7 @@ export const ContributionChart = memo(function ContributionChart({ m, height = S
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
-            <GapBands gaps={m.gaps.gaps} window={m.gaps.window} />
+            <GapBands gaps={m.gaps.gaps} />
             {timeAxis(m.span, m.gaps.window)}
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.contributionRows} note={m.note} />} />
@@ -320,8 +320,8 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
               </defs>
             ) : null}
             <CartesianGrid vertical={false} />
-            <GapBands gaps={m.gaps.gaps} window={m.gaps.window} />
-            <MissingBands runs={m.gasMissing} window={m.gaps.window} />
+            <GapBands gaps={m.gaps.gaps} />
+            <MissingBands runs={m.gasMissing} />
             {timeAxis(m.span, m.gaps.window)}
             <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.gasNote} />} />
@@ -349,8 +349,8 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
               </defs>
             ) : null}
             <CartesianGrid vertical={false} />
-            <GapBands gaps={m.gaps.gaps} window={m.gaps.window} />
-            <MissingBands runs={m.backlogMissingFor(index)} window={m.gaps.window} />
+            <GapBands gaps={m.gaps.gaps} />
+            <MissingBands runs={m.backlogMissingFor(index)} />
             {timeAxis(m.span, m.gaps.window)}
             <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.backlogNoteFor(index)} />} />

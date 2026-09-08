@@ -89,7 +89,7 @@ export const L1CostChart = memo(function L1CostChart({ rows, span, domain, gaps 
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
-            <GapBands gaps={gaps.gaps} window={window} />
+            <GapBands gaps={gaps.gaps} />
             <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
             <Tooltip

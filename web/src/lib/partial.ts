@@ -128,7 +128,8 @@ export type PartialRun = { from: number; to: number; kind: PartialKind; buckets:
 /**
  * The bands merged into runs of one kind, so a chart draws one mark over a stretch of partial buckets
  * rather than one per bucket. Coverage survives only on a run of one bucket: a stretch has as many
- * shares as it has buckets, and none of them speaks for the run.
+ * shares as it has buckets, and none of them speaks for the run. Bands must arrive oldest first, as
+ * `partialBands` and the api both give them; an out-of-order band opens a run rather than joining one.
  */
 export function partialRuns(bands: readonly PartialBand[]): PartialRun[] {
   const out: PartialRun[] = [];
