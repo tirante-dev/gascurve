@@ -40,6 +40,21 @@ type fakeRPC struct {
 	// that index on is answered with -32003, the way a geth node stops filling a batch once the answer
 	// outgrows its limit. Zero refuses even a single item.
 	sizeLimit int
+	// barrier, when set, holds every request until it is closed, so several can be observed in
+	// flight at once. inFlight counts the requests being served and peak is its high-water mark.
+	barrier  chan struct{}
+	inFlight int
+	peak     int
+	// failMethods answers any batch carrying one of these methods with HTTP 500 quoting it, so a
+	// test can fail one chunk of a fanned out request and not the others. gate, when set, holds any
+	// batch carrying gateMethod until it is closed, which orders two failures that would otherwise
+	// race.
+	// limitMethods answers any batch carrying one of them with HTTP 429, so a throttle can be aimed
+	// at one request rather than sequenced through the script.
+	failMethods  map[string]bool
+	limitMethods map[string]bool
+	gate         chan struct{}
+	gateMethod   string
 }
 
 type scriptStep struct {
@@ -88,6 +103,89 @@ func (f *fakeRPC) ethCall(params []json.RawMessage) any {
 	return EncodeHex(data)
 }
 
+func carries(reqs []rpcRequest, method string) bool {
+	for _, r := range reqs {
+		if r.Method == method {
+			return true
+		}
+	}
+	return false
+}
+
+// holdAll makes every request wait until release is called, so a test can pin how many the client
+// keeps in flight at once. The cleanup releases whatever is still held, so a failed assertion
+// reports itself instead of leaving the held callers to time the package out.
+func (f *fakeRPC) holdAll(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	f.barrier = make(chan struct{})
+	f.mu.Unlock()
+	t.Cleanup(f.release)
+}
+
+// holdMethod holds any batch carrying method until releaseMethod is called. The cleanup releases it
+// so a failed assertion reports itself rather than leaving the handler blocked and the package to
+// time out on the server's close.
+func (f *fakeRPC) holdMethod(t *testing.T, method string) {
+	t.Helper()
+	f.mu.Lock()
+	f.gate, f.gateMethod = make(chan struct{}), method
+	f.mu.Unlock()
+	t.Cleanup(f.releaseMethod)
+}
+
+func (f *fakeRPC) releaseMethod() {
+	f.mu.Lock()
+	g := f.gate
+	f.gate = nil
+	f.mu.Unlock()
+	if g != nil {
+		close(g)
+	}
+}
+
+func (f *fakeRPC) release() {
+	f.mu.Lock()
+	b := f.barrier
+	f.barrier = nil
+	f.mu.Unlock()
+	if b != nil {
+		close(b)
+	}
+}
+
+// awaitHeld waits until a request set aside by hold has arrived.
+func (f *fakeRPC) awaitHeld() bool {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		f.mu.Lock()
+		taken := f.hold == nil
+		f.mu.Unlock()
+		if taken {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
+}
+
+// flight returns the requests being served right now and the high-water mark since the start.
+func (f *fakeRPC) flight() (inFlight, peak int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inFlight, f.peak
+}
+
+// awaitFlight waits until n requests are being served at once, reporting false if they never are.
+func (f *fakeRPC) awaitFlight(n int) bool {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if in, _ := f.flight(); in >= n {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
+}
+
 func (f *fakeRPC) setCall(sig string, data []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -111,6 +209,19 @@ func (f *fakeRPC) serve(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 	}
 	f.requests++
+	f.inFlight++
+	f.peak = max(f.peak, f.inFlight)
+	barrier := f.barrier
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.inFlight--
+		f.mu.Unlock()
+	}()
+	if barrier != nil {
+		<-barrier
+	}
+	f.mu.Lock()
 	f.agents = append(f.agents, r.Header.Get("User-Agent"))
 	if len(f.script) > 0 {
 		step := f.script[0]
@@ -134,6 +245,25 @@ func (f *fakeRPC) serve(w http.ResponseWriter, r *http.Request) {
 		single = true
 	}
 	f.mu.Lock()
+	gate, gateMethod := f.gate, f.gateMethod
+	f.mu.Unlock()
+	if gate != nil && carries(reqs, gateMethod) {
+		<-gate
+	}
+	f.mu.Lock()
+	for _, req := range reqs {
+		if f.failMethods[req.Method] {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, req.Method)
+			return
+		}
+		if f.limitMethods[req.Method] {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+	}
 	var limitErr *RPCError
 	if f.maxItems > 0 && len(reqs) > f.maxItems {
 		if f.limitErr == nil {

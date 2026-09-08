@@ -481,7 +481,7 @@ func TestPoolWSRebinds(t *testing.T) {
 }
 
 // TestPoolStaleEndpointRefused: a call that selected an endpoint before
-// another caller failed over is refused under the send lock, its pacer
+// another caller failed over is refused under the send gate, its pacer
 // reservation is refunded, and the pool retries it on the endpoint that is
 // active now instead of hitting the failed one during its cooldown.
 func TestPoolStaleEndpointRefused(t *testing.T) {
@@ -500,7 +500,7 @@ func TestPoolStaleEndpointRefused(t *testing.T) {
 	}
 	tokens := e.Pacer().Available()
 	if err := e.preSend(ctx); !errors.Is(err, ErrStaleEndpoint) || !IsEndpointError(err) {
-		t.Fatalf("the send lock must refuse a stale endpoint: %v", err)
+		t.Fatalf("the send gate must refuse a stale endpoint: %v", err)
 	}
 	// The pool routes around it: the call lands on the active endpoint and
 	// the primary is not touched.
