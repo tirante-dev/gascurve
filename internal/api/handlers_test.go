@@ -1819,6 +1819,20 @@ func TestSeriesComputeRateSpread(t *testing.T) {
 	if *step.ComputeGasPerSecond < *step.ComputeGasPerSecondMin || *step.ComputeGasPerSecond > *step.ComputeGasPerSecondMax {
 		t.Fatalf("the average must sit inside the band: %+v", step)
 	}
+	// A clock two seconds into the newest step leaves it filling: its average is over the elapsed
+	// span while its band is over the whole seconds of it, two different populations, so it reports
+	// no band at all rather than one its own average can sit outside.
+	if err := store.UpsertBlocks(ctx, []db.Block{block(2500, now, 10, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	midStep, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filling := midStep.Points[len(midStep.Points)-1]
+	if filling.Completeness == model.SeriesComplete || filling.ComputeGasPerSecondMin != nil || filling.ComputeGasPerSecondMax != nil {
+		t.Fatalf("the bucket in progress carries no band: %+v", filling)
+	}
 	// A block whose poster gas was never recorded voids the step it lands in, and only that one.
 	banded := func(s *model.Series) int {
 		n := 0
@@ -1947,5 +1961,39 @@ func TestSeriesSpreadCountsIdleUnits(t *testing.T) {
 		if *p.ComputeGasPerSecond < *p.ComputeGasPerSecondMin || *p.ComputeGasPerSecond > *p.ComputeGasPerSecondMax {
 			t.Fatalf("average outside its band: %+v", p)
 		}
+	}
+}
+
+// Block rows are pruned long before the buckets standing on them. A window the prune boundary falls
+// inside holds seconds that are gone, not seconds that were idle, so it reports no band.
+func TestSeriesSpreadStopsAtTheOldestRetainedRow(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The oldest row lands two seconds into its step, so that step has three of its five seconds
+	// behind the retention boundary.
+	base := now.Add(-time.Hour).Truncate(stepDownWidth).Add(2 * time.Second)
+	var blocks []db.Block
+	for i := uint64(0); i < 2500; i++ {
+		blocks = append(blocks, db.Block{
+			ChainID: robinhood, Number: i, TS: base.Add(time.Duration(i) * time.Second), GasUsed: 100,
+			PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(100), PredictedBaseFee: db.NullWeiFromUint64(100),
+			Backlogs: db.Uint64Array{1}, ConstraintBips: pq.Int64Array{1}, MinBaseFee: db.NullWeiFromUint64(50), PricingVersion: db.PricingFull,
+		})
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	hour, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hour.Points[0].ComputeGasPerSecondMin != nil {
+		t.Fatalf("the step the retention boundary falls inside carries no band: %+v", hour.Points[0])
+	}
+	if hour.Points[1].ComputeGasPerSecondMin == nil {
+		t.Fatalf("a step wholly inside the retained rows keeps its band: %+v", hour.Points[1])
 	}
 }

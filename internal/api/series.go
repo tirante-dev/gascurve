@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"math"
 	"math/big"
 	"slices"
 	"sort"
@@ -140,10 +141,13 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 			var seconds []int64
 			out.Points, numbers, seconds = stepDown(blocks, sets, now)
 			timeline.apply(out.Points, numbers, stepDownWidth)
-			// After the timeline, which is what settles whether a step is whole: an idle unit can
-			// only be told from an unindexed one in a step the collector has all of.
+			floor, err := blockRowFloor(ctx, store, chainID, rng.spreadUnit)
+			if err != nil {
+				return nil, err
+			}
+			// After the timeline, which is what settles how much of a step the collector has.
 			for i := range out.Points {
-				zeroFloor(&out.Points[i], seconds[i], int64(stepDownWidth/rng.spreadUnit))
+				settleBand(&out.Points[i], seconds[i], int64(stepDownWidth/rng.spreadUnit), floor)
 			}
 			out.SpreadSeconds = spreadSeconds(rng.spreadUnit, out.Points)
 		} else {
@@ -189,15 +193,41 @@ func spreadSeconds(unit time.Duration, points []model.SeriesPoint) *int64 {
 	return &secs
 }
 
-// zeroFloor drops a point's band minimum to zero when its window holds a unit with no blocks at
-// all. A whole bucket short of units has idle ones in it, and an idle unit carried nothing, so
-// leaving it out would report a minimum above the bucket's own average. A bucket the collector has
-// only part of is short for another reason, and its minimum stands as measured.
-func zeroFloor(p *model.SeriesPoint, measured, units int64) {
-	if p.ComputeGasPerSecondMin == nil || p.Completeness != model.SeriesComplete || measured >= units {
+// settleBand decides what a point's load band may claim, once the timeline has settled how much of
+// the point the collector has. Only a whole bucket keeps one: its average is a rate over the
+// bucket's own span while the band is over the units inside it, so a bucket missing part of that
+// span, the one still filling included, can put its own average outside its own band. A whole
+// bucket short of units held idle ones, and an idle unit carried nothing, so its minimum is zero
+// rather than the lowest unit that had blocks. Below floor the units are not idle but gone.
+func settleBand(p *model.SeriesPoint, measured, units, floor int64) {
+	if p.ComputeGasPerSecondMin == nil {
 		return
 	}
-	p.ComputeGasPerSecondMin = uint64ValuePtr(0)
+	if p.Completeness != model.SeriesComplete || p.T < floor {
+		p.ComputeGasPerSecondMin, p.ComputeGasPerSecondMax = nil, nil
+		return
+	}
+	if measured < units {
+		p.ComputeGasPerSecondMin = uint64ValuePtr(0)
+	}
+}
+
+// blockRowFloor is the first second a per-second unit can be read for: block rows are pruned at
+// collector.block_retention, well before the buckets standing on them, so a window the prune
+// boundary falls inside holds seconds that are gone rather than seconds that were idle. Zero is no
+// floor at all, which is what a unit read from stored buckets needs, since those outlive the rows.
+func blockRowFloor(ctx context.Context, store db.Store, chainID uint64, unit time.Duration) (int64, error) {
+	if unit != time.Second {
+		return 0, nil
+	}
+	oldest, err := store.OldestBlock(ctx, chainID)
+	if err != nil {
+		return 0, err
+	}
+	if oldest == nil {
+		return math.MaxInt64, nil
+	}
+	return oldest.TS.Unix(), nil
 }
 
 // addRateSpread hangs the load band on the bucketed points: the lowest and highest compute rate any
@@ -215,6 +245,10 @@ func addRateSpread(ctx context.Context, store db.Store, chainID uint64, out *mod
 	if err != nil {
 		return err
 	}
+	floor, err := blockRowFloor(ctx, store, chainID, unit)
+	if err != nil {
+		return err
+	}
 	byStart := make(map[int64]db.RateSpread, len(spreads))
 	for _, s := range spreads {
 		byStart[s.Start.Unix()] = s
@@ -226,7 +260,7 @@ func addRateSpread(ctx context.Context, store db.Store, chainID uint64, out *mod
 		}
 		out.Points[i].ComputeGasPerSecondMin = uint64ValuePtr(uint64(max(s.MinRate, 0)))
 		out.Points[i].ComputeGasPerSecondMax = uint64ValuePtr(uint64(max(s.MaxRate, 0)))
-		zeroFloor(&out.Points[i], s.Units, int64(width/unit))
+		settleBand(&out.Points[i], s.Units, int64(width/unit), floor)
 	}
 	out.SpreadSeconds = spreadSeconds(unit, out.Points)
 	return nil
