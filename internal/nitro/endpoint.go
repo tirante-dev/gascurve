@@ -13,6 +13,10 @@ import (
 const (
 	// minBatchCap is the floor the adaptive batch cap halves down to.
 	minBatchCap = 10
+	// sizeBatchFloor is the floor for a cap cut by a response-size refusal. It goes below minBatchCap
+	// because size is a property of the answer, not of the budget: a node that will not fit five
+	// blocks of receipts in one response has to be asked for fewer, however much room the bucket has.
+	sizeBatchFloor = 1
 	// capRecoveryInterval is how long an endpoint must answer without a
 	// 429 before its batch cap grows one step (doubles) again.
 	capRecoveryInterval = time.Minute
@@ -20,8 +24,9 @@ const (
 
 // Endpoint is one JSON-RPC endpoint of a network: a Client with its own token bucket, its
 // capabilities (WebSocket URL, archive state) and an adaptive batch cap. The cap starts at the
-// configured header batch size, halves (floor 10) whenever the endpoint answers a batch with 429 and
-// recovers one step per successful minute. Chain id verification can disable an endpoint for good.
+// configured header batch size, halves (floor 10) whenever the endpoint answers a batch with 429 or
+// (floor 1) refuses one for its response size, and recovers one step per successful minute. Chain id
+// verification can disable an endpoint for good.
 type Endpoint struct {
 	*Client
 	index   int
@@ -210,6 +215,10 @@ func (e *Endpoint) observe(items int, limited bool) {
 // hold at once for the calling class. Every typed call goes through it, so a ten-call L1 sample on a
 // four calls per second budget is split rather than eating the fast reserve. A throttled chunk is
 // retried after the back-off at whatever the cap has become, so an oversized batch shrinks.
+//
+// A chunk refused for its response size is retried narrower: the refusal falls on whichever items
+// did not fit, so re-asking at the same width repeats it for ever. Each cut strictly narrows the
+// chunk and a chunk of one is left to answer with the error, which is what bounds the retries.
 func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	out := make([]Result, 0, len(reqs))
 	attempts := 0
@@ -228,10 +237,35 @@ func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) 
 			}
 			continue
 		}
+		if batchTooLarge(results) && e.shrinkForSize(len(chunk)) {
+			continue
+		}
 		out = append(out, results...)
 		start += len(chunk)
 	}
 	return out, nil
+}
+
+// shrinkForSize halves the batch cap after a chunk was refused for the size of its response and
+// reports whether the retry will be narrower. The new cap is taken from the chunk that actually
+// failed rather than from the current cap, so a short chunk at the end of a range shrinks too
+// instead of being re-sent at its own width until the caller gives up.
+//
+// It can only ever lower the cap. Every loop sharing the endpoint sizes its chunk before queueing
+// for the send lock, so a wide request can be refused long after a narrower one has already cut the
+// cap; taking its halved width unclamped would widen the cap back and walk the same refusals again.
+func (e *Endpoint) shrinkForSize(items int) bool {
+	if items <= sizeBatchFloor {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.batchCap = min(e.batchCap, max(items/2, sizeBatchFloor))
+	// Recorded on the same clock a 429 uses: the cap has to hold for capRecoveryInterval before it
+	// doubles again, or a range of dense blocks would shrink and grow on alternate batches.
+	e.lastLimit = e.now()
+	e.log.Warn("batch answered response too large, batch cap reduced", "batchCap", e.batchCap, "items", items)
+	return true
 }
 
 func (e *Endpoint) HeadersByNumbers(ctx context.Context, numbers []uint64) ([]Header, error) {
