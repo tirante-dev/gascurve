@@ -665,7 +665,8 @@ func TestSeriesPosterGasFeeDestinations(t *testing.T) {
 	if p.PosterGas == nil || *p.PosterGas != 767 || p.ComputeGasPerSecond == nil || *p.ComputeGasPerSecond != 421_949 || p.FeesWei != "8469537776000" || p.FloorFeesWei == nil || *p.FloorFeesWei != "8438980000000" || *p.SurplusFeesWei != "15190164000" || *p.PosterFeesWei != "15367612000" {
 		t.Fatalf("block destination split: %+v", p)
 	}
-	stepped := stepDown([]db.Block{b}, nil, 5*time.Second, now)[0]
+	steps, _ := stepDown([]db.Block{b}, nil, 5*time.Second, now)
+	stepped := steps[0]
 	if stepped.PosterGas == nil || *stepped.PosterGas != 767 || stepped.PosterFeesWei == nil || *stepped.PosterFeesWei != "15367612000" {
 		t.Fatalf("step destination split: %+v", stepped)
 	}
@@ -734,7 +735,7 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 		t.Fatalf("block points: %+v", pts)
 	}
 	// Stepping down folds unknown blocks into an unknown split.
-	if p := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}, nil, 5*time.Second, now); len(p) != 1 || p[0].FloorFeesWei != nil {
+	if p, _ := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}, nil, 5*time.Second, now); len(p) != 1 || p[0].FloorFeesWei != nil {
 		t.Fatalf("step down with an unknown block: %+v", p)
 	}
 }
@@ -1412,7 +1413,7 @@ func TestMissingTimelineUnknownAndCursorBounds(t *testing.T) {
 	}
 
 	unknown := []model.SeriesPoint{point(start)}
-	newMissingTimeline([]db.MissingRange{{From: 1, To: 2}}).apply(unknown, time.Minute)
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 2}}).apply(unknown, nil, time.Minute)
 	if unknown[0].Completeness != model.SeriesUnknown || unknown[0].Coverage != nil {
 		t.Fatalf("unbounded range: %+v", unknown[0])
 	}
@@ -1421,7 +1422,7 @@ func TestMissingTimelineUnknownAndCursorBounds(t *testing.T) {
 	// are absent, which is why completeness is separate from coverage.
 	equal := []model.SeriesPoint{point(start)}
 	at := sql.NullTime{Time: start.Add(20 * time.Second), Valid: true}
-	newMissingTimeline([]db.MissingRange{{From: 1, To: 2, PredecessorAt: at, SuccessorAt: at}}).apply(equal, time.Minute)
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 2, PredecessorAt: at, SuccessorAt: at}}).apply(equal, []uint64{3}, time.Minute)
 	if equal[0].Completeness != model.SeriesPartial || equal[0].Coverage == nil || *equal[0].Coverage != 1 {
 		t.Fatalf("equal-time range: %+v", equal[0])
 	}
@@ -1432,15 +1433,126 @@ func TestMissingTimelineUnknownAndCursorBounds(t *testing.T) {
 		PredecessorAt: sql.NullTime{Time: start.Add(10 * time.Second), Valid: true},
 		CursorAt:      sql.NullTime{Time: start.Add(70 * time.Second), Valid: true},
 		SuccessorAt:   sql.NullTime{Time: start.Add(90 * time.Second), Valid: true},
-	}}).apply(points, time.Minute)
+	}}).apply(points, []uint64{20, 30}, time.Minute)
 	if points[0].Completeness != model.SeriesComplete || points[1].Completeness != model.SeriesPartial || points[1].Coverage == nil || *points[1].Coverage < 0.666 || *points[1].Coverage > 0.667 {
 		t.Fatalf("advanced cursor must qualify only the remaining suffix: %+v", points)
 	}
 
 	done := []model.SeriesPoint{point(start)}
-	newMissingTimeline([]db.MissingRange{{From: 1, To: 2, Cursor: 3}}).apply(done, time.Minute)
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 2, Cursor: 3}}).apply(done, []uint64{3}, time.Minute)
 	if done[0].Completeness != model.SeriesComplete || done[0].Coverage == nil || *done[0].Coverage != 1 {
 		t.Fatalf("completed range: %+v", done[0])
+	}
+}
+
+// TestMissingTimelineLocatesRangesWithoutTimestamps is the regression for prehistory blanking a whole
+// chain. A public endpoint serves no state below its retention, so the collector records everything it
+// cannot reconstruct as one range with no timestamps beside it. Placed by block number that range only
+// reaches the points that can hold its blocks, instead of leaving every point of every range unknown.
+func TestMissingTimelineLocatesRangesWithoutTimestamps(t *testing.T) {
+	start := now.Add(-3 * time.Minute)
+	points := func() []model.SeriesPoint {
+		out := make([]model.SeriesPoint, 3)
+		for i := range out {
+			coverage := 1.0
+			out[i] = model.SeriesPoint{
+				T: start.Add(time.Duration(i) * time.Minute).Unix(), GasUsed: 60, GasPerSecond: 1,
+				Coverage: &coverage, Completeness: model.SeriesComplete,
+			}
+		}
+		return out
+	}
+	numbers := []uint64{100, 200, 300}
+	states := func(ps []model.SeriesPoint) []string {
+		out := make([]string, len(ps))
+		for i, p := range ps {
+			out[i] = p.Completeness
+			if p.Coverage == nil {
+				out[i] += "/null"
+			}
+		}
+		return out
+	}
+	complete, unknown := model.SeriesComplete, model.SeriesUnknown+"/null"
+
+	// Everything below the first point: only the point that could hold those blocks is affected.
+	below := points()
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 50}}).apply(below, numbers, time.Minute)
+	if got := states(below); got[0] != unknown || got[1] != complete || got[2] != complete {
+		t.Fatalf("prehistory below the window: %v", got)
+	}
+
+	// A range straddling two points reaches both, and no further.
+	inside := points()
+	newMissingTimeline([]db.MissingRange{{From: 150, To: 250}}).apply(inside, numbers, time.Minute)
+	if got := states(inside); got[0] != complete || got[1] != unknown || got[2] != unknown {
+		t.Fatalf("range inside the window: %v", got)
+	}
+
+	// A range above every point cannot reach into the window at all.
+	above := points()
+	newMissingTimeline([]db.MissingRange{{From: 400, To: 500}}).apply(above, numbers, time.Minute)
+	if got := states(above); got[0] != complete || got[1] != complete || got[2] != complete {
+		t.Fatalf("range above the window: %v", got)
+	}
+
+	// A single recorded timestamp does not locate the range either; its blocks still do.
+	half := points()
+	newMissingTimeline([]db.MissingRange{{
+		From: 150, To: 250, SuccessorAt: sql.NullTime{Time: start.Add(90 * time.Second), Valid: true},
+	}}).apply(half, numbers, time.Minute)
+	if got := states(half); got[0] != complete || got[1] != unknown || got[2] != unknown {
+		t.Fatalf("range with one timestamp: %v", got)
+	}
+
+	// Points that carry no block number cannot be placed against, so every one of them is uncertain.
+	unplaceable := points()
+	newMissingTimeline([]db.MissingRange{{From: 1, To: 50}}).apply(unplaceable, []uint64{100, 0, 300}, time.Minute)
+	if got := states(unplaceable); got[0] != unknown || got[1] != unknown || got[2] != unknown {
+		t.Fatalf("points without block numbers: %v", got)
+	}
+}
+
+// TestSeriesPrehistoryLeavesLaterBucketsComplete is the same regression through the endpoint: the
+// bucket the unreconstructable prehistory reaches is unknown, the ones above it stay whole.
+func TestSeriesPrehistoryLeavesLaterBucketsComplete(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+		t.Fatal(err)
+	}
+	start := now.Add(-2 * time.Minute)
+	bucket := func(at time.Time, last uint64) db.Bucket {
+		return db.Bucket{
+			ChainID: robinhood, Resolution: db.Resolution1m, BucketStart: at, Blocks: 3, GasUsed: 300,
+			PosterGas: sql.NullInt64{Int64: 50, Valid: true}, FeesWei: db.WeiFromUint64(90), PosterFeesWei: db.NullWeiFromUint64(50),
+			BaseFeeMin: db.WeiFromUint64(1), BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1),
+			BacklogsEnd: db.Uint64Array{}, BacklogsMax: db.Uint64Array{}, PricingVersion: db.PricingFull, LastBlock: last,
+		}
+	}
+	if err := store.FoldBuckets(ctx, []db.Bucket{bucket(start, 1_000), bucket(start.Add(time.Minute), 1_100)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceMissingRanges(ctx, robinhood, []db.MissingRange{{
+		ChainID: robinhood, From: 0, To: 900, Lifecycle: model.MissingRangeBlocked, Reason: "no_state",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	ts := newServer(t, store)
+	resp, body := get(t, ts, "/api/v1/networks/robinhood/series?range=24h")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	var out model.Series
+	decode(t, body, &out)
+	if len(out.Points) != 2 {
+		t.Fatalf("points: %+v", out.Points)
+	}
+	if p := out.Points[0]; p.Completeness != model.SeriesUnknown || p.Coverage != nil {
+		t.Fatalf("bucket the prehistory reaches: %+v", p)
+	}
+	if p := out.Points[1]; p.Completeness != model.SeriesComplete || p.Coverage == nil || *p.Coverage != 1 {
+		t.Fatalf("bucket above the prehistory: %+v", p)
 	}
 }
 
@@ -1463,7 +1575,7 @@ func TestMissingTimelineKeepsBlockPointRates(t *testing.T) {
 		From: 100, To: 109, Lifecycle: model.MissingRangePending,
 		PredecessorAt: sql.NullTime{Time: base, Valid: true},
 		SuccessorAt:   sql.NullTime{Time: base.Add(5 * time.Second), Valid: true},
-	}}).mark(points, time.Second)
+	}}).mark(points, []uint64{98, 99, 110}, time.Second)
 	for i, p := range points[:2] {
 		// gasPerSecond stays the gas of every block in the second, not the
 		// point's own gas divided by a gap-shortened divisor.
@@ -1480,7 +1592,7 @@ func TestMissingTimelineKeepsBlockPointRates(t *testing.T) {
 		From: 100, To: 109, Lifecycle: model.MissingRangePending,
 		PredecessorAt: sql.NullTime{Time: base, Valid: true},
 		SuccessorAt:   sql.NullTime{Time: base.Add(5 * time.Second), Valid: true},
-	}}).mark(away, time.Second)
+	}}).mark(away, []uint64{200}, time.Second)
 	if p := away[0]; p.Completeness != model.SeriesComplete || p.Coverage == nil || *p.Coverage != 1 || p.GasPerSecond != 300 {
 		t.Fatalf("block clear of every gap: %+v", p)
 	}
