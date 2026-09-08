@@ -585,7 +585,8 @@ func TestOrdinaryProgressLeavesHistoryWorkRunning(t *testing.T) {
 
 // TestEveryHistoryGateHasAFloor: a fast loop that is never idle deferred the filler, the repair and
 // the backfill without counting, and an uncounted deferral guarantees nothing. Each gate counts, so
-// each takes its turn in maxRecoveryDeferrals however long the fast loop stays busy.
+// each takes its turn in maxRecoveryDeferrals however long the fast loop stays busy. This is the share
+// against the fast loop only: runHistory still decides which job the iteration belongs to.
 func TestEveryHistoryGateHasAFloor(t *testing.T) {
 	f := newTestFollower(t, newFakeRPC(1000), dbtest.New())
 	gates := map[string]func() bool{

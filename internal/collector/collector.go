@@ -1330,8 +1330,8 @@ func (f *Follower) recoveryMustWait() bool { return f.deferredWait(&f.recoveryDe
 // hold it off for good while retention removes the rows it exists to repair.
 func (f *Follower) repairMustWait() bool { return f.deferredWait(&f.repairDeferrals) }
 
-// backfillMustWait is the same policy on the backfill's own count. It is the job with no deadline, which
-// is why it goes last, not a reason to leave it the only gate with no floor under it.
+// backfillMustWait is the same policy on the backfill's own count, over the iterations runHistory lets
+// it reach. Going last is a priority order, not a reason to be the one gate with no floor under it.
 func (f *Follower) backfillMustWait() bool { return f.deferredWait(&f.backfillDeferrals) }
 
 // deferredWait counts the caller's deferrals, so a busy fast loop takes at most maxRecoveryDeferrals-1
