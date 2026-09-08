@@ -629,15 +629,8 @@ func networkHealth(n model.NetworkStatus, now time.Time) (status string, reasons
 			{name: "slow", loop: telemetry.Loops.Slow},
 			{name: "history", loop: telemetry.Loops.History},
 		} {
-			name, loop := item.name, item.loop
-			success := parseStatusTime(loop.LastSuccessAt)
-			switch {
-			case success.IsZero():
-				reasons = append(reasons, name+" loop has not succeeded")
-			case loop.ErrorStreak >= degradedErrorStreak:
-				reasons = append(reasons, name+" loop failing")
-			case loop.StaleAfterSecs > 0 && now.Sub(success) > time.Duration(loop.StaleAfterSecs)*time.Second:
-				reasons = append(reasons, name+" loop stale")
+			if reason := loopReason(item.name, item.loop, now); reason != "" {
+				reasons = append(reasons, reason)
 			}
 		}
 		if telemetry.HeadLagBlocks > 0 {
@@ -673,6 +666,28 @@ func networkHealth(n model.NetworkStatus, now time.Time) (status string, reasons
 		return model.StatusDegraded, reasons
 	}
 	return model.StatusHealthy, []string{}
+}
+
+// loopReason names why a collector loop is unhealthy, or "" while it is fine. A loop reporting a
+// phase is inside a step it announced, such as the owner-action scan that walks the whole chain on a
+// first start: the network is still incomplete and so still degraded, but the reason says which,
+// rather than leaving an operator to guess whether it is working or wedged.
+func loopReason(name string, loop model.LoopStatus, now time.Time) string {
+	success := parseStatusTime(loop.LastSuccessAt)
+	switch {
+	case success.IsZero() && loop.Phase != "":
+		return name + " loop on its first pass: " + loop.Phase
+	case success.IsZero():
+		return name + " loop has not succeeded"
+	case loop.ErrorStreak >= degradedErrorStreak:
+		return name + " loop failing"
+	case loop.StaleAfterSecs > 0 && now.Sub(success) > time.Duration(loop.StaleAfterSecs)*time.Second:
+		if loop.Phase != "" {
+			return name + " loop busy: " + loop.Phase
+		}
+		return name + " loop stale"
+	}
+	return ""
 }
 
 func parseStatusTime(raw *string) time.Time {

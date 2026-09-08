@@ -16,6 +16,8 @@ import (
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
+
+	"github.com/tirante-dev/gascurve/internal/config"
 )
 
 func TestBackfillConstraintResetUsesTransactionGas(t *testing.T) {
@@ -49,7 +51,7 @@ func TestBackfillConstraintResetUsesTransactionGas(t *testing.T) {
 		GasUsed: 100_000, CumulativeGasUsed: 900_000,
 	}
 	f := newTestFollower(t, rpc, store)
-	f.cfg.BackfillDepth = 70 * time.Second
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +124,7 @@ func TestBackfillSegments(t *testing.T) {
 	seedSets(t, store)
 	f := newTestFollower(t, rpc, store)
 	// now is base+100s; a depth of 70s lands on block 300 (ts base+30s).
-	f.cfg.BackfillDepth = 70 * time.Second
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +262,7 @@ func TestBackfillAdditiveBeyondBoundary(t *testing.T) {
 	}
 	f := newTestFollower(t, rpc, store)
 	f.now = func() time.Time { return baseTime.Add(4000 * time.Second) }
-	f.cfg.BackfillDepth = 1000 * time.Second // block 30000, an hour before the live start's hour
+	f.cfg.BackfillDepth = config.Depth(1000 * time.Second) // block 30000, an hour before the live start's hour
 	f.cfg.HeaderBatchSize = 100
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -359,7 +361,7 @@ func TestBackfillStopsAtScanOrigin(t *testing.T) {
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
-	f.cfg.BackfillDepth = 70 * time.Second // block 300 without an origin
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second) // block 300 without an origin
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +379,7 @@ func TestBackfillStopsAtScanOrigin(t *testing.T) {
 	if f2.scanOrigin == nil || f2.scanOrigin.Block != 500 || f2.minFeeAt(499).Int64() != pricer.InitialMinimumBaseFeeWei || f2.minFeeAt(500).Int64() != 30_000_000 || f2.minFeeChangeBlock(700) != 500 {
 		t.Fatalf("origin fee: %+v %s", f2.scanOrigin, f2.minFeeAt(500))
 	}
-	f2.cfg.BackfillDepth = 70 * time.Second
+	f2.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	runBackfill(t, f2, 200)
 	c, _ := f2.loadCursor(ctx)
 	if !c.Done || c.DepthStart != 501 {
@@ -419,7 +421,7 @@ func TestBackfillWithoutKnownState(t *testing.T) {
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
-	f.cfg.BackfillDepth = 30 * time.Second // block 700
+	f.cfg.BackfillDepth = config.Depth(30 * time.Second) // block 700
 	// No sample yet and no blocks: idle.
 	scanned(f)
 	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
@@ -449,7 +451,7 @@ func TestBackfillWithoutKnownState(t *testing.T) {
 	rpcL.legacy = &lp
 	storeL := dbtest.New()
 	fl := newTestFollower(t, rpcL, storeL)
-	fl.cfg.BackfillDepth = 30 * time.Second
+	fl.cfg.BackfillDepth = config.Depth(30 * time.Second)
 	if err := fl.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +474,7 @@ func TestBackfillLegacyFromArchiveOrigin(t *testing.T) {
 	rpc.legacy = &lp
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
-	f.cfg.BackfillDepth = 70 * time.Second // block 300
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second) // block 300
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +491,7 @@ func TestBackfillLegacyFromArchiveOrigin(t *testing.T) {
 	f2.mu.Lock()
 	f2.legacyChanges = []legacyChange{{block: 800, method: methodSetSpeedLimit, value: 9_000_000}}
 	f2.mu.Unlock()
-	f2.cfg.BackfillDepth = 70 * time.Second
+	f2.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	runBackfill(t, f2, 200)
 	c, _ := f2.loadCursor(ctx)
 	if !c.Done || c.DepthStart != 501 {
@@ -537,7 +539,7 @@ func TestBackfillErrors(t *testing.T) {
 	store := dbtest.New()
 	seedSets(t, store)
 	f := newTestFollower(t, rpc, store)
-	f.cfg.BackfillDepth = 70 * time.Second
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -552,16 +554,18 @@ func TestBackfillErrors(t *testing.T) {
 		t.Fatal("corrupt cursor should fail")
 	}
 	delete(store.StateRows, "4663/"+db.StateBackfillCursor)
+	// The configured floor is resolved before anything else is decided, so
+	// its header search is the first thing a broken RPC breaks.
+	rpc.errs["HeaderByNumber"] = errRPC
+	if _, err := f.BackfillStep(ctx); !errors.Is(err, errRPC) {
+		t.Fatalf("resolveDepth: %v", err)
+	}
+	delete(rpc.errs, "HeaderByNumber")
 	store.FailOn["OldestBlock"] = true
 	if _, err := f.BackfillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("OldestBlock: %v", err)
 	}
 	delete(store.FailOn, "OldestBlock")
-	rpc.errs["HeaderByNumber"] = errRPC
-	if _, err := f.BackfillStep(ctx); !errors.Is(err, errRPC) {
-		t.Fatalf("findBlockAt: %v", err)
-	}
-	delete(rpc.errs, "HeaderByNumber")
 	store.FailOn["SetState"] = true
 	if _, err := f.BackfillStep(ctx); !errors.Is(err, dbtest.ErrInjected) {
 		t.Fatalf("save cursor: %v", err)
@@ -654,18 +658,30 @@ func TestHistoryStart(t *testing.T) {
 	f := newTestFollower(t, rpc, dbtest.New())
 	// The head is block 1000 at baseTime+100s: 70 seconds of history is
 	// block 300.
-	n, err := f.findHistoryStart(ctx, 70*time.Second)
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second)
+	n, err := f.findDepthCutoff(ctx, 0)
 	if err != nil || n != 300 {
 		t.Fatalf("historyStart = %d %v", n, err)
 	}
 	// More history than the chain has resolves to genesis, and costs one
 	// header for each boundary rather than a whole search.
 	rpc.calls["HeaderByNumber"] = 0
-	if n, err := f.findHistoryStart(ctx, time.Hour); err != nil || n != 1 {
+	f.cfg.BackfillDepth = config.Depth(time.Hour)
+	if n, err := f.findDepthCutoff(ctx, 0); err != nil || n != 1 {
 		t.Fatalf("younger than the window = %d %v", n, err)
 	}
 	if calls := rpc.calledTimes("HeaderByNumber"); calls != 2 {
 		t.Fatalf("both boundaries are checked, and nothing else: %d calls", calls)
+	}
+	// A depth of genesis is block 0 and costs no calls at all: nothing is
+	// searched for, and every caller reads it as the first block.
+	rpc.calls["HeaderByNumber"], rpc.calls["BlockNumber"] = 0, 0
+	f.cfg.BackfillDepth = config.Genesis
+	if n, err := f.findDepthCutoff(ctx, originMargin); err != nil || n != 0 {
+		t.Fatalf("genesis = %d %v", n, err)
+	}
+	if calls := rpc.calledTimes("HeaderByNumber") + rpc.calledTimes("BlockNumber"); calls != 0 {
+		t.Fatalf("genesis must cost no calls: %d", calls)
 	}
 	// A depth beyond the supported maximum is capped where the cutoff is
 	// computed, so adding originMargin to it cannot overflow.
@@ -675,16 +691,18 @@ func TestHistoryStart(t *testing.T) {
 	if got := f.historyDepth(-time.Hour); got != 0 {
 		t.Fatalf("negative depth = %v", got)
 	}
-	if n, err := f.findHistoryStart(ctx, f.historyDepth(time.Duration(1<<62))+originMargin); err != nil || n != 1 {
+	f.cfg.BackfillDepth = config.Depth(1 << 62)
+	if n, err := f.findDepthCutoff(ctx, originMargin); err != nil || n != 1 {
 		t.Fatalf("an extreme depth must still resolve to genesis: %d %v", n, err)
 	}
+	f.cfg.BackfillDepth = config.Depth(time.Second)
 	rpc.errs["BlockNumber"] = errRPC
-	if _, err := f.findHistoryStart(ctx, time.Second); !errors.Is(err, errRPC) {
+	if _, err := f.findDepthCutoff(ctx, 0); !errors.Is(err, errRPC) {
 		t.Fatalf("head error: %v", err)
 	}
 	delete(rpc.errs, "BlockNumber")
 	rpc.errs["HeaderByNumber"] = errRPC
-	if _, err := f.findHistoryStart(ctx, time.Second); !errors.Is(err, errRPC) {
+	if _, err := f.findDepthCutoff(ctx, 0); !errors.Is(err, errRPC) {
 		t.Fatalf("head header error: %v", err)
 	}
 }
@@ -704,7 +722,7 @@ func TestBlockAtAfterTheHead(t *testing.T) {
 	// derives its cutoff from the head, so it still starts at genesis
 	// instead of recording an origin at the head.
 	f.now = func() time.Time { return baseTime.Add(time.Hour) }
-	f.cfg.BackfillDepth = 70 * time.Second
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	if err := f.SlowTick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -714,7 +732,7 @@ func TestBlockAtAfterTheHead(t *testing.T) {
 	if origin != nil {
 		t.Fatalf("no origin may be recorded from a clock ahead of the chain: %+v", origin)
 	}
-	if got, _ := f.findHistoryStart(ctx, 70*time.Second); got != 300 {
+	if got, _ := f.findDepthCutoff(ctx, 0); got != 300 {
 		t.Fatalf("the window is measured from the head, not the clock: %d", got)
 	}
 }
@@ -738,7 +756,7 @@ func TestBackfillArchiveAnchors(t *testing.T) {
 	f := newTestFollower(t, rpc, store)
 	f.archive = archive
 	f.cfg.BackfillAnchorInterval = 100
-	f.cfg.BackfillDepth = 70 * time.Second // block 300
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second) // block 300
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -796,7 +814,7 @@ func TestBackfillArchiveAnchors(t *testing.T) {
 	seedSets(t, store2)
 	f2 := newTestFollower(t, rpc2, store2)
 	f2.cfg.BackfillAnchorInterval = 100
-	f2.cfg.BackfillDepth = 70 * time.Second
+	f2.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	if err := f2.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -867,7 +885,7 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 	f := newTestFollower(t, rpc, store)
 	f.archive = rpc
 	f.cfg.BackfillAnchorInterval = 5
-	f.cfg.BackfillDepth = 70 * time.Second
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1075,8 +1093,8 @@ func TestBackfillWindowSeedFallbacks(t *testing.T) {
 	seedSets(t, store2)
 	f2 := newTestFollower(t, newFakeRPC(1000), store2)
 	f2.archive = newFakeRPC(1000)
-	f2.cfg.BackfillWindow = 5000            // reaches past the depth, and past block 0
-	f2.cfg.BackfillDepth = 40 * time.Second // block 600, inside the newest set
+	f2.cfg.BackfillWindow = 5000                          // reaches past the depth, and past block 0
+	f2.cfg.BackfillDepth = config.Depth(40 * time.Second) // block 600, inside the newest set
 	if err := f2.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1132,7 +1150,7 @@ func TestBackfillLegacyWindowSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newTestFollower(t, rpc, store)
-	f.cfg.BackfillDepth = 70 * time.Second
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}

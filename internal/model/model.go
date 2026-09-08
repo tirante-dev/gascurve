@@ -483,6 +483,9 @@ type LoopStatus struct {
 	ErrorStreak    int64   `json:"errorStreak"`
 	LastDurationMS int64   `json:"lastDurationMs"`
 	StaleAfterSecs int64   `json:"staleAfterSeconds"`
+	// Phase names the long step the loop is inside, empty when it is not in one. It is what separates
+	// a first pass that legitimately takes many minutes from a loop that is failing or wedged.
+	Phase string `json:"phase,omitempty"`
 }
 
 // CollectorLoops reports the fast, slow and history loops separately.

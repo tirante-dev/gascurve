@@ -27,7 +27,7 @@ func TestSlowTickOwnerScanYieldsToFastLoop(t *testing.T) {
 	rpc := newFakeRPC(250_000)
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
-	f.cfg.BackfillDepth = 24 * time.Hour
+	f.cfg.BackfillDepth = config.Depth(24 * time.Hour)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestSlowTickOwnerActions(t *testing.T) {
 	// A chain younger than the configured history depth is scanned from
 	// genesis: the fake chain runs at ten blocks a second, so a day of
 	// history covers all 250k of its blocks.
-	f.cfg.BackfillDepth = 24 * time.Hour
+	f.cfg.BackfillDepth = config.Depth(24 * time.Hour)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ const largeChainHead = 120_000_000
 // genesis. The window comes from the chain, never from the host clock, so
 // the clock is left alone.
 func depthPastCutoff(f *Follower) {
-	f.cfg.BackfillDepth = time.Duration(tsFor(largeChainHead)-tsFor(scanCutoff))*time.Second - originMargin
+	f.cfg.BackfillDepth = config.Depth(time.Duration(tsFor(largeChainHead)-tsFor(scanCutoff))*time.Second - originMargin)
 }
 
 func TestSlowTickLargeChainAndLegacy(t *testing.T) {

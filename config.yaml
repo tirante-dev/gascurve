@@ -30,7 +30,11 @@ collector:
   block_retention: 48h       # per-block rows kept before pruning to buckets
   sample_retention: 168h     # raw state samples kept
   backfill_depth: 1h         # how far back the owner scan and the resumable backfill reach; a development default,
-                             # production sets 720h (30d) in the chart values
+                             # production sets 720h (30d) in the chart values. "genesis" reaches the first block
+                             # however old the chain is: buckets are permanent (prune never deletes them), so the
+                             # cost is time, not storage, and a whole 57M-block chain is days of backfill.
+                             # Widening it on a running collector extends the floor on the next start and logs
+                             # what it did; narrowing it is reported and otherwise ignored.
   backfill_anchor_interval: 1000  # blocks between state anchors when a network is archive: true
   backfill_window: 10000     # blocks per backfill run on archive networks: history is reconstructed
                              # newest first, a window at a time, each seeded from archive state.

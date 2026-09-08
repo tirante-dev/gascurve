@@ -274,6 +274,15 @@ func (f *Follower) runHistory(ctx context.Context) {
 	}
 }
 
+// setSlowPhase publishes what the slow loop is doing to the monitor, for /status. It is the one loop
+// with a step long enough to need it: the owner-action scan walks the whole configured depth.
+func (f *Follower) setSlowPhase(phase string) {
+	if f.monitor == nil {
+		return
+	}
+	f.monitor.observePhase(f.chainID, loopSlow, phase)
+}
+
 func (f *Follower) observeLoop(loop string, start time.Time, err error) {
 	if f.monitor == nil || (err != nil && errors.Is(err, context.Canceled)) {
 		return

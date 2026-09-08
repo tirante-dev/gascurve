@@ -242,6 +242,11 @@ type Follower struct {
 	slowGen       uint64
 	slowSaved     uint64
 	cursorChecked bool
+	// depthResolved marks the configured backfill depth as read into the cursor's target this process,
+	// and scanExtended the owner scan as checked against it: both cost a search over headers and the
+	// configuration behind them cannot change without a restart.
+	depthResolved bool
+	scanExtended  bool
 	snapshot      *model.LiveSnapshot
 }
 
@@ -744,15 +749,33 @@ func (f *Follower) recordHole(ctx context.Context, s db.Store, h hole) error {
 
 // reloadSetsLocked refreshes the constraint set, minimum fee and legacy parameter caches.
 func (f *Follower) reloadSetsLocked(ctx context.Context) error {
+	sets, actions, err := f.loadSets(ctx)
+	if err != nil {
+		return err
+	}
+	f.applySetsLocked(sets, actions)
+	return nil
+}
+
+// loadSets reads what the caches are built from. It is separate so a caller can read before taking
+// f.mu: a tick holds a database connection while it waits on f.mu (headRowError inside its chain
+// transaction), so taking f.mu and then a connection inverts the order the two are acquired in and
+// deadlocks a pool with few connections.
+func (f *Follower) loadSets(ctx context.Context) ([]db.ConstraintSet, []db.OwnerAction, error) {
 	sets, err := f.store.ConstraintSets(ctx, f.chainID)
 	if err != nil {
-		return fmt.Errorf("constraint sets: %w", err)
+		return nil, nil, fmt.Errorf("constraint sets: %w", err)
 	}
-	f.sets = sets
 	actions, err := f.store.OwnerActions(ctx, f.chainID, time.Time{}, time.Time{}, 0)
 	if err != nil {
-		return fmt.Errorf("owner actions: %w", err)
+		return nil, nil, fmt.Errorf("owner actions: %w", err)
 	}
+	return sets, actions, nil
+}
+
+// applySetsLocked rebuilds the caches from a snapshot loadSets read.
+func (f *Follower) applySetsLocked(sets []db.ConstraintSet, actions []db.OwnerAction) {
+	f.sets = sets
 	f.setChanges = f.setChanges[:0]
 	f.minFeeChanges = f.minFeeChanges[:0]
 	f.legacyChanges = f.legacyChanges[:0]
@@ -776,7 +799,6 @@ func (f *Follower) reloadSetsLocked(ctx context.Context) error {
 			f.batchCostChanges = append(f.batchCostChanges, c)
 		}
 	}
-	return nil
 }
 
 func actionPositionOf(a db.OwnerAction) actionPosition {

@@ -36,11 +36,15 @@ const (
 type backfillCursor struct {
 	Done       bool   `json:"done"`
 	DepthStart uint64 `json:"depthStart"`
-	Top        uint64 `json:"top,omitempty"`
-	Active     bool   `json:"active"`
-	Verified   bool   `json:"verified,omitempty"`
-	SegStart   uint64 `json:"segStart"`
-	Next       uint64 `json:"next"`
+	// DepthTarget is the floor the configured depth asks for, before the owner scan origin clamps it.
+	// Kept apart from DepthStart so a depth widened past the origin survives until the scan is extended
+	// down to meet it, and so a floor already reached is never given back when the window slides on.
+	DepthTarget uint64 `json:"depthTarget,omitempty"`
+	Top         uint64 `json:"top,omitempty"`
+	Active      bool   `json:"active"`
+	Verified    bool   `json:"verified,omitempty"`
+	SegStart    uint64 `json:"segStart"`
+	Next        uint64 `json:"next"`
 	// SkipFirst drops the row of the block below a seeded window: it is replayed to price the
 	// window's first block and written by the run below this one.
 	SkipFirst bool   `json:"skipFirst,omitempty"`
@@ -148,14 +152,22 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err != nil {
 		return BackfillIdle, err
 	}
+	if c, err = f.checkCursor(ctx, c, gen); err != nil {
+		return BackfillIdle, err
+	}
+	// Before the Done check, so a widened depth re-opens a finished backfill instead of being answered
+	// from the cursor and never looked at again. Gated on the same readiness as a segment: until the
+	// owner timeline is known nothing may be decided, and a floor costs a search over headers.
+	if f.historyReady() {
+		if err := f.resolveDepth(ctx, c, gen); err != nil {
+			return BackfillIdle, err
+		}
+	}
 	// The committed cursor is what the instruments report, so the gauges never claim progress a
 	// failed commit did not make.
 	f.metrics.ObserveBackfill(backfillState(c))
 	if c.Done {
 		return BackfillDone, nil
-	}
-	if c, err = f.checkCursor(ctx, c, gen); err != nil {
-		return BackfillIdle, err
 	}
 	if !c.Active {
 		status, err := f.startSegment(ctx, c, gen)
@@ -268,6 +280,95 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 		return BackfillIdle, err
 	}
 	return BackfillProgressed, nil
+}
+
+// historyReady reports whether the owner-action timeline is complete through the block before the
+// first live one. Until then the historical constraint sets and fees are unknown, so neither a
+// segment nor a floor may be decided.
+func (f *Follower) historyReady() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ownerScanThrough > 0 && f.liveStart != nil && f.ownerScanThrough+1 >= f.liveStart.Block
+}
+
+// resolveDepth settles the floor the backfill walks down to, and re-opens a finished backfill when
+// that floor moves down. The configured depth is resolved once per process, since it only changes
+// across a restart and each resolution costs a binary search over headers; the target it produces
+// only ever falls, so the window sliding forward as the chain grows never gives back history already
+// built, and a depth an operator has narrowed is reported rather than acted on. The owner scan origin
+// clamps the effective floor without touching the target, so a scan later extended down to meet a
+// widened depth (see extendScanOrigin) puts the rest of the range back to work.
+func (f *Follower) resolveDepth(ctx context.Context, c *backfillCursor, gen uint64) error {
+	f.mu.Lock()
+	resolved, origin := f.depthResolved, f.scanOrigin
+	f.mu.Unlock()
+	resolve := !resolved || c.DepthTarget == 0
+	target := c.DepthTarget
+	if resolve {
+		if err := f.resolveDepthTarget(ctx, c); err != nil {
+			return err
+		}
+	}
+	floor := max(c.DepthTarget, 1)
+	if origin != nil {
+		floor = max(floor, origin.replayFrom())
+	}
+	// A target that only changed in memory is one the next step resolves again, at the cost of another
+	// header search, for the life of the process: a finished cursor whose floor and done flag both
+	// stand would otherwise never be written back.
+	changed := c.DepthTarget != target
+	if c.DepthStart != floor {
+		f.log.Info("backfill floor", "depth", f.cfg.BackfillDepth.String(), "floor", floor,
+			"target", c.DepthTarget, "previous", c.DepthStart)
+		c.DepthStart, changed = floor, true
+	}
+	if c.Done && c.End > floor {
+		f.log.Info("the backfill floor reaches below the history already built, resuming it", "floor", floor, "from", c.End)
+		c.Done, changed = false, true
+	}
+	if changed {
+		// Only a committed target counts as resolved. A rewind between the read and this write returns a
+		// stale generation, which the caller retries as an idle step: marking it resolved there would
+		// drop a widened depth on the floor until the next restart.
+		if err := f.withGeneration(ctx, gen, func(s db.Store) error { return f.saveCursor(ctx, s, c) }); err != nil {
+			return err
+		}
+	}
+	if resolve {
+		f.mu.Lock()
+		f.depthResolved = true
+		f.mu.Unlock()
+	}
+	return nil
+}
+
+// resolveDepthTarget reads the configured depth into the cursor's target, never raising one already
+// recorded: a floor once reached is history the operator has, and a shallower configuration is a
+// reason to stop going deeper rather than to discard it. A cursor written before the target existed
+// carries only the floor it settled on, which is that same history and so seeds the target: reading
+// the configuration into it instead would raise the floor of every unfinished backfill on upgrade,
+// since the window has slid forward since it was first resolved.
+func (f *Follower) resolveDepthTarget(ctx context.Context, c *backfillCursor) error {
+	if c.DepthTarget == 0 {
+		c.DepthTarget = c.DepthStart
+	}
+	start, err := f.findDepthCutoff(ctx, 0)
+	if err != nil {
+		return err
+	}
+	want := max(start, 1)
+	switch {
+	case c.DepthTarget == 0:
+		c.DepthTarget = want
+	case want < c.DepthTarget:
+		f.log.Info("backfill depth widened, extending the floor", "depth", f.cfg.BackfillDepth.String(),
+			"from", c.DepthTarget, "to", want)
+		c.DepthTarget = want
+	case want > c.DepthTarget:
+		f.log.Info("backfill depth reaches later than the history already built, keeping the deeper floor",
+			"depth", f.cfg.BackfillDepth.String(), "floor", c.DepthTarget, "configured", want)
+	}
+	return nil
 }
 
 // checkCursor runs once per process: an active live-model segment (SetID 0) that was not verified
@@ -434,10 +535,9 @@ func sameLegacyParams(a, b *pricer.Legacy) bool {
 // block after it. Returns BackfillDone at the depth and BackfillIdle when nothing can be decided yet.
 func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint64) (BackfillStatus, error) {
 	f.mu.Lock()
-	ready := f.ownerScanThrough > 0 && f.liveStart != nil && f.ownerScanThrough+1 >= f.liveStart.Block
 	origin := f.scanOrigin
 	f.mu.Unlock()
-	if !ready {
+	if !f.historyReady() {
 		return BackfillIdle, nil
 	}
 	if c.End == 0 {
@@ -450,17 +550,6 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 		}
 		c.End, c.EndParent = oldest.Number, oldest.ParentHash
 		c.Top = oldest.Number
-	}
-	if c.DepthStart == 0 {
-		start, err := f.findHistoryStart(ctx, f.historyDepth(f.cfg.BackfillDepth))
-		if err != nil {
-			return BackfillIdle, err
-		}
-		c.DepthStart = max(start, 1)
-		if from := origin.replayFrom(); origin != nil && c.DepthStart < from {
-			f.log.Warn("backfill depth reaches before the owner scan origin, stopping after it", "depthStart", c.DepthStart, "replayFrom", from)
-			c.DepthStart = from
-		}
 	}
 	if c.End <= c.DepthStart {
 		c.Done = true
@@ -579,6 +668,11 @@ func (f *Follower) holeToDepth(ctx context.Context, c *backfillCursor, gen uint6
 		"from", h.From, "to", h.To)
 	c.Done = true
 	c.Active = false
+	// The hole accounts for everything down to the floor, so End says so too: it is what a later,
+	// deeper floor is compared against to decide whether anything is left to do. Nothing is
+	// reconstructed at the new End, so its parent hash goes with it: a run that later stops there has
+	// no history below to be checked against.
+	c.End, c.EndParent, c.RunParent = c.DepthStart, "", ""
 	err := f.withGeneration(ctx, gen, func(s db.Store) error {
 		if err := f.recordHole(ctx, s, h); err != nil {
 			return err
@@ -658,13 +752,26 @@ func (f *Follower) historyDepth(d time.Duration) time.Duration {
 	return d
 }
 
-// findHistoryStart is historyStart against the followed head.
-func (f *Follower) findHistoryStart(ctx context.Context, depth time.Duration) (uint64, error) {
+// depthCutoff is the first block collector.backfill_depth reaches below head, margin further back
+// still. Genesis is block 0 and needs no search: every caller reads that as the first block, and
+// blockAt would spend a header read per halving to arrive at the same answer.
+func (f *Follower) depthCutoff(ctx context.Context, head uint64, margin time.Duration) (uint64, error) {
+	if f.cfg.BackfillDepth.IsGenesis() {
+		return 0, nil
+	}
+	return f.historyStart(ctx, head, f.historyDepth(f.cfg.BackfillDepth.Duration())+margin)
+}
+
+// findDepthCutoff is depthCutoff against the followed head.
+func (f *Follower) findDepthCutoff(ctx context.Context, margin time.Duration) (uint64, error) {
+	if f.cfg.BackfillDepth.IsGenesis() {
+		return 0, nil
+	}
 	head, err := f.currentHead(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return f.historyStart(ctx, head, depth)
+	return f.depthCutoff(ctx, head, margin)
 }
 
 // historyStart is the first block at or after depth before the head's own timestamp. The window is

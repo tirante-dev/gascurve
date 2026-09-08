@@ -77,6 +77,13 @@ reject "enabled network without an RPC URL" "no collector.extraEnv entry named N
   --set 'config.networks[0].chain_id=99' \
   --set 'config.networks[0].enabled=true'
 
+# backfill_depth takes a duration or the word genesis, and nothing else: a
+# stray zero would otherwise ask for a replay of the whole chain.
+reject "backfill_depth of zero" "backfill_depth" \
+  --set database.existingSecret=my-db --set config.collector.backfill_depth=0s
+reject "backfill_depth that is neither a duration nor genesis" "backfill_depth" \
+  --set database.existingSecret=my-db --set config.collector.backfill_depth=all
+
 echo "== the application configuration is modelled, not waved through"
 
 # A network worth reusing across the malformed-value cases below.
@@ -469,6 +476,13 @@ if render "homelab" "${work}/homelab-config.yaml" --values "${ci}/homelab-values
   has "${work}/homelab-config.yaml" 'tick_interval: 500ms' "homelab: tick_interval 500ms did not reach config.yaml"
   has "${work}/homelab-config.yaml" 'calls_per_second: 25' "homelab: the 25 calls per second budget did not reach config.yaml"
   has "${work}/homelab-config.yaml" 'backfill_depth: 720h' "homelab: backfill_depth 720h did not reach config.yaml"
+fi
+if render "genesis depth" "${work}/genesis-config.yaml" --values "${ci}/homelab-values.yaml" \
+  --set config.collector.backfill_depth=genesis --show-only templates/configmap.yaml; then
+  has "${work}/genesis-config.yaml" 'backfill_depth: genesis' "genesis: the full-chain sentinel did not reach config.yaml"
+fi
+if render "homelab endpoints" "${work}/homelab-config.yaml" --values "${ci}/homelab-values.yaml" \
+  --show-only templates/configmap.yaml; then
   has "${work}/homelab-config.yaml" 'archive: true' "homelab: the archive primary did not reach config.yaml"
   has "${work}/homelab-config.yaml" 'ws://nitro-rpc' "homelab: the in-cluster ws:// fallback did not reach config.yaml"
   has "${work}/homelab-config.yaml" 'calls_per_second: 0$' "homelab: the unlimited in-cluster fallback did not reach config.yaml"

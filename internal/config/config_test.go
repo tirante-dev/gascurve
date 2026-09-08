@@ -314,7 +314,7 @@ func TestValidate(t *testing.T) {
 			Database: DatabaseConfig{URL: "postgres://x"},
 			Collector: CollectorConfig{
 				TickInterval: time.Second, SlowInterval: time.Second, HeaderBatchSize: 10,
-				BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: time.Hour,
+				BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: Depth(time.Hour),
 				BackfillAnchorInterval: 1000, MaxCatchUpBatches: 10, FailoverCooldown: time.Minute,
 				EthUsdSource: "coinbase", EthUsdMaxAge: DefaultEthUsdMaxAge,
 			},

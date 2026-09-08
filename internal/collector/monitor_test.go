@@ -218,3 +218,30 @@ func TestMonitorHoleFreshnessFromDurableRanges(t *testing.T) {
 		}
 	}
 }
+
+// TestMonitorLoopPhase: what a loop announces reaches the telemetry the
+// API reads, and a follower without a monitor publishes nothing.
+func TestMonitorLoopPhase(t *testing.T) {
+	clock := newMonitorClock(baseTime)
+	m := NewMonitor(dbtest.New(), nil, nil, nil, WithMonitorClock(clock.Now))
+	m.register(config.NetworkConfig{Name: "robinhood", ChainID: 4663}, testConfig(), nil, nil)
+	m.observePhase(4663, loopSlow, "scanning owner actions, 3 of 9 blocks")
+	// Unknown networks and unknown loops are ignored rather than panicking.
+	m.observePhase(9, loopSlow, "x")
+	m.observePhase(4663, "nonesuch", "x")
+	if got := m.telemetry(4663).Loops.Slow.Phase; got != "scanning owner actions, 3 of 9 blocks" {
+		t.Fatalf("phase = %q", got)
+	}
+	m.observePhase(4663, loopSlow, "")
+	if got := m.telemetry(4663).Loops.Slow.Phase; got != "" {
+		t.Fatalf("finished phase = %q", got)
+	}
+	f := newTestFollower(t, newFakeRPC(10), dbtest.New())
+	f.monitor = nil
+	f.setSlowPhase("ignored")
+	f.monitor = m
+	f.setSlowPhase("through the follower")
+	if got := m.telemetry(4663).Loops.Slow.Phase; got != "through the follower" {
+		t.Fatalf("follower phase = %q", got)
+	}
+}

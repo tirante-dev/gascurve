@@ -1750,3 +1750,31 @@ func TestDisabledNetworkLeavesThePublicAPI(t *testing.T) {
 		t.Fatalf("network after enabling = %d: %s", resp.StatusCode, body)
 	}
 }
+
+// TestLoopReasonPhase: a loop that announced a long step is reported as
+// being in it. The network is still incomplete, so still degraded, but an
+// operator can tell a first owner scan that legitimately takes twenty
+// minutes from a loop that is wedged or failing.
+func TestLoopReasonPhase(t *testing.T) {
+	now := time.Date(2026, 9, 6, 7, 0, 0, 0, time.UTC)
+	at := now.Add(-time.Hour).Format(time.RFC3339Nano)
+	fresh := now.Add(-time.Second).Format(time.RFC3339Nano)
+	for _, tc := range []struct {
+		name string
+		loop model.LoopStatus
+		want string
+	}{
+		{"never succeeded", model.LoopStatus{}, "slow loop has not succeeded"},
+		{"first pass", model.LoopStatus{Phase: "scanning owner actions, 3 of 9 blocks"},
+			"slow loop on its first pass: scanning owner actions, 3 of 9 blocks"},
+		{"failing wins over a phase", model.LoopStatus{LastSuccessAt: &fresh, ErrorStreak: degradedErrorStreak, Phase: "scanning"},
+			"slow loop failing"},
+		{"stale", model.LoopStatus{LastSuccessAt: &at, StaleAfterSecs: 60}, "slow loop stale"},
+		{"busy", model.LoopStatus{LastSuccessAt: &at, StaleAfterSecs: 60, Phase: "scanning"}, "slow loop busy: scanning"},
+		{"healthy", model.LoopStatus{LastSuccessAt: &fresh, StaleAfterSecs: 60}, ""},
+	} {
+		if got := loopReason("slow", tc.loop, now); got != tc.want {
+			t.Fatalf("%s = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

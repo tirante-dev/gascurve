@@ -97,7 +97,10 @@ type CollectorConfig struct {
 	HeaderBatchSize int           `mapstructure:"header_batch_size"`
 	BlockRetention  time.Duration `mapstructure:"block_retention"`
 	SampleRetention time.Duration `mapstructure:"sample_retention"`
-	BackfillDepth   time.Duration `mapstructure:"backfill_depth"`
+	// BackfillDepth is how far back the owner scan and the resumable backfill reach: a duration, or
+	// config.Genesis for the whole chain. It is decoded by hand in LoadWith rather than by
+	// mapstructure, which would have to read "genesis" as a number.
+	BackfillDepth Depth `mapstructure:"-"`
 	// BackfillAnchorInterval is how many blocks the backfill replays between two state anchors on
 	// archive networks (default 1000). Networks without archive ignore it.
 	BackfillAnchorInterval int `mapstructure:"backfill_anchor_interval"`
@@ -291,6 +294,9 @@ func LoadWith(opts Options) (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	if err := cfg.Collector.BackfillDepth.UnmarshalText([]byte(v.GetString("collector.backfill_depth"))); err != nil {
+		return nil, fmt.Errorf("collector.backfill_depth: %w", err)
 	}
 	if err := applyEnv(&cfg, getenv); err != nil {
 		return nil, err
@@ -493,13 +499,15 @@ func (c *Config) Validate(requireRPC bool) error {
 		"collector.slow_interval":     c.Collector.SlowInterval,
 		"collector.block_retention":   c.Collector.BlockRetention,
 		"collector.sample_retention":  c.Collector.SampleRetention,
-		"collector.backfill_depth":    c.Collector.BackfillDepth,
 		"collector.failover_cooldown": c.Collector.FailoverCooldown,
 		"collector.eth_usd_max_age":   c.Collector.EthUsdMaxAge,
 	} {
 		if d <= 0 {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
 		}
+	}
+	if d := c.Collector.BackfillDepth; !d.IsGenesis() && d <= 0 {
+		errs = append(errs, fmt.Errorf("collector.backfill_depth must be positive, or %q for the whole chain", GenesisWord))
 	}
 	if r := c.Collector.BlockRetention; r > 0 && r < MinBlockRetention {
 		errs = append(errs, fmt.Errorf("collector.block_retention %v is below the minimum of %v, the widest bucket resolution: row-backed buckets are rebuilt from their rows, so rows must outlive the widest bucket", r, MinBlockRetention))
