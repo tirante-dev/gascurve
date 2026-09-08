@@ -35,6 +35,11 @@ const (
 	minBackoff = 2 * time.Second
 	maxBackoff = 60 * time.Second
 	callWindow = 10 * time.Second
+
+	// maxUnmeteredSends is how many requests may be in flight at once on an endpoint with no
+	// budget. A budgeted endpoint keeps one, which is the whole point of having a budget. See
+	// docs/ARCHITECTURE.md section 5, "Rate limiting".
+	maxUnmeteredSends = 4
 )
 
 // ErrRateLimited is returned when the endpoint kept throttling after all retry attempts.
@@ -217,7 +222,9 @@ type Client struct {
 	// a call whose endpoint is no longer the pool's active one.
 	preSend func(context.Context) error
 
-	sendMu sync.Mutex // one in-flight HTTP request per network
+	// sendSlots bounds the requests in flight for this endpoint: one when the pacer meters the
+	// endpoint, maxUnmeteredSends when it does not.
+	sendSlots chan struct{}
 
 	mu        sync.Mutex
 	nextID    uint64
@@ -269,11 +276,26 @@ func withClock(now func() time.Time, sleep func(context.Context, time.Duration) 
 	}
 }
 
+// pooledTransport keeps enough idle connections for the requests an unmetered endpoint runs at
+// once. http.DefaultTransport holds two per host, so concurrent senders re-dial every step. The
+// spare connection above maxUnmeteredSends is for the Fast sample, which takes no send slot and
+// must not queue at the transport instead.
+func pooledTransport() http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultTransport
+	}
+	t := base.Clone()
+	t.MaxIdleConnsPerHost = maxUnmeteredSends + 1
+	t.MaxConnsPerHost = maxUnmeteredSends + 1
+	return t
+}
+
 // NewClient creates a client for url with a callsPerSecond budget.
 func NewClient(url string, callsPerSecond float64, opts ...Option) *Client {
 	c := &Client{
 		url:         url,
-		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		httpClient:  &http.Client{Timeout: 30 * time.Second, Transport: pooledTransport()},
 		userAgent:   version.UserAgent(),
 		log:         logger.Nop(),
 		sleep:       sleepContext,
@@ -293,12 +315,20 @@ func NewClient(url string, callsPerSecond float64, opts ...Option) *Client {
 	if c.chunk == nil {
 		c.chunk = c.batchCapped
 	}
+	sends := 1
+	if c.pacer.Unlimited() {
+		sends = maxUnmeteredSends
+	}
+	c.sendSlots = make(chan struct{}, sends)
 	// After the options: the index names the endpoint in every message the URL is taken out of.
 	c.scrub = newScrubber(c.index, c.url)
 	return c
 }
 
 func (c *Client) Pacer() *Pacer { return c.pacer }
+
+// sendConcurrency is how many requests may be in flight for this endpoint at once.
+func (c *Client) sendConcurrency() int { return cap(c.sendSlots) }
 
 func (c *Client) Stats() Stats {
 	c.mu.Lock()
@@ -311,13 +341,18 @@ func (c *Client) Stats() Stats {
 	}
 }
 
+// trimCallsLocked drops the call times older than the window. It filters the whole slice rather
+// than skipping a sorted prefix, so CallsLast10s (and /status.capacity under it) does not depend on
+// every append having read the clock under c.mu.
 func (c *Client) trimCallsLocked(now time.Time) {
 	cut := now.Add(-callWindow)
-	i := 0
-	for i < len(c.callTimes) && c.callTimes[i].Before(cut) {
-		i++
+	kept := c.callTimes[:0]
+	for _, t := range c.callTimes {
+		if !t.Before(cut) {
+			kept = append(kept, t)
+		}
 	}
-	c.callTimes = c.callTimes[i:]
+	c.callTimes = kept
 }
 
 func (c *Client) recordCalls(class Class, n int) {
@@ -454,15 +489,19 @@ func (c *Client) cooldown() time.Duration {
 	return c.blockedUntil.Sub(c.now())
 }
 
-// send performs one HTTP round trip under the per-endpoint send lock. The tokens were taken before
-// the caller queued for that lock, so the reservation is revalidated once it holds it: a cooldown
-// another caller started meanwhile refunds the tokens, waits it out and pays again, which is what
-// stops a queue of waiters bursting through the moment the lock opens. preSend then rejects a call
-// whose endpoint is no longer active. A cooldown this call starts is published before the lock is
-// released, so a waiter observes it instead of sending into the throttle.
+// send performs one HTTP round trip while holding a send slot. The tokens were taken before the
+// caller queued for a slot, so the reservation is revalidated once it holds one: a cooldown another
+// caller started meanwhile refunds the tokens, waits it out and pays again. preSend then rejects a
+// call whose endpoint is no longer active. Both are exact while one slot is open and advisory while
+// several are, since a request already in flight observes neither; see docs/ARCHITECTURE.md section
+// 5. A Fast call on an unmetered endpoint takes no slot: there is no budget to protect and the head
+// sample must not queue behind bulk work.
 func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses []rpcResponse, limited bool, sentAt time.Time, err error) {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
+	class := ClassOf(ctx)
+	if !c.pacer.Unlimited() || class != Fast {
+		c.sendSlots <- struct{}{}
+		defer func() { <-c.sendSlots }()
+	}
 	for {
 		wait := c.cooldown()
 		if wait <= 0 {
@@ -482,7 +521,7 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 			return nil, false, time.Time{}, err
 		}
 	}
-	c.recordCalls(ClassOf(ctx), calls)
+	c.recordCalls(class, calls)
 	sentAt = c.now()
 	responses, limited, err = c.post(ctx, payload)
 	c.recordRequest(c.now().Sub(sentAt), limited || err != nil)

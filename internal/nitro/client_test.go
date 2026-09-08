@@ -187,23 +187,18 @@ func TestCooldownSharedAcrossCallers(t *testing.T) {
 	f.mu.Lock()
 	f.hold = gate
 	f.mu.Unlock()
-	c3 := NewClient(f.server.URL, 0, WithPacer(NewPacer(0).withClock(clock.Now, clock.Sleep)), withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()), WithMaxAttempts(1))
+	// A budgeted endpoint, so the send gate holds one request at a time: the queued caller is what
+	// this case is about. The rate is high enough that a single token never costs a pacer sleep.
+	c3 := NewClient(f.server.URL, 100, WithPacer(NewPacer(100).withClock(clock.Now, clock.Sleep)), withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()), WithMaxAttempts(1))
 	first := make(chan error, 1)
 	go func() {
 		_, err := c3.Call(context.Background(), "echo", "throttled")
 		first <- err
 	}()
 	// Wait until the first request is held by the server, then queue the
-	// second behind the send lock and release the first.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		f.mu.Lock()
-		held := f.hold == nil
-		f.mu.Unlock()
-		if held || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(time.Millisecond)
+	// second behind the send gate and release the first.
+	if !f.awaitHeld() {
+		t.Fatal("the first request never reached the server")
 	}
 	second := make(chan error, 1)
 	go func() {

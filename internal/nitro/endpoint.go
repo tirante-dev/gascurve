@@ -213,37 +213,107 @@ func (e *Endpoint) observe(items int, limited bool) {
 
 // batch sends reqs in chunks of at most the current cap, itself bounded by what the token bucket can
 // hold at once for the calling class. Every typed call goes through it, so a ten-call L1 sample on a
-// four calls per second budget is split rather than eating the fast reserve. A throttled chunk is
-// retried after the back-off at whatever the cap has become, so an oversized batch shrinks.
+// four calls per second budget is split rather than eating the fast reserve.
+//
+// Chunks fan out up to the endpoint's send concurrency, which is one on a budgeted endpoint, and
+// results are written by index so the order never depends on which chunk answered first. See
+// docs/ARCHITECTURE.md section 5.
+func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) {
+	if len(reqs) == 0 {
+		return nil, nil
+	}
+	out := make([]Result, len(reqs))
+	width := chunkSize(min(e.BatchCap(), e.pacer.MaxBatchFor(ClassOf(ctx))), len(reqs))
+	workers := min(e.sendConcurrency(), (len(reqs)+width-1)/width)
+	var err error
+	if workers <= 1 {
+		err = e.sendRange(ctx, reqs, out, 0, len(reqs))
+	} else {
+		err = e.fanOut(ctx, reqs, out, width, workers)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// fanOut runs workers over the chunks of reqs, each taking the next range off a shared cursor. A
+// failure stops further ranges being taken but lets the ones in flight finish: canceling them would
+// reach the pool as endpoint errors and fail it over for nothing. The error reported is the lowest
+// range's, so it does not depend on which worker lost first.
+func (e *Endpoint) fanOut(ctx context.Context, reqs []Request, out []Result, width, workers int) error {
+	var mu sync.Mutex
+	next, failedAt := 0, 0
+	var failure error
+	take := func() (start, end int) {
+		mu.Lock()
+		defer mu.Unlock()
+		if failure != nil || next >= len(reqs) {
+			return 0, 0
+		}
+		start = next
+		next = min(next+width, len(reqs))
+		return start, next
+	}
+	fail := func(start int, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if failure == nil || start < failedAt {
+			failure, failedAt = err, start
+		}
+	}
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				start, end := take()
+				if start == end {
+					return
+				}
+				if err := e.sendRange(ctx, reqs, out, start, end); err != nil {
+					fail(start, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return failure
+}
+
+// sendRange sends reqs[start:end] into out at their own indexes, a chunk at a time, each chunk
+// counting its own throttling attempts. A throttled chunk is retried after the back-off at whatever
+// the cap has become, so an oversized batch shrinks.
 //
 // A chunk refused for its response size is retried narrower: the refusal falls on whichever items
 // did not fit, so re-asking at the same width repeats it for ever. Each cut strictly narrows the
 // chunk and a chunk of one is left to answer with the error, which is what bounds the retries.
-func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) {
-	out := make([]Result, 0, len(reqs))
-	attempts := 0
+func (e *Endpoint) sendRange(ctx context.Context, reqs []Request, out []Result, start, end int) error {
 	class := ClassOf(ctx)
-	for start := 0; start < len(reqs); {
-		size := chunkSize(min(e.BatchCap(), e.pacer.MaxBatchFor(class)), len(reqs)-start)
-		chunk := reqs[start : start+size]
-		results, limited, err := e.attempt(ctx, chunk)
+	attempts := 0
+	for cur := start; cur < end; {
+		size := chunkSize(min(e.BatchCap(), e.pacer.MaxBatchFor(class)), end-cur)
+		results, limited, err := e.attempt(ctx, reqs[cur:cur+size])
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if limited {
 			attempts++
 			if attempts >= e.maxAttempts {
-				return nil, throttled(attempts)
+				return throttled(attempts)
 			}
 			continue
 		}
-		if batchTooLarge(results) && e.shrinkForSize(len(chunk)) {
+		if batchTooLarge(results) && e.shrinkForSize(size) {
 			continue
 		}
-		out = append(out, results...)
-		start += len(chunk)
+		copy(out[cur:], results)
+		cur += size
+		attempts = 0
 	}
-	return out, nil
+	return nil
 }
 
 // shrinkForSize halves the batch cap after a chunk was refused for the size of its response and
