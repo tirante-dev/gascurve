@@ -52,9 +52,18 @@ function Wordmark() {
  */
 function Dial({ multiplier }: { multiplier: number | null }) {
   return (
-    <div style={{ display: "flex", position: "relative", width: CARD_DIAL_W, height: CARD_DIAL_H }}>
-      {/* eslint-disable-next-line @next/next/no-img-element -- the card is rasterised, not served to a browser, so there is no Image to optimise. */}
-      <img src={svgDataUri(cardDialSvg(multiplier))} width={CARD_DIAL_W} height={CARD_DIAL_H} alt="" />
+    <div
+      style={{
+        display: "flex",
+        position: "relative",
+        width: CARD_DIAL_W,
+        height: CARD_DIAL_H,
+        // The gauge rides in as a background rather than an <img>: it is decoration behind the numerals,
+        // it is already drawn at the box's own size, and the card carries its description in its alt text.
+        backgroundImage: `url("${svgDataUri(cardDialSvg(multiplier))}")`,
+        backgroundSize: `${CARD_DIAL_W}px ${CARD_DIAL_H}px`,
+      }}
+    >
       {cardNumerals().map((numeral) => (
         <div
           key={numeral.text}
