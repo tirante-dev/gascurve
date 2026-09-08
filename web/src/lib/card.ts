@@ -79,6 +79,18 @@ export function cardNumerals(scale = CARD_DIAL_SCALE): CardNumeral[] {
   });
 }
 
+/**
+ * The gauge's own glow, the same two filters FeeGauge draws with: the ring is a lit tube, the needle and
+ * the horizon carry the softer halo. The region is in user space rather than the browser version's box
+ * relative one, because the horizon is a horizontal line whose box has no height, and a filter region
+ * measured against that box collapses to nothing and takes the line with it.
+ */
+const FILTER_REGION = `filterUnits="userSpaceOnUse" x="-24" y="-24" width="${DIAL_VIEW_W + 48}" height="${DIAL_VIEW_H + 48}"`;
+
+const GLOW_FILTERS =
+  `<filter id="neon" ${FILTER_REGION}><feGaussianBlur stdDeviation="2.8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` +
+  `<filter id="soft" ${FILTER_REGION}><feGaussianBlur stdDeviation="1.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`;
+
 function line(from: { x: number; y: number }, to: { x: number; y: number }, stroke: string, width: number): string {
   return `<line x1="${from.x.toFixed(2)}" y1="${from.y.toFixed(2)}" x2="${to.x.toFixed(2)}" y2="${to.y.toFixed(2)}" stroke="${stroke}" stroke-width="${width}" stroke-linecap="round"/>`;
 }
@@ -91,13 +103,10 @@ function arc(from: number, to: number, stroke: string, width: number, opacity = 
  * The gauge as a standalone SVG document, at `multiplier` over the floor. Null is a reading the card could
  * not take: the instrument is drawn unlit and without a needle, which reads as no measurement rather than
  * as a measurement of zero.
- *
- * The lit stretch's glow is a wider translucent stroke under it rather than a blur filter, because the
- * card's rasteriser renders filters unevenly and a card is one still frame that has to come out right.
  */
 export function cardDialSvg(multiplier: number | null): string {
   const parts: string[] = [
-    `<defs><linearGradient id="chrome" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="${CARD_COLORS.accent}"/><stop offset="50%" stop-color="${CARD_COLORS.chromeMid}"/><stop offset="100%" stop-color="${CARD_COLORS.accent2}"/></linearGradient></defs>`,
+    `<defs>${GLOW_FILTERS}<linearGradient id="chrome" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="${CARD_COLORS.accent}"/><stop offset="50%" stop-color="${CARD_COLORS.chromeMid}"/><stop offset="100%" stop-color="${CARD_COLORS.accent2}"/></linearGradient></defs>`,
     `<path d="${dialArc(0, 1, R_BEZEL)}" fill="none" stroke="url(#chrome)" stroke-width="1.6" opacity="0.9"/>`,
   ];
   for (const m of DIAL_MINOR_TICKS) {
@@ -110,17 +119,15 @@ export function cardDialSvg(multiplier: number | null): string {
     parts.push(arc(band.from, band.to, CARD_TONE_COLORS[band.tone], BAND_WIDTH, DIM));
   }
   if (multiplier !== null) {
-    for (const band of litBands(multiplier)) {
-      parts.push(arc(band.from, band.to, CARD_TONE_COLORS[band.tone], BAND_WIDTH * 2, 0.16));
-      parts.push(arc(band.from, band.to, CARD_TONE_COLORS[band.tone], BAND_WIDTH, 1));
-    }
+    const lit = litBands(multiplier).map((band) => arc(band.from, band.to, CARD_TONE_COLORS[band.tone], BAND_WIDTH));
+    parts.push(`<g filter="url(#neon)">${lit.join("")}</g>`);
   }
-  parts.push(line({ x: 6, y: DIAL_CY }, { x: DIAL_VIEW_W - 6, y: DIAL_CY }, CARD_COLORS.accent2, 1.1));
+  parts.push(`<g filter="url(#soft)">${line({ x: 6, y: DIAL_CY }, { x: DIAL_VIEW_W - 6, y: DIAL_CY }, CARD_COLORS.accent2, 1.1)}</g>`);
   if (multiplier !== null) {
     const points = needlePoints(multiplier)
       .map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`)
       .join(" ");
-    parts.push(`<polygon points="${points}" fill="${CARD_COLORS.ink}"/>`);
+    parts.push(`<polygon points="${points}" fill="${CARD_COLORS.ink}" filter="url(#soft)"/>`);
   }
   parts.push(`<circle cx="${DIAL_CX}" cy="${DIAL_CY}" r="${R_HUB}" fill="url(#chrome)"/>`);
   parts.push(`<circle cx="${DIAL_CX}" cy="${DIAL_CY}" r="3" fill="${CARD_COLORS.ink}"/>`);

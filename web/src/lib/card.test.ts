@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CARD_DIAL_H, CARD_DIAL_W, CARD_TONE_COLORS, cardDialSvg, cardNumerals, cardReading, svgDataUri } from "@/lib/card";
-import { AMBER_TO, DIAL_VIEW_H, DIAL_VIEW_W, GREEN_TO, dialPoint, dialPosition, needlePoints, R_NUMERAL } from "@/lib/dial";
+import { AMBER_TO, DIAL_CY, DIAL_VIEW_H, DIAL_VIEW_W, GREEN_TO, dialPoint, dialPosition, needlePoints, R_NUMERAL } from "@/lib/dial";
 import type { LiveSnapshot } from "@/types";
 
 const snapshot = {
@@ -31,9 +31,20 @@ describe("cardDialSvg", () => {
   it("lights every band the fee has passed", () => {
     const svg = cardDialSvg(AMBER_TO + 1);
     for (const tone of ["good", "warning", "critical"] as const) {
-      // Each lit band is drawn twice, as a wide glow and the band itself, on top of its dimmed self.
-      expect(svg.split(CARD_TONE_COLORS[tone]).length - 1).toBe(3);
+      // Each band is drawn dimmed, and again lit inside the glow.
+      expect(svg.split(CARD_TONE_COLORS[tone]).length - 1).toBe(2);
     }
+  });
+
+  it("measures the glow in user space, where the horizon's flat box cannot collapse it", () => {
+    const svg = cardDialSvg(3);
+    for (const filter of ["neon", "soft"]) {
+      // A region in box relative units is zero high for the horizon, a horizontal line, and takes it with it.
+      expect(svg).toMatch(new RegExp(`<filter id="${filter}" filterUnits="userSpaceOnUse" x="-?\\d+" y="-?\\d+" width="\\d+" height="\\d+"`));
+      expect(svg).toContain(`filter="url(#${filter})"`);
+    }
+    // The horizon is one of the elements that carries the softer halo.
+    expect(svg).toContain(`<g filter="url(#soft)"><line x1="6.00" y1="${DIAL_CY}.00"`);
   });
 
   it("draws the instrument unlit and without a needle when there is no reading", () => {
