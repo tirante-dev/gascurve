@@ -186,12 +186,24 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(0); err == nil {
 		t.Fatal("Down(0) should fail")
 	}
+	// Rolling back the ArbOS version migration removes only its columns: the version behind a block is
+	// recoverable from the chain, so nothing has to be preserved through the rollback.
+	if err := m.Down(1); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := m.Version(); err != nil || v != headVersion-1 {
+		t.Fatalf("after arbos-version down: %d %v", v, err)
+	}
+	var arbosColumns int
+	if err := p.DB().QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND ((table_name = 'blocks' AND column_name = 'arbos_version') OR (table_name = 'buckets' AND column_name IN ('arbos_version_min', 'arbos_version_max')))`).Scan(&arbosColumns); err != nil || arbosColumns != 0 {
+		t.Fatalf("arbos version columns after down: %d %v", arbosColumns, err)
+	}
 	// Rolling back the prediction alignment restores the NOT NULL column and puts each pricing group
 	// back on the block whose replay produced it.
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-1 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
 		t.Fatalf("after prediction-alignment down: %d %v", v, err)
 	}
 	var nullable string
@@ -203,7 +215,7 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-2 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-3 {
 		t.Fatalf("after poster-gas down: %d %v", v, err)
 	}
 	var posterColumns int
@@ -222,7 +234,7 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-3 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-4 {
 		t.Fatalf("after attributed-cost down: %d %v", v, err)
 	}
 	var batchCostColumns int
@@ -232,7 +244,7 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-4 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-5 {
 		t.Fatalf("after missing-ranges down: %d %v", v, err)
 	}
 	if raw, ok, err := p.GetState(ctx, 1, StateHoles); err != nil || !ok || !strings.Contains(raw, `"from": 10`) {
@@ -247,10 +259,10 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	// Stepping back past the owner-action transaction index removes the
 	// column, and the step below that removes the state-sample index. Both
 	// keep the original schema and the sample rows.
-	if err := m.Down(5); err != nil {
+	if err := m.Down(6); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-5 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-6 {
 		t.Fatalf("after down: %d %v", v, err)
 	}
 	var txIndexes int
@@ -260,7 +272,7 @@ func TestIntegrationMigratorFreshInstall(t *testing.T) {
 	if err := m.Down(1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, err := m.Version(); err != nil || v != headVersion-6 {
+	if v, _, err := m.Version(); err != nil || v != headVersion-7 {
 		t.Fatalf("after index down: %d %v", v, err)
 	}
 	var indexes int
