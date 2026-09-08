@@ -36,6 +36,10 @@ type fakeRPC struct {
 	// hold, when set, makes the next request wait until it is closed
 	// before it is answered, so another caller can queue behind it.
 	hold chan struct{}
+	// sizeLimit, when not negative, is how many items of a batch fit in one response: everything from
+	// that index on is answered with -32003, the way a geth node stops filling a batch once the answer
+	// outgrows its limit. Zero refuses even a single item.
+	sizeLimit int
 }
 
 type scriptStep struct {
@@ -46,10 +50,11 @@ type scriptStep struct {
 func newFakeRPC(t *testing.T) *fakeRPC {
 	t.Helper()
 	f := &fakeRPC{
-		t:        t,
-		handlers: map[string]handlerFunc{},
-		calls:    map[string][]byte{},
-		callErrs: map[string]*RPCError{},
+		t:         t,
+		handlers:  map[string]handlerFunc{},
+		calls:     map[string][]byte{},
+		callErrs:  map[string]*RPCError{},
+		sizeLimit: -1,
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.server.Close)
@@ -139,12 +144,18 @@ func (f *fakeRPC) serve(w http.ResponseWriter, r *http.Request) {
 		limitErr = f.limitErr
 	}
 	f.items += len(reqs)
+	sizeLimit := f.sizeLimit
 	f.mu.Unlock()
 	responses := make([]map[string]any, 0, len(reqs))
 	for i, req := range reqs {
 		resp := map[string]any{"jsonrpc": "2.0", "id": req.ID}
 		if i == 0 && limitErr != nil {
 			resp["error"] = limitErr
+			responses = append(responses, resp)
+			continue
+		}
+		if sizeLimit >= 0 && len(reqs) > sizeLimit && i >= sizeLimit {
+			resp["error"] = &RPCError{Code: ResponseTooLargeCode, Message: "response too large"}
 			responses = append(responses, resp)
 			continue
 		}

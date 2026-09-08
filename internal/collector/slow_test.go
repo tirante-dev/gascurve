@@ -18,6 +18,56 @@ import (
 	"github.com/tirante-dev/gascurve/internal/pricer"
 )
 
+// TestSlowTickOwnerScanYieldsToFastLoop covers the starvation a cold owner scan used to cause. The
+// scan runs on the slow loop but shares the endpoint with the fast one, and on a chain producing ten
+// blocks a second a scan back to the depth floor is hundreds of eth_getLogs holding the send lock for
+// minutes, which puts the live path far enough behind to be visible on the site.
+func TestSlowTickOwnerScanYieldsToFastLoop(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(250_000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = 24 * time.Hour
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The fast loop is further behind than a header batch, which is what history work already yields
+	// to. The scan spans three chunks, so it has somewhere to yield.
+	f.behind.Store(uint64(f.cfg.HeaderBatchSize) + 1)
+	rpc.logRanges = nil
+	if err := f.scanOwnerActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.logRanges) != 1 || rpc.logRanges[0] != [2]uint64{0, 99_999} {
+		t.Fatalf("a busy fast loop must leave the turn after the first chunk, got %v", rpc.logRanges)
+	}
+	if _, ok, _ := store.GetState(ctx, 4663, db.StateOwnerScanThrough); ok {
+		t.Fatal("a scan short of head must not record the readiness checkpoint")
+	}
+
+	// The next turn resumes at the cursor rather than restarting.
+	rpc.logRanges = nil
+	if err := f.scanOwnerActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.logRanges) != 1 || rpc.logRanges[0] != [2]uint64{100_000, 199_999} {
+		t.Fatalf("the next turn must resume at the cursor, got %v", rpc.logRanges)
+	}
+
+	// A fast loop that has caught up lets the rest of the scan run to completion in one turn.
+	f.behind.Store(0)
+	rpc.logRanges = nil
+	if err := f.scanOwnerActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.logRanges) != 1 || rpc.logRanges[0] != [2]uint64{200_000, 250_000} {
+		t.Fatalf("an idle fast loop must not defer the scan, got %v", rpc.logRanges)
+	}
+	if _, ok, _ := store.GetState(ctx, 4663, db.StateOwnerScanThrough); !ok {
+		t.Fatal("a scan that reached head must record the readiness checkpoint")
+	}
+}
+
 func TestSlowTickOwnerActions(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(250_000)

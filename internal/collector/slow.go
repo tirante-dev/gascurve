@@ -157,9 +157,19 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	} else if from, err = f.scanStart(ctx, head, gen); err != nil {
 		return err
 	}
-	for from <= head {
+	for chunks := 0; from <= head; chunks++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		// The first chunk of a turn always runs: in the steady state it is the whole scan, a few
+		// hundred blocks wide, and deferring that would hold owner actions back without freeing
+		// anything worth having. Only a scan long enough to need a second chunk can starve the live
+		// path, and every chunk checkpoints the cursor, so the next turn resumes where this one
+		// stopped. Returning nil leaves the readiness checkpoint below untouched, which is what keeps
+		// a scan short of head from being recorded as complete.
+		if chunks > 0 && f.ownerScanMustWait() {
+			f.log.Info("owner scan yielding to the live path, resuming next turn", "from", from, "head", head)
+			return nil
 		}
 		to := min(from+ownerLogChunk-1, head)
 		if err := f.scanOwnerRange(ctx, from, to, gen); err != nil {

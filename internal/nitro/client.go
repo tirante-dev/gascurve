@@ -26,6 +26,11 @@ const (
 	RateLimitCodeExceeded = -32005
 	// RateLimitCodeQuickNode is the code QuickNode answers with at its per-second limit.
 	RateLimitCodeQuickNode = -32007
+	// ResponseTooLargeCode is the code a geth-family node answers with once a batch response has
+	// outgrown its size limit. It stops filling the batch there and marks every item from that point
+	// on, so the first item carrying it is where the response ran out of room, not an item the node
+	// cannot serve.
+	ResponseTooLargeCode = -32003
 
 	minBackoff = 2 * time.Second
 	maxBackoff = 60 * time.Second
@@ -53,6 +58,23 @@ func IsRateLimit(e *RPCError) bool {
 		return true
 	}
 	return rateLimitMessage.MatchString(e.Message)
+}
+
+// IsResponseTooLarge reports whether a JSON-RPC error is the node refusing a batch for the size of
+// its answer. Unlike throttling there is nothing to wait out: only a narrower batch can succeed.
+func IsResponseTooLarge(e *RPCError) bool {
+	return e != nil && e.Code == ResponseTooLargeCode
+}
+
+// batchTooLarge reports whether any item in an answered batch was refused for the response size.
+func batchTooLarge(results []Result) bool {
+	for _, r := range results {
+		var e *RPCError
+		if errors.As(r.Err, &e) && IsResponseTooLarge(e) {
+			return true
+		}
+	}
+	return false
 }
 
 // EndpointError marks a failure of the endpoint itself rather than an answer from the node: a

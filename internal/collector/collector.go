@@ -198,6 +198,9 @@ type Follower struct {
 	// none consumes another's.
 	repairDeferrals   atomic.Uint64
 	backfillDeferrals atomic.Uint64
+	// ownerScanDeferrals is the same count for the owner-action log scan, which runs on the slow loop
+	// rather than the history loop but competes for the same endpoint.
+	ownerScanDeferrals atomic.Uint64
 
 	mu          sync.Mutex
 	initialized bool
@@ -1335,6 +1338,12 @@ func (f *Follower) repairMustWait() bool { return f.deferredWait(&f.repairDeferr
 // backfillMustWait is the same policy on the backfill's own count, over the iterations runHistory lets
 // it reach. Going last is a priority order, not a reason to be the one gate with no floor under it.
 func (f *Follower) backfillMustWait() bool { return f.deferredWait(&f.backfillDeferrals) }
+
+// ownerScanMustWait is the same policy for the owner-action scan, checked between log chunks. A cold
+// scan covers everything back to the depth floor, which on a chain producing ten blocks a second is
+// tens of millions of blocks and minutes of eth_getLogs holding the endpoint's send lock, so the
+// live path has to be able to interrupt it rather than wait it out.
+func (f *Follower) ownerScanMustWait() bool { return f.deferredWait(&f.ownerScanDeferrals) }
 
 // deferredWait counts the caller's deferrals, so a busy fast loop takes at most maxRecoveryDeferrals-1
 // history turns in a row. Every reason to defer is counted: an uncounted one guarantees the caller
