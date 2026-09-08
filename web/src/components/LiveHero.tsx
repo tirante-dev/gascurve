@@ -219,8 +219,14 @@ export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabe
 /** The throughput line: the first series colour, the same one the bucketed view draws its rate in. */
 const THROUGHPUT_COLOR = "var(--series-1)";
 
-/** The height the throughput chart stands at under the hero's base fee chart; the enlarged view passes its own. */
-export const HERO_THROUGHPUT_HEIGHT = "h-[120px] lg:h-[140px]";
+/**
+ * The height the throughput chart stands at under the hero's base fee chart; the enlarged view passes
+ * its own. It is measured against the gauge and the rail of figures beside it, which the two columns
+ * would otherwise end 50 px apart, and the rail is the same height in either theme (see the readout
+ * padding in globals.css). Two steps because the gauge grows with the rail's width: the second is
+ * where the page reaches its own width and the rail stops growing.
+ */
+export const HERO_THROUGHPUT_HEIGHT = "h-[120px] lg:h-[240px] xl:h-[252px]";
 
 /** What a hovered second on the live throughput chart says: the gas that second carried, in how many blocks, and when it was. */
 export function throughputTooltipRows(): TooltipRow[] {

@@ -61,13 +61,15 @@
 
   /* The gauge and its readouts. Light draws the instrument straight on the card;
      dark insets it on its own face and lights the figures, which is the whole of
-     the difference between the two. */
+     the difference between the two. Colour and nothing else: a readout stands the
+     same height in both themes, so the rail measures the same and the chart
+     column beside it is sized once rather than once per theme. */
   --gauge-face: transparent;
   --gauge-face-border: transparent;
   --gauge-wash: var(--surface);
   --gauge-chrome-mid: #5e36cc;
   --gauge-horizon: var(--accent-2);
-  --readout-pad: 0;
+  --readout-pad-x: 0;
   --readout-radius: 0;
   --readout-bg: transparent;
   --readout-border: transparent;
@@ -152,7 +154,7 @@
     --gauge-face-border: rgba(255, 79, 216, 0.3);
     --gauge-wash: var(--chart);
     --gauge-chrome-mid: #b07cff;
-    --readout-pad: 0.45rem 0.6rem 0.5rem;
+    --readout-pad-x: 0.6rem;
     --readout-radius: 0.25rem;
     --readout-bg: var(--chart);
     --readout-border: rgba(46, 230, 255, 0.28);
@@ -233,7 +235,7 @@
   --gauge-face-border: rgba(255, 79, 216, 0.3);
   --gauge-wash: var(--chart);
   --gauge-chrome-mid: #b07cff;
-  --readout-pad: 0.45rem 0.6rem 0.5rem;
+  --readout-pad-x: 0.6rem;
   --readout-radius: 0.25rem;
   --readout-bg: var(--chart);
   --readout-border: rgba(46, 230, 255, 0.28);
@@ -416,9 +418,11 @@ body {
   background: radial-gradient(ellipse 74% 86% at 50% 52%, var(--gauge-wash) 0%, var(--gauge-wash) 44%, transparent 100%);
 }
 
-/* A stat as an instrument readout: flat on the card in light, inset and lit in dark. */
+/* A stat as an instrument readout: flat on the card in light, inset and lit in dark. The vertical
+   padding is not a theme's to choose: it is what the panel is tall, and the hero's two columns are
+   measured against each other. Only the inset the dark panel needs for its own edges is a token. */
 @utility vw-stat-panel {
-  padding: var(--readout-pad);
+  padding: 0.45rem var(--readout-pad-x) 0.5rem;
   border: 1px solid var(--readout-border);
   border-radius: var(--readout-radius);
   background: var(--readout-bg);
