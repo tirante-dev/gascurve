@@ -226,6 +226,9 @@ func (h *Hub) lookupNetwork(ctx context.Context, ref string) (*db.Network, error
 	if err != nil {
 		return nil, err
 	}
+	if !served(n) {
+		n = nil
+	}
 	h.mu.Lock()
 	h.cache[ref] = cachedNetwork{n: n, expires: now.Add(networkCacheTTL)}
 	h.mu.Unlock()

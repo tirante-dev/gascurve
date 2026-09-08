@@ -567,7 +567,10 @@
           "minimum": 0
         },
         "tick_interval": { "$ref": "#/definitions/duration" },
-        "enabled": { "type": "boolean" },
+        "enabled": {
+          "description": "false takes the network off the site: the collector stops indexing it and records the flag, so the api hides it and the web app stops offering it. Stored history is kept, and /status still reports it as disabled. Omitting it leaves the network off.",
+          "type": "boolean"
+        },
         "fallbacks": { "type": "array", "items": { "$ref": "#/definitions/endpoint" } }
       },
       "required": ["name", "chain_id"],

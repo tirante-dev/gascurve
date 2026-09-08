@@ -41,7 +41,9 @@ export const PRIMARY_NETWORK_NAME = "Robinhood Chain";
 export type SiteNetwork = { name: string; displayName: string; primary: boolean };
 
 /** The networks the published site serves, mirroring config.yaml. The api is the authority at runtime, but
- * the sitemap and server rendered titles are built where it cannot be fetched, so add a network here too. */
+ * the sitemap and server rendered titles are built where it cannot be fetched, so add a network here too,
+ * and drop one here when config.yaml turns it off: the api hides a disabled network from every route,
+ * which the index page and the sitemap, rendered without it, cannot know. */
 export const SITE_NETWORKS: readonly SiteNetwork[] = [
   { name: PRIMARY_NETWORK, displayName: PRIMARY_NETWORK_NAME, primary: true },
   { name: "robinhood-testnet", displayName: "Robinhood Chain Testnet", primary: false },
