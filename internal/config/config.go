@@ -609,3 +609,16 @@ func (c *Config) EnabledNetworks() []NetworkConfig {
 	}
 	return out
 }
+
+// DisabledNetworks are the configured networks the collector must not follow. They are still worth
+// naming: the api decides what to serve from the database, so the collector has to record that they
+// are off rather than simply skipping them.
+func (c *Config) DisabledNetworks() []NetworkConfig {
+	out := make([]NetworkConfig, 0, len(c.Networks))
+	for _, n := range c.Networks {
+		if !n.Enabled {
+			out = append(out, n)
+		}
+	}
+	return out
+}

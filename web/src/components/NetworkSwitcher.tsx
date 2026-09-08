@@ -4,7 +4,9 @@ import type { Network } from "@/types";
 import { findNetwork } from "@/utils/network";
 
 export function NetworkSwitcher({ networks, current, onChange, loading }: { networks: Network[] | null; current: string; onChange: (name: string) => void; loading: boolean }) {
-  const known = networks ?? [];
+  // A network switched off in the collector's configuration is not offered. The api already leaves it
+  // out of the list; an older one still reports it, and it is not somewhere a viewer can be sent.
+  const known = (networks ?? []).filter((n) => n.enabled !== false);
   // A chain-id route selects its network; only a name the api does not know gets a placeholder option.
   const match = findNetwork(known, current);
   const options = match ? known : [{ name: current, displayName: current, chainId: 0 } as Network, ...known];
@@ -20,7 +22,7 @@ export function NetworkSwitcher({ networks, current, onChange, loading }: { netw
         aria-label="Network"
       >
         {options.map((n) => (
-          <option key={n.name} value={n.name} disabled={n.enabled === false}>
+          <option key={n.name} value={n.name}>
             {n.displayName}
             {n.chainId ? ` (${n.chainId})` : ""}
           </option>

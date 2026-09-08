@@ -762,16 +762,22 @@ describe("HistoryTabs", () => {
 describe("NetworkSwitcher", () => {
   const networks: Network[] = [
     { name: "robinhood", displayName: "Robinhood Chain", chainId: 4663, explorerUrl: "", model: "constraints", headBlock: 1, headAt: null, lagSeconds: null, enabled: true },
+    { name: "robinhood-testnet", displayName: "Robinhood Chain Testnet", chainId: 46630, explorerUrl: "", model: "constraints", headBlock: 1, headAt: null, lagSeconds: null, enabled: true },
     { name: "arbitrum-one", displayName: "Arbitrum One", chainId: 42161, explorerUrl: "", model: "constraints", headBlock: 1, headAt: "", lagSeconds: 0, enabled: false },
   ];
-  it("lists networks and changes selection", async () => {
+  it("lists the networks that are on and changes selection", async () => {
     const onChange = vi.fn();
     render(<NetworkSwitcher networks={networks} current="robinhood" onChange={onChange} loading={false} />);
     const select = screen.getByRole("combobox", { name: "Network" });
     expect(within(select).getAllByRole("option")).toHaveLength(2);
-    expect(screen.getByRole("option", { name: "Arbitrum One (42161)" })).toBeDisabled();
-    await userEvent.selectOptions(select, "arbitrum-one");
-    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("option", { name: "Arbitrum One (42161)" })).not.toBeInTheDocument();
+    await userEvent.selectOptions(select, "robinhood-testnet");
+    expect(onChange).toHaveBeenCalledWith("robinhood-testnet");
+  });
+  it("keeps a disabled current network named while it is still the route", () => {
+    render(<NetworkSwitcher networks={networks} current="arbitrum-one" onChange={vi.fn()} loading={false} />);
+    expect(screen.getByRole("option", { name: "arbitrum-one" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Arbitrum One (42161)" })).not.toBeInTheDocument();
   });
   it("keeps an unknown current network selectable while the list loads", () => {
     render(<NetworkSwitcher networks={null} current="mystery" onChange={vi.fn()} loading />);

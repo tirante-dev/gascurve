@@ -89,6 +89,9 @@ func TestLoadWith(t *testing.T) {
 	if len(cfg.EnabledNetworks()) != 2 || cfg.EnabledNetworks()[0].Name != "robinhood" {
 		t.Fatalf("enabled networks: %+v", cfg.EnabledNetworks())
 	}
+	if off := cfg.DisabledNetworks(); len(off) != 1 || off[0].Name != "arbitrum-one" {
+		t.Fatalf("disabled networks: %+v", off)
+	}
 	rh := cfg.Networks[0]
 	if rh.WSURL != "" || rh.Archive || rh.Unlimited() || rh.TickInterval != 0 || rh.EffectiveTickInterval(cfg.Collector) != 2*time.Second {
 		t.Fatalf("optional fields should default off: %+v", rh)

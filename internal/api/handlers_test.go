@@ -168,15 +168,12 @@ func TestEndpoints(t *testing.T) {
 		{"/api/v1/networks", 200, cacheNetwork, func(t *testing.T, b []byte) {
 			var nets []model.Network
 			decode(t, b, &nets)
-			if len(nets) != 3 || nets[0].Name != "robinhood" || nets[0].Model != model.ModelConstraints || nets[0].HeadBlock != 1030 || nets[0].LagSeconds == nil || *nets[0].LagSeconds != 1 {
+			// arbitrum-one is seeded disabled, so the list holds the other two.
+			if len(nets) != 2 || nets[0].Name != "robinhood" || nets[0].Model != model.ModelConstraints || nets[0].HeadBlock != 1030 || nets[0].LagSeconds == nil || *nets[0].LagSeconds != 1 {
 				t.Fatalf("networks: %+v", nets)
 			}
-			if nets[1].Name != "arbitrum-one" || nets[1].Model != model.ModelUnknown || nets[1].HeadAt != nil || nets[1].LagSeconds != nil || nets[2].Model != model.ModelLegacy {
+			if nets[1].Name != "robinhood-testnet" || nets[1].Model != model.ModelLegacy {
 				t.Fatalf("networks models: %+v", nets)
-			}
-			// Timestamps of a network without a head are JSON null, never "".
-			if !strings.Contains(string(b), `"headAt":null`) || !strings.Contains(string(b), `"lagSeconds":null`) {
-				t.Fatalf("null timestamps expected: %s", b)
 			}
 		}},
 		{"/api/v1/networks/robinhood", 200, cacheNetwork, func(t *testing.T, b []byte) {
@@ -617,7 +614,7 @@ func TestMethodNotAllowedAndCORS(t *testing.T) {
 func TestSeriesStepDown(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
-	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	var blocks []db.Block
@@ -694,7 +691,7 @@ func TestSeriesPosterGasFeeDestinations(t *testing.T) {
 func TestUnknownHistoryIsNull(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
-	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	start := now.Add(-2 * time.Minute).Truncate(time.Minute)
@@ -943,7 +940,7 @@ func TestStoreFailures(t *testing.T) {
 func TestConstraintsCurrentIsModelGated(t *testing.T) {
 	store := dbtest.New()
 	ctx := context.Background()
-	if err := store.UpsertNetwork(ctx, db.Network{ChainID: arbOne, Name: "arbitrum-one"}); err != nil {
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: arbOne, Name: "arbitrum-one", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: arbOne, EffectiveBlock: 1, EffectiveAt: now.Add(-time.Hour), Source: model.SourceObserved, Constraints: db.JSONB(`[{"target":1,"window":1,"startingBacklog":0}]`)}); err != nil {
@@ -1262,7 +1259,7 @@ func TestRangeBounds(t *testing.T) {
 func TestSeriesCoverage(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
-	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	clock := now.Add(20 * time.Second) // twenty seconds into the minute that starts at now
@@ -1361,7 +1358,7 @@ func TestSeriesCoverage(t *testing.T) {
 func TestSeriesCoverageIncludesHoleInsidePopulatedBucket(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
-	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	start := now.Add(-2 * time.Minute)
@@ -1591,7 +1588,7 @@ func TestMissingTimelineLocatesRangesAmongBlockPoints(t *testing.T) {
 func TestSeriesPrehistoryLeavesLaterBucketsComplete(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
-	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	start := now.Add(-2 * time.Minute)
@@ -1677,7 +1674,7 @@ func TestMissingTimelineKeepsBlockPointRates(t *testing.T) {
 func TestBatchesOneHourBounds(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.New()
-	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood"}); err != nil {
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	ts := newServer(t, store)
@@ -1701,5 +1698,55 @@ func TestBatchesOneHourBounds(t *testing.T) {
 	}
 	if s := batches(t); len(s.Points) != 1 || s.From != from || s.To != to {
 		t.Fatalf("one hour window with a report: %d..%d %+v", s.From, s.To, s.Points)
+	}
+}
+
+// A network switched off in the collector's configuration keeps its rows but leaves the public api:
+// the list drops it and every route below /networks answers as it does for a name it never knew,
+// so nothing on the site offers a chain whose history has stopped moving.
+func TestDisabledNetworkLeavesThePublicAPI(t *testing.T) {
+	ctx := context.Background()
+	store := seed(t)
+	ts := newServer(t, store)
+
+	for _, path := range []string{"/api/v1/networks/arbitrum-one", "/api/v1/networks/42161", "/api/v1/networks/arbitrum-one/live", "/api/v1/networks/arbitrum-one/series?range=24h"} {
+		if resp, body := get(t, ts, path); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s = %d: %s", path, resp.StatusCode, body)
+		}
+	}
+	resp, body := get(t, ts, "/api/v1/networks")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("networks = %d: %s", resp.StatusCode, body)
+	}
+	var nets []model.Network
+	decode(t, body, &nets)
+	for _, n := range nets {
+		if n.Name == "arbitrum-one" {
+			t.Fatalf("disabled network listed: %+v", nets)
+		}
+	}
+
+	row, err := store.NetworkByRef(ctx, "arbitrum-one")
+	if err != nil || row == nil {
+		t.Fatalf("arbitrum-one row: %+v %v", row, err)
+	}
+	row.Enabled = true
+	if err := store.UpsertNetwork(ctx, *row); err != nil {
+		t.Fatal(err)
+	}
+	resp, body = get(t, ts, "/api/v1/networks")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("networks after enabling = %d: %s", resp.StatusCode, body)
+	}
+	decode(t, body, &nets)
+	if len(nets) != 3 || nets[1].Name != "arbitrum-one" || nets[1].Model != model.ModelUnknown || nets[1].HeadAt != nil || nets[1].LagSeconds != nil {
+		t.Fatalf("networks after enabling: %+v", nets)
+	}
+	// Timestamps of a network without a head are JSON null, never "".
+	if !strings.Contains(string(body), `"headAt":null`) || !strings.Contains(string(body), `"lagSeconds":null`) {
+		t.Fatalf("null timestamps expected: %s", body)
+	}
+	if resp, body := get(t, ts, "/api/v1/networks/arbitrum-one"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("network after enabling = %d: %s", resp.StatusCode, body)
 	}
 }
