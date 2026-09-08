@@ -113,8 +113,9 @@ describe("the instrument's box", () => {
     expect(DIAL_CY - R_NUMERAL).toBeGreaterThan(0);
     expect(DIAL_CX - R_NUMERAL).toBeGreaterThan(0);
     expect(DIAL_CX + R_NUMERAL).toBeLessThan(DIAL_VIEW_W);
-    // The hub sits on the horizon at the foot of the box, not in the middle of it.
-    expect(DIAL_VIEW_H).toBeGreaterThan(DIAL_CY);
+    // The hub sits on the horizon near the foot of the box, not in the middle of it, and the box has to
+    // clear its lower half: the root svg clips to its viewport, so a hub past the edge renders flattened.
+    expect(DIAL_VIEW_H).toBeGreaterThanOrEqual(DIAL_CY + R_HUB);
     expect(DIAL_VIEW_H - DIAL_CY).toBeLessThan(DIAL_RADIUS);
   });
   it("ticks the minors between the majors, and numbers only the thresholds", () => {

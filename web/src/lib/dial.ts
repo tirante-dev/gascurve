@@ -42,10 +42,10 @@ export const DIAL_BANDS: readonly DialBand[] = [
   { tone: "critical", from: dialPosition(AMBER_TO), to: 1 },
 ];
 
-/** The hub sits on the horizon at the foot of the box, and the numerals ring is the outermost thing
- * drawn, so the box clears that rather than the bezel. */
+/** The hub sits on the horizon near the foot of the box, so the box clears the numerals ring above the
+ * arc and the hub's own lower half below it. */
 export const DIAL_VIEW_W = 240;
-export const DIAL_VIEW_H = 124;
+export const DIAL_VIEW_H = 127;
 export const DIAL_CX = 120;
 export const DIAL_CY = 118;
 

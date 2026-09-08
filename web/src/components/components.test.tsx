@@ -173,7 +173,9 @@ describe("LiveHero", () => {
     // The working is the hover note, and the description says the same to a screen reader.
     expect(within(gauge).getByText("19.99× the 0.02 gwei floor")).toBeInTheDocument();
     expect(within(gauge).getByText("0.3997 gwei ≈ 19.99 × 0.02 gwei")).toBeInTheDocument();
-    expect(within(gauge).getByLabelText("19.99 times the 0.02 gwei floor, far above the floor.")).toBeInTheDocument();
+    expect(within(gauge).getByText("19.99 times the 0.02 gwei floor, far above the floor.")).toBeInTheDocument();
+    // The arc is decoration: everything it shows is in the readout below it, so it is not announced twice.
+    expect(gauge.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
     // At the floor the needle rests at the left end, in the green, and no stretch of the ring is lit.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(1)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-good");
@@ -195,6 +197,12 @@ describe("LiveHero", () => {
     expect(position(gauge)).toBe("1.0000");
     // The floor and x moved into the readout with the figure they qualify.
     expect(within(gauge).getByText(/floor 0.02 gwei/)).toHaveTextContent("floor 0.02 gwei · x 3.2425");
+  });
+  it("keeps the lagging-collector pill set as a readout, like the stats beside it", () => {
+    const stale = { ...snapshot, sampledAt: new Date(Date.parse(snapshot.sampledAt) - 120_000).toISOString() };
+    render(<LiveHeroView network="robinhood" snapshot={stale} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    const pill = screen.getByText(/collector lagging/);
+    expect(pill.closest(".vw-stat-panel")).not.toBeNull();
   });
   it("bands the rail into what the chain is doing and what it costs", () => {
     render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);

@@ -432,7 +432,7 @@ export const HERO_TERMS = {
 function Freshness({ sinceBlock, age, tone }: { sinceBlock: number; age: number; tone?: StatTone }) {
   if (age <= COLLECTOR_LAG_S) return <Stat label="Since last block" value={<Figure ch={4}>{sinceBlock.toFixed(1)}</Figure>} unit="s" tone={tone} />;
   return (
-    <div className="min-w-0" aria-live="polite">
+    <div className={`min-w-0 ${tone === "readout" ? "vw-stat-panel" : ""}`} aria-live="polite">
       <Label>Since last block</Label>
       <div className="mt-1">
         <span className="num inline-flex items-center gap-1.5 rounded-full border border-warning px-2.5 py-1 text-xs font-medium text-warning" title={`The collector's last sample is ${Math.floor(age)} s old; the chain may well be producing blocks`}>

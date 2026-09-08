@@ -124,7 +124,7 @@ export function FeeGauge({ baseFeeGwei, floorGwei, multiplier, exponent }: { bas
   const description = `${figure} times the ${floorGwei} gwei floor, ${TONE_SENTENCE[tone]}.`;
   return (
     <div className="vw-gauge rounded-md" data-testid="fee-gauge">
-      <svg viewBox={`0 0 ${DIAL_VIEW_W} ${DIAL_VIEW_H}`} className="block h-auto w-full" role="img" aria-label={description}>
+      <svg viewBox={`0 0 ${DIAL_VIEW_W} ${DIAL_VIEW_H}`} className="block h-auto w-full" aria-hidden="true" focusable="false">
         <defs>
           <filter id={`${uid}-neon`} x="-60%" y="-60%" width="220%" height="220%">
             <feGaussianBlur stdDeviation={2.8} result="b" />
