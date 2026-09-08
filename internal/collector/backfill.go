@@ -221,6 +221,15 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if err != nil {
 		return BackfillIdle, err
 	}
+	if _, _, bad := unsupportedModel(st, headers); bad {
+		// Versions only go up, so nothing below this batch runs the constraint model either.
+		return f.stopWithHole(ctx, c, gen, reasonUnsupportedModel,
+			"the backfill reached blocks older than the multi-constraint pricer, recording the rest as a hole rather than pricing it with a model the chain did not run")
+	}
+	if at, ok := spansArbOSUpgrade(headers); ok {
+		f.log.Info("the backfill replayed across an ArbOS upgrade, so the buckets over it carry a version range",
+			"block", at, "from", headers[0].ArbOSVersion, "to", last.ArbOSVersion)
+	}
 	rows, err := f.replaySegment(ctx, st, c, headers, anchor, anchorFees)
 	if err != nil {
 		return BackfillIdle, err
@@ -663,9 +672,14 @@ func (f *Follower) seedWindow(ctx context.Context, c *backfillCursor) error {
 // before it is not known from any independent source, so it is reported missing rather than
 // reconstructed from the live model.
 func (f *Follower) holeToDepth(ctx context.Context, c *backfillCursor, gen uint64) (BackfillStatus, error) {
-	h := hole{From: c.DepthStart, To: c.End - 1, Reason: reasonNoState}
-	f.log.Warn("no independently known pricer state below the backfill range, recording it as a hole",
-		"from", h.From, "to", h.To)
+	return f.stopWithHole(ctx, c, gen, reasonNoState,
+		"no independently known pricer state below the backfill range, recording it as a hole")
+}
+
+// stopWithHole ends the backfill at the depth floor, recording the rest as one unfillable range.
+func (f *Follower) stopWithHole(ctx context.Context, c *backfillCursor, gen uint64, reason, message string) (BackfillStatus, error) {
+	h := hole{From: c.DepthStart, To: c.End - 1, Reason: reason}
+	f.log.Warn(message, "from", h.From, "to", h.To)
 	c.Done = true
 	c.Active = false
 	// The hole accounts for everything down to the floor, so End says so too: it is what a later,

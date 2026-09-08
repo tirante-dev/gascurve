@@ -738,6 +738,7 @@ func blockPoint(b db.Block) model.BlockPoint {
 		Number: b.Number, TS: uint64(b.TS.Unix()), GasUsed: b.GasUsed, PosterGas: uint64Ptr(b.PosterGas), BaseFee: b.BaseFee.String(),
 		PredictedBaseFee: b.PredictedBaseFee.StringPtr(), Backlogs: b.Backlogs.Uint64s(), ConstraintBips: int64s(b.ConstraintBips),
 		ExponentBips: b.ExponentBips, MinBaseFee: b.MinBaseFee.StringPtr(), Anchored: b.Anchored,
+		ArbOSVersion: uint64Ptr(b.ArbOSVersion),
 	}
 }
 

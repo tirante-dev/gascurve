@@ -205,6 +205,52 @@ Known error sources, all to be surfaced in the "Data & method" footer:
 2. Owner actions inside a block: the replay uses the log's transaction index and the action transaction's receipt. Gas before the action transaction is added to the old backlogs, then the reset is applied, then the action transaction and later gas are added to the reset backlogs.
 3. Old headers without state: the decomposition before the collector's start is a pure replay validated only through base fee agreement. Because the two constraints have very different time constants, an alternative estimator exists: `x_24h ≈ rolling 60-s minimum of x` (the 15-s backlog drains to zero within seconds whenever demand < 60 M gas/s). Use it as a cross-check.
 4. Blocks with equal timestamps get `dt = 0`; that is how ArbOS behaves too (`startBlock.timePassed` is the timestamp delta), so no correction and no interpolation is needed as long as per-block headers are used.
+5. ArbOS version changes: the replay implements one model per block, and which model a block ran is a property of its ArbOS version, not of the constraint set. See §7.1.
+
+### 7.1 Replay fidelity across ArbOS versions
+
+**The version is in the header.** Nitro writes `HeaderInfo.ArbOSFormatVersion` into bytes 16 through 23 of a block's mix digest, so the ArbOS version in force at any historical block is already in every header the collector fetches. No archive state and no extra call is needed. Verified live on 2026-09-08: Robinhood block 64,714 has `mixHash` `0x…0033…` (ArbOS 51) and block 64,715 has `0x…003d…` (ArbOS 61). `internal/nitro` decodes it as `Header.ArbOSVersion`; the collector stores it per block and, as a range, per bucket.
+
+**The transitions, recovered from headers alone** (coarse grid then bisection, `eth_getBlockByNumber` only):
+
+| Chain | Block | UTC | ArbOS |
+|---|---|---|---|
+| Robinhood | 64,715 | 2026-06-16 22:19 | 51 → 61 |
+| Arbitrum One | 22,207,817 | 2022-08-31 14:32 | 0 → 6 |
+| Arbitrum One | 26,033,850 | 2022-09-22 19:55 | 6 → 7 |
+| Arbitrum One | 45,670,163 | 2022-12-12 22:28 | 7 → 8 |
+| Arbitrum One | 176,489,734 | 2024-02-01 20:01 | 10 → 11 |
+| Arbitrum One | 190,301,731 | 2024-03-14 13:48 | 11 → 20 |
+| Arbitrum One | 249,717,777 | 2024-09-03 17:00 | 20 → 31 |
+| Arbitrum One | 257,061,351 | 2024-09-25 02:37 | 31 → 32 |
+| Arbitrum One | 348,448,106 | 2025-06-17 23:05 | 32 → 40 |
+| Arbitrum One | 419,260,688 | 2026-01-08 17:00 | 40 → 51 |
+| Arbitrum One | 496,578,581 | 2026-08-20 17:00 | 51 → 61 |
+
+The grid resolves one change per interval, so versions 9 and 10 sit inside the 45.6M-to-176.5M stretch without an exact block; nothing below ArbOS 50 is replayed with the constraint model anyway.
+
+Two things follow immediately. Arbitrum One's constraint model starts at 419,260,688, so **everything below that block ran the legacy pricer** and a constraint replay there is not drift, it is the wrong model. And Arbitrum One's 51 → 61 upgrade is **inside the default 30-day `backfill_depth`**, so this is not a deep-history curiosity.
+
+**The measurement.** `internal/collector/fidelity_test.go` (build tag `fidelity`, `make test-fidelity`) replays a window of real headers with `internal/pricer` and scores each block against the header that carries its fee, shifted by one exactly as the collector stores it. Arbitrum One is the controlled case: one `setGasPricingConstraints` at block 419,260,973 (six constraints, all starting backlogs 0), one `setMinimumL2BaseFee` at 419,260,697 (0.02 gwei), and **neither changed again** through the 51 → 61 upgrade. Same parameters, same traffic profile, one variable.
+
+Each window starts at a block priced exactly at the floor, so every backlog is under its own exponent threshold (`W_i·T_i/10_000`, at most 86.4 M gas on the 86,400 s constraint) and the seed of all zeros is wrong by at most that plus one block of gas. Every constraint drains that in seconds, so the first 200 blocks are burned in and not scored.
+
+RESULTS_TABLE_PLACEHOLDER
+
+**Re-running it.** Windows are JSON; the recorded constraint set comes from the owner-action history, never from a live call, since a live call reports today's set:
+
+```bash
+make test-fidelity FIDELITY_URL=https://arb1.arbitrum.io/rpc FIDELITY_CPS=4 \
+  FIDELITY_WINDOWS='[{"name":"arb1-61","from":496582627,"blocks":2000,"burn":200,
+    "targets":[60000000,41000000,29000000,20000000,14000000,10000000],
+    "windows":[9,52,329,2105,13485,86400],"seed":[0,0,0,0,0,0],"minFee":"20000000"}]'
+```
+
+**What the collector does with it.** `internal/pricer` records the versions this measurement covers (`pricer.VerifiedVersions`), a set rather than a range: a version nobody has run is a version nobody has checked, and adding one is a claim that belongs with a new measurement. Three consequences:
+
+- **Refuse, do not guess.** A replay holding a constraint set that meets a block whose header says ArbOS is below 50 stops. The range is recorded as a missing range with reason `unsupported model` and left unpriced, the same answer a range with no state to replay from gets. This is the case Arbitrum One below block 419,260,688 falls into.
+- **Carry the caveat.** Every block row stores its version and every bucket the range of versions folded into it. `/series` reports `arbosVersionMin`, `arbosVersionMax` and a `replayFidelity` of `verified`, `boundary` (the bucket spans an upgrade), `unverified` (one version, unmeasured) or `unknown` (a block recorded none). The web app marks the first two with a counter-hatch and a caption; `unknown` draws plainly, because it is most of a database written before the version was stored and shading all of it would say something the data does not.
+- **An upgrade is self-announcing.** `/live` reports `arbosVersion` and `replayFidelity` from the sampled head, so the day a chain moves to a version nobody has measured, the site says so without a redeploy.
 
 ---
 
@@ -213,7 +259,7 @@ Known error sources, all to be surfaced in the "Data & method" footer:
 - **Collector budget on the public RPC**: the limiter counts calls, and exact reconstruction needs one header call plus one receipt call per block. Public endpoints are paced sequentially, so deep recomputation can take substantially longer than wall-clock history. Use a dedicated archive endpoint for a timely full repair, or run a Nitro follower node.
 - **Limiter semantics** are inferred, not documented. Log every 429 with timestamp and calls-in-last-10-s so the real window can be fitted from data.
 - **Constraint set changes** must be handled without redeploy: the page reads the constraint set from `meta.json` and the live call, renders N cards, and shows a "parameters changed at block …" banner within a minute.
-- **ArbOS upgrades** could change `P4` or the model (multi-gas constraints are already in the code). Pin the model to ArbOS version; the collector alerts if `arbOSVersion()` changes.
+- **ArbOS upgrades** could change `P4` or the model (multi-gas constraints are already in the code). The version behind every block is recorded from its header and carried into the api (§7.1), so a bucket says which model produced it and a version nobody has measured is reported as such rather than assumed to behave like its predecessor. What remains open is the measurement itself: it covers the versions in `pricer.VerifiedVersions` and has to be repeated for each new one.
 - **USD pricing** needs an external API; keep optional.
 - **Fee-account balances** are a proxy for fees collected; withdrawals break it. Prefer `Σ gasUsed × baseFee` from headers for "fees/day", use balances only as a live counter.
 

@@ -170,6 +170,11 @@ type LiveSnapshot struct {
 	L1                  *L1                  `json:"l1,omitempty"`
 	Accounts            *Accounts            `json:"accounts,omitempty"`
 	ReplayErrorBips     int64                `json:"replayErrorBips"`
+	// ArbOSVersion is the version producing blocks now, from the sampled header, and ReplayFidelity
+	// what it says about the replay: an upgrade to a version nobody has measured the pricer against
+	// turns this to unverified without anything else having to change.
+	ArbOSVersion   *uint64 `json:"arbosVersion"`
+	ReplayFidelity string  `json:"replayFidelity"`
 	// EthUsd is null when no spot was fetched or the last one is stale.
 	EthUsd *EthUsd `json:"ethUsd"`
 }
@@ -189,6 +194,39 @@ type BlockPoint struct {
 	ExponentBips     int64    `json:"exponentBips"`
 	MinBaseFee       *string  `json:"minBaseFee"`
 	Anchored         bool     `json:"anchored"`
+	// ArbOSVersion is the version that produced the block, from its header. Null for history stored
+	// before it was recorded, which is not the same as version zero.
+	ArbOSVersion *uint64 `json:"arbosVersion"`
+}
+
+// Replay fidelity of a bucket: what the ArbOS versions behind it say the replay is worth.
+const (
+	// FidelityVerified: every block ran one ArbOS version, and that version is one the pricer has been
+	// measured against (docs/SPEC.md section 7.1).
+	FidelityVerified = "verified"
+	// FidelityBoundary: the bucket spans an ArbOS upgrade, so the replay carried backlogs from one
+	// pricing model into the next with nothing recording the change.
+	FidelityBoundary = "boundary"
+	// FidelityUnverified: one known version, outside the measured range. The replay still ran; nobody
+	// has checked it against this version of the model.
+	FidelityUnverified = "unverified"
+	// FidelityUnknown: at least one block recorded no version, so nothing can be said either way.
+	FidelityUnknown = "unknown"
+)
+
+// ReplayFidelity classifies a bucket from the ArbOS versions of the blocks folded into it. verified is
+// deliberately the narrowest answer: a bucket has to be wholly inside one measured version to earn it.
+func ReplayFidelity(minVersion, maxVersion *uint64, verified func(uint64) bool) string {
+	if minVersion == nil || maxVersion == nil {
+		return FidelityUnknown
+	}
+	if *minVersion != *maxVersion {
+		return FidelityBoundary
+	}
+	if !verified(*minVersion) {
+		return FidelityUnverified
+	}
+	return FidelityVerified
 }
 
 // SeriesPoint is one bucket of a Series, its pricing fields describing the bucket's last block.
@@ -226,6 +264,12 @@ type SeriesPoint struct {
 	SurplusFeesWei         *string  `json:"surplusFeesWei"`
 	ConstraintSetID        int64    `json:"constraintSetId"`
 	ReplayErrorBips        int64    `json:"replayErrorBips"`
+	// The ArbOS versions of the blocks folded in, null together when any of them recorded none.
+	// ReplayFidelity is what they say about the replay behind the bucket, so a client does not have to
+	// know which versions the pricer was measured against to draw the difference.
+	ArbOSVersionMin *uint64 `json:"arbosVersionMin"`
+	ArbOSVersionMax *uint64 `json:"arbosVersionMax"`
+	ReplayFidelity  string  `json:"replayFidelity"`
 }
 
 // Reorg is the WebSocket reorg message: the collector replaced blocks at or below the ring's tip,
@@ -344,6 +388,11 @@ const (
 	// HoleReasonExpired is accepted only while importing the old bounded JSON
 	// checkpoint. Those ranges become pending again in durable storage.
 	HoleReasonExpired = "expired"
+	// HoleReasonUnsupportedModel marks a range whose blocks ran an ArbOS version older than the
+	// multi-constraint pricer, which the only state available would price with constraints. That is a
+	// model the chain did not have, so the range is left unpriced rather than filled with a number
+	// nothing supports.
+	HoleReasonUnsupportedModel = "unsupported model"
 )
 
 // HoleState is the pricer state at the end of the last block a filler committed, carried in the

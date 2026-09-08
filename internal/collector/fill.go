@@ -229,7 +229,7 @@ func effectiveLifecycle(h hole) string {
 	if h.Lifecycle != "" {
 		return h.Lifecycle
 	}
-	if h.Reason == reasonNoState {
+	if h.Reason == reasonNoState || h.Reason == reasonUnsupportedModel {
 		return rangeBlocked
 	}
 	return rangePending
@@ -745,6 +745,20 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	}
 	if err := verifyChain(headers); err != nil {
 		return FillIdle, err
+	}
+	if lo, hi, bad := unsupportedModel(t.state, headers); bad {
+		f.log.Warn("a queued range predates the multi-constraint pricer, recording it as unfillable rather than pricing it with a model the chain did not run",
+			"from", lo, "to", hi, "arbosBelow", pricer.FirstConstraintVersion)
+		if err := f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+			return f.markHoles(ctx, s, map[uint64]string{h.From: reasonUnsupportedModel})
+		}); err != nil {
+			return FillNone, err
+		}
+		return FillNone, nil
+	}
+	if at, ok := spansArbOSUpgrade(headers); ok {
+		f.log.Info("the gap replay crossed an ArbOS upgrade, so the buckets over it carry a version range",
+			"block", at, "from", headers[0].ArbOSVersion, "to", headers[len(headers)-1].ArbOSVersion)
 	}
 	last := from+n-1 == h.To
 	var tail *db.Block

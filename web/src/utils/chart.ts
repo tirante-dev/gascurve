@@ -1,6 +1,7 @@
 // Pure helpers that turn api shapes into what the charts draw.
 
 import { bucketSeconds as bucketWidth } from "@/lib/gaps";
+import { unvouchedKind, versionRange, type UnvouchedKind } from "@/lib/fidelity";
 import { completenessOf, coverageOf, partialKinds, type PartialKind } from "@/lib/partial";
 import { saturatingCastToBips, saturatingUMul, toUint64 } from "@/lib/pricer";
 import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesCompleteness, SeriesPoint } from "@/types";
@@ -241,6 +242,10 @@ export type ChartPoint = {
    */
   partial: PartialKind | null;
   replayErrorBips: number;
+  /** What the ArbOS versions behind the bucket say the replay is worth, null for one it can vouch for. */
+  fidelity: UnvouchedKind | null;
+  /** The versions the bucket names, "51 to 61" across an upgrade. Null when it recorded none. */
+  arbosVersions: string | null;
   constraintSetId: number;
   /** False when the point's set is not in the series; then its backlogs sit under the `buI` keys. */
   setKnown: boolean;
@@ -306,6 +311,8 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
       completeness: completenessOf(p),
       partial: kinds[i],
       replayErrorBips: p.replayErrorBips,
+      fidelity: unvouchedKind(p),
+      arbosVersions: versionRange(p),
       constraintSetId: p.constraintSetId,
       setKnown: own !== undefined,
       splitKnown: own !== undefined && split !== null,

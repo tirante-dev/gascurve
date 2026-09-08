@@ -5,6 +5,7 @@
 import type { OwnerAction, PricerModel, Series } from "@/types";
 import type { TooltipRow } from "@/components/ChartTooltip";
 import { bucketSeconds as bucketWidth, gapModel, withGapBreaks, NO_GAPS, type GapModel, type GapRow } from "@/lib/gaps";
+import { fidelityRowNote } from "@/lib/fidelity";
 import { parseConstraintArg, rawConstraintArg } from "@/lib/ownerActions";
 import { partialRowNote } from "@/lib/partial";
 import { buildChartPoints, FLOOR_COLOR, logDomain, shortConstraintLabel, spanSeconds, withSetBoundaries, type ChartPoint } from "@/utils/chart";
@@ -56,14 +57,14 @@ export function ownerActionNote(markers: readonly Marker[], bucketSeconds: numbe
 }
 
 /**
- * The whole tooltip footnote for a hovered bucket: that the collector has only part of it, then every
- * owner action inside it. `sums` is true for a chart drawing sums per bucket, which leaves a partial
+ * The whole tooltip footnote for a hovered bucket: that the collector has only part of it, that the
+ * replay behind it is not vouched for, then every owner action inside it. `sums` is true for a chart drawing sums per bucket, which leaves a partial
  * bucket out of its marks rather than drawing it short.
  */
 export function bucketNote(markers: readonly Marker[], bucketSeconds: number, sums = false): (row: Record<string, unknown>) => string | null {
   const actions = ownerActionNote(markers, bucketSeconds);
   return (row) => {
-    const parts = [partialRowNote(row, sums), actions(row)].filter((part): part is string => part !== null);
+    const parts = [partialRowNote(row, sums), fidelityRowNote(row), actions(row)].filter((part): part is string => part !== null);
     return parts.length > 0 ? parts.join(" \u00b7 ") : null;
   };
 }

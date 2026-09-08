@@ -1,6 +1,7 @@
 "use client";
 
 import { useTicker } from "@/hooks/useTicker";
+import { unvouchedKind } from "@/lib/fidelity";
 import type { LiveSnapshot, LiveStatus, Network, Series, StatusResponse } from "@/types";
 import { formatAgo, formatDateTime, formatInteger } from "@/utils/format";
 import { Bips, STATUS_COPY } from "./primitives";
@@ -11,11 +12,23 @@ function estimatedNote(count: number): string {
 }
 
 /** `now` is for a caller that fixes the clock; left out, the footer keeps its own so the page above it does not tick. */
+/** What the live head says the replay stands on: the version producing blocks now, and whether the
+ * pricer has been measured against it. */
+function modelStanding(snapshot: LiveSnapshot | null): string {
+  const version = snapshot?.arbosVersion;
+  if (typeof version !== "number") return "n/a";
+  const fidelity = snapshot?.replayFidelity;
+  return fidelity === "unverified" ? `ArbOS ${formatInteger(version)}, not yet measured` : `ArbOS ${formatInteger(version)}`;
+}
+
 export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, now }: { snapshot: LiveSnapshot | null; series: Series | null; networkInfo: Network | null; status: LiveStatus; apiStatus: StatusResponse | null; now?: number }) {
   const ticked = useTicker(now === undefined ? 1000 : 0);
   const clock = now ?? ticked;
   const maxReplayError = series ? Math.max(0, ...series.points.map((p) => p.replayErrorBips)) : 0;
   const estimated = series ? series.points.filter((p) => p.replayErrorBips > 200).length : 0;
+  // Buckets whose replay the measurement does not cover, which is a different fact from a large error:
+  // the numbers may be right, nobody has checked the model that produced them.
+  const unvouched = series ? series.points.filter((p) => unvouchedKind(p) !== null).length : 0;
   const sampledAgo = snapshot ? (clock - new Date(snapshot.sampledAt).getTime()) / 1000 : null;
   const networkStatus = apiStatus?.networks.find((n) => n.name === networkInfo?.name);
   const webVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "dev";
@@ -44,6 +57,14 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
               {series ? <Bips value={maxReplayError} /> : "n/a"}
               {estimated > 0 ? estimatedNote(estimated) : ""}
             </dd>
+            <dt className="text-ink-3">pricing model</dt>
+            <dd>{modelStanding(snapshot)}</dd>
+            {unvouched > 0 ? (
+              <>
+                <dt className="text-ink-3">unverified buckets</dt>
+                <dd>{`${formatInteger(unvouched)} of ${formatInteger(series?.points.length ?? 0)} in range`}</dd>
+              </>
+            ) : null}
           </dl>
         </div>
         <div>

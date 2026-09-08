@@ -51,6 +51,9 @@ export type MockNetworkDef = {
   blockAtHistoryStart: number;
   blocksPerSecond: number;
   minFeeHistory: { at: string; wei: bigint }[];
+  /** ArbOS upgrades in the recorded history, oldest first. The version in force before the first entry
+   * is that entry's `from`, since the world does not model anything older. */
+  arbosHistory: { at: string; version: number }[];
   constraintSets: MockConstraintSet[];
   legacy?: MockLegacyParams;
   ownerActions: OwnerAction[];
@@ -192,6 +195,12 @@ export const ROBINHOOD: MockNetworkDef = {
     { at: "2026-04-30T20:37:00Z", wei: 100_000_000n },
     { at: "2026-06-24T20:28:00Z", wei: 20_000_000n },
   ],
+  // The chain launched on 51 and upgraded before the recorded history begins, so every bucket here is
+  // on one version.
+  arbosHistory: [
+    { at: "2026-04-30T20:37:00Z", version: 51 },
+    { at: "2026-06-16T22:19:00Z", version: 61 },
+  ],
   constraintSets: ROBINHOOD_CONSTRAINT_HISTORY,
   ownerActions: ROBINHOOD_OWNER_ACTIONS,
   demand: {
@@ -280,6 +289,11 @@ export const ARBITRUM_ONE: MockNetworkDef = {
   blockAtHistoryStart: 372_000_000,
   blocksPerSecond: 4,
   minFeeHistory: [{ at: "2024-01-01T00:00:00Z", wei: 10_000_000n }],
+  // The upgrade lands inside the recorded history, so the deeper ranges carry buckets that span it.
+  arbosHistory: [
+    { at: "2026-01-08T17:00:00Z", version: 51 },
+    { at: "2026-08-20T17:00:00Z", version: 61 },
+  ],
   constraintSets: ARBITRUM_ONE_SETS,
   ownerActions: [constraintAction(ARBITRUM_ONE_SETS[1], 200)],
   demand: {
@@ -334,6 +348,7 @@ export const ROBINHOOD_TESTNET: MockNetworkDef = {
     { at: "2026-04-01T00:00:00Z", wei: 100_000_000n },
     { at: "2026-07-15T10:00:00Z", wei: 10_000_000n },
   ],
+  arbosHistory: [{ at: "2026-04-01T00:00:00Z", version: 40 }],
   constraintSets: [],
   legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10 },
   ownerActions: [

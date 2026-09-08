@@ -38,12 +38,16 @@ type fakeRPC struct {
 	l1          *nitro.L1Sample
 	accounts    *nitro.FeeAccounts
 	arbos       uint64
-	logs        []nitro.Log
-	fullBlocks  map[uint64]nitro.Block
-	receipts    map[string]nitro.Receipt
-	available   int
-	stats       nitro.Stats
-	errs        map[string]error
+	// arbosFrom is the block an upgrade takes effect at, so a test can put a version boundary inside a
+	// range of headers. Zero leaves every header on arbos.
+	arbosFrom  uint64
+	arbosTo    uint64
+	logs       []nitro.Log
+	fullBlocks map[uint64]nitro.Block
+	receipts   map[string]nitro.Receipt
+	available  int
+	stats      nitro.Stats
+	errs       map[string]error
 	// hooks run when the named method is called, before it answers, so a
 	// test can change the database (commit a rewind, say) while a fetch is
 	// in flight.
@@ -168,7 +172,15 @@ func (f *fakeRPC) header(n uint64) nitro.Header {
 	}
 	posterGas := f.posterGas(n)
 	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50,
-		ArbOSVersion: f.arbos, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)], PosterGas: &posterGas}
+		ArbOSVersion: f.arbosOf(n), TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)], PosterGas: &posterGas}
+}
+
+// arbosOf is the version in force at a block: the upgrade's version from arbosFrom on.
+func (f *fakeRPC) arbosOf(n uint64) uint64 {
+	if f.arbosFrom > 0 && n >= f.arbosFrom {
+		return f.arbosTo
+	}
+	return f.arbos
 }
 
 func (f *fakeRPC) ChainID(context.Context) (uint64, error) {
