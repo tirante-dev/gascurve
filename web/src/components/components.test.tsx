@@ -175,8 +175,7 @@ describe("LiveHero", () => {
     // The working is the hover note, and the description says the same to a screen reader.
     expect(within(dial).getByText("19.99× the 0.02 gwei floor")).toBeInTheDocument();
     expect(within(dial).getByText("0.3997 gwei ≈ 19.99 × 0.02 gwei")).toBeInTheDocument();
-    expect(within(dial).getByText("green to 2× the floor, amber to 10×, red above")).toBeInTheDocument();
-    expect(within(dial).getByText("19.99 times the 0.02 gwei floor, far above the floor: green to 2× the floor, amber to 10×, red above.")).toBeInTheDocument();
+    expect(within(dial).getByText("19.99 times the 0.02 gwei floor, far above the floor.")).toBeInTheDocument();
     // At the floor the needle rests at the left end, in the green.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(1)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-good");
@@ -187,7 +186,7 @@ describe("LiveHero", () => {
     expect(Number(within(dial).getByTestId("fee-dial-needle").getAttribute("x2"))).toBeCloseTo(50, 1);
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10.01)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-critical");
-    // The tone follows the printed figure: 10.004 prints as "10.00×", which the note says is still amber.
+    // The tone follows the printed figure: 10.004 prints as "10.00×", which is still amber.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10.004)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(within(dial).getByText("10.00")).toBeInTheDocument();
     expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-warning");

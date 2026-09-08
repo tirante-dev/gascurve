@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AMBER_TO, BANDS_LINE, DIAL_BANDS, DIAL_CX, DIAL_CY, DIAL_MAX, DIAL_RADIUS, dialArc, dialPoint, dialPosition, dialTone, GREEN_TO, TONE_SENTENCE } from "./dial";
+import { AMBER_TO, DIAL_BANDS, DIAL_CX, DIAL_CY, DIAL_MAX, DIAL_RADIUS, dialArc, dialPoint, dialPosition, dialTone, GREEN_TO, TONE_SENTENCE } from "./dial";
 
 describe("dialTone", () => {
   it("is green to twice the floor, amber to ten times, red above", () => {
@@ -9,7 +9,6 @@ describe("dialTone", () => {
     expect(dialTone(AMBER_TO)).toBe("warning");
     expect(dialTone(10.01)).toBe("critical");
     expect(dialTone(1000)).toBe("critical");
-    expect(BANDS_LINE).toBe("green to 2× the floor, amber to 10×, red above");
     expect(Object.keys(TONE_SENTENCE)).toEqual(["good", "warning", "critical"]);
   });
 });
