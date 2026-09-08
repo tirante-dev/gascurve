@@ -1,6 +1,6 @@
 "use client";
 
-import { BANDS_LINE, DIAL_BANDS, DIAL_CX, DIAL_CY, DIAL_RADIUS, dialArc, dialPoint, dialPosition, dialTone, TONE_SENTENCE, type DialTone } from "@/lib/dial";
+import { DIAL_BANDS, DIAL_CX, DIAL_CY, DIAL_RADIUS, dialArc, dialPoint, dialPosition, dialTone, TONE_SENTENCE, type DialTone } from "@/lib/dial";
 import { FIXED_WIDTH_CH, formatGweiFixed, formatMultiplierFixed } from "@/utils/format";
 import { Figure, HoverNote } from "./primitives";
 
@@ -32,12 +32,12 @@ const NEEDLE_RADIUS = DIAL_RADIUS - BAND_WIDTH;
 export function FeeDial({ baseFeeGwei, floorGwei, multiplier }: { baseFeeGwei: number; floorGwei: string; multiplier: number }) {
   const figure = formatMultiplierFixed(multiplier);
   // The tone follows the figure as printed, not the raw multiplier: 2.004x prints as "2.00x", and a
-  // "2.00x" in amber under a note that says green runs to 2x would contradict itself.
+  // "2.00x" in amber would put the figure a band away from where a reader can see it rounds to.
   const tone = dialTone(Number(figure));
   const tip = dialPoint(dialPosition(multiplier), NEEDLE_RADIUS);
   // Each side is rounded on its own, so the product is only ever about equal.
-  const lines = [`${figure}× the ${floorGwei} gwei floor`, `${formatGweiFixed(baseFeeGwei)} gwei ≈ ${figure} × ${floorGwei} gwei`, BANDS_LINE];
-  const description = `${figure} times the ${floorGwei} gwei floor, ${TONE_SENTENCE[tone]}: ${BANDS_LINE}.`;
+  const lines = [`${figure}× the ${floorGwei} gwei floor`, `${formatGweiFixed(baseFeeGwei)} gwei ≈ ${figure} × ${floorGwei} gwei`];
+  const description = `${figure} times the ${floorGwei} gwei floor, ${TONE_SENTENCE[tone]}.`;
   return (
     <div className="vw-tile rounded-md bg-surface-2 px-3 pt-2 pb-1.5" data-testid="fee-dial">
       <HoverNote lines={lines} description={description} align="end">
