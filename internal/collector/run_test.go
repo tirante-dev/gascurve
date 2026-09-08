@@ -469,10 +469,10 @@ func TestRunHistoryFillsGaps(t *testing.T) {
 	waitFor(t, "the first head", func() bool { return f.Head() == 1000 })
 	rpc.setHead(1150)
 	waitFor(t, "the skipped gap", func() bool { return len(holesOf(t, store)) == 1 })
-	// While the fast loop catches up the history loop stands down.
-	f.catchingUp.Store(true)
+	// While the fast loop rewinds a reorg the history loop stands down.
+	f.rewinding.Store(true)
 	time.Sleep(20 * time.Millisecond)
-	f.catchingUp.Store(false)
+	f.rewinding.Store(false)
 	// With a hole queued every header fetch belongs to the filler, so the
 	// attempts through the failing endpoint run its error path.
 	attempts := rpc.calledTimes("HeadersByNumbers")
@@ -553,6 +553,70 @@ func TestRunHistoryRestartsBackfillAfterRewind(t *testing.T) {
 	})
 	cancel()
 	<-done
+}
+
+// TestOrdinaryProgressLeavesHistoryWorkRunning: the catch-up flag was raised for every tick in which
+// the head had moved at all, so a chain producing blocks faster than a tick completes held it raised
+// almost permanently and the backfill never ran. A gap within one header batch is ordinary progress,
+// and history work runs through it.
+func TestOrdinaryProgressLeavesHistoryWorkRunning(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var busy []bool
+	rpc.hooks["HeadersByNumbers"] = func() { busy = append(busy, f.fastLoopBusy()) }
+	rpc.setHead(1000 + uint64(f.cfg.HeaderBatchSize))
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(busy) == 0 {
+		t.Fatal("the catch-up fetched no header")
+	}
+	for i, b := range busy {
+		if b {
+			t.Fatalf("history work held off at batch %d of a one-batch catch-up", i)
+		}
+	}
+}
+
+// TestEveryHistoryGateHasAFloor: a fast loop that is never idle deferred the filler, the repair and
+// the backfill without counting, and an uncounted deferral guarantees nothing. Each gate counts, so
+// each takes its turn in maxRecoveryDeferrals however long the fast loop stays busy. This is the share
+// against the fast loop only: runHistory still decides which job the iteration belongs to.
+func TestEveryHistoryGateHasAFloor(t *testing.T) {
+	f := newTestFollower(t, newFakeRPC(1000), dbtest.New())
+	gates := map[string]func() bool{
+		"recovery": f.recoveryMustWait,
+		"repair":   f.repairMustWait,
+		"backfill": f.backfillMustWait,
+	}
+	for _, busy := range []func(){
+		func() { f.rewinding.Store(true) },
+		func() { f.behind.Store(uint64(f.cfg.HeaderBatchSize) + 1) },
+	} {
+		busy()
+		for name, gate := range gates {
+			for i := 1; i < maxRecoveryDeferrals; i++ {
+				if !gate() {
+					t.Fatalf("%s: turn %d taken while the fast loop is busy", name, i)
+				}
+			}
+			if gate() {
+				t.Fatalf("%s: no turn in %d deferrals", name, maxRecoveryDeferrals)
+			}
+		}
+		f.rewinding.Store(false)
+		f.behind.Store(0)
+	}
+	for name, gate := range gates {
+		if gate() {
+			t.Fatalf("%s: waiting on an idle fast loop", name)
+		}
+	}
 }
 
 // TestRunManagerRetiresNetworkTurnedOff: a network that was followed before and is now enabled:

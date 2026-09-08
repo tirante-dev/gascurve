@@ -279,7 +279,7 @@ func TestRepairStepYieldsToACatchingUpFastLoop(t *testing.T) {
 	store := dbtest.New()
 	seedBlocksWithoutPosterGas(t, rpc, store, 900, 905)
 	f := repairFollower(t, rpc, store)
-	f.catchingUp.Store(true)
+	f.rewinding.Store(true)
 
 	if status, err := f.RepairStep(ctx); err != nil || status != RepairIdle {
 		t.Fatalf("repair: %v %v", status, err)

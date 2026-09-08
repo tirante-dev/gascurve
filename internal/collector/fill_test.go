@@ -350,30 +350,30 @@ func TestFillRestartedByReorg(t *testing.T) {
 	}
 }
 
-// TestFillYieldsWhileCatchingUp: the fast loop's catch-up owns the budget,
-// so the filler stands down until it is done.
-func TestFillYieldsWhileCatchingUp(t *testing.T) {
+// TestFillYieldsWhileTheFastLoopIsBusy: a rewind and a lag of more than one
+// header batch each own the budget, so the filler stands down for both, and
+// takes its guaranteed turn once it has deferred maxRecoveryDeferrals times.
+func TestFillYieldsWhileTheFastLoopIsBusy(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
 	f := newTestFollower(t, rpc, store)
 	skipGap(t, f, rpc)
-	f.catchingUp.Store(true)
+	f.rewinding.Store(true)
 	if st, err := f.FillStep(ctx); err != nil || st != FillIdle {
-		t.Fatalf("catching up: %v %v", st, err)
+		t.Fatalf("rewinding: %v %v", st, err)
 	}
 	if len(rpc.headerCalls) != 0 {
-		t.Fatalf("no header may be fetched while the fast loop catches up: %v", rpc.headerCalls)
+		t.Fatalf("no header may be fetched while the fast loop rewinds: %v", rpc.headerCalls)
 	}
-	f.catchingUp.Store(false)
+	f.rewinding.Store(false)
 	// The same while the last tick found the stored head more than a
 	// header batch behind: the filler's batches would queue ahead of the
-	// catch-up's and turn the lag into another skipped gap.
+	// catch-up's and turn the lag into another skipped gap. The rewind
+	// above counted as one of the turns, so the guaranteed one arrives
+	// maxRecoveryDeferrals deferrals after it, not after it and thirty more.
 	f.behind.Store(uint64(f.cfg.HeaderBatchSize) + 1)
-	if st, err := f.FillStep(ctx); err != nil || st != FillIdle || len(rpc.headerCalls) != 0 {
-		t.Fatalf("behind the chain: %v %v %v", st, err, rpc.headerCalls)
-	}
-	for i := 1; i < maxRecoveryDeferrals-1; i++ {
+	for i := 2; i < maxRecoveryDeferrals; i++ {
 		if st, err := f.FillStep(ctx); err != nil || st != FillIdle || len(rpc.headerCalls) != 0 {
 			t.Fatalf("priority deferral %d: %v %v %v", i, st, err, rpc.headerCalls)
 		}
@@ -775,7 +775,7 @@ func TestTickTracksHowFarBehind(t *testing.T) {
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if f.behind.Load() != 0 || f.historyMustWait() {
+	if f.behind.Load() != 0 || f.fastLoopBusy() {
 		t.Fatalf("caught up after a tick: behind %d", f.behind.Load())
 	}
 	rpc.setHead(gapHead)
@@ -792,7 +792,7 @@ func TestTickTracksHowFarBehind(t *testing.T) {
 	if err := f.Tick(ctx); err == nil {
 		t.Fatal("expected the catch-up to fail")
 	}
-	if f.behind.Load() != 30 || !f.historyMustWait() {
+	if f.behind.Load() != 30 || !f.fastLoopBusy() {
 		t.Fatalf("behind after a failed catch-up: %d", f.behind.Load())
 	}
 	delete(rpc.errs, "HeadersByNumbers")

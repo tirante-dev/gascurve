@@ -182,17 +182,22 @@ type Follower struct {
 	// registry, not the follower.
 	metrics *metrics.Network
 
-	catchingUp atomic.Bool
+	// rewinding marks a tick that is undoing a reorg. History work yields to it because behind cannot
+	// see that work: a rewind moves the stored head backwards, so the gap the tick then re-fetches is
+	// wider than the lag measured when it started.
+	rewinding atomic.Bool
 	// behind is how many blocks the stored head trailed the sampled head at the last tick. History
 	// work waits while it exceeds a header batch: on a small budget their batches would queue ahead
-	// of the catch-up's and turn a lag into a skipped gap.
+	// of the catch-up's and turn a lag into a skipped gap. A lag within one batch is ordinary progress
+	// on a fast chain, not a catch-up, and history must keep running through it.
 	behind atomic.Uint64
-	// recoveryDeferrals counts consecutive missing-range turns yielded to a lagging fast loop.
+	// recoveryDeferrals counts consecutive missing-range turns yielded to a busy fast loop.
 	recoveryDeferrals atomic.Uint64
-	// repairDeferrals is the same count for the poster-gas repair, kept
-	// apart so the filler and the repair each get their guaranteed turn
-	// rather than sharing, and neither consumes the other's.
-	repairDeferrals atomic.Uint64
+	// repairDeferrals is the same count for the poster-gas repair, and backfillDeferrals for the
+	// backfill, kept apart so each of the three gets its guaranteed turn rather than sharing, and
+	// none consumes another's.
+	repairDeferrals   atomic.Uint64
+	backfillDeferrals atomic.Uint64
 
 	mu          sync.Mutex
 	initialized bool
@@ -1311,28 +1316,31 @@ func (f *Follower) withGeneration(ctx context.Context, gen uint64, fn func(db.St
 	})
 }
 
-// historyMustWait reports whether the gap filler and backfill should hold off: the fast loop is
-// catching up, or its last tick found the stored head more than a header batch behind, so every spare
-// call belongs to the live path.
-func (f *Follower) historyMustWait() bool {
-	return f.catchingUp.Load() || f.behind.Load() > uint64(f.cfg.HeaderBatchSize)
+// fastLoopBusy reports whether history work should yield the call budget to the live path: the fast loop
+// is rewinding a reorg, or its last tick found the stored head more than a header batch behind. It is
+// the condition to defer on, not a veto: deferredWait still lets each caller through one turn in
+// maxRecoveryDeferrals.
+func (f *Follower) fastLoopBusy() bool {
+	return f.rewinding.Load() || f.behind.Load() > uint64(f.cfg.HeaderBatchSize)
 }
 
-// recoveryMustWait gives the active catch-up absolute priority, and a lagging fast loop all but one of
-// every maxRecoveryDeferrals history turns, so a durable missing range is still retried eventually.
+// recoveryMustWait gives a busy fast loop all but one of every maxRecoveryDeferrals history turns, so a
+// durable missing range is still retried eventually.
 func (f *Follower) recoveryMustWait() bool { return f.deferredWait(&f.recoveryDeferrals) }
 
-// repairMustWait is the same policy on the repair's own count, so a lag that never lifts cannot hold
-// it off for good while retention removes the rows it exists to repair. Neither consumes the other's turn.
+// repairMustWait is the same policy on the repair's own count, so a fast loop that is never idle cannot
+// hold it off for good while retention removes the rows it exists to repair.
 func (f *Follower) repairMustWait() bool { return f.deferredWait(&f.repairDeferrals) }
 
-// deferredWait counts the caller's deferrals: absolute priority to an active catch-up, all but one of
-// every maxRecoveryDeferrals turns to a lagging fast loop.
+// backfillMustWait is the same policy on the backfill's own count, over the iterations runHistory lets
+// it reach. Going last is a priority order, not a reason to be the one gate with no floor under it.
+func (f *Follower) backfillMustWait() bool { return f.deferredWait(&f.backfillDeferrals) }
+
+// deferredWait counts the caller's deferrals, so a busy fast loop takes at most maxRecoveryDeferrals-1
+// history turns in a row. Every reason to defer is counted: an uncounted one guarantees the caller
+// nothing at all on a chain whose head moves during most ticks.
 func (f *Follower) deferredWait(deferrals *atomic.Uint64) bool {
-	if f.catchingUp.Load() {
-		return true
-	}
-	if f.behind.Load() <= uint64(f.cfg.HeaderBatchSize) {
+	if !f.fastLoopBusy() {
 		deferrals.Store(0)
 		return false
 	}
