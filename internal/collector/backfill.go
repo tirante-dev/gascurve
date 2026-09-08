@@ -43,8 +43,13 @@ type backfillCursor struct {
 	Next       uint64 `json:"next"`
 	// SkipFirst drops the row of the block below a seeded window: it is replayed to price the
 	// window's first block and written by the run below this one.
-	SkipFirst           bool     `json:"skipFirst,omitempty"`
-	End                 uint64   `json:"end"`
+	SkipFirst bool   `json:"skipFirst,omitempty"`
+	End       uint64 `json:"end"`
+	// EndParent is the parent hash of the block at End, so a run stopping under history already
+	// reconstructed is checked to be on the same fork as it. RunParent holds the current run's own,
+	// which becomes EndParent when it finishes.
+	EndParent           string   `json:"endParent,omitempty"`
+	RunParent           string   `json:"runParent,omitempty"`
 	PrevTs              uint64   `json:"prevTs"`
 	PrevHash            string   `json:"prevHash,omitempty"`
 	Backlogs            []uint64 `json:"backlogs"`
@@ -189,6 +194,13 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if hashMismatch(c.PrevHash, headers[0].ParentHash) {
 		return BackfillIdle, fmt.Errorf("backfill header %d does not build on the prior batch, retrying", headers[0].Number)
 	}
+	last := headers[len(headers)-1]
+	if last.Number+1 == c.End && hashMismatch(c.EndParent, last.Hash) {
+		return BackfillIdle, fmt.Errorf("backfill block %d is not the parent of the reconstructed block above it, retrying", last.Number)
+	}
+	if c.SegStart >= c.Next && c.SegStart-c.Next < uint64(len(headers)) {
+		c.RunParent = headers[c.SegStart-c.Next].ParentHash
+	}
 	st, setID, err := f.segmentState(ctx, c)
 	if err != nil {
 		return BackfillIdle, err
@@ -230,12 +242,11 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	buckets := db.FoldBlocks(additive, func(uint64) sql.NullInt64 { return setID })
 
 	c.Next += n
-	c.PrevTs = headers[len(headers)-1].Timestamp
-	c.PrevHash = headers[len(headers)-1].Hash
+	c.PrevTs, c.PrevHash = last.Timestamp, last.Hash
 	c.Backlogs = st.Backlogs()
 	if c.Next >= c.End {
 		c.Active = false
-		c.End = c.SegStart
+		c.End, c.EndParent, c.RunParent = c.SegStart, c.RunParent, ""
 	}
 	err = f.withGeneration(ctx, gen, func(s db.Store) error {
 		if len(rowBacked) > 0 {
@@ -437,7 +448,7 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 		if oldest == nil {
 			return BackfillIdle, nil
 		}
-		c.End = oldest.Number
+		c.End, c.EndParent = oldest.Number, oldest.ParentHash
 		c.Top = oldest.Number
 	}
 	if c.DepthStart == 0 {
@@ -519,10 +530,14 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 // be reached by replaying the segment from a known starting backlog.
 func (f *Follower) seedWindow(ctx context.Context, c *backfillCursor) error {
 	window := uint64(max(f.cfg.BackfillWindow, 0))
-	if f.archive == nil || window == 0 || c.End <= window {
+	if f.archive == nil || window == 0 {
 		return nil
 	}
-	floor, first := c.SegStart, max(c.End-window, c.DepthStart)
+	// The depth is where the descent bottoms out, and bounds the subtraction with it.
+	floor, first := c.SegStart, c.DepthStart
+	if c.End > window+c.DepthStart {
+		first = c.End - window
+	}
 	if first < floor+2 {
 		return nil
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -1074,7 +1075,7 @@ func TestBackfillWindowSeedFallbacks(t *testing.T) {
 	seedSets(t, store2)
 	f2 := newTestFollower(t, newFakeRPC(1000), store2)
 	f2.archive = newFakeRPC(1000)
-	f2.cfg.BackfillWindow = 800
+	f2.cfg.BackfillWindow = 5000            // reaches past the depth, and past block 0
 	f2.cfg.BackfillDepth = 40 * time.Second // block 600, inside the newest set
 	if err := f2.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -1086,6 +1087,28 @@ func TestBackfillWindowSeedFallbacks(t *testing.T) {
 	c2, _ := f2.loadCursor(ctx)
 	if c2.SegStart != 600 || c2.LastAnchor != 598 {
 		t.Fatalf("the window must stop at the depth: %+v", c2)
+	}
+	// A run that stops under history already reconstructed must be on the
+	// same fork as it, whether it stopped at a window or at a segment.
+	poisoned, _ := f2.loadCursor(ctx)
+	good := poisoned.EndParent
+	poisoned.EndParent = "0xwrong"
+	if err := f2.saveCursor(ctx, store2, poisoned); err != nil {
+		t.Fatal(err)
+	}
+	var linkErr error
+	for linkErr == nil {
+		if _, linkErr = f2.BackfillStep(ctx); linkErr == nil {
+			continue
+		}
+		if !strings.Contains(linkErr.Error(), "is not the parent of the reconstructed block above it") {
+			t.Fatalf("unexpected failure: %v", linkErr)
+		}
+	}
+	fixed, _ := f2.loadCursor(ctx)
+	fixed.EndParent = good
+	if err := f2.saveCursor(ctx, store2, fixed); err != nil {
+		t.Fatal(err)
 	}
 	runBackfill(t, f2, 100)
 	if b, _ := store2.BlockByNumber(ctx, 4663, 600); b == nil {
