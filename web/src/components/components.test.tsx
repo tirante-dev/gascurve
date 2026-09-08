@@ -8,7 +8,7 @@ import { applyReorg } from "@/hooks/useLive";
 import { BACKLOG_TITLE, backlogAxis, ConstraintCards, ConstraintCardsView, drainLabel, Sawtooth, sawtoothTooltipRows, secondsAgoLabel } from "./ConstraintCards";
 import { ChartTooltip } from "./ChartTooltip";
 import { DataFooter } from "./DataFooter";
-import { COLLECTOR_LAG_S, CostTile, FeeSplitBar, HeroChart, HeroChartPanel, heroTooltipRows, LiveHero, LiveHeroView, sampleAge } from "./LiveHero";
+import { COLLECTOR_LAG_S, CostTile, HeroChart, HeroChartPanel, heroTooltipRows, LiveHero, LiveHeroView, sampleAge } from "./LiveHero";
 import { HERO_RANGE_KEY, setHeroRange } from "@/lib/hero";
 import { HistoryTabs } from "./HistoryTabs";
 import { NetworkSwitcher } from "./NetworkSwitcher";
@@ -127,7 +127,6 @@ describe("LiveHero", () => {
     expect(screen.getByText("0.0000600")).toBeInTheDocument();
     expect(screen.getByText(/4.02 Mgas in block 55,812,345/)).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("live");
-    expect(screen.getByRole("img", { name: /Floor 5.0% to the infra account/ })).toBeInTheDocument();
   });
   it("does not relabel total throughput as compute throughput against an old api", () => {
     render(<LiveHeroView network="robinhood" snapshot={{ ...snapshot, computeGasPerSecond: undefined }} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
@@ -141,9 +140,6 @@ describe("LiveHero", () => {
       ["Network load (10 s)", "compute gas per second, averaged over the last 10 s"],
       ["Send", "a 21,000 gas transfer at the base fee now"],
       ["Swap", "a 150,000 gas swap at the base fee now"],
-      ["Who gets the fee", "where each unit of compute gas's fee goes"],
-      ["to infrastructure", "floor to infra"],
-      ["to the network", "congestion to network"],
     ]) {
       const word = screen.getByText(label);
       // The term is in the note, set as text rather than as a figure, and in the description a screen reader gets instead.
@@ -157,7 +153,6 @@ describe("LiveHero", () => {
     expect(screen.queryByText("21k transfer")).toBeNull();
     expect(screen.queryByText("150k swap")).toBeNull();
     expect(screen.queryByText("Compute gas/s (10 s)")).toBeNull();
-    expect(screen.getByText("receipt poster gas is paid separately, to the L1 pricer pool")).toBeInTheDocument();
   });
   it("draws the multiplier over the floor as a speedometer, coloured by which of three bands it falls in", () => {
     const at = (multiplier: number) => ({ ...targetValues(snapshot, [], 0), multiplier });
@@ -436,10 +431,6 @@ describe("LiveHero", () => {
     rerender(<LiveHero network="robinhood" live={{ display: null, frame: createFrameStore(), resyncing: true }} status="open" model="constraints" />);
     expect(screen.getByText("Resyncing after a reorg.")).toBeInTheDocument();
     expect(screen.queryByText("Waiting for the first sample.")).toBeNull();
-  });
-  it("splits a fee at the floor entirely to infra", () => {
-    render(<FeeSplitBar snapshot={{ ...snapshot, prices: { ...snapshot.prices, perArbGasCongestion: "0" } }} />);
-    expect(screen.getByText(/0.02 gwei · 100%/)).toBeInTheDocument();
   });
   it("shows the chain's cadence while the sample is fresh and a collector lag warning once it is stale", () => {
     // The block closed at 07:19:59Z and was sampled at 07:20:00Z; three seconds later both are fresh.
