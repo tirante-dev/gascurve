@@ -10,6 +10,7 @@ import {
   partialKinds,
   partialNote,
   partialRowNote,
+  partialRuns,
   partialSumNote,
   withFeeStack,
   IN_PROGRESS_LABEL,
@@ -153,6 +154,23 @@ describe("the bands", () => {
   it("captions what is hatched, and nothing when nothing is", () => {
     expect(partialCaption(partialBands(points, 60))).toBe("Hatched and left out: partially indexed, 40% of the bucket · bucket in progress, 75% elapsed");
     expect(partialCaption([])).toBeNull();
+  });
+
+  it("merges neighbouring buckets of one kind into a run, and keeps a share only where one bucket owns it", () => {
+    const bands = partialBands([{ t: 0, coverage: 0.4 }, { t: 60, coverage: 0.5 }, { t: 120, coverage: null }, { t: 180, coverage: 1 }, { t: 240, coverage: 0.25 }], 60, 255);
+    expect(partialRuns(bands)).toEqual([
+      { from: 0, to: 120, kind: "leading", buckets: 2, coverage: null },
+      { from: 120, to: 180, kind: "unknown", buckets: 1, coverage: null },
+      { from: 240, to: 300, kind: "in-progress", buckets: 1, coverage: 0.25 },
+    ]);
+    expect(partialRuns([])).toEqual([]);
+  });
+
+  it("counts a kind rather than listing every bucket once there is more than one of it", () => {
+    const many = Array.from({ length: 300 }, (_, i) => ({ t: i * 60, coverage: i % 100 < 50 ? 0.5 : null }));
+    expect(partialCaption(partialBands(many, 60))).toBe("Hatched and left out: partly indexed for 150 buckets in 3 stretches · coverage unknown for 150 buckets in 3 stretches");
+    const one = Array.from({ length: 4 }, (_, i) => ({ t: i * 60, coverage: 0.5 }));
+    expect(partialCaption(partialBands(one, 60, 6000))).toBe("Hatched and left out: partly indexed for 4 buckets");
   });
 });
 

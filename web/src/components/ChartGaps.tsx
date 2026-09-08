@@ -1,9 +1,9 @@
 "use client";
 
-import { ReferenceArea } from "recharts";
-import { gapBandLabel, gapCaption, type Gap, type GapModel, type GapWindow } from "@/lib/gaps";
+import { DefaultZIndexes, Text, usePlotArea, useXAxisScale, ZIndexLayer } from "recharts";
+import { gapBandLabel, gapCaption, type Gap, type GapModel } from "@/lib/gaps";
 import { missingBandLabel, missingCaption, type MissingRun } from "@/lib/missing";
-import { partialBandLabel, partialCaption, type PartialBand } from "@/lib/partial";
+import { partialBandLabel, partialCaption, partialRuns, type PartialBand } from "@/lib/partial";
 import { HatchPattern } from "./primitives";
 
 /** Shading for a span with nothing in it: the muted ink at a tenth. It is a background and not a mark,
@@ -15,25 +15,83 @@ export const GAP_FILL_OPACITY = 0.1;
  * beside it, and the caption says the same thing in full. */
 export const GAP_LABEL_MIN_SHARE = 0.09;
 
+/** What a test finds a band by, and how far under the top of the plot its word sits. */
+export const BAND_CLASS = "gascurve-band";
+export const BAND_LABEL_OFFSET = 5;
+
+type BandKind = "gap" | "partial" | "missing";
+
+type BandStyle = { kind: BandKind; fill: string; fillOpacity: number; stroke?: string; strokeOpacity?: number; strokeDasharray?: string };
+
+type DrawnBand = { from: number; to: number; label: string };
+
 /**
- * The shaded spans of a chart's window, as reference areas. Returned as an array rather than wrapped in a
- * component because recharts reads its children by type. Call it before the series so they sit on top.
+ * Every band of one kind as one layer of rects, not one `ReferenceArea` each: a reference area is a
+ * component with its own store subscription, and a day of minute buckets carries hundreds, so any chart's
+ * re-render woke thousands of subscribers. The rects sit in the default layer, above the grid and under
+ * the marks, where nothing covers them because the lines break and the stack is null there. The words go
+ * in the label layer the reference areas used, over every mark, so a target line crossing a band cannot
+ * cross out what it says.
  */
-export function gapBands(gaps: readonly Gap[], window: GapWindow) {
-  const span = window.to - window.from;
-  return gaps.map((gap) => {
-    const wide = span > 0 && (gap.to - gap.from) / span >= GAP_LABEL_MIN_SHARE;
-    return (
-      <ReferenceArea
-        key={`${gap.kind}-${gap.from}`}
-        x1={gap.from}
-        x2={gap.to}
-        fill={GAP_FILL}
-        fillOpacity={GAP_FILL_OPACITY}
-        label={wide ? { value: gapBandLabel(gap), position: "insideTop", fill: "var(--ink-2)", fontSize: 10 } : undefined}
-      />
-    );
-  });
+function BandLayer({ bands, style }: { bands: readonly DrawnBand[]; style: BandStyle }) {
+  const scale = useXAxisScale();
+  const plot = usePlotArea();
+  if (bands.length === 0 || scale === undefined || plot === undefined) return null;
+  const left = plot.x;
+  const right = plot.x + plot.width;
+  const drawn = bands
+    .map((band) => {
+      const a = scale(band.from);
+      const b = scale(band.to);
+      if (a === undefined || b === undefined) return null;
+      const x = Math.max(left, Math.min(a, b));
+      const end = Math.min(right, Math.max(a, b));
+      // The share is of what is on screen, not of the band's own span: a band running off the axis draws
+      // as a sliver, and a word over a sliver lands on whatever sits beside it.
+      return end > x ? { key: `${band.from}-${band.to}`, x, width: end - x, label: plot.width > 0 && (end - x) / plot.width >= GAP_LABEL_MIN_SHARE ? band.label : null } : null;
+    })
+    .filter((band): band is { key: string; x: number; width: number; label: string | null } => band !== null);
+  const labelled = drawn.filter((band) => band.label !== null);
+  return (
+    <>
+      <g className={`${BAND_CLASS}s`}>
+        {drawn.map((band) => (
+          <rect
+            key={band.key}
+            className={BAND_CLASS}
+            data-band={style.kind}
+            x={band.x}
+            y={plot.y}
+            width={band.width}
+            height={plot.height}
+            fill={style.fill}
+            fillOpacity={style.fillOpacity}
+            stroke={style.stroke}
+            strokeOpacity={style.strokeOpacity}
+            strokeDasharray={style.strokeDasharray}
+          />
+        ))}
+      </g>
+      {labelled.length > 0 ? (
+        <ZIndexLayer zIndex={DefaultZIndexes.label}>
+          <g className={`${BAND_CLASS}-labels`}>
+            {labelled.map((band) => (
+              <Text key={band.key} className="recharts-label" x={band.x + band.width / 2} y={plot.y + BAND_LABEL_OFFSET} textAnchor="middle" verticalAnchor="start">
+                {band.label}
+              </Text>
+            ))}
+          </g>
+        </ZIndexLayer>
+      ) : null}
+    </>
+  );
+}
+
+const GAP_STYLE: BandStyle = { kind: "gap", fill: GAP_FILL, fillOpacity: GAP_FILL_OPACITY };
+
+/** The shaded spans of a chart's window. Put it before the series so they draw over it. */
+export function GapBands({ gaps }: { gaps: readonly Gap[] }) {
+  return <BandLayer bands={gaps.map((gap) => ({ from: gap.from, to: gap.to, label: gapBandLabel(gap) }))} style={GAP_STYLE} />;
 }
 
 /** The line under a chart with shaded spans. Nothing at all when none are shaded. */
@@ -56,23 +114,11 @@ export function PartialHatch() {
   return <HatchPattern id={PARTIAL_PATTERN_ID} color={PARTIAL_FILL} />;
 }
 
-/** The buckets a sum chart leaves out, as reference areas one bucket wide. An array for the same reason
- * `gapBands` is. */
-export function partialBandAreas(bands: readonly PartialBand[], window: GapWindow) {
-  const span = window.to - window.from;
-  return bands.map((band) => {
-    const wide = span > 0 && (band.to - band.from) / span >= GAP_LABEL_MIN_SHARE;
-    return (
-      <ReferenceArea
-        key={`partial-${band.from}`}
-        x1={band.from}
-        x2={band.to}
-        fill={`url(#${PARTIAL_PATTERN_ID})`}
-        fillOpacity={PARTIAL_FILL_OPACITY}
-        label={wide ? { value: partialBandLabel(band.kind), position: "insideTop", fill: "var(--ink-2)", fontSize: 10 } : undefined}
-      />
-    );
-  });
+const PARTIAL_STYLE: BandStyle = { kind: "partial", fill: `url(#${PARTIAL_PATTERN_ID})`, fillOpacity: PARTIAL_FILL_OPACITY };
+
+/** The buckets a sum chart leaves out, coalesced into runs so a stretch of them is one rect. */
+export function PartialBands({ bands }: { bands: readonly PartialBand[] }) {
+  return <BandLayer bands={partialRuns(bands).map((run) => ({ from: run.from, to: run.to, label: partialBandLabel(run.kind) }))} style={PARTIAL_STYLE} />;
 }
 
 /** The line under a chart that hatches partial buckets. */
@@ -113,28 +159,18 @@ export function MissingDots() {
   );
 }
 
-/**
- * The runs a series has no value over, as reference areas. An array for the same reason `gapBands` is.
- * Call it before the series in the chart's children and the bands sit under them.
- */
-export function missingBandAreas(runs: readonly MissingRun[], window: GapWindow) {
-  const span = window.to - window.from;
-  return runs.map((run) => {
-    const wide = span > 0 && (run.to - run.from) / span >= GAP_LABEL_MIN_SHARE;
-    return (
-      <ReferenceArea
-        key={`missing-${run.kind}-${run.from}`}
-        x1={run.from}
-        x2={run.to}
-        fill={`url(#${MISSING_PATTERN_ID})`}
-        fillOpacity={MISSING_FILL_OPACITY}
-        stroke={MISSING_FILL}
-        strokeOpacity={MISSING_STROKE_OPACITY}
-        strokeDasharray={MISSING_DASH}
-        label={wide ? { value: missingBandLabel(run.kind), position: "insideTop", fill: "var(--ink-2)", fontSize: 10 } : undefined}
-      />
-    );
-  });
+const MISSING_STYLE: BandStyle = {
+  kind: "missing",
+  fill: `url(#${MISSING_PATTERN_ID})`,
+  fillOpacity: MISSING_FILL_OPACITY,
+  stroke: MISSING_FILL,
+  strokeOpacity: MISSING_STROKE_OPACITY,
+  strokeDasharray: MISSING_DASH,
+};
+
+/** The runs a series has no value over. Put it before the series in the chart's children. */
+export function MissingBands({ runs }: { runs: readonly MissingRun[] }) {
+  return <BandLayer bands={runs.map((run) => ({ from: run.from, to: run.to, label: missingBandLabel(run.kind) }))} style={MISSING_STYLE} />;
 }
 
 /** The line under a chart that dots the runs a series had nothing to draw from. */
