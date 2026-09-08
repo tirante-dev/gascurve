@@ -742,6 +742,113 @@ func TestBackfillDepthHoldStopsAtTheSegmentFloor(t *testing.T) {
 	}
 }
 
+// TestBackfillDepthHoldSurvivesARewind: a reorg reaching above the backfill's
+// range drops its cursor and everything it built. The floor a hold recorded is
+// not in the configuration to be resolved again, so it outlives the cursor and
+// the rebuilt walk reaches it, rather than an emptied cursor reading as history
+// nobody wants and the hold settling at the new live start.
+func TestBackfillDepthHoldSurvivesARewind(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	archive := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	held := func(r *fakeRPC) *Follower {
+		f := newTestFollower(t, r, store)
+		f.archive = archive
+		f.cfg.BackfillWindow = 100
+		f.cfg.BackfillDepth = config.Hold
+		if err := f.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	f := newTestFollower(t, rpc, store)
+	f.archive = archive
+	f.cfg.BackfillWindow = 100
+	f.cfg.BackfillDepth = config.Genesis
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	for i := range 4 {
+		if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+			t.Fatalf("step %d: %v %v", i, st, err)
+		}
+	}
+	runBackfill(t, held(newFakeRPC(1000)), 50)
+	c, err := f.loadCursor(ctx)
+	if err != nil || !c.Done || c.DepthTarget != 900 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	// A reorg below the held floor: every row it built goes, and with them the
+	// cursor. Both fakes fork together, so the archive seeds the same chain.
+	rpc.fork(890, "d")
+	archive.fork(890, "d")
+	rpc.setHead(1005)
+	archive.setHead(1005)
+	after := held(rpc)
+	if c, err = after.loadCursor(ctx); err != nil || c.Top != 0 || c.DepthTarget != 900 {
+		t.Fatalf("the rewind keeps the floor asked for: %+v %v", c, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 900); err != nil || b != nil {
+		t.Fatalf("the rewind drops what the hold had built: %+v %v", b, err)
+	}
+	runBackfill(t, after, 200)
+	if c, err = after.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 900 || c.DepthStart != 900 {
+		t.Fatalf("the rebuilt walk reaches the held floor: %+v %v", c, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 900); err != nil || b == nil {
+		t.Fatalf("the held range must be reconstructed again: %+v %v", b, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 899); err != nil || b != nil {
+		t.Fatalf("nothing below the held floor: %+v %v", b, err)
+	}
+}
+
+// TestBackfillDepthHoldOutlivesADiscardedCursor: the other reset. An
+// unverified live-model segment from an older collector is thrown away with
+// its buckets, and the floor the hold recorded has to survive that too, or the
+// discard would quietly become the end of the history it was keeping.
+func TestBackfillDepthHoldOutlivesADiscardedCursor(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Genesis
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("first step: %v %v", st, err)
+	}
+	held := newTestFollower(t, newFakeRPC(1000), store)
+	held.cfg.BackfillDepth = config.Hold
+	if err := held.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, held, 200)
+	c, err := held.loadCursor(ctx)
+	if err != nil || c.DepthTarget != 500 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	c.Done, c.Active, c.SetID, c.Verified = false, true, 0, false
+	if err := held.saveCursor(ctx, store, c); err != nil {
+		t.Fatal(err)
+	}
+	after := newTestFollower(t, newFakeRPC(1000), store)
+	after.cfg.BackfillDepth = config.Hold
+	if err := after.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, after, 200)
+	if c, err = after.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 500 || c.DepthStart != 500 {
+		t.Fatalf("the discard keeps the floor asked for: %+v %v", c, err)
+	}
+}
+
 // TestBackfillDepthHoldIsIdempotent: the word says where the floor is, not
 // that it moves, so a pod restarting on the same configuration holds where it
 // held and does not walk on.

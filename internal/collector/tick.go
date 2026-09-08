@@ -433,8 +433,9 @@ func (f *Follower) rewindNetworkHead(ctx context.Context, s db.Store, ancestor u
 
 // rewindBackfill resets the backfill when its range reaches above the ancestor: everything it folded
 // came from the old fork or was cut off, so its backfill-only buckets are dropped and the cursor starts
-// over. It reports whether those additive buckets were deleted, since everything a gap filler folded
-// into them went with them.
+// over. The floor it was walking to outlives the walk, since resolving it again would hand back the
+// history just deleted and a held floor lives nowhere else. It reports whether those additive buckets
+// were deleted, since everything a gap filler folded into them went with them.
 func (f *Follower) rewindBackfill(ctx context.Context, s db.Store, ancestor uint64, boundary time.Time, hasBoundary bool) (cleared bool, err error) {
 	raw, ok, err := s.GetState(ctx, f.chainID, db.StateBackfillCursor)
 	if err != nil {
@@ -457,7 +458,7 @@ func (f *Follower) rewindBackfill(ctx context.Context, s db.Store, ancestor uint
 		}
 		cleared = true
 	}
-	return cleared, f.saveCursor(ctx, s, &backfillCursor{})
+	return cleared, f.saveCursor(ctx, s, &backfillCursor{DepthTarget: c.recordedTarget()})
 }
 
 // rewindCursor lowers a numeric checkpoint to block when it is beyond it.

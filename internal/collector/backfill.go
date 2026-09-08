@@ -68,6 +68,15 @@ type backfillCursor struct {
 	PendingBips     []int64 `json:"pendingBips,omitempty"`
 }
 
+// recordedTarget is the floor the cursor was asked to reach, reading a cursor written before the
+// target existed, whose DepthStart is that same floor and nothing else.
+func (c *backfillCursor) recordedTarget() uint64 {
+	if c.DepthTarget != 0 {
+		return c.DepthTarget
+	}
+	return c.DepthStart
+}
+
 // carry reads the pricing group held for the next batch's first block.
 func (c *backfillCursor) carry() prediction {
 	return decodeCarry(c.PendingFee, c.PendingExponent, c.PendingBips)
@@ -352,9 +361,7 @@ func (f *Follower) resolveDepth(ctx context.Context, c *backfillCursor, gen uint
 // history and so seeds the target: reading the configuration into it instead would raise the floor of
 // every unfinished backfill on upgrade, since the window has slid forward since it was resolved.
 func (f *Follower) resolveDepthTarget(ctx context.Context, c *backfillCursor) error {
-	if c.DepthTarget == 0 {
-		c.DepthTarget = c.DepthStart
-	}
+	c.DepthTarget = c.recordedTarget()
 	if f.cfg.BackfillDepth.IsHold() {
 		f.holdDepthTarget(c)
 		return nil
@@ -393,7 +400,10 @@ func (f *Follower) holdDepthTarget(c *backfillCursor) {
 		remaining = pricer.SaturatingUSub(c.End, c.Next)
 	}
 	switch {
+	case floor == 0 && c.DepthTarget == 0:
 	case floor == 0:
+		f.log.Info("backfill depth held, keeping the floor recorded while the walk beneath it restarts",
+			"target", c.DepthTarget)
 	case floor > c.DepthTarget:
 		f.log.Info("backfill depth held, keeping the floor reached and abandoning the rest of the descent",
 			"floor", floor, "previousTarget", c.DepthTarget, "runRemaining", remaining)
@@ -408,13 +418,18 @@ func (f *Follower) holdDepthTarget(c *backfillCursor) {
 
 // heldFloor is where a held descent settles: the bottom of the run in flight, else the bottom of the
 // history already reconstructed, else the first live block, which is what a chain that has backfilled
-// nothing yet holds at. Zero when even that is unknown, which leaves the target alone until it is.
+// nothing yet holds at. Zero where a floor is recorded with no cursor position under it, which is a
+// rewind or a discard having just dropped the walk and the buckets with it: the floor asked for
+// stands and is rebuilt to, rather than an emptied cursor reading as history nobody wants.
 func (f *Follower) heldFloor(c *backfillCursor) uint64 {
 	if c.Active && c.SegStart > 0 {
 		return c.SegStart
 	}
 	if c.End > 0 {
 		return c.End
+	}
+	if c.DepthTarget > 0 {
+		return 0
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -426,8 +441,10 @@ func (f *Follower) heldFloor(c *backfillCursor) uint64 {
 
 // checkCursor runs once per process: an active live-model segment (SetID 0) that was not verified
 // against a completed owner-action scan came from an older collector and may carry the wrong
-// constraints, so every backfill-only bucket is deleted and the backfill starts over. The check
-// counts as done only once that cleanup has committed.
+// constraints, so every backfill-only bucket is deleted and the backfill starts over. The floor it
+// was walking to survives the reset and the fresh walk reaches it again: recomputing it would hand
+// back the history just deleted, and a held floor is recorded nowhere else. The check counts as done
+// only once that cleanup has committed.
 func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor, gen uint64) (*backfillCursor, error) {
 	f.mu.Lock()
 	checked := f.cursorChecked
@@ -443,7 +460,7 @@ func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor, gen uint6
 		return c, nil
 	}
 	f.log.Warn("discarding an unverified live-model backfill segment, its buckets are re-backfilled", "from", c.SegStart, "next", c.Next)
-	fresh := &backfillCursor{}
+	fresh := &backfillCursor{DepthTarget: c.recordedTarget()}
 	err := f.withGeneration(ctx, gen, func(s db.Store) error {
 		if hasBoundary {
 			if _, err := s.DeleteBucketsBefore(ctx, f.chainID, boundary); err != nil {
