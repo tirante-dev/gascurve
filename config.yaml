@@ -68,6 +68,12 @@ collector:
 # and missing-range recovery. With reliable newHeads, budget about 4*B calls/s.
 # Legacy pricing adds four calls per sample. /status.capacity reports the latest
 # observed requirement and /status.degraded turns true when it is exceeded.
+# enabled decides whether the network is part of the site. false stops every
+# loop that would index it and the collector records the flag, so the api drops
+# the network from /networks and answers 404 below it and the web app stops
+# offering it. Stored rows are kept, so switching back restores the chain with
+# the history it had. /status keeps reporting it, as disabled. A network with
+# no enabled key is off. Environment: NETWORK_<NAME>_ENABLED.
 # Optional per network:
 #   tick_interval: overrides collector.tick_interval for this network (the
 #            polling cadence, and the safety timer while a newHeads

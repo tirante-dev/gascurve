@@ -342,7 +342,7 @@ func TestWebSocketErrors(t *testing.T) {
 	store.SetFailure("BlocksAfter", false)
 	// Hub without a snapshot and no data for the network says null.
 	empty := dbtest.New()
-	if err := empty.UpsertNetwork(context.Background(), db.Network{ChainID: 9, Name: "empty"}); err != nil {
+	if err := empty.UpsertNetwork(context.Background(), db.Network{ChainID: 9, Name: "empty", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	h2 := newWSHarness(t, empty, time.Hour)
@@ -1199,5 +1199,42 @@ func TestWebSocketSlowClientDropped(t *testing.T) {
 	}
 	if hub.Connections() != 0 || hub.ClientCount(robinhood) != 0 {
 		t.Fatalf("a peer that never reads must be dropped: connections %d clients %d", hub.Connections(), hub.ClientCount(robinhood))
+	}
+}
+
+// The socket follows the same rule as the REST routes: a disabled network is not one clients may
+// follow, whether they name it in the handshake or switch to it later.
+func TestWebSocketRejectsDisabledNetwork(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	for _, n := range []db.Network{
+		{ChainID: robinhood, Name: "robinhood", Enabled: true},
+		{ChainID: testnet, Name: "robinhood-testnet", Enabled: false},
+	} {
+		if err := store.UpsertNetwork(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := newWSHarness(t, store, time.Hour)
+	url := "ws" + strings.TrimPrefix(h.ts.URL, "http") + "/api/v1/ws?network=robinhood-testnet"
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, resp, err := websocket.Dial(dialCtx, url, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{"http://localhost:3000"}}})
+	if err == nil {
+		_ = conn.CloseNow()
+		t.Fatal("handshake accepted a disabled network")
+	}
+	if resp == nil || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("handshake status: %+v", resp)
+	}
+	_ = resp.Body.Close()
+
+	conn2 := h.dial(t, "robinhood")
+	if typ, _ := readMsg(t, conn2); typ != "hello" {
+		t.Fatalf("hello: %s", typ)
+	}
+	send(t, conn2, map[string]string{"type": "subscribe", "network": "robinhood-testnet"})
+	if typ, data := readMsg(t, conn2); typ != "error" {
+		t.Fatalf("subscribe to a disabled network: %s %s", typ, data)
 	}
 }
