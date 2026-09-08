@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.3.0...gascurve-chart-v0.3.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **collector:** backfill poster gas for blocks stored without receipts ([#47](https://github.com/tirante-dev/gascurve/issues/47)) ([8b470f8](https://github.com/tirante-dev/gascurve/commit/8b470f8694b30e4f64039699578e6e78fd335f52))
+* **collector:** require a streak of failures to fail readiness ([#48](https://github.com/tirante-dev/gascurve/issues/48)) ([92ae302](https://github.com/tirante-dev/gascurve/commit/92ae3029425637ef2179126866dd015fb7a3de7b))
+* **helm:** update chart app version to 1.2.0 ([#59](https://github.com/tirante-dev/gascurve/issues/59)) ([a4d0588](https://github.com/tirante-dev/gascurve/commit/a4d058890bcb3906eb6045c42f5b5f7e485a351c))
+
 ## [0.3.0](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.2.1...gascurve-chart-v0.3.0) (2026-09-07)
 
 

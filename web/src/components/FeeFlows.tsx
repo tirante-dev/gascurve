@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { memo, useMemo, useState, type ReactNode } from "react";
+import { useTicker } from "@/hooks/useTicker";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { EthUsd, LiveSnapshot, PricerModel, Series, SeriesCompleteness, SeriesRange } from "@/types";
 import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL, type ChartPoint } from "@/utils/chart";
@@ -172,20 +173,26 @@ export function feeFlowRows(unsplit: boolean): TooltipRow[] {
  * Fees per bucket in ETH, stacked by destination. Buckets whose split
  * is unavailable are hatched rather than assigned to a destination.
  */
-export function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT }: { points: ChartPoint[]; gaps?: GapModel; height?: ChartHeight }) {
-  const window = gaps.window.to > gaps.window.from ? gaps.window : { from: points[0]?.t ?? 0, to: (points[points.length - 1]?.t ?? 0) + gaps.step };
+export const FeeFlowChart = memo(function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT }: { points: ChartPoint[]; gaps?: GapModel; height?: ChartHeight }) {
+  // Recharts recomputes every selector and regenerates every stacked path when
+  // the `data` identity changes, so the rows are derived once per series and
+  // the window, bands and unsplit flag with them.
+  const window = useMemo(
+    () => (gaps.window.to > gaps.window.from ? gaps.window : { from: points[0]?.t ?? 0, to: (points[points.length - 1]?.t ?? 0) + gaps.step }),
+    [gaps.window, gaps.step, points],
+  );
   const span = window.to > window.from ? window.to - window.from : spanSeconds(points);
-  const unsplit = points.some((p) => p.unsplitFeesEth !== null);
+  const unsplit = useMemo(() => points.some((p) => p.unsplitFeesEth !== null), [points]);
   // The stack is a sum over the bucket, so a bucket the collector has only
   // part of would draw as a bucket that collected little. It is hatched
   // instead, and the stack ends at the last whole bucket.
   // Which partial bucket is the one still filling is decided by the window's
   // right edge, not by array position: a range with a trailing gap ends on a
   // bucket indexing stopped part way through, which is not in progress.
-  const bands = partialBands(points, gaps.step, window.to);
+  const bands = useMemo(() => partialBands(points, gaps.step, window.to), [points, gaps.step, window.to]);
   // Empty rows inside the holes, so a bucket that was never indexed breaks the
   // stack rather than reading as a bucket that collected nothing.
-  const rows = withGapBreaks(withFeeStack(points), gaps.gaps);
+  const rows = useMemo(() => withGapBreaks(withFeeStack(points), gaps.gaps), [points, gaps.gaps]);
   return (
     <>
       <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as infrastructure, network, and L1 poster destinations, hatched where the split is unavailable or the bucket is incomplete">
@@ -214,7 +221,7 @@ export function FeeFlowChart({ points, gaps = NO_GAPS, height = FEE_CHART_HEIGHT
       <PartialNote bands={bands} />
     </>
   );
-}
+});
 
 /** The legend the fee chart carries, wherever it is drawn. */
 export function feeFlowLegend(unsplit: boolean) {
@@ -229,7 +236,11 @@ export function feeFlowLegend(unsplit: boolean) {
 }
 
 /** Fee account balances as sampled counters, and fees per bucket from the history split by the floor in force at each block. */
-export function FeeFlows({ network, range, snapshot, series, explorerUrl, model = "unknown", nowMs }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null; explorerUrl?: string; model?: PricerModel; /** Wall clock of the page's ticker: what the quote's age is measured against. */ nowMs: number }) {
+export function FeeFlows({ network, range, snapshot, series, explorerUrl, model = "unknown", nowMs }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null; explorerUrl?: string; model?: PricerModel; /** Wall clock the quote's age is measured against, for a caller that fixes it; otherwise this component keeps its own. */ nowMs?: number }) {
+  // The clock lives here rather than on the page, so a second of wall time
+  // re-renders the quote lines and not every history chart above them.
+  const ticked = useTicker(nowMs === undefined ? 1000 : 0);
+  const clock = nowMs ?? ticked;
   const points = useMemo(() => (series ? buildChartPoints(series, model) : []), [series, model]);
   const gaps = useMemo(() => (series ? gapModel(series, points) : NO_GAPS), [series, points]);
   // The same rule the live tiles follow: no quote, or one older than ten minutes, and the totals stay in ETH alone.
@@ -265,11 +276,11 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
         {totals && series ? (
           <>
             <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-5">
-              <Stat label={`${incomplete ? "Indexed fees" : "Fees"} in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, nowMs, 4, USD_PLACEMENT[0])} />
-              <Stat label="Per day (est.)" value={totals.perDay === null ? "n/a" : formatSignificant(totals.perDay, 4)} unit={totals.perDay === null ? undefined : "ETH"} size="sm" hint={totals.perDay === null ? undefined : usdLine(totals.perDay, ethUsd, nowMs, 4, USD_PLACEMENT[1])} />
-              <Stat label={incomplete ? "Indexed floor to infra" : "Floor to infra"} value={totals.known > 0 ? formatSignificant(totals.floorEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.floorEth, ethUsd, nowMs, 3, USD_PLACEMENT[2]) : undefined} />
-              <Stat label={incomplete ? "Indexed congestion" : "Congestion to network"} value={totals.known > 0 ? formatSignificant(totals.surplusEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.surplusEth, ethUsd, nowMs, 3, USD_PLACEMENT[3]) : undefined} />
-              <Stat label={incomplete ? "Indexed poster fee" : "Poster fee to L1 pricer"} value={totals.known > 0 ? formatSignificant(totals.posterEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.posterEth, ethUsd, nowMs, 3, USD_PLACEMENT[4]) : undefined} />
+              <Stat label={`${incomplete ? "Indexed fees" : "Fees"} in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, clock, 4, USD_PLACEMENT[0])} />
+              <Stat label="Per day (est.)" value={totals.perDay === null ? "n/a" : formatSignificant(totals.perDay, 4)} unit={totals.perDay === null ? undefined : "ETH"} size="sm" hint={totals.perDay === null ? undefined : usdLine(totals.perDay, ethUsd, clock, 4, USD_PLACEMENT[1])} />
+              <Stat label={incomplete ? "Indexed floor to infra" : "Floor to infra"} value={totals.known > 0 ? formatSignificant(totals.floorEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.floorEth, ethUsd, clock, 3, USD_PLACEMENT[2]) : undefined} />
+              <Stat label={incomplete ? "Indexed congestion" : "Congestion to network"} value={totals.known > 0 ? formatSignificant(totals.surplusEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.surplusEth, ethUsd, clock, 3, USD_PLACEMENT[3]) : undefined} />
+              <Stat label={incomplete ? "Indexed poster fee" : "Poster fee to L1 pricer"} value={totals.known > 0 ? formatSignificant(totals.posterEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.posterEth, ethUsd, clock, 3, USD_PLACEMENT[4]) : undefined} />
             </div>
             {totalsNote ? <p className="mt-2 text-xs text-ink-3">{totalsNote}</p> : null}
             {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}; all three destination totals leave them out.</p> : null}

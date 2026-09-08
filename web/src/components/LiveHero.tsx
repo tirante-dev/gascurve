@@ -288,7 +288,7 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, h
  * against every constraint target in force on a history range. The bucketed
  * view is the history chart itself, not a second implementation of it.
  */
-export function HeroThroughputPanel({
+export const HeroThroughputPanel = memo(function HeroThroughputPanel({
   blocks,
   places,
   nowMs,
@@ -383,7 +383,7 @@ export function HeroThroughputPanel({
         ) : null}
     </>
   );
-}
+});
 
 /** What the live throughput chart reads out without a pointer. */
 const THROUGHPUT_READOUT: ReadoutGroup[] = [{ title: "second", rows: throughputTooltipRows() }];
@@ -516,7 +516,7 @@ export function CostTile({ label, eth, ethUsd, nowMs, align }: { label: ReactNod
  * same thing at its own height, so the enlarged base fee is this component
  * and not a second implementation of it.
  */
-export function HeroChartPanel({
+export const HeroChartPanel = memo(function HeroChartPanel({
   snapshot,
   blocks,
   places,
@@ -605,7 +605,7 @@ export function HeroChartPanel({
         )}
     </>
   );
-}
+});
 
 /** What the live base fee chart reads out without a pointer. */
 const FEE_READOUT: ReadoutGroup[] = [{ title: "block", rows: heroTooltipRows() }];
@@ -687,6 +687,12 @@ export function LiveHeroView({
   seriesError?: string | null;
   model?: PricerModel;
 }) {
+  // Built here, and before the early return, so the throughput panel's memo
+  // holds across the frames: a fresh element every render would defeat it.
+  const throughputAction = useMemo(
+    () => <EnlargeLink network={network} view={chartView("gas-per-second")} range={range} size="hero" />,
+    [network, range],
+  );
   if (!snapshot) {
     return (
       <div className="vw-card p-5 text-sm text-ink-2" aria-busy="true">
@@ -757,7 +763,7 @@ export function LiveHeroView({
             seriesLoading={seriesLoading}
             seriesError={seriesError}
             model={model}
-            action={<EnlargeLink network={network} view={chartView("gas-per-second")} range={range} size="hero" />}
+            action={throughputAction}
           />
         </div>
       </div>
