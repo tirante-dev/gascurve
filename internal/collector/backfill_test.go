@@ -213,8 +213,13 @@ func TestBackfillSegments(t *testing.T) {
 	if b299 == nil || b300 == nil || b299.MinBaseFee.Wei.Int64() != pricer.InitialMinimumBaseFeeWei || b300.MinBaseFee.Wei.Int64() != 30_000_000 {
 		t.Fatalf("backfill rows and fees: %+v %+v", b299, b300)
 	}
-	if b299.PredictedBaseFee.Cmp(b300.PredictedBaseFee.BigInt()) <= 0 {
-		t.Fatalf("the higher genesis floor must price higher: %s vs %s", b299.PredictedBaseFee, b300.PredictedBaseFee)
+	// A block's prediction is computed while replaying its parent, so the floor recorded at 300 first
+	// reaches a prediction at 301. Row 300 therefore holds the floor in force at 300 (which its own fee
+	// split needs) beside a prediction the genesis floor produced: the two coincide everywhere except
+	// at a floor change.
+	b301, _ := store.BlockByNumber(ctx, 4663, 301)
+	if b301 == nil || b300.PredictedBaseFee.Wei.Cmp(b301.PredictedBaseFee.Wei.BigInt()) <= 0 {
+		t.Fatalf("the higher genesis floor must price higher: %+v vs %+v", b300, b301)
 	}
 	bk, _ := store.Buckets(ctx, 4663, db.Resolution1m, baseTime, baseTime.Add(time.Minute))
 	if len(bk) != 1 || !bk[0].ConstraintSetID.Valid || bk[0].ConstraintSetID.Int64 != 2 || bk[0].LastBlock != 599 {

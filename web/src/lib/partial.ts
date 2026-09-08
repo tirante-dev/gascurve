@@ -3,7 +3,7 @@
 // presented as full bucket totals for any of those states.
 
 import type { SeriesCompleteness } from "@/types";
-import { formatPercent } from "@/utils/format";
+import { formatInteger, formatPercent } from "@/utils/format";
 
 /** What every point carries. Optional on purpose: an older api sends nothing, and a bucket nobody said
  * anything about is a whole bucket. */
@@ -123,10 +123,45 @@ export function partialBands(points: readonly (Covered & { t: number })[], step:
   return out;
 }
 
+export type PartialRun = { from: number; to: number; kind: PartialKind; buckets: number; coverage: number | null };
+
+/**
+ * The bands merged into runs of one kind, so a chart draws one mark over a stretch of partial buckets
+ * rather than one per bucket. Coverage survives only on a run of one bucket: a stretch has as many
+ * shares as it has buckets, and none of them speaks for the run. Bands must arrive oldest first, as
+ * `partialBands` and the api both give them; an out-of-order band opens a run rather than joining one.
+ */
+export function partialRuns(bands: readonly PartialBand[]): PartialRun[] {
+  const out: PartialRun[] = [];
+  for (const band of bands) {
+    const open = out.length > 0 ? out[out.length - 1] : null;
+    if (open !== null && open.kind === band.kind && band.from <= open.to) {
+      open.to = Math.max(open.to, band.to);
+      open.buckets += 1;
+      open.coverage = null;
+      continue;
+    }
+    out.push({ from: band.from, to: band.to, kind: band.kind, buckets: 1, coverage: band.coverage });
+  }
+  return out;
+}
+
+const KINDS: readonly PartialKind[] = ["leading", "in-progress", "unknown"];
+
+/** One kind's share of the caption: the bucket's own note when it is the only one, else a count, since a
+ * day of buckets would otherwise list hundreds of shares. */
+function describe(kind: PartialKind, bands: readonly PartialBand[]): string {
+  if (bands.length === 1) return partialNote(bands[0].coverage, kind);
+  const runs = partialRuns(bands).length;
+  const where = runs === 1 ? "" : ` in ${formatInteger(runs)} stretches`;
+  return `${partialBandLabel(kind)} for ${formatInteger(bands.length)} buckets${where}`;
+}
+
 /** The line under a chart that hatches partial buckets. Null when nothing is hatched. */
 export function partialCaption(bands: readonly PartialBand[]): string | null {
   if (bands.length === 0) return null;
-  return `Hatched and left out: ${bands.map((b) => partialNote(b.coverage, b.kind)).join(" · ")}`;
+  const parts = KINDS.filter((kind) => bands.some((b) => b.kind === kind)).map((kind) => describe(kind, bands.filter((b) => b.kind === kind)));
+  return `Hatched and left out: ${parts.join(" · ")}`;
 }
 
 /** The fee destination stack as a chart draws it. The keys are separate from the bucket's own fee fields,

@@ -236,7 +236,7 @@ describe("LiveHero", () => {
     // and the hour before the first bucket is shaded and labelled.
     const early = { ...history, from: history.points[0].t - 3600 };
     const { container } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" series={early} model="constraints" />);
-    const band = container.querySelector(".recharts-reference-area-rect");
+    const band = container.querySelector('rect[data-band="gap"]');
     expect(band).not.toBeNull();
     expect(band).toHaveAttribute("fill", "var(--ink-3)");
     expect(band).toHaveAttribute("fill-opacity", "0.1");

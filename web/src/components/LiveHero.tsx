@@ -51,7 +51,7 @@ import { chartView } from "@/lib/chartViews";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { ChartReadout, type ReadoutGroup } from "./ChartReadout";
 import { EnlargeLink } from "./ChartActions";
-import { gapBands, GapNote } from "./ChartGaps";
+import { GapBands, GapNote } from "./ChartGaps";
 import { buildSeriesModel, bucketRowTitle, GasPerSecondChart } from "./SeriesCharts";
 import { FeeDial } from "./FeeDial";
 import { Figure, HoverNote, Label, type NoteAlign, Stat, StatusPill, Term, TIME_AXIS_RIGHT } from "./primitives";
@@ -195,7 +195,7 @@ export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabe
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data.drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
             <CartesianGrid vertical={false} />
-            {gapBands(data.gaps.gaps, data.gaps.window)}
+            <GapBands gaps={data.gaps.gaps} />
             {/* The axis is the window that was asked for, so the buckets that
                 exist sit where they happened rather than filling the frame. */}
             <XAxis dataKey="t" type="number" domain={[data.gaps.window.from, data.gaps.window.to]} tickFormatter={(t: number) => formatTick(t, data.span)} tickLine axisLine={false} height={18} minTickGap={48} />
@@ -287,7 +287,7 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, h
  * against every constraint target in force on a history range. The bucketed
  * view is the history chart itself, not a second implementation of it.
  */
-export function HeroThroughputPanel({
+export const HeroThroughputPanel = memo(function HeroThroughputPanel({
   blocks,
   places,
   nowMs,
@@ -382,7 +382,7 @@ export function HeroThroughputPanel({
         ) : null}
     </>
   );
-}
+});
 
 /** What the live throughput chart reads out without a pointer. */
 const THROUGHPUT_READOUT: ReadoutGroup[] = [{ title: "second", rows: throughputTooltipRows() }];
@@ -472,7 +472,7 @@ export function CostTile({ label, eth, ethUsd, nowMs, align }: { label: ReactNod
  * same thing at its own height, so the enlarged base fee is this component
  * and not a second implementation of it.
  */
-export function HeroChartPanel({
+export const HeroChartPanel = memo(function HeroChartPanel({
   snapshot,
   blocks,
   places,
@@ -561,7 +561,7 @@ export function HeroChartPanel({
         )}
     </>
   );
-}
+});
 
 /** What the live base fee chart reads out without a pointer. */
 const FEE_READOUT: ReadoutGroup[] = [{ title: "block", rows: heroTooltipRows() }];
@@ -643,6 +643,12 @@ export function LiveHeroView({
   seriesError?: string | null;
   model?: PricerModel;
 }) {
+  // Built here, and before the early return, so the throughput panel's memo
+  // holds across the frames: a fresh element every render would defeat it.
+  const throughputAction = useMemo(
+    () => <EnlargeLink network={network} view={chartView("gas-per-second")} range={range} size="hero" />,
+    [network, range],
+  );
   if (!snapshot) {
     return (
       <div className="vw-card p-5 text-sm text-ink-2" aria-busy="true">
@@ -711,7 +717,7 @@ export function LiveHeroView({
             seriesLoading={seriesLoading}
             seriesError={seriesError}
             model={model}
-            action={<EnlargeLink network={network} view={chartView("gas-per-second")} range={range} size="hero" />}
+            action={throughputAction}
           />
         </div>
       </div>

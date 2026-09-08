@@ -264,13 +264,14 @@ export const TIME_AXIS_RIGHT = 22;
  * against the viewport, which is a class and not a number. */
 export type ChartHeight = number | string;
 
-/** Charts scroll inside this frame on narrow screens; the page never scrolls sideways. The frame paints
- * the chart surface, the colour every series palette was validated against. */
+/** The frame paints the chart surface, the colour every series palette was validated against. `minWidth`
+ * is the width a chart is drawn for, capped at the frame: a card narrower than that shrinks the chart
+ * rather than scrolling sideways, which is what a phone got before the cap. */
 export function ChartFrame({ height, minWidth = 560, children, label }: { height: ChartHeight; minWidth?: number; children: ReactNode; label: string }) {
   const sized = typeof height === "string";
   return (
     <div className="-mx-1 overflow-x-auto px-1" role="figure" aria-label={label}>
-      <div className={`rounded-sm bg-chart ${sized ? height : ""}`} style={{ height: sized ? undefined : height, minWidth }}>
+      <div className={`rounded-sm bg-chart ${sized ? height : ""}`} style={{ height: sized ? undefined : height, minWidth: `min(${minWidth}px, 100%)` }}>
         {children}
       </div>
     </div>

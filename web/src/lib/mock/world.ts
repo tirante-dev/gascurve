@@ -697,8 +697,9 @@ export class MockWorld {
    */
   snapshotForBlock(block: BlockPoint, sampledAtMs: number): LiveSnapshot {
     const fee = BigInt(block.baseFee);
-    const predicted = BigInt(block.predictedBaseFee);
-    const replayError = fee > 0n ? Math.round((Number(fee - predicted) * 10_000) / Number(fee)) : 0;
+    const predicted = block.predictedBaseFee === null ? null : BigInt(block.predictedBaseFee);
+    const replayError =
+      predicted !== null && fee > 0n ? Math.round((Number(fee - predicted) * 10_000) / Number(fee)) : 0;
     return this.composeSnapshot({
       block,
       fee,

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"math/big"
+	"slices"
 	"sort"
 	"time"
 
@@ -122,13 +123,14 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 			return nil, err
 		}
 		if len(blocks) > maxBlockPoints {
+			var numbers []uint64
 			out.Resolution = "5s"
-			out.Points = stepDown(blocks, sets, stepDownWidth, now)
-			timeline.apply(out.Points, stepDownWidth)
+			out.Points, numbers = stepDown(blocks, sets, now)
+			timeline.apply(out.Points, numbers, stepDownWidth)
 		} else {
 			out.Resolution = "block"
 			out.Points = blockPoints(blocks, sets)
-			timeline.mark(out.Points, time.Second)
+			timeline.mark(out.Points, blockNumbers(blocks))
 		}
 		out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 		return out, nil
@@ -142,14 +144,27 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 		return nil, err
 	}
 	width := db.Resolutions[rng.resolution]
+	numbers := make([]uint64, 0, len(buckets))
 	for _, b := range buckets {
 		if p, ok := bucketPoint(b, width, now, liveStart); ok {
 			out.Points = append(out.Points, p)
+			numbers = append(numbers, b.LastBlock)
 		}
 	}
-	timeline.apply(out.Points, width)
+	timeline.apply(out.Points, bucketWatermarks(numbers), width)
 	out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 	return out, nil
+}
+
+// bucketWatermarks is the highest block of every bucket, or nothing when one of them was not recorded.
+// last_block defaults to zero, so a zero is a row stored before the column was written, or the rarest
+// of genuine buckets: one holding genesis alone. The two cannot be told apart, and reading the first
+// as the second would place ranges against a watermark that was never written, so neither is placed.
+func bucketWatermarks(numbers []uint64) []uint64 {
+	if slices.Contains(numbers, 0) {
+		return nil
+	}
+	return numbers
 }
 
 // missingInterval is the time envelope between the indexed blocks on either side of a durable missing
@@ -159,50 +174,54 @@ type missingInterval struct {
 	to   time.Time
 }
 
-// missingTimeline is the durable gap ledger reduced to time. A range with only a lower or upper bound
-// makes the corresponding suffix or prefix unknown, and one with no usable bounds makes every point
-// unknown unless a bounded range already proves it partial.
+// blockSpan is the still-missing block interval of a range the collector could not put a time on.
+type blockSpan struct {
+	from uint64
+	to   uint64
+}
+
+// missingTimeline is the durable gap ledger reduced to what qualifies a point. A range the collector
+// bounded with the timestamps of the blocks on either side is measured against the clock; one without
+// two usable timestamps keeps its block numbers, which rise with time, and is placed among the points
+// by number instead. Prehistory no reachable chain state can reconstruct is recorded with no bounds at
+// all and sits below everything a window serves, so letting it stand for "somewhere" would leave every
+// point of every range unknown for as long as the row exists.
 type missingTimeline struct {
-	bounded       []missingInterval
-	unknownAfter  *time.Time
-	unknownBefore *time.Time
-	unknownAll    bool
+	bounded   []missingInterval
+	unlocated []blockSpan
 }
 
 func newMissingTimeline(ranges []db.MissingRange) missingTimeline {
 	var out missingTimeline
 	for _, r := range ranges {
-		lower, lowerOK, upper, upperOK, active := remainingMissingBounds(r)
+		b, active := remainingMissingBounds(r)
 		if !active {
 			continue
 		}
-		switch {
-		case lowerOK && upperOK && !upper.Before(lower):
-			out.bounded = append(out.bounded, missingInterval{from: lower, to: upper})
-		case lowerOK && upperOK:
-			// Inverted timestamps cannot safely locate the range.
-			out.unknownAll = true
-		case lowerOK:
-			if out.unknownAfter == nil || lower.Before(*out.unknownAfter) {
-				v := lower
-				out.unknownAfter = &v
-			}
-		case upperOK:
-			if out.unknownBefore == nil || upper.After(*out.unknownBefore) {
-				v := upper
-				out.unknownBefore = &v
-			}
-		default:
-			out.unknownAll = true
+		// Inverted timestamps cannot locate the range against the clock either.
+		if b.lowerOK && b.upperOK && !b.upper.Before(b.lower) {
+			out.bounded = append(out.bounded, missingInterval{from: b.lower, to: b.upper})
+			continue
 		}
+		out.unlocated = append(out.unlocated, blockSpan{from: b.start, to: r.To})
 	}
 	out.bounded = mergeMissingIntervals(out.bounded)
 	return out
 }
 
-// remainingMissingBounds chooses the lower time bound for the still-missing suffix. Once Cursor
-// advances, CursorAt describes Cursor-1 and supersedes the original predecessor.
-func remainingMissingBounds(r db.MissingRange) (lower time.Time, lowerOK bool, upper time.Time, upperOK, active bool) {
+// missingBounds is the still-missing suffix of a range: the first block of it and whatever is known
+// about the time on either side.
+type missingBounds struct {
+	start   uint64
+	lower   time.Time
+	lowerOK bool
+	upper   time.Time
+	upperOK bool
+}
+
+// remainingMissingBounds describes the still-missing suffix of a range. Once Cursor advances, CursorAt
+// describes Cursor-1 and supersedes the original predecessor.
+func remainingMissingBounds(r db.MissingRange) (missingBounds, bool) {
 	start := r.From
 	lowerBound := r.PredecessorAt
 	if r.Cursor > r.From {
@@ -210,9 +229,12 @@ func remainingMissingBounds(r db.MissingRange) (lower time.Time, lowerOK bool, u
 		lowerBound = r.CursorAt
 	}
 	if start > r.To {
-		return time.Time{}, false, time.Time{}, false, false
+		return missingBounds{}, false
 	}
-	return lowerBound.Time, lowerBound.Valid, r.SuccessorAt.Time, r.SuccessorAt.Valid, true
+	return missingBounds{
+		start: start, lower: lowerBound.Time, lowerOK: lowerBound.Valid,
+		upper: r.SuccessorAt.Time, upperOK: r.SuccessorAt.Valid,
+	}, true
 }
 
 func mergeMissingIntervals(intervals []missingInterval) []missingInterval {
@@ -235,20 +257,22 @@ func mergeMissingIntervals(intervals []missingInterval) []missingInterval {
 	return merged
 }
 
-// apply qualifies aggregate points that span width. Numeric coverage can only be adjusted when the
-// original boundary span was whole and every overlapping gap envelope is bounded; otherwise coverage
-// becomes null rather than combining spans whose overlap is not measurable.
-func (m missingTimeline) apply(points []model.SeriesPoint, width time.Duration) {
-	m.qualify(points, width, true)
+// apply qualifies aggregate points that span width, numbers holding the highest block each one
+// aggregates. Numeric coverage can only be adjusted when the original boundary span was whole and
+// every overlapping gap envelope is bounded; otherwise coverage becomes null rather than combining
+// spans whose overlap is not measurable.
+func (m missingTimeline) apply(points []model.SeriesPoint, numbers []uint64, width time.Duration) {
+	m.qualify(points, numbers, width, true)
 }
 
-// mark qualifies per-block points. A block covers itself and its rate is the gas of every block in
-// its second, so a neighboring gap only changes completeness, never a value.
-func (m missingTimeline) mark(points []model.SeriesPoint, width time.Duration) {
-	m.qualify(points, width, false)
+// mark qualifies per-block points, whose window is the block's own second. A block covers itself and
+// its rate is the gas of every block in that second, so a neighboring gap only changes completeness.
+func (m missingTimeline) mark(points []model.SeriesPoint, numbers []uint64) {
+	m.qualify(points, numbers, time.Second, false)
 }
 
-func (m missingTimeline) qualify(points []model.SeriesPoint, width time.Duration, measure bool) {
+func (m missingTimeline) qualify(points []model.SeriesPoint, numbers []uint64, width time.Duration, measure bool) {
+	unlocated := m.unlocatedPoints(points, numbers)
 	for i := range points {
 		point := &points[i]
 		start := time.Unix(point.T, 0).UTC()
@@ -267,7 +291,7 @@ func (m missingTimeline) qualify(points []model.SeriesPoint, width time.Duration
 				missing += to.Sub(from)
 			}
 		}
-		uncertain := m.unknownAll || (m.unknownAfter != nil && m.unknownAfter.Before(end)) || (m.unknownBefore != nil && !m.unknownBefore.Before(start))
+		uncertain := unlocated[i]
 		if !known && !uncertain {
 			continue
 		}
@@ -299,6 +323,54 @@ func (m missingTimeline) qualify(points []model.SeriesPoint, width time.Duration
 			point.ComputeGasPerSecond = uint64ValuePtr((point.GasUsed - *point.PosterGas) / seconds)
 		}
 	}
+}
+
+// unlocatedPoints marks the points each unlocated range can overlap. numbers is the highest block each
+// point indexed, which rises with time. The missing blocks are in no point, so the run spans the two
+// watermarks straddling the range: it can start in the point whose watermark sits below it, whose
+// window has not ended there, and end in the first whose watermark reaches it. A range above every
+// watermark is the collector falling behind inside the last point, not a range clear of the window.
+// Points the caller could not put a watermark on are not placeable, and every one of them is then
+// uncertain, as they were before ranges were located.
+func (m missingTimeline) unlocatedPoints(points []model.SeriesPoint, numbers []uint64) []bool {
+	out := make([]bool, len(points))
+	if len(m.unlocated) == 0 || len(points) == 0 {
+		return out
+	}
+	if len(numbers) != len(points) || !slices.IsSorted(numbers) {
+		for i := range out {
+			out[i] = true
+		}
+		return out
+	}
+	last := len(points) - 1
+	for _, span := range m.unlocated {
+		hi := min(sort.Search(len(numbers), func(i int) bool { return numbers[i] >= span.to }), last)
+		// A watermark inside the range contradicts the ledger, which says those blocks are absent. The
+		// run then holds the point that claims them rather than collapsing to nothing.
+		lo := min(max(sort.Search(len(numbers), func(i int) bool { return numbers[i] > span.from })-1, 0), hi)
+		// Points sharing a second are one window: a per-block point's rate is the gas of every block in
+		// that second, so a sibling of a point the range reaches is missing the same blocks.
+		for lo > 0 && points[lo-1].T == points[lo].T {
+			lo--
+		}
+		for hi < last && points[hi+1].T == points[hi].T {
+			hi++
+		}
+		for i := lo; i <= hi; i++ {
+			out[i] = true
+		}
+	}
+	return out
+}
+
+// blockNumbers is the block number of every per-block point, in the order blockPoints renders them.
+func blockNumbers(blocks []db.Block) []uint64 {
+	out := make([]uint64, len(blocks))
+	for i, b := range blocks {
+		out[i] = b.Number
+	}
+	return out
 }
 
 func minTime(a, b time.Time) time.Time {
@@ -516,33 +588,36 @@ func computeRate(gas uint64, poster sql.NullInt64, secs uint64) *uint64 {
 
 func uint64ValuePtr(v uint64) *uint64 { return &v }
 
-// stepDown folds blocks into fixed width buckets, taking each step's rate
-// over the span it covers exactly as a stored bucket does.
-func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration, now time.Time) []model.SeriesPoint {
+// stepDown folds blocks into stepDownWidth buckets, taking each step's rate over the span it covers
+// exactly as a stored bucket does. numbers is the highest block of each step, so a missing range the
+// collector could not put a time on can still be placed among the steps.
+func stepDown(blocks []db.Block, sets []db.ConstraintSet, now time.Time) (points []model.SeriesPoint, numbers []uint64) {
+	const width = stepDownWidth
 	secs := int64(width / time.Second)
-	var out []model.SeriesPoint
 	var cur *acc
 	for _, b := range blocks {
 		start := (b.TS.Unix() / secs) * secs
 		if cur == nil || cur.start != start {
 			if cur != nil {
-				out = append(out, cur.point(width, now))
+				points, numbers = append(points, cur.point(width, now)), append(numbers, cur.lastBlock)
 			}
 			cur = &acc{start: start, sum: new(big.Int), fees: new(big.Int), floor: new(big.Int), posterFees: new(big.Int)}
 		}
 		cur.add(b, setIDAt(sets, b.Number, len(b.Backlogs)))
 	}
 	if cur != nil {
-		out = append(out, cur.point(width, now))
+		points, numbers = append(points, cur.point(width, now)), append(numbers, cur.lastBlock)
 	}
-	return out
+	return points, numbers
 }
 
 type acc struct {
 	start int64
 	// last is the newest block second the step carries: a step whose blocks reach or pass the serving
 	// clock is covered to the end of that second rather than truncated to nothing.
-	last                int64
+	last int64
+	// lastBlock is the highest block number the step carries, the same watermark a stored bucket keeps.
+	lastBlock           uint64
 	blocks              int64
 	gas                 uint64
 	posterGas           uint64
@@ -572,6 +647,7 @@ func (a *acc) add(b db.Block, setID int64) {
 	}
 	a.blocks++
 	a.last = max(a.last, b.TS.Unix())
+	a.lastBlock = max(a.lastBlock, b.Number)
 	a.gas += b.GasUsed
 	if b.PosterGas.Valid && b.PosterGas.Int64 >= 0 && uint64(b.PosterGas.Int64) <= b.GasUsed {
 		a.posterGas += uint64(b.PosterGas.Int64)

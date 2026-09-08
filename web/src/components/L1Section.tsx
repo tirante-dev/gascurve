@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useApi } from "@/hooks/useApi";
 import { getBatches } from "@/lib/api/batches";
@@ -12,7 +12,7 @@ import { gapModel, irregularStep, withGapBreaks, NO_GAPS, type GapModel } from "
 import { formatDateTime, formatDuration, formatEth, formatGas, formatGwei, formatInteger, formatSignificant, formatTick } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip } from "./ChartTooltip";
-import { gapBands, GapNote } from "./ChartGaps";
+import { GapBands, GapNote } from "./ChartGaps";
 import { Card, ChartFrame, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
 
 // "batch" is exactly one point per posting report (every 12 to 24 s on Robinhood).
@@ -78,15 +78,18 @@ export function l1CostLegend(totals: L1Costs["totals"]) {
 }
 
 /** User fees against ArbOS-attributed batch-poster spending, per bucket. */
-export function L1CostChart({ rows, span, domain, gaps = NO_GAPS, height = L1_CHART_HEIGHT }: { rows: CostRow[]; span: number; domain: [number, number]; gaps?: GapModel; height?: ChartHeight }) {
+export const L1CostChart = memo(function L1CostChart({ rows, span, domain, gaps = NO_GAPS, height = L1_CHART_HEIGHT }: { rows: CostRow[]; span: number; domain: [number, number]; gaps?: GapModel; height?: ChartHeight }) {
   const window = gaps.window.to > gaps.window.from ? gaps.window : { from: rows[0]?.t ?? 0, to: rows[rows.length - 1]?.t ?? 0 };
+  // Recharts keys its selectors off the `data` identity, so the broken rows
+  // are built once per join rather than on every render of the page.
+  const drawn = useMemo(() => withGapBreaks(rows, gaps.gaps), [rows, gaps.gaps]);
   return (
     <>
       <ChartFrame height={height} label="L2 fees and ArbOS-attributed batch-posting cost per bucket on a log scale">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={withGapBreaks(rows, gaps.gaps)} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+          <LineChart data={drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
-            {gapBands(gaps.gaps, window)}
+            <GapBands gaps={gaps.gaps} />
             <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
             <Tooltip
@@ -113,7 +116,7 @@ export function L1CostChart({ rows, span, domain, gaps = NO_GAPS, height = L1_CH
       <GapNote gaps={gaps} />
     </>
   );
-}
+});
 
 /** L1 pricer values and ArbOS-attributed batch costs. Collapsed by default. */
 export function L1Section({ network, range, snapshot, series }: { network: string; range: SeriesRange; snapshot: LiveSnapshot | null; series: Series | null }) {

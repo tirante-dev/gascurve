@@ -31,9 +31,9 @@ const (
 	PricingFull int16 = 1
 )
 
-// Block is a row of the blocks table. Backlogs are end-of-block values, ConstraintBips the
-// start-of-block per-constraint exponents (nil for rows written before they were recorded, empty for
-// a legacy block) and MinBaseFee the floor in force. PricingVersion says which.
+// Block is a row of the blocks table. Backlogs are end-of-block values and MinBaseFee the floor in
+// force. PredictedBaseFee, ExponentBips and ConstraintBips price this block and are absent when its
+// parent was not replayed; PricingVersion says what a row carries. See docs/ARCHITECTURE.md section 5.
 type Block struct {
 	ChainID          uint64        `db:"chain_id"`
 	Number           uint64        `db:"number"`
@@ -48,7 +48,7 @@ type Block struct {
 	Backlogs         Uint64Array   `db:"backlogs"`
 	ConstraintBips   pq.Int64Array `db:"constraint_bips"`
 	ExponentBips     int64         `db:"exponent_bips"`
-	PredictedBaseFee Wei           `db:"predicted_base_fee"`
+	PredictedBaseFee NullWei       `db:"predicted_base_fee"`
 	MinBaseFee       NullWei       `db:"min_base_fee"`
 	Anchored         bool          `db:"anchored"`
 	PricingVersion   int16         `db:"pricing_version"`

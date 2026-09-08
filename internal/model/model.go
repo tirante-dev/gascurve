@@ -183,7 +183,7 @@ type BlockPoint struct {
 	GasUsed          uint64   `json:"gasUsed"`
 	PosterGas        *uint64  `json:"posterGas"`
 	BaseFee          string   `json:"baseFee"`
-	PredictedBaseFee string   `json:"predictedBaseFee"`
+	PredictedBaseFee *string  `json:"predictedBaseFee"`
 	Backlogs         []uint64 `json:"backlogs"`
 	ConstraintBips   []int64  `json:"constraintBips"`
 	ExponentBips     int64    `json:"exponentBips"`
@@ -349,6 +349,11 @@ type HoleState struct {
 	Constraints []Constraint  `json:"constraints,omitempty"`
 	Legacy      *LegacyParams `json:"legacy,omitempty"`
 	SetID       int64         `json:"setId,omitempty"`
+	// The pricing group Block computed, which prices Block+1: the first block the next fill batch
+	// writes. Empty on the first batch of a hole, leaving that block without a prediction.
+	PendingFee      string  `json:"pendingFee,omitempty"`
+	PendingExponent int64   `json:"pendingExponent,omitempty"`
+	PendingBips     []int64 `json:"pendingBips,omitempty"`
 }
 
 // Hole is the collector's domain shape for one durable missing_ranges row and the decoder for the

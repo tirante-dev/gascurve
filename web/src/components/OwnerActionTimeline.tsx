@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { parseConstraintArg, rawConstraintArg } from "@/lib/ownerActions";
 import type { OwnerAction } from "@/types";
 import { shortConstraintLabel } from "@/utils/chart";
@@ -38,7 +39,7 @@ function ArgsView({ action }: { action: OwnerAction }) {
 }
 
 /** Decoded owner actions, newest first. */
-export function OwnerActionTimeline({ actions, explorerUrl, loading, error }: { actions: OwnerAction[] | null; explorerUrl?: string; loading: boolean; error: string | null }) {
+export const OwnerActionTimeline = memo(function OwnerActionTimeline({ actions, explorerUrl, loading, error }: { actions: OwnerAction[] | null; explorerUrl?: string; loading: boolean; error: string | null }) {
   if (error) return <p className="text-sm text-critical">Could not load owner actions: {error}</p>;
   if (!actions) return <p className="text-sm text-ink-2">{loading ? "Loading owner actions." : "No owner actions."}</p>;
   if (actions.length === 0) return <p className="text-sm text-ink-2">No owner actions decoded for this network yet.</p>;
@@ -81,4 +82,4 @@ export function OwnerActionTimeline({ actions, explorerUrl, loading, error }: { 
       ))}
     </ol>
   );
-}
+});

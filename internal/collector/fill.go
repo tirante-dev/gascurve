@@ -280,6 +280,18 @@ type fillTarget struct {
 	hash   string
 	prevTs uint64
 	state  *pricer.State
+	// carry is the pricing group prev computed, when a checkpoint recorded it. A stored row no longer
+	// holds it (its own group prices itself), so a fill resumed from block rows alone starts without
+	// one and leaves its first block unpredicted.
+	carry prediction
+}
+
+// carriedCarry reads the pending pricing group from a hole checkpoint, empty when there is none.
+func carriedCarry(c *model.HoleState) prediction {
+	if c == nil {
+		return prediction{}
+	}
+	return decodeCarry(c.PendingFee, c.PendingExponent, c.PendingBips)
 }
 
 // FillStep advances the newest fillable hole by at most one header batch, through the bulk
@@ -493,12 +505,12 @@ func (f *Follower) targetFor(ctx context.Context, h hole) (target *fillTarget, s
 			return nil, false, err
 		}
 		if st != nil {
-			return &fillTarget{h: h, prev: prev.Number, hash: prev.Hash, prevTs: uint64(prev.TS.Unix()), state: st}, false, nil
+			return &fillTarget{h: h, prev: prev.Number, hash: prev.Hash, prevTs: uint64(prev.TS.Unix()), state: st, carry: carriedCarry(carried)}, false, nil
 		}
 	}
 	if carried != nil {
 		if st := carriedFillState(carried); st != nil {
-			return &fillTarget{h: h, prev: carried.Block, hash: carried.Hash, prevTs: carried.PrevTS, state: st}, false, nil
+			return &fillTarget{h: h, prev: carried.Block, hash: carried.Hash, prevTs: carried.PrevTS, state: st, carry: carriedCarry(carried)}, false, nil
 		}
 	}
 	// A stored predecessor whose state cannot be built yet is a wait: the shape may still be
@@ -666,7 +678,24 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	h.Next, h.State = from+n, end
 	h.CursorAt = time.Unix(int64(headers[len(headers)-1].Timestamp), 0).UTC().Format(time.RFC3339)
 	h.Lifecycle, h.NextRetryAt, h.LastError = rangePending, "", ""
-	return FillProgressed, f.commitFill(ctx, gen, h, rows, filledTail, h.Next > h.To)
+	if err := f.commitFill(ctx, gen, h, rows, filledTail, h.Next > h.To); err != nil {
+		return FillProgressed, err
+	}
+	f.noteFilledHead(filledTail)
+	return FillProgressed, nil
+}
+
+// noteFilledHead republishes the replay error when the fill gave the current head its prediction.
+// Without it the next snapshot keeps reporting the head's old error until a new block arrives.
+func (f *Follower) noteFilledHead(filled *db.Block) {
+	if filled == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if filled.Number == f.head {
+		f.lastErrBips = db.ReplayErrorBips(*filled)
+	}
 }
 
 // startAmong reports whether start is one of starts.
@@ -704,6 +733,7 @@ func (f *Follower) holeTail(ctx context.Context, h hole, prevHeader nitro.Header
 func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Block, tl *timeline, actions actionBlocks) (rows []db.Block, filled *db.Block, end *model.HoleState) {
 	st := t.state
 	rows, _ = replayForward(f.chainID, st, t.prevTs, headers, tl, nil, actions)
+	carry := shiftPredictions(rows, t.carry)
 	lastHeader := headers[len(headers)-1]
 	var setID int64
 	f.mu.Lock()
@@ -713,21 +743,20 @@ func (f *Follower) replayHole(t *fillTarget, headers []nitro.Header, tail *db.Bl
 	f.mu.Unlock()
 	// Taken before the tail is replayed: the tail belongs to the block after the range.
 	end = holeStateOf(st, lastHeader, setID)
+	end.PendingFee, end.PendingExponent, end.PendingBips = carry.encode()
 	if tail == nil {
 		return rows, nil, end
 	}
-	backlogs := tail.Backlogs.Uint64s()
-	head := headerOf(*tail)
-	anchored, _ := replayForward(f.chainID, st, lastHeader.Timestamp, []nitro.Header{head}, tl,
-		func(uint64) ([]uint64, bool) { return backlogs, true }, actions)
-	if len(tail.Backlogs) != len(anchored[0].Backlogs) {
+	// The tail is the block after the range, so the group the last gap header computed is exactly its
+	// prediction: the reconstruction is scored against a block whose backlogs were really sampled.
+	if len(rows) == 0 || !carry.known || len(tail.Backlogs) != len(rows[len(rows)-1].Backlogs) {
 		f.log.Warn("the block after the gap carries another pricer shape, leaving its replay error unrecorded",
-			"block", tail.Number, "backlogs", len(tail.Backlogs), "replay", len(anchored[0].Backlogs))
+			"block", tail.Number, "backlogs", len(tail.Backlogs), "replay", len(rows[len(rows)-1].Backlogs))
 		return rows, nil, end
 	}
 	merged := *tail
-	merged.PredictedBaseFee = anchored[0].PredictedBaseFee
-	merged.ExponentBips, merged.ConstraintBips = anchored[0].ExponentBips, anchored[0].ConstraintBips
+	merged.PredictedBaseFee = db.NewNullWei(carry.fee)
+	merged.ExponentBips, merged.ConstraintBips = carry.exponent, carry.perConstraint
 	f.log.Info("gap replay reached the sampled head", "block", merged.Number, "replayErrorBips", db.ReplayErrorBips(merged))
 	return rows, &merged, end
 }

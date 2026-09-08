@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { memo, useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { PricerModel, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
@@ -27,7 +27,7 @@ import {
 } from "@/utils/chart";
 import { formatDateTime, formatGas, formatGasPerSecond, formatInteger, formatSignificant, formatTick, unbroken } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
-import { gapBands, GapNote, MissingDots, missingBandAreas, MissingNote } from "./ChartGaps";
+import { GapBands, GapNote, MissingBands, MissingDots, MissingNote } from "./ChartGaps";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { PointInspector } from "./ChartReadout";
 import { ChartFrame, Legend, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
@@ -275,14 +275,14 @@ const bucketTitle = (t: number) => formatDateTime(t);
 export const bucketRowTitle = (row: Record<string, unknown>) => formatDateTime(Number(row.t));
 
 /** Each constraint's share of the exponent, stacked, one series per constraint set. */
-export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
+export const ContributionChart = memo(function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
   return (
     <>
       <ChartFrame height={height} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
-            {gapBands(m.gaps.gaps, m.gaps.window)}
+            <GapBands gaps={m.gaps.gaps} />
             {timeAxis(m.span, m.gaps.window)}
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.contributionRows} note={m.note} />} />
@@ -299,7 +299,7 @@ export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: Seri
       <GapNote gaps={m.gaps} />
     </>
   );
-}
+});
 
 /**
  * Gas carried per second against the target of every constraint in force, at
@@ -308,7 +308,7 @@ export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: Seri
  * axis carries one unit for the whole scale, named in the caption beside the
  * chart, so every label is a bare figure of the same width.
  */
-export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth = GAS_AXIS_WIDTH, minWidth }: { m: SeriesModel; height?: ChartHeight; axisWidth?: number; minWidth?: number }) {
+export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth = GAS_AXIS_WIDTH, minWidth }: { m: SeriesModel; height?: ChartHeight; axisWidth?: number; minWidth?: number }) {
   return (
     <>
       <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit} with each constraint target in force drawn as a stepped line`}>
@@ -320,8 +320,8 @@ export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth =
               </defs>
             ) : null}
             <CartesianGrid vertical={false} />
-            {gapBands(m.gaps.gaps, m.gaps.window)}
-            {missingBandAreas(m.gasMissing, m.gaps.window)}
+            <GapBands gaps={m.gaps.gaps} />
+            <MissingBands runs={m.gasMissing} />
             {timeAxis(m.span, m.gaps.window)}
             <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.gasNote} />} />
@@ -334,10 +334,10 @@ export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth =
       <MissingNote runs={m.gasMissing} />
     </>
   );
-}
+});
 
 /** One slot's backlog over time, on its own scale. A replaced constraint starts a new series. */
-export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }: { m: SeriesModel; index: number; label: string; height?: ChartHeight }) {
+export const BacklogChart = memo(function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }: { m: SeriesModel; index: number; label: string; height?: ChartHeight }) {
   return (
     <>
       <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
@@ -349,8 +349,8 @@ export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }:
               </defs>
             ) : null}
             <CartesianGrid vertical={false} />
-            {gapBands(m.gaps.gaps, m.gaps.window)}
-            {missingBandAreas(m.backlogMissingFor(index), m.gaps.window)}
+            <GapBands gaps={m.gaps.gaps} />
+            <MissingBands runs={m.backlogMissingFor(index)} />
             {timeAxis(m.span, m.gaps.window)}
             <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.backlogNoteFor(index)} />} />
@@ -369,7 +369,7 @@ export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }:
       <MissingNote runs={m.backlogMissingFor(index)} />
     </>
   );
-}
+});
 
 /** The card a history chart sits in: its name, its legend and the control that enlarges it. */
 function ChartBlock({ title, legend, action, children }: { title: string; legend?: { label: string; color: string; kind?: "rect" | "line" }[]; action?: ReactNode; children: ReactNode }) {
@@ -393,7 +393,7 @@ function ChartBlock({ title, legend, action, children }: { title: string; legend
  * constraint-set list means "no set known", never "legacy". Every card links
  * to the chart's own page at the range on screen.
  */
-export function SeriesCharts({ network, range, series, loading, model }: { network: string; range: SeriesRange; series: Series | null; loading: boolean; model: PricerModel }) {
+export const SeriesCharts = memo(function SeriesCharts({ network, range, series, loading, model }: { network: string; range: SeriesRange; series: Series | null; loading: boolean; model: PricerModel }) {
   const m = useMemo(() => (series ? buildSeriesModel(series, model) : null), [series, model]);
   const [tableOpen, setTableOpen] = useState(false);
 
@@ -533,4 +533,4 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
       </details>
     </div>
   );
-}
+});
