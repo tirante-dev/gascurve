@@ -332,7 +332,7 @@ export const HeroThroughputPanel = memo(function HeroThroughputPanel({
   // reader who has never met the pricer, then the unit and the span for one who has.
   const caption = live
     ? { lead: `Network load, second by second, over the last ${heroSpan()} s`, detail: `compute gas per second across the chain \u00b7 ${unit}` }
-    : { lead: `Network load per bucket against each target in force, ${rangeLabel}`, detail: `compute gas per second \u00b7 ${unit}` };
+    : { lead: `Network load per bucket against each target in force, ${rangeLabel}`, detail: `compute gas per second \u00b7 ${unit}${m?.hasSpread === true ? ` \u00b7 min to max per ${m.spreadUnit}` : ""}` };
   return (
     <>
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -375,7 +375,7 @@ export const HeroThroughputPanel = memo(function HeroThroughputPanel({
             title={bucketRowTitle}
             heading="Bucket inspector"
             selectLabel="Select a bucket to read its values"
-            caption={`Every bucket of the throughput chart over ${rangeLabel} with its rate and the targets in force`}
+            caption={`Every bucket of the throughput chart over ${rangeLabel} with its rate, its band and the targets in force`}
             summary={`Compute gas per second over ${rangeLabel}, as a table`}
             timeLabel="bucket"
           />

@@ -271,7 +271,7 @@ func TestEndpoints(t *testing.T) {
 				t.Fatalf("series sets/actions: %+v %+v", s.ConstraintSets, s.OwnerActions)
 			}
 		}},
-		{"/api/v1/networks/robinhood/series?range=24h", 200, cacheDay, func(t *testing.T, b []byte) {
+		{"/api/v1/networks/robinhood/series?range=24h", 200, cacheHistory, func(t *testing.T, b []byte) {
 			var s model.Series
 			decode(t, b, &s)
 			// The average derives from the exact sum (25 / 10), not the
@@ -288,14 +288,14 @@ func TestEndpoints(t *testing.T) {
 				t.Fatalf("bucket point contract fields: %+v", p)
 			}
 		}},
-		{"/api/v1/networks/robinhood/series?range=30d", 200, cacheMonth, func(t *testing.T, b []byte) {
+		{"/api/v1/networks/robinhood/series?range=30d", 200, cacheHistory, func(t *testing.T, b []byte) {
 			var s model.Series
 			decode(t, b, &s)
 			if s.Resolution != "15m" || len(s.Points) != 3 || len(s.OwnerActions) != 2 {
 				t.Fatalf("series 30d: %+v", s)
 			}
 		}},
-		{"/api/v1/networks/robinhood/series?range=all", 200, cacheAll, func(t *testing.T, b []byte) {
+		{"/api/v1/networks/robinhood/series?range=all", 200, cacheHistory, func(t *testing.T, b []byte) {
 			var s model.Series
 			decode(t, b, &s)
 			if s.Resolution != "1h" || len(s.Points) != 3 || len(s.ConstraintSets) != 2 {
@@ -317,7 +317,7 @@ func TestEndpoints(t *testing.T) {
 				t.Fatalf("empty arrays expected: %s", b)
 			}
 		}},
-		{"/api/v1/networks/robinhood/constraints", 200, cacheDay, func(t *testing.T, b []byte) {
+		{"/api/v1/networks/robinhood/constraints", 200, cacheOwner, func(t *testing.T, b []byte) {
 			var out struct {
 				Current *model.ConstraintSet  `json:"current"`
 				History []model.ConstraintSet `json:"history"`
@@ -327,20 +327,20 @@ func TestEndpoints(t *testing.T) {
 				t.Fatalf("constraints: %+v", out)
 			}
 		}},
-		{"/api/v1/networks/robinhood-testnet/constraints", 200, cacheDay, func(t *testing.T, b []byte) {
+		{"/api/v1/networks/robinhood-testnet/constraints", 200, cacheOwner, func(t *testing.T, b []byte) {
 			if !strings.Contains(string(b), `"current":null`) || !strings.Contains(string(b), `"history":[]`) {
 				t.Fatalf("empty constraints: %s", b)
 			}
 		}},
 
-		{"/api/v1/networks/robinhood/owner-actions?limit=1", 200, cacheDay, func(t *testing.T, b []byte) {
+		{"/api/v1/networks/robinhood/owner-actions?limit=1", 200, cacheOwner, func(t *testing.T, b []byte) {
 			var acts []model.OwnerAction
 			decode(t, b, &acts)
 			if len(acts) != 1 || acts[0].Block != 174150 || acts[0].Method != "setMinimumL2BaseFee" || string(acts[0].Args) != "{}" {
 				t.Fatalf("owner actions: %+v", acts)
 			}
 		}},
-		{"/api/v1/networks/robinhood/batches?range=24h", 200, cacheDay, func(t *testing.T, b []byte) {
+		{"/api/v1/networks/robinhood/batches?range=24h", 200, cacheHistory, func(t *testing.T, b []byte) {
 			var s model.BatchSeries
 			decode(t, b, &s)
 			if s.Range != "24h" || s.Resolution != "1m" || len(s.Points) != 2 || s.Points[0].Batches != 1 || s.Points[0].WeiSpent != "5000" || s.Points[0].L1BaseFeeAvg != "5" || s.Points[0].CalldataBytes != 100 || s.Points[1].Batches != 2 {
@@ -367,14 +367,14 @@ func TestEndpoints(t *testing.T) {
 			}
 		}},
 		{"/api/v1/networks/robinhood/batches?range=x", 400, cacheNone, nil},
-		{"/api/v1/networks/robinhood/l1?range=24h", 200, cacheDay, func(t *testing.T, b []byte) {
+		{"/api/v1/networks/robinhood/l1?range=24h", 200, cacheHistory, func(t *testing.T, b []byte) {
 			var s model.L1Series
 			decode(t, b, &s)
 			if s.Range != "24h" || len(s.Points) != 2 || s.Points[1].BaseFeeEstimate != "2369608" || s.Points[1].UnitsSinceUpdate != 7 || s.Points[1].Surplus != "-1" {
 				t.Fatalf("l1: %+v", s)
 			}
 		}},
-		{"/api/v1/networks/robinhood/l1?range=all", 200, cacheAll, func(t *testing.T, b []byte) {
+		{"/api/v1/networks/robinhood/l1?range=all", 200, cacheHistory, func(t *testing.T, b []byte) {
 			var s model.L1Series
 			decode(t, b, &s)
 			if len(s.Points) != 1 || s.From != s.Points[0].T || s.To != now.Add(time.Second).Unix() {
@@ -662,7 +662,7 @@ func TestSeriesPosterGasFeeDestinations(t *testing.T) {
 	if p.PosterGas == nil || *p.PosterGas != 767 || p.ComputeGasPerSecond == nil || *p.ComputeGasPerSecond != 421_949 || p.FeesWei != "8469537776000" || p.FloorFeesWei == nil || *p.FloorFeesWei != "8438980000000" || *p.SurplusFeesWei != "15190164000" || *p.PosterFeesWei != "15367612000" {
 		t.Fatalf("block destination split: %+v", p)
 	}
-	steps, _ := stepDown([]db.Block{b}, nil, now)
+	steps, _, _ := stepDown([]db.Block{b}, nil, now)
 	stepped := steps[0]
 	if stepped.PosterGas == nil || *stepped.PosterGas != 767 || stepped.PosterFeesWei == nil || *stepped.PosterFeesWei != "15367612000" {
 		t.Fatalf("step destination split: %+v", stepped)
@@ -732,7 +732,7 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 		t.Fatalf("block points: %+v", pts)
 	}
 	// Stepping down folds unknown blocks into an unknown split.
-	if p, _ := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}, nil, now); len(p) != 1 || p[0].FloorFeesWei != nil {
+	if p, _, _ := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}, nil, now); len(p) != 1 || p[0].FloorFeesWei != nil {
 		t.Fatalf("step down with an unknown block: %+v", p)
 	}
 }
@@ -1571,7 +1571,7 @@ func TestMissingTimelineLocatesRangesAmongBlockPoints(t *testing.T) {
 	}
 
 	// Stepping down carries the highest block of each step, so the range lands on the same two steps.
-	steps, numbers := stepDown(blocks, nil, now)
+	steps, numbers, _ := stepDown(blocks, nil, now)
 	if len(steps) != 2 || numbers[0] != 99 || numbers[1] != 110 {
 		t.Fatalf("step watermarks: %+v %v", steps, numbers)
 	}
@@ -1776,5 +1776,259 @@ func TestLoopReasonPhase(t *testing.T) {
 		if got := loopReason("slow", tc.loop, now); got != tc.want {
 			t.Fatalf("%s = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// The load band: every bucketed resolution reports the spread of the unit one step finer, the
+// per-block one reports none, and the unit the clock is inside is never one of them.
+func TestSeriesComputeRateSpread(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	block := func(n uint64, ts time.Time, gas uint64, poster int64) db.Block {
+		return db.Block{ChainID: robinhood, Number: n, TS: ts, GasUsed: gas, PosterGas: sql.NullInt64{Int64: poster, Valid: true},
+			BaseFee: db.WeiFromUint64(100), PredictedBaseFee: db.NullWeiFromUint64(100), Backlogs: db.Uint64Array{1},
+			ConstraintBips: pq.Int64Array{1}, MinBaseFee: db.NullWeiFromUint64(50), PricingVersion: db.PricingFull}
+	}
+	// Enough blocks for the hour to step down to 5s, with one busy second in every step.
+	var blocks []db.Block
+	for i := uint64(0); i < 2500; i++ {
+		at := now.Add(-time.Duration(2500-i) * 100 * time.Millisecond).Truncate(time.Second)
+		gas := uint64(10)
+		if i%50 == 0 {
+			gas = 400
+		}
+		blocks = append(blocks, block(i, at, gas, 0))
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	hour, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hour.Resolution != "5s" || hour.SpreadSeconds == nil || *hour.SpreadSeconds != 1 {
+		t.Fatalf("stepped spread unit: %s %v", hour.Resolution, hour.SpreadSeconds)
+	}
+	step := hour.Points[1]
+	if step.ComputeGasPerSecondMin == nil || step.ComputeGasPerSecondMax == nil || *step.ComputeGasPerSecondMin >= *step.ComputeGasPerSecondMax {
+		t.Fatalf("stepped band: %+v", step)
+	}
+	if *step.ComputeGasPerSecond < *step.ComputeGasPerSecondMin || *step.ComputeGasPerSecond > *step.ComputeGasPerSecondMax {
+		t.Fatalf("the average must sit inside the band: %+v", step)
+	}
+	// A clock two seconds into the newest step leaves it filling: its average is over the elapsed
+	// span while its band is over the whole seconds of it, two different populations, so it reports
+	// no band at all rather than one its own average can sit outside.
+	if err := store.UpsertBlocks(ctx, []db.Block{block(2500, now, 10, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	midStep, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filling := midStep.Points[len(midStep.Points)-1]
+	if filling.Completeness == model.SeriesComplete || filling.ComputeGasPerSecondMin != nil || filling.ComputeGasPerSecondMax != nil {
+		t.Fatalf("the bucket in progress carries no band: %+v", filling)
+	}
+	// A block whose poster gas was never recorded voids the step it lands in, and only that one.
+	banded := func(s *model.Series) int {
+		n := 0
+		for _, p := range s.Points {
+			if p.ComputeGasPerSecondMin != nil {
+				n++
+			}
+		}
+		return n
+	}
+	before := banded(hour)
+	voided := blocks[60]
+	voided.PosterGas = sql.NullInt64{}
+	if err := store.UpsertBlocks(ctx, []db.Block{voided}); err != nil {
+		t.Fatal(err)
+	}
+	if hour, err = buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now); err != nil {
+		t.Fatal(err)
+	}
+	if banded(hour) != before-1 {
+		t.Fatalf("one unrated second voided %d steps", before-banded(hour))
+	}
+
+	// Under the step-down threshold the points are the blocks themselves, which have no interior.
+	few := dbtest.New()
+	if err := few.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := few.UpsertBlocks(ctx, blocks[:10]); err != nil {
+		t.Fatal(err)
+	}
+	perBlock, err := buildSeriesIn(ctx, few, robinhood, ranges[rangeHour], now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perBlock.Resolution != resolutionBlock || perBlock.SpreadSeconds != nil || perBlock.Points[0].ComputeGasPerSecondMax != nil {
+		t.Fatalf("per-block points carry no band: %s %v %+v", perBlock.Resolution, perBlock.SpreadSeconds, perBlock.Points[0])
+	}
+
+	// Two quarter hours read their spread from the minutes inside them: one with every minute
+	// stored, one with three, whose twelve idle minutes carried nothing.
+	minute := func(start time.Time, compute uint64, resolution string) db.Bucket {
+		return db.Bucket{
+			ChainID: robinhood, Resolution: resolution, BucketStart: start, Blocks: 1, GasUsed: compute + 7,
+			PosterGas: sql.NullInt64{Int64: 7, Valid: true}, FeesWei: db.WeiFromUint64(1), BaseFeeMin: db.WeiFromUint64(1),
+			BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1), LastBlock: uint64(9000 + start.Unix()), PricingVersion: db.PricingFull,
+		}
+	}
+	whole := now.Add(-time.Hour).Truncate(15 * time.Minute)
+	sparse := whole.Add(15 * time.Minute)
+	rows := make([]db.Bucket, 0, 20)
+	for i := range 15 {
+		compute := uint64(600)
+		switch i {
+		case 3:
+			compute = 120
+		case 7:
+			compute = 6_000
+		}
+		rows = append(rows, minute(whole.Add(time.Duration(i)*time.Minute), compute, db.Resolution1m))
+	}
+	for i, compute := range []uint64{600, 120, 6_000} {
+		rows = append(rows, minute(sparse.Add(time.Duration(i)*time.Minute), compute, db.Resolution1m))
+	}
+	rows = append(rows, minute(whole, 0, db.Resolution15m), minute(sparse, 0, db.Resolution15m))
+	if err := store.FoldBuckets(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	month, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeMonth], now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if month.SpreadSeconds == nil || *month.SpreadSeconds != 60 {
+		t.Fatalf("month spread unit: %v", month.SpreadSeconds)
+	}
+	if len(month.Points) != 2 {
+		t.Fatalf("quarter hours: %+v", month.Points)
+	}
+	if *month.Points[0].ComputeGasPerSecondMin != 2 || *month.Points[0].ComputeGasPerSecondMax != 100 {
+		t.Fatalf("a quarter hour with every minute stored bands over what it measured: %+v", month.Points[0])
+	}
+	if *month.Points[1].ComputeGasPerSecondMin != 0 || *month.Points[1].ComputeGasPerSecondMax != 100 {
+		t.Fatalf("an idle minute inside a whole quarter hour carried nothing: %+v", month.Points[1])
+	}
+}
+
+// A second with no blocks at all is not an unmeasured one: it carried nothing, and a band that
+// leaves it out reports a minimum above the bucket's own average.
+func TestSeriesSpreadCountsIdleUnits(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Four blocks in the first second of every five, so each step of the hour holds one measured
+	// second and four idle ones, and enough of them for the range to step down.
+	base := now.Add(-time.Hour).Truncate(stepDownWidth)
+	var blocks []db.Block
+	for i := uint64(0); i < 2500; i++ {
+		at := base.Add(time.Duration(i/4) * stepDownWidth)
+		blocks = append(blocks, db.Block{
+			ChainID: robinhood, Number: i, TS: at, GasUsed: 100, PosterGas: sql.NullInt64{Valid: true},
+			BaseFee: db.WeiFromUint64(100), PredictedBaseFee: db.NullWeiFromUint64(100), Backlogs: db.Uint64Array{1},
+			ConstraintBips: pq.Int64Array{1}, MinBaseFee: db.NullWeiFromUint64(50), PricingVersion: db.PricingFull,
+		})
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	hour, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hour.Resolution != resolutionStepped {
+		t.Fatalf("resolution %q", hour.Resolution)
+	}
+	p := hour.Points[0]
+	if p.Completeness != model.SeriesComplete || p.ComputeGasPerSecondMin == nil || *p.ComputeGasPerSecondMin != 0 || *p.ComputeGasPerSecondMax != 400 {
+		t.Fatalf("four idle seconds floor the step's band: %+v", p)
+	}
+	// The average of a step is a mean over its whole span, so it can never leave its own band.
+	for _, p := range hour.Points {
+		if p.ComputeGasPerSecondMin == nil || p.ComputeGasPerSecond == nil {
+			continue
+		}
+		if *p.ComputeGasPerSecond < *p.ComputeGasPerSecondMin || *p.ComputeGasPerSecond > *p.ComputeGasPerSecondMax {
+			t.Fatalf("average outside its band: %+v", p)
+		}
+	}
+}
+
+// Block rows are pruned long before the buckets standing on them. A window the prune boundary falls
+// inside holds seconds that are gone, not seconds that were idle, so it reports no band.
+func TestSeriesSpreadStopsAtTheOldestRetainedRow(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The oldest row lands two seconds into its step, so that step has three of its five seconds
+	// behind the retention boundary.
+	base := now.Add(-time.Hour).Truncate(stepDownWidth).Add(2 * time.Second)
+	var blocks []db.Block
+	for i := uint64(0); i < 2500; i++ {
+		blocks = append(blocks, db.Block{
+			ChainID: robinhood, Number: i, TS: base.Add(time.Duration(i) * time.Second), GasUsed: 100,
+			PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(100), PredictedBaseFee: db.NullWeiFromUint64(100),
+			Backlogs: db.Uint64Array{1}, ConstraintBips: pq.Int64Array{1}, MinBaseFee: db.NullWeiFromUint64(50), PricingVersion: db.PricingFull,
+		})
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	hour, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hour.Points[0].ComputeGasPerSecondMin != nil {
+		t.Fatalf("the step the retention boundary falls inside carries no band: %+v", hour.Points[0])
+	}
+	if hour.Points[1].ComputeGasPerSecondMin == nil {
+		t.Fatalf("a step wholly inside the retained rows keeps its band: %+v", hour.Points[1])
+	}
+}
+
+// A step reaches back to its own five second boundary. For a window that does not start on one the
+// seconds before it were never asked for, so that step is not one whose gaps are idle seconds.
+func TestSeriesSpreadStopsAtTheWindowEdge(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	var blocks []db.Block
+	for i := uint64(0); i < 2500; i++ {
+		blocks = append(blocks, db.Block{
+			ChainID: robinhood, Number: i, TS: now.Add(-time.Hour).Add(time.Duration(i) * time.Second), GasUsed: 100,
+			PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(100), PredictedBaseFee: db.NullWeiFromUint64(100),
+			Backlogs: db.Uint64Array{1}, ConstraintBips: pq.Int64Array{1}, MinBaseFee: db.NullWeiFromUint64(50), PricingVersion: db.PricingFull,
+		})
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	// A clock three seconds off the five second grid puts the window's start inside a step.
+	hour, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hour.Points[0].T >= hour.From {
+		t.Fatalf("the first step is expected to reach back past the window: %d, window from %d", hour.Points[0].T, hour.From)
+	}
+	if hour.Points[0].ComputeGasPerSecondMin != nil {
+		t.Fatalf("the step the window starts inside carries no band: %+v", hour.Points[0])
+	}
+	if hour.Points[1].ComputeGasPerSecondMin == nil {
+		t.Fatalf("a step wholly inside the window keeps its band: %+v", hour.Points[1])
 	}
 }

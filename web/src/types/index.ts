@@ -137,6 +137,13 @@ export type SeriesPoint = {
   /** Nitro pricer input rate. Null until receipt poster gas is available; absent only during a rolling api upgrade. */
   computeGasPerSecond?: number | null;
   /**
+   * The lowest and highest compute rate any unit of `Series.spreadSeconds` inside the bucket
+   * carried: the band around the average. Null together for a bucket holding a unit whose poster
+   * gas is unknown, and absent only during a rolling api upgrade.
+   */
+  computeGasPerSecondMin?: number | null;
+  computeGasPerSecondMax?: number | null;
+  /**
    * The share of the bucket the collector indexed when it can be measured.
    * Bounded missing intervals reduce it. Insufficient time bounds make it null.
    * Both gas rates cover the measured span, so rates and averages read normally.
@@ -184,6 +191,12 @@ export type Series = {
    */
   from: number;
   to: number;
+  /**
+   * The width of the unit the points' load band is measured over: a second inside a 5s or 1m
+   * bucket, a minute inside 15m, a quarter hour inside 1h. Null for the per-block resolution,
+   * whose points have no interior, and absent only during a rolling api upgrade.
+   */
+  spreadSeconds?: number | null;
   constraintSets: ConstraintSet[];
   ownerActions: OwnerAction[];
   points: SeriesPoint[];

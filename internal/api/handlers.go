@@ -24,9 +24,11 @@ const (
 	cacheShort   = "public, max-age=1"
 	cacheNetwork = "public, max-age=5"
 	cacheHour    = "public, max-age=5"
-	cacheDay     = "public, max-age=30"
-	cacheMonth   = "public, max-age=300"
-	cacheAll     = "public, max-age=600"
+	cacheOwner   = "public, max-age=30"
+	// The bucketed ranges move by a bucket at a time and are the dearest responses the api
+	// assembles: the load band alone reads every block second of a day. Ten minutes of cache is
+	// well inside the resolution of every one of them.
+	cacheHistory = "public, max-age=600"
 )
 
 // degradedErrorStreak is how many consecutive failures of one collector loop mark a network
@@ -367,7 +369,7 @@ func (s *Server) handleConstraints(w http.ResponseWriter, r *http.Request) {
 			current = &history[0]
 		}
 	}
-	writeJSON(w, http.StatusOK, cacheDay, map[string]any{"current": current, "history": history})
+	writeJSON(w, http.StatusOK, cacheOwner, map[string]any{"current": current, "history": history})
 }
 
 func (s *Server) handleOwnerActions(w http.ResponseWriter, r *http.Request) {
@@ -385,7 +387,7 @@ func (s *Server) handleOwnerActions(w http.ResponseWriter, r *http.Request) {
 	for _, a := range rows {
 		out = append(out, ownerActionModel(a))
 	}
-	writeJSON(w, http.StatusOK, cacheDay, out)
+	writeJSON(w, http.StatusOK, cacheOwner, out)
 }
 
 func (s *Server) handleBatches(w http.ResponseWriter, r *http.Request) {

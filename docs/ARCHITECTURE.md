@@ -261,6 +261,7 @@ type BlockPoint = {
 type Series = {
   range: '1h' | '24h' | '30d' | 'all'; resolution: 'block' | '5s' | '1m' | '15m' | '1h';
   from: number; to: number;   // the requested window in unix seconds, whatever the points cover; charts draw the whole window and show what is missing as not indexed. For 'all', from is the first indexed point (equal to to when nothing is indexed)
+  spreadSeconds: number | null;            // width of the unit the points' compute rate spread is measured over: 1 second from the block rows for 5s and 1m points, 60 for 15m points and 900 for 1h points, all from the stored buckets one resolution finer. Null for the per-block resolution, whose points have no interior, and null when no point carries a band: a per-second unit is read from block rows, which `collector.block_retention` outlives only when it is set past the range, so a 24h range on a shorter retention bands its recent points alone
   constraintSets: ConstraintSet[];         // sets that were in force during the range, for markers and card layout
   ownerActions: OwnerAction[];             // within the range, for chart markers
   points: SeriesPoint[];
@@ -268,7 +269,9 @@ type Series = {
 type SeriesPoint = {
   t: number;                               // unix seconds, bucket start
   blocks: number; gasUsed: number; posterGas: number | null; gasPerSecond: number; computeGasPerSecond: number | null; feesWei: string;
+  computeGasPerSecondMin: number | null; computeGasPerSecondMax: number | null; // lowest and highest compute rate any spreadSeconds unit inside the point carried, the load band. Only a bucket with completeness 'complete' carries one, the bucket still filling included: the average is a rate over the bucket's own span while the band is over the units inside it, so a bucket missing part of that span can put its average outside its own band. A complete bucket short of units held idle ones, which carried nothing, so its minimum is 0, and a window the block-row retention boundary falls inside holds seconds that are gone rather than idle and carries no band at all
   // gasPerSecond retains the total-gas API value. computeGasPerSecond is the pricer input rate and is null when receipt poster gas is unavailable for any source block.
+  // The min and max are null together, for a point with no spreadSeconds, for one whose window holds a unit without authoritative poster gas, and for the unit the serving clock is still inside, which is not measured.
   // minBaseFee follows pricing_version. The destination split is independently unknown until both pricing and receipt inputs are available.
   coverage: number | null;                 // share of the bucket the collector indexed when the time span is measurable. Bounded missing intervals reduce it; it is null when missing-range time bounds are insufficient. Both gas rates are usable only when coverage is positive and non-null. Sums (gasUsed, feesWei, blocks) always include indexed blocks only
   completeness: 'complete' | 'partial' | 'unknown'; // complete means every block is indexed; partial means the API can place a missing range in this bucket or the bucket is still in progress, even when equal block timestamps leave coverage at 1; unknown means a missing range without two usable time bounds falls in the block numbers this bucket aggregates, so whether it overlaps cannot be decided. A range recorded with no usable timestamps is still located by its block numbers, and only reaches the buckets that can hold them

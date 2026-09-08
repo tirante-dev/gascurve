@@ -27,6 +27,7 @@ import {
   MARKER_COLOR,
   resampleBatches,
   resampleFees,
+  spreadUnitLabel,
   bigFraction,
   segmentsFor,
   seriesColor,
@@ -182,6 +183,14 @@ describe("labels", () => {
     expect(slotLabel({ constraintSets: [], points: [point({ backlogs: [1] })] }, 0, "constraints")).toBe("C1 · definition unknown");
     expect(slotLabel({ constraintSets: [], points: [point({ backlogs: [1] })] }, 0, "unknown")).toBe(unknownSlotLabel(0));
     expect(unknownBacklogKey(2)).toBe("bu2");
+  });
+  it("names the unit a load band was measured over, so a band read at one range is not read as another", () => {
+    expect(spreadUnitLabel(1)).toBe("second");
+    expect(spreadUnitLabel(5)).toBe("5 seconds");
+    expect(spreadUnitLabel(60)).toBe("minute");
+    expect(spreadUnitLabel(900)).toBe("15 minutes");
+    expect(spreadUnitLabel(3600)).toBe("hour");
+    expect(spreadUnitLabel(7200)).toBe("2 hours");
   });
 });
 

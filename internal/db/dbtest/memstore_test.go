@@ -591,3 +591,61 @@ func TestMemStoreSetPosterGasRefusesValuesTheColumnCannotHold(t *testing.T) {
 		t.Fatalf("in-range poster gas not recorded: %+v", b)
 	}
 }
+
+// The memory store measures a spread exactly as the SQL does: whole units only, one unrated unit
+// voiding the window it falls in, and per-second units read from blocks against per-bucket ones read
+// from the stored resolution of that width.
+func TestMemStoreComputeRateSpread(t *testing.T) {
+	ctx := context.Background()
+	m := New()
+	base := time.Date(2026, 9, 6, 7, 0, 0, 0, time.UTC)
+	block := func(n uint64, ts time.Time, gas uint64, poster sql.NullInt64) db.Block {
+		return db.Block{ChainID: 1, Number: n, TS: ts, GasUsed: gas, PosterGas: poster, BaseFee: db.WeiFromUint64(1)}
+	}
+	known := func(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+	if err := m.UpsertBlocks(ctx, []db.Block{
+		block(1, base, 100, known(10)),
+		block(2, base, 250, known(40)),
+		block(3, base.Add(time.Second), 50, known(5)),
+		block(4, base.Add(59*time.Second), 500, known(0)),
+		block(5, base.Add(time.Minute), 100, known(10)),
+		block(6, base.Add(61*time.Second), 100, sql.NullInt64{}),
+		// Poster gas the column would refuse is not authoritative here either.
+		block(7, base.Add(2*time.Minute), 100, known(400)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.ComputeRateSpread(ctx, 1, base, base.Add(3*time.Minute), time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Units is what the caller needs to tell an idle second from a measured one: three of the
+	// minute's sixty seconds carried blocks.
+	if len(got) != 1 || !got[0].Start.Equal(base) || got[0].MinRate != 45 || got[0].MaxRate != 500 || got[0].Units != 3 {
+		t.Fatalf("per-second spread: %+v", got)
+	}
+
+	for i, compute := range []uint64{600, 120, 6_000} {
+		start := base.Add(time.Duration(i) * time.Minute)
+		m.BucketRows[bucketKey(1, "1m", start)] = db.Bucket{ChainID: 1, Resolution: "1m", BucketStart: start, Blocks: 1, GasUsed: compute + 7, PosterGas: known(7)}
+	}
+	unknown := base.Add(20 * time.Minute)
+	m.BucketRows[bucketKey(1, "1m", unknown)] = db.Bucket{ChainID: 1, Resolution: "1m", BucketStart: unknown, Blocks: 1, GasUsed: 900}
+	spread, err := m.ComputeRateSpread(ctx, 1, base, base.Add(30*time.Minute), 15*time.Minute, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spread) != 1 || !spread[0].Start.Equal(base) || spread[0].MinRate != 2 || spread[0].MaxRate != 100 || spread[0].Units != 3 {
+		t.Fatalf("per-minute spread: %+v", spread)
+	}
+	if _, err := m.ComputeRateSpread(ctx, 1, base, base.Add(time.Hour), time.Hour, 7*time.Minute); err == nil {
+		t.Fatal("a unit no stored resolution is wide must be refused")
+	}
+	if rows, err := m.ComputeRateSpread(ctx, 1, base, base.Add(time.Hour), time.Minute, time.Minute); err != nil || rows != nil {
+		t.Fatalf("unit as wide as the step: %+v %v", rows, err)
+	}
+	m.FailOn["ComputeRateSpread"] = true
+	if _, err := m.ComputeRateSpread(ctx, 1, base, base.Add(time.Hour), time.Minute, time.Second); err == nil {
+		t.Fatal("a failing store must report it")
+	}
+}

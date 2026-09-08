@@ -179,6 +179,52 @@ describe("SeriesCharts", () => {
     expect(m.gasNote(m.points[0])).toBeNull();
   });
 
+  it("bands the load chart from the lowest to the highest unit inside each bucket, as the base fee chart is banded", () => {
+    const banded: Series = {
+      ...series,
+      spreadSeconds: 60,
+      points: series.points.map((p) => ({ ...p, computeGasPerSecond: 10_000_000, computeGasPerSecondMin: 2_000_000, computeGasPerSecondMax: 40_000_000 })),
+    };
+    const m = buildSeriesModel(banded, "constraints");
+    expect(m.hasSpread).toBe(true);
+    expect(m.spreadUnit).toBe("minute");
+    // The axis holds the top of the band, not just the average that runs through it.
+    expect(m.gasAxis.top).toBeGreaterThanOrEqual(40_000_000);
+    expect(m.gasRows[1].label).toBe("min to max per minute in bucket");
+    expect(m.gasRows[1].value(m.points[0])).toBe("2 Mgas/s to 40 Mgas/s");
+    expect(m.gasLegend.map((l) => l.label)).toContain("min to max per minute");
+    render(<GasPerSecondChart m={m} />);
+    expect(screen.getByRole("figure").getAttribute("aria-label")).toContain("banded from the lowest to the highest minute inside each bucket");
+  });
+
+  it("draws no band where the api measured none: a bucket that is itself one unit has no interior", () => {
+    // What the api serves for the per-block resolution, and what an api older
+    // than the band serves everywhere.
+    const m = buildSeriesModel(series, "constraints");
+    expect(m.hasSpread).toBe(false);
+    expect(m.spreadUnit).toBeNull();
+    expect(m.gasRows.map((r) => r.label)).not.toContain("min to max per second in bucket");
+    render(<GasPerSecondChart m={m} />);
+    expect(screen.getByRole("figure").getAttribute("aria-label")).not.toContain("banded");
+  });
+
+  it("keeps the band off a bucket whose units the api could not rate, without voiding its neighbours", () => {
+    const [a, b, c] = series.points;
+    const banded: Series = {
+      ...series,
+      spreadSeconds: 1,
+      points: [
+        { ...a, computeGasPerSecondMin: 1_000_000, computeGasPerSecondMax: 3_000_000 },
+        { ...b, computeGasPerSecondMin: null, computeGasPerSecondMax: null },
+        { ...c, computeGasPerSecondMin: 2_000_000, computeGasPerSecondMax: 4_000_000 },
+      ],
+    };
+    const m = buildSeriesModel(banded, "constraints");
+    expect(m.hasSpread).toBe(true);
+    expect(m.gasRows[1].value(m.points[1])).toBe("n/a");
+    expect(m.gasRows[1].value(m.points[2])).toBe("2 Mgas/s to 4 Mgas/s");
+  });
+
   it("claims nothing about receipts when the api never reports a compute rate at all", () => {
     // An api older than the field sends no rate anywhere. The chart has
     // nothing to draw, but that is the client meeting an older api and not a

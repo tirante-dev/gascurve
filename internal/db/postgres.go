@@ -756,6 +756,45 @@ func (p *Postgres) Buckets(ctx context.Context, chainID uint64, resolution strin
 		chainID, resolution, from, to)
 }
 
+// blockRateSpread measures the spread over whole seconds of the block rows. A second's rate is the
+// compute gas of every block stamped with it, which is what the pricer meters, so a second missing
+// one block's poster gas has no rate at all and voids the window it falls in.
+const blockRateSpread = `
+	WITH per_unit AS (
+		SELECT ts, CASE WHEN count(*) = count(poster_gas) THEN sum(gas_used - poster_gas) END AS rate
+		FROM blocks WHERE chain_id = $1 AND ts >= $2 AND ts < $3
+		GROUP BY ts
+	)
+	SELECT to_timestamp(floor(extract(epoch FROM ts) / $4::BIGINT) * $4::BIGINT) AS start,
+		min(rate)::BIGINT AS min_rate, max(rate)::BIGINT AS max_rate, count(*)::BIGINT AS units
+	FROM per_unit GROUP BY 1 HAVING count(*) = count(rate) ORDER BY 1`
+
+// bucketRateSpread measures the spread over the stored buckets one resolution finer, whose rate is
+// the division bucketPoint makes for a whole bucket: its compute gas over its own width.
+const bucketRateSpread = `
+	WITH per_unit AS (
+		SELECT bucket_start, CASE WHEN poster_gas IS NOT NULL THEN (gas_used - poster_gas) / $5::BIGINT END AS rate
+		FROM buckets WHERE chain_id = $1 AND resolution = $2 AND bucket_start >= $3 AND bucket_start < $4
+	)
+	SELECT to_timestamp(floor(extract(epoch FROM bucket_start) / $6::BIGINT) * $6::BIGINT) AS start,
+		min(rate)::BIGINT AS min_rate, max(rate)::BIGINT AS max_rate, count(*)::BIGINT AS units
+	FROM per_unit GROUP BY 1 HAVING count(*) = count(rate) ORDER BY 1`
+
+func (p *Postgres) ComputeRateSpread(ctx context.Context, chainID uint64, from, to time.Time, step, unit time.Duration) ([]RateSpread, error) {
+	if step <= 0 || unit <= 0 || unit >= step || !to.After(from) {
+		return nil, nil
+	}
+	stepSecs := int64(step / time.Second)
+	if unit == time.Second {
+		return selectAll[RateSpread](ctx, p, blockRateSpread, chainID, from, to, stepSecs)
+	}
+	resolution, ok := ResolutionOf(unit)
+	if !ok {
+		return nil, fmt.Errorf("compute rate spread: no stored resolution is %v wide", unit)
+	}
+	return selectAll[RateSpread](ctx, p, bucketRateSpread, chainID, resolution, from, to, int64(unit/time.Second), stepSecs)
+}
+
 const sampleColumns = `chain_id, sampled_at, block_number, base_fee, min_base_fee, constraints, legacy, prices, l1, accounts`
 
 func (p *Postgres) InsertStateSample(ctx context.Context, s StateSample) error {
