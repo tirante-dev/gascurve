@@ -172,6 +172,7 @@
             "sample_retention": { "$ref": "#/definitions/duration" },
             "backfill_depth": { "$ref": "#/definitions/duration" },
             "backfill_anchor_interval": { "type": "integer", "minimum": 1 },
+            "backfill_window": { "type": "integer", "minimum": 0 },
             "max_catch_up_batches": { "type": "integer", "minimum": 1 },
             "failover_cooldown": { "$ref": "#/definitions/duration" },
             "eth_usd_source": {

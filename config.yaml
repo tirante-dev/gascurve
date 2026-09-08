@@ -32,6 +32,9 @@ collector:
   backfill_depth: 1h         # how far back the owner scan and the resumable backfill reach; a development default,
                              # production sets 720h (30d) in the chart values
   backfill_anchor_interval: 1000  # blocks between state anchors when a network is archive: true
+  backfill_window: 10000     # blocks per backfill run on archive networks: history is reconstructed
+                             # newest first, a window at a time, each seeded from archive state.
+                             # 0 replays each constraint set forward in one run instead.
   max_catch_up_batches: 10   # paced networks skip a catch-up gap larger than this many header batches; unlimited networks never skip
   failover_cooldown: 60s     # time on a fallback endpoint before the primary is probed again (one eth_chainId)
   # ETH/USD spot for the fee cards, fetched server side by the slow loop

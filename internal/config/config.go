@@ -101,6 +101,11 @@ type CollectorConfig struct {
 	// BackfillAnchorInterval is how many blocks the backfill replays between two state anchors on
 	// archive networks (default 1000). Networks without archive ignore it.
 	BackfillAnchorInterval int `mapstructure:"backfill_anchor_interval"`
+	// BackfillWindow is how many blocks one backfill run covers on archive networks (default 10000).
+	// Runs descend: each starts a window below the blocks already reconstructed, seeded from archive
+	// state, so history nearest the live data appears first. Zero replays each constraint set forward
+	// in one run instead, which is also what a network without an archive endpoint does.
+	BackfillWindow int `mapstructure:"backfill_window"`
 	// MaxCatchUpBatches bounds one fast tick's catch-up on a budgeted network (default 10); a
 	// larger gap is skipped so the follower never falls behind forever on a budget below the
 	// chain's block rate. Unlimited networks never skip.
@@ -311,6 +316,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collector.sample_retention", "168h")
 	v.SetDefault("collector.backfill_depth", "720h")
 	v.SetDefault("collector.backfill_anchor_interval", 1000)
+	v.SetDefault("collector.backfill_window", 10000)
 	v.SetDefault("collector.max_catch_up_batches", 10)
 	v.SetDefault("collector.failover_cooldown", "60s")
 	v.SetDefault("collector.eth_usd_source", "coinbase")
@@ -503,6 +509,9 @@ func (c *Config) Validate(requireRPC bool) error {
 	}
 	if c.Collector.BackfillAnchorInterval <= 0 {
 		errs = append(errs, fmt.Errorf("collector.backfill_anchor_interval %d must be positive", c.Collector.BackfillAnchorInterval))
+	}
+	if c.Collector.BackfillWindow < 0 {
+		errs = append(errs, fmt.Errorf("collector.backfill_window %d must not be negative", c.Collector.BackfillWindow))
 	}
 	if c.Collector.MaxCatchUpBatches <= 0 {
 		errs = append(errs, fmt.Errorf("collector.max_catch_up_batches %d must be positive", c.Collector.MaxCatchUpBatches))

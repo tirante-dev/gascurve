@@ -26,21 +26,30 @@ const (
 )
 
 // backfillCursor is the resumable checkpoint stored in collector_state. Segments are bounded by
-// constraint sets and replayed forward from the set's starting backlogs; the job walks segments
-// backwards until the segment end is older than backfill_depth. Top is the first live block when the
-// backfill started, the bound of everything it folds: a reorg whose ancestor lies below Top-1
-// restarts the backfill. LastAnchor and friends record the most recent archive state anchor.
-// Verified marks a segment chosen after the owner-action scan completed; an unverified live-model
-// segment left by an older collector is discarded at start.
+// constraint sets and the job walks them backwards until the segment end is older than
+// backfill_depth; inside one it walks backwards through the windows seedWindow can seed, otherwise
+// forward from the segment floor. SegStart is the first block of the current run, End its exclusive
+// top, Next the replay cursor. Top is the first live block when the backfill started, the bound of
+// everything it folds: a reorg whose ancestor lies below Top-1 restarts the backfill. LastAnchor and
+// friends record the most recent archive state anchor. Verified marks a segment chosen after the
+// owner-action scan completed; an unverified live-model segment from an older collector is discarded.
 type backfillCursor struct {
-	Done                bool     `json:"done"`
-	DepthStart          uint64   `json:"depthStart"`
-	Top                 uint64   `json:"top,omitempty"`
-	Active              bool     `json:"active"`
-	Verified            bool     `json:"verified,omitempty"`
-	SegStart            uint64   `json:"segStart"`
-	Next                uint64   `json:"next"`
-	End                 uint64   `json:"end"`
+	Done       bool   `json:"done"`
+	DepthStart uint64 `json:"depthStart"`
+	Top        uint64 `json:"top,omitempty"`
+	Active     bool   `json:"active"`
+	Verified   bool   `json:"verified,omitempty"`
+	SegStart   uint64 `json:"segStart"`
+	Next       uint64 `json:"next"`
+	// SkipFirst drops the row of the block below a seeded window: it is replayed to price the
+	// window's first block and written by the run below this one.
+	SkipFirst bool   `json:"skipFirst,omitempty"`
+	End       uint64 `json:"end"`
+	// EndParent is the parent hash of the block at End, so a run stopping under history already
+	// reconstructed is checked to be on the same fork as it. RunParent holds the current run's own,
+	// which becomes EndParent when it finishes.
+	EndParent           string   `json:"endParent,omitempty"`
+	RunParent           string   `json:"runParent,omitempty"`
 	PrevTs              uint64   `json:"prevTs"`
 	PrevHash            string   `json:"prevHash,omitempty"`
 	Backlogs            []uint64 `json:"backlogs"`
@@ -185,6 +194,13 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	if hashMismatch(c.PrevHash, headers[0].ParentHash) {
 		return BackfillIdle, fmt.Errorf("backfill header %d does not build on the prior batch, retrying", headers[0].Number)
 	}
+	last := headers[len(headers)-1]
+	if last.Number+1 == c.End && hashMismatch(c.EndParent, last.Hash) {
+		return BackfillIdle, fmt.Errorf("backfill block %d is not the parent of the reconstructed block above it, retrying", last.Number)
+	}
+	if c.SegStart >= c.Next && c.SegStart-c.Next < uint64(len(headers)) {
+		c.RunParent = headers[c.SegStart-c.Next].ParentHash
+	}
 	st, setID, err := f.segmentState(ctx, c)
 	if err != nil {
 		return BackfillIdle, err
@@ -196,6 +212,12 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	rows, err := f.replaySegment(ctx, st, c, headers, anchor, anchorFees)
 	if err != nil {
 		return BackfillIdle, err
+	}
+	if c.SkipFirst && len(rows) > 0 {
+		// The block below a seeded window is replayed only to price the window's first block. Its own
+		// row belongs to the run below this one, which would otherwise fold it into a bucket twice.
+		rows = rows[1:]
+		c.SkipFirst = false
 	}
 	for _, r := range rows {
 		if r.Anchored {
@@ -220,12 +242,11 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 	buckets := db.FoldBlocks(additive, func(uint64) sql.NullInt64 { return setID })
 
 	c.Next += n
-	c.PrevTs = headers[len(headers)-1].Timestamp
-	c.PrevHash = headers[len(headers)-1].Hash
+	c.PrevTs, c.PrevHash = last.Timestamp, last.Hash
 	c.Backlogs = st.Backlogs()
 	if c.Next >= c.End {
 		c.Active = false
-		c.End = c.SegStart
+		c.End, c.EndParent, c.RunParent = c.SegStart, c.RunParent, ""
 	}
 	err = f.withGeneration(ctx, gen, func(s db.Store) error {
 		if len(rowBacked) > 0 {
@@ -405,7 +426,8 @@ func sameLegacyParams(a, b *pricer.Legacy) bool {
 	return a.SpeedLimit == b.SpeedLimit && a.Inertia == b.Inertia && a.Tolerance == b.Tolerance
 }
 
-// startSegment picks the next segment to replay, walking backwards through constraint sets. Nothing
+// startSegment picks the next run to replay, walking backwards through constraint sets and, inside
+// one, through the windows seedWindow can seed. Nothing
 // starts before the owner-action timeline is complete through the block preceding the first live one
 // (owner_scan_through): only then are the historical sets and fees known. A truncated scan's origin
 // bounds the depth, and since that sample is end-of-block state the replay may only start at the
@@ -426,7 +448,7 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 		if oldest == nil {
 			return BackfillIdle, nil
 		}
-		c.End = oldest.Number
+		c.End, c.EndParent = oldest.Number, oldest.ParentHash
 		c.Top = oldest.Number
 	}
 	if c.DepthStart == 0 {
@@ -482,6 +504,7 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 	c.Next = c.SegStart
 	c.PrevTs = 0
 	c.PrevHash = ""
+	c.SkipFirst = false
 	c.LastAnchor, c.LastAnchorErrorBips, c.AnchorMinFee = 0, 0, ""
 	// The finished segment's last output prices the first block of the segment above it, which was
 	// written by an earlier step and keeps no prediction. Carrying it across would be wrong (the walk
@@ -489,8 +512,62 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 	// updating a row whose bucket may already have been folded additively, where a rebuild loses the
 	// fold. So one block per segment boundary stays unpredicted until the ranges are replayed as one.
 	c.setCarry(prediction{})
-	f.log.Info("backfill segment", "from", c.SegStart, "to", c.End, "setId", c.SetID)
+	floor := c.SegStart
+	if err := f.seedWindow(ctx, c); err != nil {
+		return BackfillIdle, err
+	}
+	f.log.Info("backfill run", "from", c.SegStart, "to", c.End, "setId", c.SetID, "segmentFloor", floor)
 	return BackfillProgressed, f.withGeneration(ctx, gen, func(s db.Store) error { return f.saveCursor(ctx, s, c) })
+}
+
+// seedWindow moves the run's start up from the segment floor to backfill_window blocks below the
+// unfilled top, so an archive network reconstructs the blocks nearest the live data first and walks
+// down from there rather than replaying a whole constraint set forward before anything near the head
+// appears. The state entering the window is the archive's own, two blocks below it: the block in
+// between is replayed unwritten so the window's first block still gets the prediction its parent
+// computed. The run is left at the floor when nothing can seed it, which is what a network without an
+// archive endpoint always gets: the pricer only runs forwards, so a window it cannot sample can only
+// be reached by replaying the segment from a known starting backlog.
+func (f *Follower) seedWindow(ctx context.Context, c *backfillCursor) error {
+	window := uint64(max(f.cfg.BackfillWindow, 0))
+	if f.archive == nil || window == 0 {
+		return nil
+	}
+	// The depth is where the descent bottoms out, and bounds the subtraction with it.
+	floor, first := c.SegStart, c.DepthStart
+	if pricer.SaturatingUSub(c.End, c.DepthStart) > window {
+		first = c.End - window
+	}
+	if first < floor+2 {
+		return nil
+	}
+	seed := first - 2
+	sample, err := f.archive.PricingSampleAt(ctx, seed)
+	if err != nil {
+		return fmt.Errorf("backfill window seed %d: %w", seed, err)
+	}
+	st, _, err := f.segmentState(ctx, c)
+	if err != nil {
+		return err
+	}
+	if st.Legacy != nil {
+		f.mu.Lock()
+		base := *st.Legacy
+		applyLegacyParams(st, f.timelineLocked(nil).legacyBefore(first-1, &base))
+		f.mu.Unlock()
+	}
+	if !sameShape(st, sample) {
+		f.log.Warn("backfill window seed skipped, the sampled model differs from the segment's set", "block", seed)
+		return nil
+	}
+	c.SegStart, c.Next, c.SkipFirst = first, first-1, true
+	c.Backlogs = sampleBacklogs(sample)
+	c.PrevTs, c.PrevHash = sample.Header.Timestamp, sample.Header.Hash
+	c.LastAnchor = seed
+	if sample.MinBaseFee != nil {
+		c.AnchorMinFee = sample.MinBaseFee.String()
+	}
+	return nil
 }
 
 // holeToDepth records everything still unfilled as a hole and finishes the backfill: the state
