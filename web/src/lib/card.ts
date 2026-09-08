@@ -142,23 +142,45 @@ export function svgDataUri(svg: string): string {
 /** Everything the card prints, already formatted. Null where the api could not be reached. */
 export type CardReading = {
   baseFee: string;
+  /** The size the fee is set at, which shrinks rather than letting a long figure run off the card. */
+  baseFeeSize: number;
   multiplier: number;
   multiplierText: string;
+  /** True when the multiplier is past 2^53 and there is no figure to quote, so nothing follows the words. */
+  offScale: boolean;
   tone: DialTone;
   floor: string;
   block: string;
 } | null;
 
+/** What the card prints in place of a multiplier past 2^53, where the digits that reached the browser are
+ * no longer the ones the api sent. The same words the footer's bips figure uses, for the same reason. */
+export const OFF_SCALE = "off scale";
+
+/** The fee's size by how many characters it runs to. A card is a fixed box with no reflow and no ellipsis,
+ * so an unusually long figure has to be set smaller rather than pushed off the right edge. */
+export function baseFeeSize(text: string): number {
+  if (text.length <= 7) return 96;
+  if (text.length <= 10) return 72;
+  return text.length <= 14 ? 54 : 40;
+}
+
 export function cardReading(snapshot: LiveSnapshot): NonNullable<CardReading> {
-  const multiplier = snapshot.multiplierBips / 10_000;
+  const bips = snapshot.multiplierBips;
+  const offScale = Math.abs(bips) > Number.MAX_SAFE_INTEGER;
+  const multiplier = bips / 10_000;
   // The tone follows the figure as printed rather than the raw multiplier, as it does on the page: a
   // "2.00x" in amber would put the figure a band away from where a reader can see it rounds to.
-  const multiplierText = formatMultiplierFixed(multiplier);
+  const multiplierText = offScale ? OFF_SCALE : formatMultiplierFixed(multiplier);
+  const baseFee = formatGweiFixed(weiToGweiNumber(snapshot.baseFee));
   return {
-    baseFee: formatGweiFixed(weiToGweiNumber(snapshot.baseFee)),
+    baseFee,
+    baseFeeSize: baseFeeSize(baseFee),
     multiplier,
     multiplierText,
-    tone: dialTone(Number(multiplierText)),
+    offScale,
+    // A reading with no digits left is still one the pricer saturated to reach, which is the top of the scale.
+    tone: offScale ? "critical" : dialTone(Number(multiplierText)),
     floor: formatGwei(snapshot.minBaseFee),
     block: formatInteger(snapshot.block.number),
   };

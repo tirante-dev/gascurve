@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { CARD_DIAL_H, CARD_DIAL_W, CARD_TONE_COLORS, cardDialSvg, cardNumerals, cardReading, svgDataUri } from "@/lib/card";
-import { AMBER_TO, DIAL_CY, DIAL_VIEW_H, DIAL_VIEW_W, GREEN_TO, dialPoint, dialPosition, needlePoints, R_NUMERAL } from "@/lib/dial";
+import { CARD_DIAL_H, CARD_DIAL_W, CARD_TONE_COLORS, OFF_SCALE, baseFeeSize, cardDialSvg, cardNumerals, cardReading, svgDataUri } from "@/lib/card";
+import { AMBER_TO, DIAL_CY, DIAL_MAX, DIAL_VIEW_H, DIAL_VIEW_W, GREEN_TO, dialPoint, dialPosition, needlePoints, R_NUMERAL } from "@/lib/dial";
 import type { LiveSnapshot } from "@/types";
+
+/** The tones lit inside the glow group, in the order they are drawn. The dimmed ring outside it carries
+ * every tone whatever the reading, so counting colours across the whole document proves nothing. */
+function litToneNames(svg: string): string[] {
+  const group = /<g filter="url\(#neon\)">(.*?)<\/g>/.exec(svg);
+  if (group === null) return [];
+  return (["good", "warning", "critical"] as const).filter((tone) => group[1].includes(CARD_TONE_COLORS[tone]));
+}
 
 const snapshot = {
   block: { number: 62_912_450, ts: 0, gasUsed: 0, baseFee: "409000000", txCount: 0 },
@@ -18,22 +26,25 @@ describe("cardDialSvg", () => {
     expect(svg.endsWith("</svg>")).toBe(true);
   });
 
-  it("lights the ring up to the reading and points the needle at it", () => {
-    const svg = cardDialSvg(1.5);
+  it("points the needle at the reading", () => {
     const needle = needlePoints(1.5)
       .map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`)
       .join(" ");
-    expect(svg).toContain(`<polygon points="${needle}"`);
-    // Only the good band is lit at 1.5x: the two above it appear once each, dimmed.
-    expect(svg.split(CARD_TONE_COLORS.good).length - 1).toBeGreaterThan(svg.split(CARD_TONE_COLORS.critical).length - 1);
+    expect(cardDialSvg(1.5)).toContain(`<polygon points="${needle}"`);
   });
 
-  it("lights every band the fee has passed", () => {
-    const svg = cardDialSvg(AMBER_TO + 1);
-    for (const tone of ["good", "warning", "critical"] as const) {
-      // Each band is drawn dimmed, and again lit inside the glow.
-      expect(svg.split(CARD_TONE_COLORS[tone]).length - 1).toBe(2);
-    }
+  it.each([
+    [0.5, []],
+    [1.5, ["good"]],
+    [GREEN_TO, ["good"]],
+    [GREEN_TO + 0.01, ["good", "warning"]],
+    [AMBER_TO, ["good", "warning"]],
+    [AMBER_TO + 1, ["good", "warning", "critical"]],
+    [DIAL_MAX * 10, ["good", "warning", "critical"]],
+    [Number.POSITIVE_INFINITY, ["good", "warning", "critical"]],
+    [Number.NaN, []],
+  ])("lights exactly the bands %p has passed", (multiplier, expected) => {
+    expect(litToneNames(cardDialSvg(multiplier))).toEqual(expected);
   });
 
   it("measures the glow in user space, where the horizon's flat box cannot collapse it", () => {
@@ -50,9 +61,7 @@ describe("cardDialSvg", () => {
   it("draws the instrument unlit and without a needle when there is no reading", () => {
     const svg = cardDialSvg(null);
     expect(svg).not.toContain("<polygon");
-    for (const tone of ["good", "warning", "critical"] as const) {
-      expect(svg.split(CARD_TONE_COLORS[tone]).length - 1).toBe(1);
-    }
+    expect(litToneNames(svg)).toEqual([]);
   });
 
   it("carries no text, which the card's rasteriser would draw in the wrong face", () => {
@@ -82,12 +91,29 @@ describe("cardReading", () => {
   it("formats every figure the card prints", () => {
     expect(cardReading(snapshot)).toEqual({
       baseFee: "0.4090",
+      baseFeeSize: 96,
       multiplier: 20.45,
       multiplierText: "20.45",
+      offScale: false,
       tone: "critical",
       floor: "0.02",
       block: "62,912,450",
     });
+  });
+
+  it("says off scale past 2^53, where the digits are no longer the ones the api sent", () => {
+    // The api's own int64 ceiling lands here: 9223372036854775807 parses back as 9223372036854776000.
+    const saturated = { ...snapshot, multiplierBips: 9_223_372_036_854_775_807 } as LiveSnapshot;
+    expect(cardReading(saturated)).toMatchObject({ multiplierText: OFF_SCALE, offScale: true, tone: "critical" });
+    const under = { ...snapshot, multiplierBips: Number.MAX_SAFE_INTEGER } as LiveSnapshot;
+    expect(cardReading(under)).toMatchObject({ multiplierText: "900,719,925,474.10", offScale: false });
+  });
+
+  it("sets a long fee smaller, since the card has no room to reflow it", () => {
+    expect(baseFeeSize("0.4090")).toBe(96);
+    const sizes = ["0.4090", "12345678.1", "123456789012.1", "12345678901234567.1"].map(baseFeeSize);
+    expect(sizes).toEqual([...sizes].sort((a, b) => b - a));
+    expect(new Set(sizes).size).toBe(sizes.length);
   });
 
   it("takes the tone from the figure as printed, so a rounded reading matches its band", () => {

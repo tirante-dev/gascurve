@@ -86,7 +86,7 @@ export function cardImage(network: string) {
   return {
     url: cardPath(network),
     ...CARD_SIZE,
-    alt: `A gauge of the ${name} base fee against its floor, read when the card was drawn, beside the fee in gwei and the block it was taken at.`,
+    alt: `A gauge of the ${name} base fee against its floor as it stood when the card was drawn, with the fee in gwei and the block it came from, or an unlit gauge when no reading could be taken.`,
   };
 }
 

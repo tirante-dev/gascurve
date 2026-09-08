@@ -72,14 +72,14 @@ function Readout({ reading }: { reading: CardReading }) {
     <div style={{ display: "flex", flexDirection: "column", flexGrow: 1 }}>
       <div style={{ display: "flex", fontSize: 19, letterSpacing: 3, color: CARD_COLORS.label }}>BASE FEE NOW</div>
       <div style={{ display: "flex", alignItems: "flex-end", marginTop: 10 }}>
-        <div style={{ display: "flex", fontSize: 96, lineHeight: 1, color: CARD_COLORS.ink }}>{reading === null ? "n/a" : reading.baseFee}</div>
+        <div style={{ display: "flex", fontSize: reading === null ? 96 : reading.baseFeeSize, lineHeight: 1, color: CARD_COLORS.ink }}>{reading === null ? "n/a" : reading.baseFee}</div>
         {reading !== null && <div style={{ display: "flex", fontSize: 32, marginLeft: 12, marginBottom: 6, color: CARD_COLORS.ink2 }}>gwei</div>}
       </div>
       {reading === null ? (
         <div style={{ display: "flex", marginTop: 22, fontSize: 24, color: CARD_COLORS.ink3 }}>no reading right now</div>
       ) : (
         <div style={{ display: "flex", alignItems: "baseline", marginTop: 22 }}>
-          <div style={{ display: "flex", fontSize: 44, color: CARD_TONE_COLORS[reading.tone] }}>{reading.multiplierText}×</div>
+          <div style={{ display: "flex", fontSize: 44, color: CARD_TONE_COLORS[reading.tone] }}>{reading.offScale ? reading.multiplierText : `${reading.multiplierText}×`}</div>
           <div style={{ display: "flex", fontSize: 19, letterSpacing: 2, marginLeft: 12, color: CARD_COLORS.ink3 }}>OVER FLOOR</div>
         </div>
       )}

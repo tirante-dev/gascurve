@@ -65,9 +65,25 @@ export function isRelativeBase(base: string = API_BASE_URL): boolean {
  * server can take instead. See "The live card" in docs/ARCHITECTURE.md.
  */
 export function serverApiBase(origin: string, base: string = API_BASE_URL, override = process.env.GASCURVE_SERVER_API_URL): string {
-  const direct = override?.trim();
-  if (direct !== undefined && direct !== "") return direct.replace(/\/+$/, "");
+  const direct = absoluteHttpBase(override);
+  if (direct !== null) return direct;
   return isRelativeBase(base) ? origin.replace(/\/+$/, "") + base : base;
+}
+
+/** `value` as an absolute http(s) base with no trailing slash, or null for anything `fetch` could not use.
+ * An override that is not one is dropped rather than obeyed: a relative path has nothing to resolve
+ * against on the server, and the public route it falls back to is the one that works everywhere. */
+function absoluteHttpBase(value: string | undefined): string | null {
+  const text = value?.trim();
+  if (text === undefined || text === "") return null;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  return text.replace(/\/+$/, "");
 }
 
 /**

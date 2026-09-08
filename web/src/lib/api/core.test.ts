@@ -59,6 +59,13 @@ describe("serverApiBase", () => {
       expect(serverApiBase("https://gascurve.com", "/api/v1", unset)).toBe("https://gascurve.com/api/v1");
     }
   });
+
+  it("drops an override fetch could not use, rather than handing it a URL that throws", () => {
+    // A path has nothing to resolve against on the server, and a non-HTTP scheme is not a base at all.
+    for (const bad of ["/api/v1", "api/v1", "gascurve-api:8080", "file:///api/v1", "ws://gascurve-api/api/v1"]) {
+      expect(serverApiBase("https://gascurve.com", "/api/v1", bad)).toBe("https://gascurve.com/api/v1");
+    }
+  });
 });
 
 describe("request", () => {
