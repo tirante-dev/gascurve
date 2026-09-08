@@ -125,12 +125,12 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 		if len(blocks) > maxBlockPoints {
 			var numbers []uint64
 			out.Resolution = "5s"
-			out.Points, numbers = stepDown(blocks, sets, stepDownWidth, now)
+			out.Points, numbers = stepDown(blocks, sets, now)
 			timeline.apply(out.Points, numbers, stepDownWidth)
 		} else {
 			out.Resolution = "block"
 			out.Points = blockPoints(blocks, sets)
-			timeline.mark(out.Points, blockNumbers(blocks), time.Second)
+			timeline.mark(out.Points, blockNumbers(blocks))
 		}
 		out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 		return out, nil
@@ -254,10 +254,10 @@ func (m missingTimeline) apply(points []model.SeriesPoint, numbers []uint64, wid
 	m.qualify(points, numbers, width, true)
 }
 
-// mark qualifies per-block points. A block covers itself and its rate is the gas of every block in
-// its second, so a neighboring gap only changes completeness, never a value.
-func (m missingTimeline) mark(points []model.SeriesPoint, numbers []uint64, width time.Duration) {
-	m.qualify(points, numbers, width, false)
+// mark qualifies per-block points, whose window is the block's own second. A block covers itself and
+// its rate is the gas of every block in that second, so a neighboring gap only changes completeness.
+func (m missingTimeline) mark(points []model.SeriesPoint, numbers []uint64) {
+	m.qualify(points, numbers, time.Second, false)
 }
 
 func (m missingTimeline) qualify(points []model.SeriesPoint, numbers []uint64, width time.Duration, measure bool) {
@@ -314,11 +314,13 @@ func (m missingTimeline) qualify(points []model.SeriesPoint, numbers []uint64, w
 	}
 }
 
-// unlocatedPoints marks the points each unlocated range can overlap. Block numbers rise with time, so
-// the run reaches from the first point that can hold the range's first block to the first point that
-// can hold its last: a point aggregates the blocks above its predecessor's highest, so the point that
-// ends above the range is the last one it can reach into. A point whose highest block is unknown
-// cannot be placed at all, and then every point is uncertain, as it was before ranges were located.
+// unlocatedPoints marks the points each unlocated range can overlap. numbers is the highest block each
+// point indexed, which rises with time. The missing blocks are in no point, so the run spans the two
+// watermarks straddling the range: it can start in the point whose watermark sits below it, whose
+// window has not ended there, and end in the first whose watermark reaches it. A range above every
+// watermark is the collector falling behind inside the last point, not a range clear of the window.
+// A zero watermark is a bucket written before one was recorded, never genesis, which is never indexed:
+// it cannot be placed against, and then every point is uncertain, as before ranges were located.
 func (m missingTimeline) unlocatedPoints(points []model.SeriesPoint, numbers []uint64) []bool {
 	out := make([]bool, len(points))
 	if len(m.unlocated) == 0 {
@@ -331,9 +333,11 @@ func (m missingTimeline) unlocatedPoints(points []model.SeriesPoint, numbers []u
 		return out
 	}
 	for _, span := range m.unlocated {
-		lo := sort.Search(len(numbers), func(i int) bool { return numbers[i] >= span.from })
+		lo := max(sort.Search(len(numbers), func(i int) bool { return numbers[i] > span.from })-1, 0)
 		hi := sort.Search(len(numbers), func(i int) bool { return numbers[i] >= span.to })
-		for i := lo; i <= hi && i < len(out); i++ {
+		// A watermark inside the range contradicts the ledger, which claims those blocks are absent.
+		// The run then starts at that point rather than collapsing to nothing.
+		for i := min(lo, hi); i <= hi && i < len(out); i++ {
 			out[i] = true
 		}
 	}
@@ -564,10 +568,11 @@ func computeRate(gas uint64, poster sql.NullInt64, secs uint64) *uint64 {
 
 func uint64ValuePtr(v uint64) *uint64 { return &v }
 
-// stepDown folds blocks into fixed width buckets, taking each step's rate over the span it covers
+// stepDown folds blocks into stepDownWidth buckets, taking each step's rate over the span it covers
 // exactly as a stored bucket does. numbers is the highest block of each step, so a missing range the
 // collector could not put a time on can still be placed among the steps.
-func stepDown(blocks []db.Block, sets []db.ConstraintSet, width time.Duration, now time.Time) (points []model.SeriesPoint, numbers []uint64) {
+func stepDown(blocks []db.Block, sets []db.ConstraintSet, now time.Time) (points []model.SeriesPoint, numbers []uint64) {
+	const width = stepDownWidth
 	secs := int64(width / time.Second)
 	var cur *acc
 	for _, b := range blocks {

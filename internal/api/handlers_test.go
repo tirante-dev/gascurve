@@ -665,7 +665,7 @@ func TestSeriesPosterGasFeeDestinations(t *testing.T) {
 	if p.PosterGas == nil || *p.PosterGas != 767 || p.ComputeGasPerSecond == nil || *p.ComputeGasPerSecond != 421_949 || p.FeesWei != "8469537776000" || p.FloorFeesWei == nil || *p.FloorFeesWei != "8438980000000" || *p.SurplusFeesWei != "15190164000" || *p.PosterFeesWei != "15367612000" {
 		t.Fatalf("block destination split: %+v", p)
 	}
-	steps, _ := stepDown([]db.Block{b}, nil, 5*time.Second, now)
+	steps, _ := stepDown([]db.Block{b}, nil, now)
 	stepped := steps[0]
 	if stepped.PosterGas == nil || *stepped.PosterGas != 767 || stepped.PosterFeesWei == nil || *stepped.PosterFeesWei != "15367612000" {
 		t.Fatalf("step destination split: %+v", stepped)
@@ -735,7 +735,7 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 		t.Fatalf("block points: %+v", pts)
 	}
 	// Stepping down folds unknown blocks into an unknown split.
-	if p, _ := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}, nil, 5*time.Second, now); len(p) != 1 || p[0].FloorFeesWei != nil {
+	if p, _ := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}, nil, now); len(p) != 1 || p[0].FloorFeesWei != nil {
 		t.Fatalf("step down with an unknown block: %+v", p)
 	}
 }
@@ -1449,10 +1449,12 @@ func TestMissingTimelineUnknownAndCursorBounds(t *testing.T) {
 // chain. A public endpoint serves no state below its retention, so the collector records everything it
 // cannot reconstruct as one range with no timestamps beside it. Placed by block number that range only
 // reaches the points that can hold its blocks, instead of leaving every point of every range unknown.
+// The watermarks are the highest block each point indexed, so an active range always falls between two
+// of them: no point can claim a block the ledger says is missing.
 func TestMissingTimelineLocatesRangesWithoutTimestamps(t *testing.T) {
 	start := now.Add(-3 * time.Minute)
-	points := func() []model.SeriesPoint {
-		out := make([]model.SeriesPoint, 3)
+	points := func(n int) []model.SeriesPoint {
+		out := make([]model.SeriesPoint, n)
 		for i := range out {
 			coverage := 1.0
 			out[i] = model.SeriesPoint{
@@ -1462,7 +1464,6 @@ func TestMissingTimelineLocatesRangesWithoutTimestamps(t *testing.T) {
 		}
 		return out
 	}
-	numbers := []uint64{100, 200, 300}
 	states := func(ps []model.SeriesPoint) []string {
 		out := make([]string, len(ps))
 		for i, p := range ps {
@@ -1474,42 +1475,93 @@ func TestMissingTimelineLocatesRangesWithoutTimestamps(t *testing.T) {
 		return out
 	}
 	complete, unknown := model.SeriesComplete, model.SeriesUnknown+"/null"
+	locate := func(ps []model.SeriesPoint, numbers []uint64, r db.MissingRange) []string {
+		newMissingTimeline([]db.MissingRange{r}).apply(ps, numbers, time.Minute)
+		return states(ps)
+	}
 
-	// Everything below the first point: only the point that could hold those blocks is affected.
-	below := points()
-	newMissingTimeline([]db.MissingRange{{From: 1, To: 50}}).apply(below, numbers, time.Minute)
-	if got := states(below); got[0] != unknown || got[1] != complete || got[2] != complete {
+	// Everything below the first watermark: only the point that could hold those blocks is affected.
+	if got := locate(points(3), []uint64{1_000, 1_100, 1_200}, db.MissingRange{From: 1, To: 900}); got[0] != unknown || got[1] != complete || got[2] != complete {
 		t.Fatalf("prehistory below the window: %v", got)
 	}
 
-	// A range straddling two points reaches both, and no further.
-	inside := points()
-	newMissingTimeline([]db.MissingRange{{From: 150, To: 250}}).apply(inside, numbers, time.Minute)
-	if got := states(inside); got[0] != complete || got[1] != unknown || got[2] != unknown {
-		t.Fatalf("range inside the window: %v", got)
+	// A gap between two watermarks reaches both points that straddle it. The blocks after the first
+	// point's own last block still carry its timestamps, so that point is missing them too.
+	if got := locate(points(3), []uint64{100, 300, 400}, db.MissingRange{From: 101, To: 299}); got[0] != unknown || got[1] != unknown || got[2] != complete {
+		t.Fatalf("gap between two watermarks: %v", got)
 	}
 
-	// A range above every point cannot reach into the window at all.
-	above := points()
-	newMissingTimeline([]db.MissingRange{{From: 400, To: 500}}).apply(above, numbers, time.Minute)
-	if got := states(above); got[0] != complete || got[1] != complete || got[2] != complete {
-		t.Fatalf("range above the window: %v", got)
+	// A gap above every watermark is the collector falling behind inside the last point, not a range
+	// clear of the window: its blocks belong to the minute the last indexed block was in.
+	if got := locate(points(3), []uint64{100, 200, 300}, db.MissingRange{From: 301, To: 400}); got[0] != complete || got[1] != complete || got[2] != unknown {
+		t.Fatalf("gap above every watermark: %v", got)
 	}
 
-	// A single recorded timestamp does not locate the range either; its blocks still do.
-	half := points()
-	newMissingTimeline([]db.MissingRange{{
-		From: 150, To: 250, SuccessorAt: sql.NullTime{Time: start.Add(90 * time.Second), Valid: true},
-	}}).apply(half, numbers, time.Minute)
-	if got := states(half); got[0] != complete || got[1] != unknown || got[2] != unknown {
+	// A single recorded timestamp does not bound the other end of the range; its blocks still do.
+	half := db.MissingRange{From: 101, To: 299, SuccessorAt: sql.NullTime{Time: start.Add(90 * time.Second), Valid: true}}
+	if got := locate(points(3), []uint64{100, 300, 400}, half); got[0] != unknown || got[1] != unknown || got[2] != complete {
 		t.Fatalf("range with one timestamp: %v", got)
 	}
 
-	// Points that carry no block number cannot be placed against, so every one of them is uncertain.
-	unplaceable := points()
-	newMissingTimeline([]db.MissingRange{{From: 1, To: 50}}).apply(unplaceable, []uint64{100, 0, 300}, time.Minute)
-	if got := states(unplaceable); got[0] != unknown || got[1] != unknown || got[2] != unknown {
-		t.Fatalf("points without block numbers: %v", got)
+	// A range spanning several points reaches all of them, and stops at the watermark above it.
+	if got := locate(points(4), []uint64{100, 200, 300, 400}, db.MissingRange{From: 101, To: 299}); got[0] != unknown || got[1] != unknown || got[2] != unknown || got[3] != complete {
+		t.Fatalf("range spanning several points: %v", got)
+	}
+
+	// An advanced cursor narrows the range to the suffix that is still missing.
+	filled := db.MissingRange{From: 101, To: 299, Cursor: 250}
+	if got := locate(points(3), []uint64{100, 200, 300}, filled); got[0] != complete || got[1] != unknown || got[2] != unknown {
+		t.Fatalf("range with an advanced cursor: %v", got)
+	}
+
+	// Points that carry no watermark cannot be placed against, so every one of them is uncertain.
+	if got := locate(points(3), []uint64{1_000, 0, 1_200}, db.MissingRange{From: 1, To: 900}); got[0] != unknown || got[1] != unknown || got[2] != unknown {
+		t.Fatalf("points without a watermark: %v", got)
+	}
+	// So does a watermark order the search cannot rely on, and a count that does not match the points.
+	if got := locate(points(3), []uint64{1_200, 1_100, 1_000}, db.MissingRange{From: 1, To: 900}); got[0] != unknown || got[1] != unknown || got[2] != unknown {
+		t.Fatalf("descending watermarks: %v", got)
+	}
+	if got := locate(points(3), []uint64{1_000, 1_100}, db.MissingRange{From: 1, To: 900}); got[0] != unknown || got[1] != unknown || got[2] != unknown {
+		t.Fatalf("watermarks that do not match the points: %v", got)
+	}
+}
+
+// TestMissingTimelineLocatesRangesAmongBlockPoints places an undated range among per-block points and
+// among stepped-down ones, where the watermark is the block itself and the highest block of the step.
+func TestMissingTimelineLocatesRangesAmongBlockPoints(t *testing.T) {
+	base := now.Truncate(time.Second).Add(-time.Minute)
+	block := func(number uint64, at time.Time) db.Block {
+		return db.Block{
+			Number: number, TS: at, GasUsed: 100, BaseFee: db.WeiFromUint64(1),
+			PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull,
+		}
+	}
+	blocks := []db.Block{block(98, base), block(99, base.Add(time.Second)), block(110, base.Add(20*time.Second))}
+	gap := []db.MissingRange{{From: 100, To: 109, Lifecycle: model.MissingRangeBlocked}}
+
+	// A per-block point covers itself, so the range only changes completeness and never a rate.
+	points := blockPoints(blocks, nil)
+	newMissingTimeline(gap).mark(points, blockNumbers(blocks))
+	if p := points[0]; p.Completeness != model.SeriesComplete {
+		t.Fatalf("block below the range: %+v", p)
+	}
+	for _, p := range points[1:] {
+		if p.Completeness != model.SeriesUnknown || p.Coverage == nil || *p.Coverage != 1 || p.GasPerSecond != 100 {
+			t.Fatalf("block beside the range: %+v", p)
+		}
+	}
+
+	// Stepping down carries the highest block of each step, so the range lands on the same two steps.
+	steps, numbers := stepDown(blocks, nil, now)
+	if len(steps) != 2 || numbers[0] != 99 || numbers[1] != 110 {
+		t.Fatalf("step watermarks: %+v %v", steps, numbers)
+	}
+	newMissingTimeline(gap).apply(steps, numbers, stepDownWidth)
+	for i, p := range steps {
+		if p.Completeness != model.SeriesUnknown || p.Coverage != nil {
+			t.Fatalf("step %d beside the range: %+v", i, p)
+		}
 	}
 }
 
@@ -1575,7 +1627,7 @@ func TestMissingTimelineKeepsBlockPointRates(t *testing.T) {
 		From: 100, To: 109, Lifecycle: model.MissingRangePending,
 		PredecessorAt: sql.NullTime{Time: base, Valid: true},
 		SuccessorAt:   sql.NullTime{Time: base.Add(5 * time.Second), Valid: true},
-	}}).mark(points, []uint64{98, 99, 110}, time.Second)
+	}}).mark(points, []uint64{98, 99, 110})
 	for i, p := range points[:2] {
 		// gasPerSecond stays the gas of every block in the second, not the
 		// point's own gas divided by a gap-shortened divisor.
@@ -1592,7 +1644,7 @@ func TestMissingTimelineKeepsBlockPointRates(t *testing.T) {
 		From: 100, To: 109, Lifecycle: model.MissingRangePending,
 		PredecessorAt: sql.NullTime{Time: base, Valid: true},
 		SuccessorAt:   sql.NullTime{Time: base.Add(5 * time.Second), Valid: true},
-	}}).mark(away, []uint64{200}, time.Second)
+	}}).mark(away, []uint64{200})
 	if p := away[0]; p.Completeness != model.SeriesComplete || p.Coverage == nil || *p.Coverage != 1 || p.GasPerSecond != 300 {
 		t.Fatalf("block clear of every gap: %+v", p)
 	}
