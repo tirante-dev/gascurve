@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { latestConstraintBlock } from "@/lib/ownerActions";
-import { assignPlaces, createFrameStore, DISPLAY_INTERVAL_MS, definitionOf, NO_PLACES, signatureOf, targetValues, tweenValues, type BlockPlaces, type FrameStore, type LiveFrame, type LiveValues } from "@/lib/smoothing";
+import { assignPlaces, createFrameStore, DISPLAY_INTERVAL_MS, definitionOf, NO_PLACES, signatureOf, targetValues, tweenValues, VALUE_INTERVAL_MS, type BlockPlaces, type FrameStore, type LiveFrame, type LiveValues } from "@/lib/smoothing";
 import type { BlockPoint, LiveSnapshot } from "@/types";
 import { useDocumentVisible } from "./useDocumentVisible";
 import type { LiveState } from "./useLive";
@@ -44,7 +44,10 @@ type Loop = {
   /** Where each block of the ring sits, assigned once per block and evicted with it. */
   places: BlockPlaces;
   lastCommit: number | null;
-  lastFrame: number | null;
+  /** When the values were last eased, which is what `dt` spans: frames between two eases are skipped, not shortened. */
+  lastEase: number | null;
+  /** The reduced-motion preference the published values were computed under, so a flip is a change like any other. */
+  wasStill: boolean;
   values: LiveValues | null;
   /** True after a reorg: the tick that follows commits on the next frame and its values snap, as a first commit does. */
   fresh: boolean;
@@ -66,7 +69,8 @@ function emptyLoop(): Loop {
     blocks: [],
     places: NO_PLACES,
     lastCommit: null,
-    lastFrame: null,
+    lastEase: null,
+    wasStill: false,
     values: null,
     fresh: false,
     seq: 0,
@@ -159,8 +163,6 @@ export function useSmoothedLive(
     let handle = 0;
     const step = (t: number) => {
       const prev = frame.get();
-      const dt = s.lastFrame === null ? 0 : t - s.lastFrame;
-      s.lastFrame = t;
       const forced = s.fresh && s.pending !== null && s.pending.seq === s.seq;
       const cadence = s.lastCommit === null || t - s.lastCommit >= DISPLAY_INTERVAL_MS || forced;
       let snapshotChanged = false;
@@ -197,7 +199,16 @@ export function useSmoothedLive(
       }
       const blocksChanged = s.blocks !== prev.blocks;
       const still = reduced.current;
-      if (s.snapshot && (!still || snapshotChanged || blocksChanged || values === null)) {
+      const stillChanged = still !== s.wasStill;
+      s.wasStill = still;
+      // A frame that only advanced the clock still moves every long-window backlog, so easing on each one
+      // publishes at the display's rate for as long as the page is open. Frames that carry something new
+      // ease at once; the rest wait for VALUE_INTERVAL_MS.
+      const changed = snapshotChanged || blocksChanged || stillChanged || values === null;
+      const due = s.lastEase === null || t - s.lastEase >= VALUE_INTERVAL_MS;
+      if (s.snapshot && (still ? changed : changed || cadence || due)) {
+        const dt = s.lastEase === null ? 0 : t - s.lastEase;
+        s.lastEase = t;
         const elapsedS = still ? 0 : Math.max(0, t - s.sampleAt) / 1000;
         const target = targetValues(s.snapshot, s.blocks, elapsedS, s.signatureSince);
         values = still ? target : tweenValues(values, target, dt);
@@ -212,7 +223,7 @@ export function useSmoothedLive(
     handle = requestAnimationFrame(step);
     return () => {
       cancelAnimationFrame(handle);
-      s.lastFrame = null;
+      s.lastEase = null;
     };
   }, [enabled, visible, frame]);
 
