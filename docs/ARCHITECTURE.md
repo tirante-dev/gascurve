@@ -319,6 +319,7 @@ Nothing replaces a failed lib/pq listener, because a failed one cannot be observ
 ```
 src/app/                 layout, page (redirect to default network), [network]/page, [network]/how-it-works/page,
                          [network]/charts/[chart]/page (one chart enlarged; ?range= and ?constraint= deep-link the view)
+                         [network]/card/route (the social card, drawn from the live snapshot when it is asked for)
 src/components/          PageHeader, LiveHero (live figures plus the base fee chart with a range control: Live 2 min from the block ring,
                          or 1h/24h/30d/all from /series), ConstraintCards, PricerEquation, HowItWorks (Explainer + TaylorChart), HistoryTabs,
                          SeriesCharts (constraint-level history), FeeFlows, L1Section, OwnerActionTimeline, NetworkSwitcher, DataFooter
@@ -327,7 +328,8 @@ src/lib/api/             core.ts (fetch with timeout and retry), networks.ts, se
 src/lib/pricer.ts        approxExpBips and helpers in TS, unit-tested against the same vectors as Go
 src/types/               the shapes above, less the response fields no component reads
 src/utils/               formatting (gwei, gas, durations), bips math
-src/lib/seo.ts           site metadata: canonical origin, titles, the social card, the network list the sitemap uses
+src/lib/seo.ts           site metadata: canonical origin, titles, the social cards, the network list the sitemap uses
+src/lib/card.ts          the live social card's palette and its gauge, as an SVG document with no text in it
 ```
 
 `src/types/` narrows the response shapes to what the client renders rather than restating them. `/status` carries fields meant for an operator that no component reads: `holes`, `activeEndpoint`, `failovers`, `endpoints` and `listener` are all absent from `StatusResponse`. Add one when something on the page starts using it, so a type that grows records a real dependency instead of churning four test fixtures for a field nothing reads.
@@ -336,17 +338,25 @@ Every chart card carries an enlarge control linking to `/{network}/charts/{chart
 
 Units in copy: gas carries an SI prefix on the unit, never on the number (`11.2 Tgas`, `60 Mgas/s`, `812,345 gas` below one million). Figures that animate use fixed decimal counts per band so neighbouring elements never shift. USD figures (from `ethUsd`) are shown by default; hovering one gives the working (`ETH amount × $price/ETH = $figure`) and the quote behind it (source and age), and the same facts are in the accessible description.
 
-Environment: `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`), `NEXT_PUBLIC_WS_URL` (derived from the API URL when unset), `NEXT_PUBLIC_SITE_URL` (canonical origin, default `https://gascurve.com`).
+Environment: `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`), `NEXT_PUBLIC_WS_URL` (derived from the API URL when unset), `NEXT_PUBLIC_SITE_URL` (canonical origin, default `https://gascurve.com`), `GASCURVE_SERVER_API_URL` (optional, see the card below).
 
 ### Search metadata and icons
 
 The site is a Robinhood Chain gas tracker first; the other networks are carried for comparison, and that ordering is what `src/lib/seo.ts` encodes. `PRIMARY_NETWORK` names the chain the default title, the description, the social card and the index page lead with, and `SITE_NETWORKS` mirrors the `networks` block of `config.yaml`, marking that one primary. The list is duplicated there rather than fetched because the sitemap, the server rendered titles and the index page's crawlable fallback are all built on the server, where `NEXT_PUBLIC_API_URL` is a path on the site's own origin and cannot be fetched. **Add a network to `SITE_NETWORKS` whenever one is added to `config.yaml`.**
 
-`NEXT_PUBLIC_SITE_URL` is the origin every canonical link, sitemap entry and card URL resolves against, and is baked at build time by `Dockerfile.web`. Every route under `/[network]` builds its metadata through `pageMetadata`, which sets the title, description, social card and either a canonical link or, for the duplicate that a chain id route such as `/4663` serves, `noindex, follow`. The card image is named explicitly in both the `openGraph` and `twitter` objects rather than dropped in as an `opengraph-image` file: a page that declares its own `openGraph` replaces the whole object, so a card left to the file convention would be present on the index and missing from every network page.
+`NEXT_PUBLIC_SITE_URL` is the origin every canonical link, sitemap entry and card URL resolves against, and is baked at build time by `Dockerfile.web`. Every route under `/[network]` builds its metadata through `pageMetadata`, which sets the title, description, social card and either a canonical link or, for the duplicate that a chain id route such as `/4663` serves, `noindex, follow`. The card image is named explicitly in both the `openGraph` and `twitter` objects rather than dropped in as an `opengraph-image` file: a page that declares its own `openGraph` replaces the whole object, so a card left to the file convention would be present on the index and missing from every network page. The file convention would not have reached them anyway, since it covers only the segment it sits in.
+
+### The live card
+
+`/{network}/card` (`app/[network]/card/route.tsx`) draws the 1200x630 card when a platform asks for it, so a posted link unfurls with the fee the chain is charging rather than a fixed picture: the same gauge the page shows, at the same multiplier over the floor, beside the fee in gwei and the block it was read at. Every page under `/[network]` points at it, including the chart pages and the explainer. The index and anything else the root layout covers keep the drawn `public/og-card.png`.
+
+The route renders through `next/og`, which is satori and resvg: flexbox and a subset of CSS, no stylesheet and no cascade. So `src/lib/card.ts` freezes the dark palette rather than reading tokens, and hands over the gauge as an SVG document carrying geometry only, with the ring's numerals placed by the renderer around it; text inside that document would come out in resvg's fallback face. The lit ring's glow is a wide translucent stroke rather than a blur filter for the same reason.
+
+It reads `/networks/{network}/live` with a 3 s budget and no retries, and draws an unlit instrument with no reading when that fails, because a crawler gives up long before the client's ten seconds and a card without a figure beats no card at all. The fetch is made on the server, where `NEXT_PUBLIC_API_URL=/api/v1` has no document to resolve against, so `serverApiBase` joins it onto `NEXT_PUBLIC_SITE_URL`: the request leaves through the ingress and comes back, which is the only route that needs no further configuration. Set `GASCURVE_SERVER_API_URL` to an address the web pod can reach directly (the api's own service) to skip that hop, keeping in mind that the chart's `api.networkPolicy` admits only the ingress controller and the monitoring peers.
 
 Generated routes: `/robots.txt` (`app/robots.ts`), `/sitemap.xml` (`app/sitemap.ts`, the index plus each network's page, explainer and one entry per chart, weighted so the primary chain ranks above the rest) and `/manifest.webmanifest` (`app/manifest.ts`).
 
-Icons: `app/icon.svg` is the source of truth for the mark, a base fee curve lifting off its floor with the live block as the bright tip, in the dark palette's magenta and cyan. `app/favicon.ico` (16/32/48), `app/apple-icon.png` (180) and `public/icon-192.png`, `public/icon-512.png`, `public/icon-maskable-512.png` are the same geometry on the same 64 unit grid; regenerate them together if the mark changes. `public/og-card.png` is the 1200x630 social card.
+Icons: `app/icon.svg` is the source of truth for the mark, a base fee curve lifting off its floor with the live block as the bright tip, in the dark palette's magenta and cyan. `app/favicon.ico` (16/32/48), `app/apple-icon.png` (180) and `public/icon-192.png`, `public/icon-512.png`, `public/icon-maskable-512.png` are the same geometry on the same 64 unit grid; regenerate them together if the mark changes. `public/og-card.png` is the 1200x630 card the pages outside a network share.
 
 Coverage gate (90% lines) applies to `src/lib/**`, `src/hooks/**`, `src/utils/**`. Components are tested where behaviour is non-trivial.
 

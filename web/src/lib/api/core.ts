@@ -32,6 +32,8 @@ export type QueryValue = string | number | boolean | undefined;
 
 export type RequestOptions = {
   query?: Record<string, QueryValue>;
+  /** The api base to fetch against, for a caller that cannot use the configured one. See serverApiBase. */
+  baseUrl?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   retries?: number;
@@ -57,13 +59,25 @@ export function isRelativeBase(base: string = API_BASE_URL): boolean {
 }
 
 /**
+ * The api base a fetch made on the server can use. A page-relative base is resolved against the document
+ * by a browser and against nothing at all by `fetch` in Node, so a server render joins it onto `origin`:
+ * the request goes out through the ingress and back. GASCURVE_SERVER_API_URL names a shorter route the
+ * server can take instead. See "The live card" in docs/ARCHITECTURE.md.
+ */
+export function serverApiBase(origin: string, base: string = API_BASE_URL, override = process.env.GASCURVE_SERVER_API_URL): string {
+  const direct = override?.trim();
+  if (direct !== undefined && direct !== "") return direct.replace(/\/+$/, "");
+  return isRelativeBase(base) ? origin.replace(/\/+$/, "") + base : base;
+}
+
+/**
  * The absolute or origin-relative URL of an api path, with the query
  * appended. Built by string rather than through `new URL`, which throws on
  * a relative base; `fetch` resolves a leading-slash URL against the
  * document, which is exactly what a same-origin deployment wants.
  */
-export function buildUrl(path: string, query?: Record<string, QueryValue>): string {
-  const url = API_BASE_URL + (path.startsWith("/") ? path : `/${path}`);
+export function buildUrl(path: string, query?: Record<string, QueryValue>, base: string = API_BASE_URL): string {
+  const url = base + (path.startsWith("/") ? path : `/${path}`);
   const params = new URLSearchParams();
   if (query) {
     for (const [key, value] of Object.entries(query)) {
@@ -124,7 +138,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     const { mockRequest } = await import("@/lib/mock");
     return mockRequest<T>(path, options.query);
   }
-  const url = buildUrl(path, options.query);
+  const url = buildUrl(path, options.query, options.baseUrl ?? API_BASE_URL);
   const retries = options.retries ?? MAX_RETRIES;
   let lastError: unknown;
   for (let i = 0; i <= retries; i++) {
