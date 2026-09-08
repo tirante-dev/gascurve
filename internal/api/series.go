@@ -151,9 +151,20 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 			numbers = append(numbers, b.LastBlock)
 		}
 	}
-	timeline.apply(out.Points, numbers, width)
+	timeline.apply(out.Points, bucketWatermarks(numbers), width)
 	out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 	return out, nil
+}
+
+// bucketWatermarks is the highest block of every bucket, or nothing when one of them was not recorded.
+// last_block defaults to zero, so a zero is a row stored before the column was written, or the rarest
+// of genuine buckets: one holding genesis alone. The two cannot be told apart, and reading the first
+// as the second would place ranges against a watermark that was never written, so neither is placed.
+func bucketWatermarks(numbers []uint64) []uint64 {
+	if slices.Contains(numbers, 0) {
+		return nil
+	}
+	return numbers
 }
 
 // missingInterval is the time envelope between the indexed blocks on either side of a durable missing
@@ -319,25 +330,34 @@ func (m missingTimeline) qualify(points []model.SeriesPoint, numbers []uint64, w
 // watermarks straddling the range: it can start in the point whose watermark sits below it, whose
 // window has not ended there, and end in the first whose watermark reaches it. A range above every
 // watermark is the collector falling behind inside the last point, not a range clear of the window.
-// A zero watermark is a bucket written before one was recorded, never genesis, which is never indexed:
-// it cannot be placed against, and then every point is uncertain, as before ranges were located.
+// Points the caller could not put a watermark on are not placeable, and every one of them is then
+// uncertain, as they were before ranges were located.
 func (m missingTimeline) unlocatedPoints(points []model.SeriesPoint, numbers []uint64) []bool {
 	out := make([]bool, len(points))
-	if len(m.unlocated) == 0 {
+	if len(m.unlocated) == 0 || len(points) == 0 {
 		return out
 	}
-	if len(numbers) != len(points) || !slices.IsSorted(numbers) || slices.Contains(numbers, 0) {
+	if len(numbers) != len(points) || !slices.IsSorted(numbers) {
 		for i := range out {
 			out[i] = true
 		}
 		return out
 	}
+	last := len(points) - 1
 	for _, span := range m.unlocated {
-		lo := max(sort.Search(len(numbers), func(i int) bool { return numbers[i] > span.from })-1, 0)
-		hi := sort.Search(len(numbers), func(i int) bool { return numbers[i] >= span.to })
-		// A watermark inside the range contradicts the ledger, which claims those blocks are absent.
-		// The run then starts at that point rather than collapsing to nothing.
-		for i := min(lo, hi); i <= hi && i < len(out); i++ {
+		hi := min(sort.Search(len(numbers), func(i int) bool { return numbers[i] >= span.to }), last)
+		// A watermark inside the range contradicts the ledger, which says those blocks are absent. The
+		// run then holds the point that claims them rather than collapsing to nothing.
+		lo := min(max(sort.Search(len(numbers), func(i int) bool { return numbers[i] > span.from })-1, 0), hi)
+		// Points sharing a second are one window: a per-block point's rate is the gas of every block in
+		// that second, so a sibling of a point the range reaches is missing the same blocks.
+		for lo > 0 && points[lo-1].T == points[lo].T {
+			lo--
+		}
+		for hi < last && points[hi+1].T == points[hi].T {
+			hi++
+		}
+		for i := lo; i <= hi; i++ {
 			out[i] = true
 		}
 	}
