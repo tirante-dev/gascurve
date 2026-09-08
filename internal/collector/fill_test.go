@@ -98,11 +98,17 @@ func TestFillSkippedGap(t *testing.T) {
 	if len(blocks) != 151 {
 		t.Fatalf("stored blocks after the fill: %d", len(blocks))
 	}
-	for _, want := range []uint64{1001, 1075, 1149} {
+	for _, want := range []uint64{1075, 1149} {
 		b, _ := store.BlockByNumber(ctx, 4663, want)
 		if b == nil || !b.Known() || b.PricingVersion != db.PricingFull || len(b.ConstraintBips) != 2 {
 			t.Fatalf("filled block %d: %+v", want, b)
 		}
+	}
+	// The first block of the fill has no replayed parent, so it carries the block's own facts but no
+	// prediction: an absent one, not a perfect one.
+	first, _ := store.BlockByNumber(ctx, 4663, 1001)
+	if first == nil || !first.Known() || first.PredictedBaseFee.Valid || first.ConstraintBips != nil {
+		t.Fatalf("the first filled block must carry no prediction: %+v", first)
 	}
 	b1000, _ := store.BlockByNumber(ctx, 4663, 1000)
 	b1001, _ := store.BlockByNumber(ctx, 4663, 1001)
@@ -119,7 +125,7 @@ func TestFillSkippedGap(t *testing.T) {
 	if !head.Anchored || head.Backlogs[1] != 11_194_391_810_886 {
 		t.Fatalf("the sampled head keeps its sampled backlogs: %+v", head)
 	}
-	if head.PredictedBaseFee.Cmp(head.BaseFee.BigInt()) == 0 || db.ReplayErrorBips(*head) == 0 {
+	if head.PredictedBaseFee.Wei.Cmp(head.BaseFee.BigInt()) == 0 || db.ReplayErrorBips(*head) == 0 {
 		t.Fatalf("the replay error must be recorded against the sampled head: %+v", head)
 	}
 	// A further step has nothing to do and costs no call.
@@ -650,7 +656,7 @@ func TestFillRefusesMismatchedState(t *testing.T) {
 		t.Fatal("the last block of the range must be written")
 	}
 	after, _ := store.BlockByNumber(ctx, 4663, 1150)
-	if after.PredictedBaseFee.Cmp(after.BaseFee.BigInt()) != 0 {
+	if after.PredictedBaseFee.Valid {
 		t.Fatalf("a head with other backlogs must not be anchored to: %+v", after)
 	}
 }
@@ -826,7 +832,7 @@ func TestFillBelowTheBoundaryResumes(t *testing.T) {
 	// The stored block after the range still gets the replay's prediction,
 	// so the error of the reconstruction is recorded where it can be seen.
 	tail, _ := store.BlockByNumber(ctx, 4663, 1150)
-	if tail == nil || tail.PredictedBaseFee.Cmp(tail.BaseFee.BigInt()) == 0 {
+	if tail == nil || tail.PredictedBaseFee.Wei.Cmp(tail.BaseFee.BigInt()) == 0 {
 		t.Fatalf("the tail keeps its row and gains the replay error: %+v", tail)
 	}
 }
@@ -1182,15 +1188,16 @@ func TestFillLegacyUsesHistoricalParameters(t *testing.T) {
 		st := &pricer.State{MinBaseFee: new(big.Int).Set(prev.MinBaseFee.Wei.BigInt()),
 			Legacy: &pricer.Legacy{SpeedLimit: l.SpeedLimit, Inertia: l.Inertia, Tolerance: l.Tolerance, Backlog: prev.Backlogs[0]}}
 		return pricer.Replay(st, uint64(prev.TS.Unix()),
-			[]pricer.Block{{Number: 1001, Timestamp: tsFor(1001), GasUsed: gasFor(1001), BaseFee: feeFor(1001)}}, nil)[0]
+			[]pricer.Block{{Number: 1001, Timestamp: tsFor(1001), GasUsed: gasFor(1001)}}, nil)[0]
 	}
 	wantOld, wantNew := replayed(was), replayed(now)
 	if wantOld.Exponent == wantNew.Exponent {
 		t.Fatal("the two parameter sets must price the block differently for this test to mean anything")
 	}
-	row, _ := store.BlockByNumber(ctx, 4663, 1001)
-	if row == nil || row.ExponentBips != int64(wantOld.Exponent) || row.PredictedBaseFee.Cmp(wantOld.Predicted) != 0 {
-		t.Fatalf("block 1001 priced with the parameters of its own time: %+v (want exponent %d)", row, wantOld.Exponent)
+	// Block 1001's replay prices 1002, which is where the parameters of 1001's own time show up.
+	row, _ := store.BlockByNumber(ctx, 4663, 1002)
+	if row == nil || row.ExponentBips != int64(wantOld.Exponent) || row.PredictedBaseFee.Wei.Cmp(wantOld.Predicted) != 0 {
+		t.Fatalf("block 1002 priced with the parameters of 1001's time: %+v (want exponent %d)", row, wantOld.Exponent)
 	}
 }
 

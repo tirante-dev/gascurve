@@ -710,7 +710,7 @@ func intParam(r *http.Request, name string, def, lo, hi int) int {
 func blockPoint(b db.Block) model.BlockPoint {
 	return model.BlockPoint{
 		Number: b.Number, TS: uint64(b.TS.Unix()), GasUsed: b.GasUsed, PosterGas: uint64Ptr(b.PosterGas), BaseFee: b.BaseFee.String(),
-		PredictedBaseFee: b.PredictedBaseFee.String(), Backlogs: b.Backlogs.Uint64s(), ConstraintBips: int64s(b.ConstraintBips),
+		PredictedBaseFee: b.PredictedBaseFee.StringPtr(), Backlogs: b.Backlogs.Uint64s(), ConstraintBips: int64s(b.ConstraintBips),
 		ExponentBips: b.ExponentBips, MinBaseFee: b.MinBaseFee.StringPtr(), Anchored: b.Anchored,
 	}
 }
@@ -771,9 +771,10 @@ func ownerActionModel(a db.OwnerAction) model.OwnerAction {
 	}
 }
 
-// replayError is |predicted - actual| in bips for a stored block.
+// replayError is |predicted - actual| in bips for a stored block, and zero when it carries no
+// prediction.
 func replayError(b db.Block) int64 {
-	return pricer.ErrorBips(b.PredictedBaseFee.BigInt(), b.BaseFee.BigInt())
+	return db.ReplayErrorBips(b)
 }
 
 func multiplierBips(baseFee, minFee *big.Int) int64 {

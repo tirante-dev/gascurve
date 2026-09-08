@@ -526,16 +526,17 @@ func (f *Follower) seed(ctx context.Context, sample *nitro.Sample, h *hole, pend
 	}
 	start.SetBacklogs(backlogs)
 	hdr := sample.Header
-	results := pricer.Replay(start, 0, []pricer.Block{{Number: hdr.Number, Timestamp: hdr.Timestamp, GasUsed: hdr.ComputeGas(), BaseFee: hdr.BaseFee}},
+	results := pricer.Replay(start, 0, []pricer.Block{{Number: hdr.Number, Timestamp: hdr.Timestamp, GasUsed: hdr.ComputeGas()}},
 		func(uint64) ([]uint64, bool) { return sampleBacklogs(sample), true })
 	r := results[0]
-	// No known state preceded the seed, so it carries no prediction.
-	r.Predicted, r.ErrorBips = new(big.Int).Set(hdr.BaseFee), 0
 	rows := blockRows(f.chainID, []nitro.Header{hdr}, []pricer.Result{r}, func(uint64) *big.Int { return st.MinBaseFee })
-	if err := f.persist(ctx, sample, rows, &r, h, pending, capacity); err != nil {
+	// No known state preceded the seed, so the seeded block itself carries no prediction. Its own Step
+	// output prices the next block and reaches it as the carry, through the published result.
+	shiftPredictions(rows, prediction{})
+	if err := f.persist(ctx, sample, rows, h, pending, capacity); err != nil {
 		return f.fail(ctx, err)
 	}
-	f.publish(sample, st, &r)
+	f.publish(sample, st, &r, f.headRowError(rows, hdr.Number))
 	return nil
 }
 
@@ -546,6 +547,7 @@ func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []
 	head := sample.Header.Number
 	f.mu.Lock()
 	st, prevTs, err := f.replayStateLocked(ctx, sample)
+	carry := f.carryLocked(headers[0].Number)
 	f.mu.Unlock()
 	if err != nil {
 		return f.fail(ctx, err)
@@ -578,11 +580,12 @@ func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []
 		f.log.Warn("pricer parameters changed without a recorded owner action, restarting from the sampled head", "from", h.From, "to", h.To)
 		return f.seed(ctx, sample, &h, pending, capacity)
 	}
+	shiftPredictions(rows, carry)
 	headResult := results[len(results)-1]
-	if err := f.persist(ctx, sample, rows, &headResult, nil, pending, capacity); err != nil {
+	if err := f.persist(ctx, sample, rows, nil, pending, capacity); err != nil {
 		return f.fail(ctx, err)
 	}
-	f.publish(sample, st, &headResult)
+	f.publish(sample, st, &headResult, f.headRowError(rows, sample.Header.Number))
 	return nil
 }
 
@@ -640,8 +643,7 @@ func replayForward(chainID uint64, st *pricer.State, prevTs uint64, headers []ni
 		}
 		applyActionGas(st, header.ComputeGas(), boundaries)
 		result := pricer.Result{
-			Number: header.Number, Exponent: exponent, PerConstraint: per,
-			Predicted: predicted, ErrorBips: pricer.ErrorBips(predicted, header.BaseFee),
+			Number: header.Number, Exponent: exponent, PerConstraint: per, Predicted: predicted,
 		}
 		if anchor != nil {
 			if backlogs, ok := anchor(header.Number); ok {
@@ -737,16 +739,16 @@ func (f *Follower) sampleOnly(ctx context.Context, sample *nitro.Sample, capacit
 	if last == nil {
 		last = &pricer.Result{Number: sample.Header.Number}
 	}
-	if err := f.persist(ctx, sample, nil, last, nil, nil, capacity); err != nil {
+	if err := f.persist(ctx, sample, nil, nil, nil, capacity); err != nil {
 		return f.fail(ctx, err)
 	}
-	f.publish(sample, st, last)
+	f.publish(sample, st, last, f.headRowError(nil, sample.Header.Number))
 	return nil
 }
 
 // publish makes a committed tick the follower's state: head, replay state, sample and result move
 // together, only after the commit.
-func (f *Follower) publish(sample *nitro.Sample, st *pricer.State, headResult *pricer.Result) {
+func (f *Follower) publish(sample *nitro.Sample, st *pricer.State, headResult *pricer.Result, errBips int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.head = sample.Header.Number
@@ -755,6 +757,7 @@ func (f *Follower) publish(sample *nitro.Sample, st *pricer.State, headResult *p
 	f.state = st
 	f.lastSample = sample
 	f.lastResult = headResult
+	f.lastErrBips = errBips
 	if f.liveStart == nil {
 		f.liveStart = &liveStart{Block: sample.Header.Number, TS: int64(sample.Header.Timestamp)}
 	}
@@ -795,7 +798,7 @@ func (f *Follower) observedSetLocked(sample *nitro.Sample, pending []*nitro.Owne
 // found in the catch-up interval with their sets and notifications, an observed set when the sampled
 // shape is not the latest known one, the blocks, their buckets (rebuilt from the rows in their windows,
 // so a retried fold changes nothing), the state sample, the head and the live start. Caches follow.
-func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.Block, headResult *pricer.Result, h *hole, pending []*nitro.OwnerAction, capacity model.RPCCapacity) error {
+func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.Block, h *hole, pending []*nitro.OwnerAction, capacity model.RPCCapacity) error {
 	head := sample.Header.Number
 	headAt := time.Unix(int64(sample.Header.Timestamp), 0).UTC()
 	f.mu.Lock()
@@ -846,7 +849,7 @@ func (f *Follower) persist(ctx context.Context, sample *nitro.Sample, rows []db.
 		if err != nil {
 			return fmt.Errorf("gas per second: %w", err)
 		}
-		snap := buildSnapshot(f.chainID, sample, headResult,
+		snap := buildSnapshot(f.chainID, sample, f.headRowError(rows, sample.Header.Number),
 			model.GasPerSecond{S10: g10 / 10, S60: g60 / 60},
 			model.NullableGasPerSecond{S10: dividedPtr(c10, 10), S60: dividedPtr(c60, 60)},
 			l1, accounts, ethUsd)
@@ -937,8 +940,99 @@ func (f *Follower) endpointErrorNow() string {
 	return endpointError(f.pool.Status())
 }
 
+// prediction is what the pricer computed while replaying one block: the fee ArbOS stores at that
+// block and writes into the next block's header, with the exponents that produced it. The zero value
+// means no predecessor was replayed, so the block it lands on carries no prediction.
+type prediction struct {
+	fee           *big.Int
+	exponent      int64
+	perConstraint pq.Int64Array
+	known         bool
+}
+
+// encode renders the group for a JSON checkpoint; an unknown one is the empty triple.
+func (p prediction) encode() (fee string, exponent int64, bips []int64) {
+	if !p.known || p.fee == nil {
+		return "", 0, nil
+	}
+	return p.fee.String(), p.exponent, p.perConstraint
+}
+
+// decodeCarry reads a group back from a checkpoint. An unparsable fee is treated as absent, so a
+// checkpoint written by an older collector simply starts its next block without a prediction.
+func decodeCarry(fee string, exponent int64, bips []int64) prediction {
+	v, ok := new(big.Int).SetString(fee, 10)
+	if !ok {
+		return prediction{}
+	}
+	return prediction{fee: v, exponent: exponent, perConstraint: bips, known: true}
+}
+
+// headRowError is the replay error to publish with a tick: the sampled head's own, once its
+// prediction has been shifted into place. A tick that wrote no row for the head (no new block, or a
+// batch ending elsewhere) keeps the last published value rather than reporting a fresh zero.
+func (f *Follower) headRowError(rows []db.Block, head uint64) int64 {
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].Number == head {
+			return db.ReplayErrorBips(rows[i])
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastErrBips
+}
+
+// carryLocked is the pricing group for first, taken from the last committed tick. It is known only
+// when that tick replayed first's parent: after a restart, a reorg or across a gap the committed
+// result is gone or belongs to another block, and first starts a new chain without a prediction.
+func (f *Follower) carryLocked(first uint64) prediction {
+	if f.lastResult == nil || f.lastResult.Predicted == nil || f.head == 0 || f.head+1 != first {
+		return prediction{}
+	}
+	return predictionOf(*f.lastResult)
+}
+
+// predictionOf reads the group a replay wrote onto its own row, before shiftPredictions moves it.
+func predictionOf(r pricer.Result) prediction {
+	bips := make(pq.Int64Array, len(r.PerConstraint))
+	for k, v := range r.PerConstraint {
+		bips[k] = int64(v)
+	}
+	return prediction{fee: r.Predicted, exponent: int64(r.Exponent), perConstraint: bips, known: true}
+}
+
+// shiftPredictions moves each row's pricing group onto the block it prices. ArbOS computes the fee
+// while processing block N and writes it into the header of N+1, so a replay's output for N describes
+// N+1 and comparing it against N's own header measures how far the fee moved rather than how wrong the
+// model is. carry is the group from the block before rows[0]; the zero value leaves the first row
+// without a prediction, which is what a cold start or the block after a gap gets. The group of the
+// last row is returned to carry into the next contiguous batch. A break in numbering ends the chain:
+// the row after it starts without a prediction.
+func shiftPredictions(rows []db.Block, carry prediction) prediction {
+	next := carry
+	var prev uint64
+	for i := range rows {
+		if i > 0 && rows[i].Number != prev+1 {
+			next = prediction{}
+		}
+		prev = rows[i].Number
+		cur := prediction{
+			fee: rows[i].PredictedBaseFee.Wei.BigInt(), exponent: rows[i].ExponentBips,
+			perConstraint: rows[i].ConstraintBips, known: rows[i].PredictedBaseFee.Valid,
+		}
+		rows[i].PredictedBaseFee, rows[i].ExponentBips, rows[i].ConstraintBips = db.NullWei{}, 0, nil
+		if next.known {
+			rows[i].PredictedBaseFee = db.NewNullWei(next.fee)
+			rows[i].ExponentBips, rows[i].ConstraintBips = next.exponent, next.perConstraint
+		}
+		next = cur
+	}
+	return next
+}
+
 // blockRows joins headers with replay results. Rows written here always carry the full pricing
-// breakdown, so their fee split is exact.
+// breakdown, so their fee split is exact. The pricing group each row receives here is the one the
+// replay produced at that block, which prices the next one; shiftPredictions moves it into place.
 func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, minFee func(uint64) *big.Int) []db.Block {
 	rows := make([]db.Block, len(headers))
 	for i, h := range headers {
@@ -965,7 +1059,7 @@ func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, 
 			Backlogs:         db.Uint64Array(append([]uint64{}, r.Backlogs...)),
 			ConstraintBips:   bips,
 			ExponentBips:     int64(r.Exponent),
-			PredictedBaseFee: db.NewWei(r.Predicted),
+			PredictedBaseFee: db.NewNullWei(r.Predicted),
 			MinBaseFee:       db.NewNullWei(minFee(h.Number)),
 			Anchored:         r.Anchored,
 			PricingVersion:   db.PricingFull,
@@ -976,7 +1070,7 @@ func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, 
 
 // buildSnapshot assembles the LiveSnapshot from a sample. ethUsd is the spot the caller already checked
 // for staleness, nil when there is none.
-func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Result, gps model.GasPerSecond, computeGPS model.NullableGasPerSecond, l1 *model.L1, accounts *model.Accounts, ethUsd *model.EthUsd) model.LiveSnapshot {
+func buildSnapshot(chainID uint64, sample *nitro.Sample, replayErrorBips int64, gps model.GasPerSecond, computeGPS model.NullableGasPerSecond, l1 *model.L1, accounts *model.Accounts, ethUsd *model.EthUsd) model.LiveSnapshot {
 	live := stateFromSample(sample)
 	_, exponent, per := live.Step(0)
 	h := sample.Header
@@ -1005,7 +1099,7 @@ func buildSnapshot(chainID uint64, sample *nitro.Sample, headResult *pricer.Resu
 		ComputeGasPerSecond: computeGPS,
 		L1:                  l1,
 		Accounts:            accounts,
-		ReplayErrorBips:     headResult.ErrorBips,
+		ReplayErrorBips:     replayErrorBips,
 		EthUsd:              ethUsd,
 	}
 	for i, c := range sample.Constraints {

@@ -493,8 +493,8 @@ func TestMemStoreRebuildBucketsHonoursThePruneFrontier(t *testing.T) {
 	m := New()
 	base := time.Date(2026, 9, 6, 7, 0, 0, 0, time.UTC)
 	rows := []db.Block{
-		{ChainID: 1, Number: 1, TS: base, GasUsed: 10, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)},
-		{ChainID: 1, Number: 2, TS: base.Add(time.Minute), GasUsed: 20, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)},
+		{ChainID: 1, Number: 1, TS: base, GasUsed: 10, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)},
+		{ChainID: 1, Number: 2, TS: base.Add(time.Minute), GasUsed: 20, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)},
 	}
 	if err := m.UpsertBlocks(ctx, rows); err != nil {
 		t.Fatal(err)

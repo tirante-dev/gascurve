@@ -51,12 +51,12 @@ func seed(t *testing.T) *dbtest.MemStore {
 	for i := uint64(1); i <= 30; i++ {
 		blocks = append(blocks, db.Block{
 			ChainID: robinhood, Number: 1000 + i, TS: now.Add(-time.Duration(31-i) * time.Second), GasUsed: 1_000_000, PosterGas: sql.NullInt64{Valid: true},
-			BaseFee: db.WeiFromUint64(20_000_000 + i), PredictedBaseFee: db.WeiFromUint64(19_970_000), L1Block: 5, TxCount: 3,
+			BaseFee: db.WeiFromUint64(20_000_000 + i), PredictedBaseFee: db.NullWeiFromUint64(19_970_000), L1Block: 5, TxCount: 3,
 			Backlogs: db.Uint64Array{i, 100}, ConstraintBips: pq.Int64Array{int64(i), 0}, MinBaseFee: db.NullWeiFromUint64(20_000_000), ExponentBips: int64(i), Anchored: i == 30, PricingVersion: db.PricingFull,
 		})
 	}
 	must(s.UpsertBlocks(ctx, blocks))
-	must(s.UpsertBlocks(ctx, []db.Block{{ChainID: testnet, Number: 500, TS: now.Add(-3 * time.Second), GasUsed: 5, BaseFee: db.WeiFromUint64(10_000_000), PredictedBaseFee: db.WeiFromUint64(10_000_000), Backlogs: db.Uint64Array{7}, ExponentBips: 42}}))
+	must(s.UpsertBlocks(ctx, []db.Block{{ChainID: testnet, Number: 500, TS: now.Add(-3 * time.Second), GasUsed: 5, BaseFee: db.WeiFromUint64(10_000_000), PredictedBaseFee: db.NullWeiFromUint64(10_000_000), Backlogs: db.Uint64Array{7}, ExponentBips: 42}}))
 
 	constraints := db.JSONB(`[{"target":60000000,"window":15,"backlog":3111506,"exponentBips":34},{"target":40000000,"window":86400,"backlog":11194391810886,"exponentBips":32391}]`)
 	prices := db.JSONB(`{"perL2Tx":"1","perL1CalldataByte":"2","perL2Storage":"3","perArbGasBase":"4","perArbGasCongestion":"5","perArbGasTotal":"6"}`)
@@ -623,7 +623,7 @@ func TestSeriesStepDown(t *testing.T) {
 	var blocks []db.Block
 	for i := uint64(0); i < 2500; i++ {
 		blocks = append(blocks, db.Block{ChainID: robinhood, Number: i, TS: now.Add(-time.Duration(2500-i) * 100 * time.Millisecond).Truncate(time.Second), GasUsed: 10,
-			PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(100 + i%3), PredictedBaseFee: db.WeiFromUint64(100), Backlogs: db.Uint64Array{i % 5, 9}, ConstraintBips: pq.Int64Array{int64(i), 0}, MinBaseFee: db.NullWeiFromUint64(50), ExponentBips: int64(i), PricingVersion: db.PricingFull})
+			PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(100 + i%3), PredictedBaseFee: db.NullWeiFromUint64(100), Backlogs: db.Uint64Array{i % 5, 9}, ConstraintBips: pq.Int64Array{int64(i), 0}, MinBaseFee: db.NullWeiFromUint64(50), ExponentBips: int64(i), PricingVersion: db.PricingFull})
 	}
 	if err := store.UpsertBlocks(ctx, blocks); err != nil {
 		t.Fatal(err)
@@ -653,7 +653,7 @@ func TestSeriesPosterGasFeeDestinations(t *testing.T) {
 		GasUsed:          422_716,
 		PosterGas:        sql.NullInt64{Int64: 767, Valid: true},
 		BaseFee:          db.WeiFromUint64(20_036_000),
-		PredictedBaseFee: db.WeiFromUint64(20_036_000),
+		PredictedBaseFee: db.NullWeiFromUint64(20_036_000),
 		MinBaseFee:       db.NullWeiFromUint64(20_000_000),
 		PricingVersion:   db.PricingFull,
 	}
@@ -703,9 +703,9 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 	}
 	// Two old blocks (no exponents) and one written after the migration.
 	if err := store.UpsertBlocks(ctx, []db.Block{
-		{ChainID: robinhood, Number: 1, TS: now.Add(-30 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.WeiFromUint64(5), Backlogs: db.Uint64Array{1}},
-		{ChainID: robinhood, Number: 2, TS: now.Add(-29 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.WeiFromUint64(5), Backlogs: db.Uint64Array{1}},
-		{ChainID: robinhood, Number: 3, TS: now.Add(-20 * time.Second), GasUsed: 10, PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(6), PredictedBaseFee: db.WeiFromUint64(6), Backlogs: db.Uint64Array{1}, ConstraintBips: pq.Int64Array{}, MinBaseFee: db.NullWeiFromUint64(2), PricingVersion: db.PricingFull},
+		{ChainID: robinhood, Number: 1, TS: now.Add(-30 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.NullWeiFromUint64(5), Backlogs: db.Uint64Array{1}},
+		{ChainID: robinhood, Number: 2, TS: now.Add(-29 * time.Second), GasUsed: 10, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.NullWeiFromUint64(5), Backlogs: db.Uint64Array{1}},
+		{ChainID: robinhood, Number: 3, TS: now.Add(-20 * time.Second), GasUsed: 10, PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(6), PredictedBaseFee: db.NullWeiFromUint64(6), Backlogs: db.Uint64Array{1}, ConstraintBips: pq.Int64Array{}, MinBaseFee: db.NullWeiFromUint64(2), PricingVersion: db.PricingFull},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 		t.Fatalf("block points: %+v", pts)
 	}
 	// Stepping down folds unknown blocks into an unknown split.
-	if p := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}}, nil, 5*time.Second, now); len(p) != 1 || p[0].FloorFeesWei != nil {
+	if p := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}, nil, 5*time.Second, now); len(p) != 1 || p[0].FloorFeesWei != nil {
 		t.Fatalf("step down with an unknown block: %+v", p)
 	}
 }
@@ -972,7 +972,7 @@ func TestConstraintsCurrentIsModelGated(t *testing.T) {
 func TestLiveIsOneTick(t *testing.T) {
 	store := seed(t)
 	ctx := context.Background()
-	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now.Add(time.Second), GasUsed: 9, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.WeiFromUint64(5), Backlogs: db.Uint64Array{1, 1}}}); err != nil {
+	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now.Add(time.Second), GasUsed: 9, BaseFee: db.WeiFromUint64(5), PredictedBaseFee: db.NullWeiFromUint64(5), Backlogs: db.Uint64Array{1, 1}}}); err != nil {
 		t.Fatal(err)
 	}
 	ts := newServer(t, store)
@@ -1348,7 +1348,7 @@ func TestSeriesCoverage(t *testing.T) {
 		t.Fatalf("live start before the bucket: %v", span)
 	}
 	// Per-block points are whole by definition.
-	if p := blockPoints([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull}}, nil); p[0].Coverage == nil || *p[0].Coverage != 1 || p[0].Completeness != model.SeriesComplete {
+	if p := blockPoints([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull}}, nil); p[0].Coverage == nil || *p[0].Coverage != 1 || p[0].Completeness != model.SeriesComplete {
 		t.Fatalf("block coverage: %v", p[0].Coverage)
 	}
 }
@@ -1453,7 +1453,7 @@ func TestMissingTimelineKeepsBlockPointRates(t *testing.T) {
 	block := func(number uint64, at time.Time, gas uint64) db.Block {
 		return db.Block{
 			Number: number, TS: at, GasUsed: gas, BaseFee: db.WeiFromUint64(1),
-			PredictedBaseFee: db.WeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull,
+			PredictedBaseFee: db.NullWeiFromUint64(1), MinBaseFee: db.NullWeiFromUint64(1), PricingVersion: db.PricingFull,
 		}
 	}
 	points := blockPoints([]db.Block{

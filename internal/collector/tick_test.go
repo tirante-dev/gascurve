@@ -15,6 +15,8 @@ import (
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
+
+	"github.com/lib/pq"
 )
 
 func lastSnapshot(t *testing.T, store *dbtest.MemStore) model.LiveSnapshot {
@@ -78,10 +80,12 @@ func TestTickFreshStartAndCatchUp(t *testing.T) {
 	if !head.Anchored || head.Backlogs[1] != 11_194_391_810_886 || head.Backlogs[0] != 3_111_506 {
 		t.Fatalf("head not anchored to the sample: %+v", head)
 	}
-	if head.Hash != "0x3e8" || head.ParentHash != "0x3e7" || head.MinBaseFee.Wei.Int64() != 20_000_000 || len(head.ConstraintBips) != 2 {
+	if head.Hash != "0x3e8" || head.ParentHash != "0x3e7" || head.MinBaseFee.Wei.Int64() != 20_000_000 {
 		t.Fatalf("head row fields: %+v", head)
 	}
-	if head.PredictedBaseFee.Cmp(head.BaseFee.BigInt()) != 0 || db.ReplayErrorBips(head) != 0 {
+	// The seed's parent was never replayed, so the block's own facts are stored but its prediction is
+	// absent rather than a fabricated exact hit.
+	if head.PredictedBaseFee.Valid || head.ConstraintBips != nil || head.ExponentBips != 0 || db.ReplayErrorBips(head) != 0 {
 		t.Fatalf("seed carries no prediction: %+v", head)
 	}
 	if f.Head() != 1000 {
@@ -165,8 +169,20 @@ func TestTickFreshStartAndCatchUp(t *testing.T) {
 	if b1001.Backlogs[0] != 3_111_506+gasFor(1001) || b1001.Anchored {
 		t.Fatalf("block 1001 replay: %+v", b1001)
 	}
-	if b1001.ConstraintBips[0] != 34 || b1001.ConstraintBips[1] != 32_391 || b1001.ExponentBips != 32_425 {
+	// 1001 is priced by the seed's start-of-block state, one block of gas below the anchored backlog:
+	// 2_111_500 gas over the 15 s constraint's 900 M is 23 bips, against the anchored 3_111_506's 34.
+	if b1001.ConstraintBips[0] != 23 || b1001.ConstraintBips[1] != 32_391 || b1001.ExponentBips != 32_414 {
 		t.Fatalf("block 1001 constraint bips: %+v", b1001)
+	}
+	// The anchored exponents price 1002, the block the replay at 1001 computed them for.
+	var b1002 db.Block
+	for _, b := range blocks {
+		if b.Number == 1002 {
+			b1002 = b
+		}
+	}
+	if b1002.ConstraintBips[0] != 34 || b1002.ConstraintBips[1] != 32_391 || b1002.ExponentBips != 32_425 {
+		t.Fatalf("block 1002 constraint bips: %+v", b1002)
 	}
 	// Buckets are rebuilt from rows: exactly one contribution per block.
 	if blockCountIn(store, db.Resolution1m) != 26 || blockCountIn(store, db.Resolution1h) != 26 {
@@ -785,7 +801,7 @@ func TestTickErrors(t *testing.T) {
 	// A database written before the live_start checkpoint derives it from
 	// the oldest block; a corrupt checkpoint is an error.
 	old := dbtest.New()
-	_ = old.UpsertBlocks(ctx, []db.Block{{ChainID: 4663, Number: 990, TS: baseTime.Add(99 * time.Second), BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), Backlogs: db.Uint64Array{1, 2}}})
+	_ = old.UpsertBlocks(ctx, []db.Block{{ChainID: 4663, Number: 990, TS: baseTime.Add(99 * time.Second), BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), Backlogs: db.Uint64Array{1, 2}}})
 	fo := newTestFollower(t, rpc, old)
 	if err := fo.ensureInit(ctx); err != nil {
 		t.Fatal(err)
@@ -1214,12 +1230,12 @@ func TestHelpers(t *testing.T) {
 	if weiString(nil) != "0" || weiString(big.NewInt(7)) != "7" || bigOrZero(nil).Sign() != 0 || bigOrZero(big.NewInt(3)).Int64() != 3 {
 		t.Fatal("weiString / bigOrZero")
 	}
-	snap := buildSnapshot(1, s, &pricer.Result{ErrorBips: 3}, model.GasPerSecond{}, model.NullableGasPerSecond{}, nil, nil, nil)
+	snap := buildSnapshot(1, s, 3, model.GasPerSecond{}, model.NullableGasPerSecond{}, nil, nil, nil)
 	if snap.ReplayErrorBips != 3 || snap.MultiplierBips != 0 || snap.MinBaseFee != "9" {
 		t.Fatalf("buildSnapshot: %+v", snap)
 	}
 	nilFee := &nitro.Sample{Constraints: []nitro.Constraint{{Target: 1, Window: 2, Backlog: 3}}}
-	if snap := buildSnapshot(1, nilFee, &pricer.Result{}, model.GasPerSecond{}, model.NullableGasPerSecond{}, nil, nil, nil); snap.MinBaseFee != "0" {
+	if snap := buildSnapshot(1, nilFee, 0, model.GasPerSecond{}, model.NullableGasPerSecond{}, nil, nil, nil); snap.MinBaseFee != "0" {
 		t.Fatalf("nil min fee: %+v", snap)
 	}
 	f := newTestFollower(t, newFakeRPC(1), dbtest.New())
@@ -1624,5 +1640,112 @@ func TestRewindDiscardsBucketsStraddlingThePruneFrontier(t *testing.T) {
 		if len(after) != 0 {
 			t.Fatalf("%s bucket %s straddles the frontier and survived the rewind with old-fork rows: %+v", res, start, after[0])
 		}
+	}
+}
+
+// TestShiftPredictions covers the alignment rule directly: a row's pricing group is the one its
+// parent's replay produced, a carry supplies the first row, a break in numbering ends the chain, and
+// the group of the last row is handed on.
+func TestShiftPredictions(t *testing.T) {
+	group := func(fee int64, exp int64) db.Block {
+		return db.Block{PredictedBaseFee: db.NullWeiFromUint64(uint64(fee)), ExponentBips: exp,
+			ConstraintBips: pq.Int64Array{exp}}
+	}
+	rows := []db.Block{group(10, 1), group(20, 2), group(30, 3)}
+	for i := range rows {
+		rows[i].Number = uint64(100 + i)
+	}
+	carry := prediction{fee: big.NewInt(9), exponent: 99, perConstraint: pq.Int64Array{99}, known: true}
+	next := shiftPredictions(rows, carry)
+	for i, want := range []int64{9, 10, 20} {
+		if !rows[i].PredictedBaseFee.Valid || rows[i].PredictedBaseFee.Wei.Int64() != want {
+			t.Fatalf("row %d predicted = %+v, want %d", i, rows[i].PredictedBaseFee, want)
+		}
+	}
+	if rows[0].ExponentBips != 99 || rows[2].ExponentBips != 2 || rows[2].ConstraintBips[0] != 2 {
+		t.Fatalf("exponents did not move with the fee: %+v", rows)
+	}
+	if !next.known || next.fee.Int64() != 30 || next.exponent != 3 {
+		t.Fatalf("carry out = %+v", next)
+	}
+
+	// No carry leaves the first row unpredicted rather than claiming a perfect hit.
+	rows = []db.Block{group(10, 1), group(20, 2)}
+	rows[0].Number, rows[1].Number = 100, 101
+	shiftPredictions(rows, prediction{})
+	if rows[0].PredictedBaseFee.Valid || rows[0].ExponentBips != 0 || rows[0].ConstraintBips != nil {
+		t.Fatalf("an unpredicted row must be empty: %+v", rows[0])
+	}
+	if rows[1].PredictedBaseFee.Wei.Int64() != 10 {
+		t.Fatalf("the second row still takes the first's group: %+v", rows[1])
+	}
+
+	// A gap in numbering breaks the chain: the block after it has no replayed parent.
+	rows = []db.Block{group(10, 1), group(20, 2), group(30, 3)}
+	rows[0].Number, rows[1].Number, rows[2].Number = 100, 105, 106
+	shiftPredictions(rows, carry)
+	if !rows[0].PredictedBaseFee.Valid || rows[1].PredictedBaseFee.Valid {
+		t.Fatalf("the block after a break must carry no prediction: %+v", rows)
+	}
+	if rows[2].PredictedBaseFee.Wei.Int64() != 20 {
+		t.Fatalf("the chain resumes after the break: %+v", rows[2])
+	}
+}
+
+// TestCarryRoundTrip: a checkpointed group survives encode and decode, and an absent or unreadable
+// one decodes to no prediction rather than a zero fee.
+func TestCarryRoundTrip(t *testing.T) {
+	p := prediction{fee: big.NewInt(42), exponent: 7, perConstraint: pq.Int64Array{3, 4}, known: true}
+	if got := decodeCarry(p.encode()); !got.known || got.fee.Int64() != 42 || got.exponent != 7 || len(got.perConstraint) != 2 {
+		t.Fatalf("round trip = %+v", got)
+	}
+	if got := decodeCarry(prediction{}.encode()); got.known {
+		t.Fatalf("an empty group must decode to no prediction: %+v", got)
+	}
+	if got := decodeCarry("not a number", 1, nil); got.known {
+		t.Fatalf("an unreadable fee must decode to no prediction: %+v", got)
+	}
+}
+
+// TestReloadHeadKeepsCarryOnAFailedTick: a metered RPC fails ticks routinely and every failure
+// reloads the head. The committed result still describes an unmoved head, so the group it carries
+// into the next block must survive; a head that moved or forked drops it, and the published error
+// then comes from the stored row rather than a fresh zero.
+func TestReloadHeadKeepsCarryOnAFailedTick(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	f := &Follower{chainID: 4663, store: store, log: logger.Nop()}
+	row := db.Block{ChainID: 4663, Number: 100, Hash: "0x64", ParentHash: "0x63", TS: time.Unix(1000, 0).UTC(),
+		BaseFee: db.WeiFromUint64(100), PredictedBaseFee: db.NullWeiFromUint64(90), Backlogs: db.Uint64Array{1},
+		MinBaseFee: db.NullWeiFromUint64(20), PricingVersion: db.PricingFull}
+	if err := store.UpsertBlocks(ctx, []db.Block{row}); err != nil {
+		t.Fatal(err)
+	}
+	f.head, f.headHash = 100, "0x64"
+	f.lastResult = &pricer.Result{Number: 100, Predicted: big.NewInt(7), Exponent: 5}
+	f.lastErrBips = 42
+	if err := f.reloadHeadLocked(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.lastResult == nil || f.lastErrBips != 42 {
+		t.Fatalf("an unmoved head keeps its carry: result=%+v err=%d", f.lastResult, f.lastErrBips)
+	}
+	if got := f.carryLocked(101); !got.known || got.fee.Int64() != 7 {
+		t.Fatalf("the carry must still reach the next block: %+v", got)
+	}
+
+	// A head on another fork invalidates it, and the error comes from the stored row: |90-100|/100.
+	f.headHash = "0xdead"
+	if err := f.reloadHeadLocked(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.lastResult != nil {
+		t.Fatalf("a forked head must drop the carry: %+v", f.lastResult)
+	}
+	if f.lastErrBips != 1000 {
+		t.Fatalf("the published error must come from the stored head, got %d", f.lastErrBips)
+	}
+	if got := f.carryLocked(101); got.known {
+		t.Fatalf("no carry after a fork: %+v", got)
 	}
 }

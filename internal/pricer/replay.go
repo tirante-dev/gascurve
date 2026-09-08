@@ -2,24 +2,25 @@ package pricer
 
 import "math/big"
 
-// Block is the per-block input to a replay: header timestamp, gas used and
-// the observed base fee.
+// Block is the per-block input to a replay: header timestamp and gas used. The observed base fee is
+// deliberately absent, because the fee a block's Step produces belongs to the next block; scoring a
+// prediction is the caller's job, once it has aligned the two.
 type Block struct {
 	Number    uint64
 	Timestamp uint64
 	GasUsed   uint64
-	BaseFee   *big.Int
 }
 
-// Result is the replay output for one block. Backlogs are the end of block values; Exponent and
-// PerConstraint are the values that produced the block's predicted base fee at its start.
+// Result is the replay output for one block. Backlogs are the end of block values. Exponent,
+// PerConstraint and Predicted are what Step computed at this block, which is the fee of the NEXT
+// block: ArbOS stores the fee it computes while processing block N in the header of N+1. A caller
+// that reports a prediction per block has to move the group forward one block first.
 type Result struct {
 	Number        uint64
 	Backlogs      []uint64
 	Exponent      Bips
 	PerConstraint []Bips
 	Predicted     *big.Int
-	ErrorBips     int64
 	Anchored      bool
 }
 
@@ -28,11 +29,8 @@ type Result struct {
 type Anchor func(number uint64) ([]uint64, bool)
 
 // Replay runs blocks through the state in order, exactly as ArbOS does: Step(dt) first, then
-// AddGas(gasUsed). The state is mutated so a caller can continue with later blocks.
-//
-// ArbOS stores the fee computed by Step(dt) of block N and uses it as the header base fee of block N+1,
-// so a prediction for block N is compared against block N's own header here and carries at most one
-// block of lag. At Nitro block rates that error is far below the 2% threshold the UI calls estimated.
+// AddGas(gasUsed). The state is mutated so a caller can continue with later blocks. Each Result holds
+// the Step output at its own block, which prices the next one; see Result.
 func Replay(state *State, prevTimestamp uint64, blocks []Block, anchor Anchor) []Result {
 	results := make([]Result, 0, len(blocks))
 	prev := prevTimestamp
@@ -49,7 +47,6 @@ func Replay(state *State, prevTimestamp uint64, blocks []Block, anchor Anchor) [
 			Exponent:      exponent,
 			PerConstraint: per,
 			Predicted:     predicted,
-			ErrorBips:     ErrorBips(predicted, b.BaseFee),
 		}
 		if anchor != nil {
 			if backlogs, ok := anchor(b.Number); ok {

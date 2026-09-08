@@ -108,12 +108,16 @@ export type BlockPoint = {
   /** Receipt-backed L1 poster gas. Absent only during a rolling api upgrade. */
   posterGas?: number | null;
   baseFee: string;
-  predictedBaseFee: string;
+  /**
+   * The model's fee for this block, computed while replaying its parent. Null when the parent was not
+   * replayed: a cold start, a reorg, or the block after a gap.
+   */
+  predictedBaseFee: string | null;
   /** End-of-block backlogs (after AddGas). */
   backlogs: number[];
   /**
-   * Start-of-block per-constraint exponent, the values that priced this block;
-   * sums to exponentBips. Null only for pricing version 0 rows, history recorded before the breakdown existed.
+   * Per-constraint exponents that priced this block; sums to exponentBips. Null with no prediction,
+   * and for pricing version 0 rows, history recorded before the breakdown existed.
    */
   constraintBips: number[] | null;
   exponentBips: number;
