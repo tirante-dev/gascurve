@@ -143,11 +143,13 @@ export class Demand {
   }
 }
 
-const RANGE_SPEC: Record<SeriesRange, { seconds: number; resolution: Series["resolution"]; span: number }> = {
-  "1h": { seconds: 5, resolution: "5s", span: 3600 },
-  "24h": { seconds: 60, resolution: "1m", span: 86_400 },
-  "30d": { seconds: 900, resolution: "15m", span: 30 * 86_400 },
-  all: { seconds: 3600, resolution: "1h", span: Number.POSITIVE_INFINITY },
+// `spread` is the unit the api measures a bucket's load band over: a second from the block rows for
+// the two finer resolutions, and the stored buckets one step finer for the two coarser ones.
+const RANGE_SPEC: Record<SeriesRange, { seconds: number; resolution: Series["resolution"]; span: number; spread: number }> = {
+  "1h": { seconds: 5, resolution: "5s", span: 3600, spread: 1 },
+  "24h": { seconds: 60, resolution: "1m", span: 86_400, spread: 1 },
+  "30d": { seconds: 900, resolution: "15m", span: 30 * 86_400, spread: 60 },
+  all: { seconds: 3600, resolution: "1h", span: Number.POSITIVE_INFINITY, spread: 900 },
 };
 
 const BATCH_RESOLUTION: Record<SeriesRange, { seconds: number; resolution: BatchResolution }> = {
@@ -551,7 +553,9 @@ export class MockWorld {
       { end: alignDown(now - 30 * 86_400, 900), dt: 1200 },
       { end: alignDown(now - 86_400, 60), dt: 300 },
       { end: alignDown(now - 3600, 5), dt: 20 },
-      { end: tailStart, dt: 5 },
+      // The last hour a second at a time: the finest range buckets five seconds, and a step as wide
+      // as a bucket would leave it one unit to measure its load band over, which is no band at all.
+      { end: tailStart, dt: 1 },
     ];
     for (const { end, dt } of boundaries) {
       while (this.time < end) {
@@ -903,6 +907,24 @@ export class MockWorld {
       acc.backlogsMax = acc.backlogsMax.map((v, j) => Math.max(v, r.backlogsMax[j] ?? 0));
       acc.replayErrorBips = Math.max(acc.replayErrorBips, r.replayErrorBips);
     }
+    // The load band, over the unit the api measures this resolution's spread with. A unit's rate is
+    // over the span the world actually covers of it, so a coarse step of deeper history stands for
+    // the one unit it falls in rather than being read as a burst.
+    const units = new Map<number, { compute: number; covered: number }>();
+    for (let i = this.records.length - 1; i >= 0; i--) {
+      const r = this.records[i];
+      if (r.t < from) break;
+      if (r.dt <= 0) continue;
+      const at = alignDown(r.t, spec.spread);
+      const unit = units.get(at) ?? { compute: 0, covered: 0 };
+      units.set(at, { compute: unit.compute + r.gas - r.posterGas, covered: unit.covered + r.dt });
+    }
+    const spreads = new Map<number, { min: number; max: number }>();
+    for (const [at, unit] of units) {
+      const rate = Math.round(unit.compute / unit.covered);
+      const band = spreads.get(alignDown(at, spec.seconds));
+      spreads.set(alignDown(at, spec.seconds), band ? { min: Math.min(band.min, rate), max: Math.max(band.max, rate) } : { min: rate, max: rate });
+    }
     // Buckets that predate the breakdown are served the way the api serves
     // pricing version 0 history: no split, no floor in force, no fee
     // destinations.
@@ -912,6 +934,9 @@ export class MockWorld {
       .map((b) => {
         const recorded = b.t >= recordedFrom;
         const coverage = Math.min(1, b.duration / spec.seconds);
+        // Only a whole bucket carries a band, as the api serves it: the extrema of a bucket the
+        // collector has part of are not over the same span as its average.
+        const band = coverage < 1 ? undefined : spreads.get(b.t);
         return {
           t: b.t,
           blocks: b.blocks,
@@ -919,6 +944,8 @@ export class MockWorld {
           posterGas: b.posterGas,
           gasPerSecond: b.duration > 0 ? Math.round(b.gas / b.duration) : 0,
           computeGasPerSecond: b.duration > 0 ? Math.round((b.gas - b.posterGas) / b.duration) : 0,
+          computeGasPerSecondMin: band?.min ?? null,
+          computeGasPerSecondMax: band?.max ?? null,
           // What the collector has of the bucket: a whole one everywhere but
           // at the two ends, where the bucket in progress and the first one
           // after the world began hold only part of their span.
@@ -948,6 +975,7 @@ export class MockWorld {
       // point, and to `now` alone when nothing is indexed.
       from: range === "all" ? (points[0]?.t ?? now) : from,
       to: now,
+      spreadSeconds: spec.spread,
       constraintSets: this.constraintSetsFor(from, now),
       ownerActions: this.ownerActionsFor(from, now),
       points,

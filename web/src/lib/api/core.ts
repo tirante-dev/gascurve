@@ -32,6 +32,8 @@ export type QueryValue = string | number | boolean | undefined;
 
 export type RequestOptions = {
   query?: Record<string, QueryValue>;
+  /** The api base to fetch against, for a caller that cannot use the configured one. See serverApiBase. */
+  baseUrl?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   retries?: number;
@@ -57,13 +59,47 @@ export function isRelativeBase(base: string = API_BASE_URL): boolean {
 }
 
 /**
+ * The api base a fetch made on the server can use. A page-relative base is resolved against the document
+ * by a browser and against nothing at all by `fetch` in Node, so a server render joins it onto `origin`:
+ * the request goes out through the ingress and back. GASCURVE_SERVER_API_URL names a shorter route the
+ * server can take instead. See "The live card" in docs/ARCHITECTURE.md.
+ */
+export function serverApiBase(origin: string, base: string = API_BASE_URL, override = process.env.GASCURVE_SERVER_API_URL): string {
+  const direct = absoluteHttpBase(override);
+  if (direct !== null) return direct;
+  return isRelativeBase(base) ? origin.replace(/\/+$/, "") + base : base;
+}
+
+/**
+ * `value` as an absolute http(s) base with no trailing slash, or null for anything this path could not
+ * use. An override that is not one is dropped rather than obeyed: the public route it falls back to works
+ * everywhere. Rejected along with a relative path and a foreign scheme: credentials, which `fetch` itself
+ * refuses, and a query or fragment, which buildUrl would append the endpoint inside of.
+ */
+function absoluteHttpBase(value: string | undefined): string | null {
+  const text = value?.trim();
+  if (text === undefined || text === "") return null;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") return null;
+  // Rebuilt from the parsed URL rather than handed back as written: a bare "?" or "#" leaves search and
+  // hash empty but survives in the text, and buildUrl would then append the endpoint after it.
+  return (url.origin + url.pathname).replace(/\/+$/, "");
+}
+
+/**
  * The absolute or origin-relative URL of an api path, with the query
  * appended. Built by string rather than through `new URL`, which throws on
  * a relative base; `fetch` resolves a leading-slash URL against the
  * document, which is exactly what a same-origin deployment wants.
  */
-export function buildUrl(path: string, query?: Record<string, QueryValue>): string {
-  const url = API_BASE_URL + (path.startsWith("/") ? path : `/${path}`);
+export function buildUrl(path: string, query?: Record<string, QueryValue>, base: string = API_BASE_URL): string {
+  const url = base + (path.startsWith("/") ? path : `/${path}`);
   const params = new URLSearchParams();
   if (query) {
     for (const [key, value] of Object.entries(query)) {
@@ -124,7 +160,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     const { mockRequest } = await import("@/lib/mock");
     return mockRequest<T>(path, options.query);
   }
-  const url = buildUrl(path, options.query);
+  const url = buildUrl(path, options.query, options.baseUrl ?? API_BASE_URL);
   const retries = options.retries ?? MAX_RETRIES;
   let lastError: unknown;
   for (let i = 0; i <= retries; i++) {

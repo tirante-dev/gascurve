@@ -82,7 +82,8 @@
         "image": { "$ref": "#/definitions/componentImage" },
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
         "service": { "$ref": "#/definitions/service" },
-        "resources": { "$ref": "#/definitions/resources" }
+        "resources": { "$ref": "#/definitions/resources" },
+        "serverApiUrl": { "type": "string" }
       },
       "required": ["enabled", "image", "service"],
       "additionalProperties": false

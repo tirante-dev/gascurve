@@ -270,7 +270,8 @@ describe("LiveHero", () => {
     // Live: whole seconds of blocks from the ring, in one unit named beside the chart.
     const throughput = screen.getByRole("figure", { name: /^Compute gas carried per second over the last 120 seconds/ });
     expect(throughput.firstElementChild).toHaveClass("h-[120px]");
-    expect(throughput.firstElementChild).toHaveClass("lg:h-[140px]");
+    expect(throughput.firstElementChild).toHaveClass("lg:h-[240px]");
+    expect(throughput.firstElementChild).toHaveClass("page:h-[252px]");
     // The caption leads with the plain reading and keeps the measurement after it.
     expect(screen.getByText("Network load, second by second, over the last 120 s")).toBeInTheDocument();
     expect(screen.getByText(/compute gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
@@ -283,6 +284,10 @@ describe("LiveHero", () => {
     expect(screen.getByRole("figure", { name: /^Compute gas used per second in .* with each constraint target/ })).toBeInTheDocument();
     expect(screen.getByText("Network load per bucket against each target in force, 24h")).toBeInTheDocument();
     expect(screen.getByText(/^· compute gas per second · /)).toBeInTheDocument();
+    // The band the api measured is named in the caption, because what it is a spread of changes with the range.
+    const banded = { ...history, spreadSeconds: 1, points: history.points.map((p) => ({ ...p, computeGasPerSecondMin: 1, computeGasPerSecondMax: 9 })) };
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" series={banded} model="constraints" />);
+    expect(screen.getByText(/· min to max per second$/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=24h");
   });
   it("draws the canonical blocks after a reorg, not the orphaned ones", () => {
@@ -417,7 +422,8 @@ describe("LiveHero", () => {
     expect(box()).toHaveClass("h-[180px]");
     expect(box()).toHaveClass("lg:h-[260px]");
     expect(throughputBox()).toHaveClass("h-[120px]");
-    expect(throughputBox()).toHaveClass("lg:h-[140px]");
+    expect(throughputBox()).toHaveClass("lg:h-[240px]");
+    expect(throughputBox()).toHaveClass("page:h-[252px]");
 
     rerender(<LiveHeroView {...props} series={{ ...history, points: [] }} />);
     expect(screen.getAllByText("Nothing indexed for this range yet.").length).toBeGreaterThan(0);

@@ -94,7 +94,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
   }, [canonical, replaceNetwork]);
 
   return (
-    <div className="mx-auto max-w-[1200px] px-4 pb-12 sm:px-6">
+    <div className="mx-auto max-w-page px-4 pb-12 sm:px-6">
       <PageHeader name={name} info={info}>
         <NetworkSwitcher networks={networks.data} current={name} onChange={setNetwork} loading={networks.loading} />
         <HowItWorksLink network={name} className="vw-control px-3 py-1 text-sm text-ink-2 hover:text-ink" />

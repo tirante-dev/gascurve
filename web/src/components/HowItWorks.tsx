@@ -51,7 +51,7 @@ export function HowItWorks({ network }: { network: string }) {
   const floor = floorText(snapshot);
 
   return (
-    <div className="mx-auto max-w-[1200px] px-4 pb-12 sm:px-6">
+    <div className="mx-auto max-w-page px-4 pb-12 sm:px-6">
       <PageHeader name={network} info={info}>
         <Link href={`/${encodeURIComponent(network)}`} className="vw-control px-3 py-1 text-sm text-ink-2 hover:text-ink">
           ← Live view

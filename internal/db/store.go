@@ -112,6 +112,14 @@ type Bucket struct {
 	PricingVersion int16 `db:"pricing_version"`
 }
 
+// RateSpread is the lowest and highest compute gas rate over the Units of a window that had blocks.
+type RateSpread struct {
+	Start   time.Time `db:"start"`
+	MinRate int64     `db:"min_rate"`
+	MaxRate int64     `db:"max_rate"`
+	Units   int64     `db:"units"`
+}
+
 // StateSample is a row of the state_samples table.
 type StateSample struct {
 	ChainID     uint64    `db:"chain_id"`
@@ -271,6 +279,9 @@ type Store interface {
 	BelowFrontier(ctx context.Context, chainID uint64, starts []time.Time) ([]time.Time, error)
 	// Buckets returns buckets with from <= bucket_start < to, ascending.
 	Buckets(ctx context.Context, chainID uint64, resolution string, from, to time.Time) ([]Bucket, error)
+	// ComputeRateSpread returns every window of width step over [from, to), ascending, with the spread
+	// of its units of width unit: a second from the block rows, or a resolution width from its buckets.
+	ComputeRateSpread(ctx context.Context, chainID uint64, from, to time.Time, step, unit time.Duration) ([]RateSpread, error)
 
 	InsertStateSample(ctx context.Context, s StateSample) error
 	// LatestStateSample returns the newest sample, optionally only among

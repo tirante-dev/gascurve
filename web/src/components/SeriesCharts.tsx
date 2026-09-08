@@ -21,6 +21,7 @@ import {
   UNKNOWN_COLOR,
   UNKNOWN_KEY,
   UNKNOWN_LABEL,
+  spreadUnitLabel,
   unknownBacklogKey,
   type ChartPoint,
   type Segment,
@@ -40,6 +41,14 @@ const SYNC_ID = "history";
  * narrowest: a clipped tick label is not a label.
  */
 const GAS_AXIS_WIDTH = 74;
+
+/**
+ * The load band's fill and the strokes along its edges. Heavier than the base fee's band, which sits
+ * on a log axis where a bucket's own spread is a large share of the frame: a compute rate band is a
+ * thin ribbon around the average over most of a range, and a 0.12 tint of it reads as nothing.
+ */
+const BAND_FILL_OPACITY = 0.22;
+const BAND_EDGE_OPACITY = 0.55;
 
 /** The heights the history charts stand at on the network page; the enlarged views pass their own. */
 export const SERIES_CHART_HEIGHT = 220;
@@ -93,6 +102,12 @@ export type SeriesModel = {
   gaps: GapModel;
   /** The gas-per-second axis: one unit for every label, shared by the live and the bucketed view. */
   gasAxis: ThroughputAxis;
+  /**
+   * The load band: the unit the api measured the spread of each bucket over, in words, and whether
+   * any bucket has one. A range whose points are already that fine measures none.
+   */
+  spreadUnit: string | null;
+  hasSpread: boolean;
   segments: Segment[];
   /** True when some point's constraint set is not known, so its backlogs go under the unlabelled slots. */
   unknown: boolean;
@@ -176,6 +191,12 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   // draws, and every bucket's x lands either under its own set or under the
   // unknown-split series, so the stack is never silently empty.
 
+  // The load band the api measured, and the unit it measured it over: a bucket that is itself one
+  // unit has no interior, so a range at that resolution carries no band at all.
+  const spreadSeconds = series.spreadSeconds ?? null;
+  const spreadUnit = spreadSeconds !== null && spreadSeconds > 0 ? spreadUnitLabel(spreadSeconds) : null;
+  const hasSpread = spreadUnit !== null && points.some((p) => p.gpsMin !== null && p.gpsMax !== null);
+
   const contributionRows: TooltipRow[] = segments.map((s) => ({
     label: s.label,
     color: s.color,
@@ -188,6 +209,12 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   contributionRows.push({ label: "x total", value: (r) => Number(r.x).toFixed(4) });
 
   const gasRows: TooltipRow[] = [{ label: "compute gas per second", color: "var(--series-1)", value: (r) => known(r.gps, (v) => formatGasPerSecond(v)) }];
+  if (hasSpread) {
+    gasRows.push({
+      label: `min to max per ${spreadUnit} in bucket`,
+      value: (r) => (typeof r.gpsMin === "number" && typeof r.gpsMax === "number" ? `${formatGasPerSecond(r.gpsMin)} to ${formatGasPerSecond(r.gpsMax)}` : "n/a"),
+    });
+  }
   indices.forEach((i) => gasRows.push({ label: `target C${i + 1} in force`, color: seriesColor(i), value: (r) => formatGasPerSecond(Number(r[targetKey(i)])), when: (r) => typeof r[targetKey(i)] === "number" }));
 
   const backlogRowsFor = (i: number): TooltipRow[] => [
@@ -220,8 +247,14 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   // The targets are drawn as thresholds on the same axis as the rate, so the
   // axis has to hold the taller of the two. Its unit is named once, in the
   // legend, because every tick on it is a bare figure.
-  const gasAxis = throughputAxis(Math.max(0, ...points.flatMap((p) => (p.gps === null ? [] : [p.gps])), ...points.flatMap((p) => indices.map((i) => p[targetKey(i)] ?? 0))));
-  const gasLegend = [{ label: `compute gas per second (${gasAxis.unit})`, color: "var(--series-1)", kind: "line" as const }, ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : [])];
+  const gasAxis = throughputAxis(
+    Math.max(0, ...points.flatMap((p) => (p.gps === null ? [] : [p.gps])), ...points.flatMap((p) => (p.gpsMax === null ? [] : [p.gpsMax])), ...points.flatMap((p) => indices.map((i) => p[targetKey(i)] ?? 0))),
+  );
+  const gasLegend = [
+    { label: `compute gas per second (${gasAxis.unit})`, color: "var(--series-1)", kind: "line" as const },
+    ...(hasSpread ? [{ label: `min to max per ${spreadUnit}`, color: "var(--series-1)", kind: "rect" as const }] : []),
+    ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : []),
+  ];
 
   return {
     points,
@@ -230,6 +263,8 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
     span,
     gaps,
     gasAxis,
+    spreadUnit,
+    hasSpread,
     segments,
     unknown,
     unrecorded,
@@ -306,12 +341,13 @@ export const ContributionChart = memo(function ContributionChart({ m, height = S
  * whatever size its frame is: the hero draws it under the base fee, its own
  * page draws it large, and both read the same rows and the same axis. The
  * axis carries one unit for the whole scale, named in the caption beside the
- * chart, so every label is a bare figure of the same width.
+ * chart. Where the api measured the load inside a bucket, the average runs as
+ * a line through the band of it, as the base fee chart is drawn.
  */
 export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth = GAS_AXIS_WIDTH, minWidth }: { m: SeriesModel; height?: ChartHeight; axisWidth?: number; minWidth?: number }) {
   return (
     <>
-      <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit} with each constraint target in force drawn as a stepped line`}>
+      <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit}${m.hasSpread ? `, banded from the lowest to the highest ${m.spreadUnit} inside each bucket,` : ""} with each constraint target in force drawn as a stepped line`}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             {m.gasMissing.length > 0 ? (
@@ -325,7 +361,20 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
             {timeAxis(m.span, m.gaps.window)}
             <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.gasNote} />} />
-            <Area type="monotone" dataKey="gps" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+            {m.hasSpread ? (
+              <>
+                {/* The band is the max filled to the floor of the axis with the min painted back out
+                    over it, so the fill between the two is what is left. Its edges are drawn after
+                    that mask, which would otherwise take the lower one with it. */}
+                <Area type="monotone" dataKey="gpsMax" connectNulls={false} stroke="none" fill="var(--series-1)" fillOpacity={BAND_FILL_OPACITY} isAnimationActive={false} activeDot={false} />
+                <Area type="monotone" dataKey="gpsMin" connectNulls={false} stroke="none" fill="var(--chart)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
+                <Line type="monotone" dataKey="gpsMax" connectNulls={false} stroke="var(--series-1)" strokeOpacity={BAND_EDGE_OPACITY} strokeWidth={1} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="gpsMin" connectNulls={false} stroke="var(--series-1)" strokeOpacity={BAND_EDGE_OPACITY} strokeWidth={1} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="gps" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} />
+              </>
+            ) : (
+              <Area type="monotone" dataKey="gps" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+            )}
             {m.hasTargets ? m.indices.map((i) => <Line key={i} type="stepAfter" dataKey={targetKey(i)} connectNulls={false} stroke={seriesColor(i)} strokeDasharray="4 3" dot={false} isAnimationActive={false} />) : null}
           </ComposedChart>
         </ResponsiveContainer>
@@ -485,6 +534,12 @@ export const SeriesCharts = memo(function SeriesCharts({ network, range, series,
                   <th scope="col" className="py-1 pr-3 font-medium">x</th>
                   <th scope="col" className="py-1 pr-3 font-medium">split (set)</th>
                   <th scope="col" className="py-1 pr-3 font-medium">compute gas/s</th>
+                  {m.hasSpread ? (
+                    <>
+                      <th scope="col" className="py-1 pr-3 font-medium">gas/s min</th>
+                      <th scope="col" className="py-1 pr-3 font-medium">gas/s max</th>
+                    </>
+                  ) : null}
                   {m.indices.map((i) => (
                     <th key={i} scope="col" className="py-1 pr-3 font-medium">
                       backlog C{i + 1}
@@ -510,6 +565,12 @@ export const SeriesCharts = memo(function SeriesCharts({ network, range, series,
                       {describeSplit(p, m.segments)} ({p.setKnown ? `set ${p.constraintSetId}` : "unknown set"})
                     </td>
                     <td className="py-1 pr-3">{p.gps === null ? "n/a" : formatGasPerSecond(p.gps)}</td>
+                    {m.hasSpread ? (
+                      <>
+                        <td className="py-1 pr-3">{p.gpsMin === null ? "n/a" : formatGasPerSecond(p.gpsMin)}</td>
+                        <td className="py-1 pr-3">{p.gpsMax === null ? "n/a" : formatGasPerSecond(p.gpsMax)}</td>
+                      </>
+                    ) : null}
                     {m.indices.map((i) => {
                       const s = p.setKnown ? m.segments.find((seg) => seg.setId === p.constraintSetId && seg.index === i) : undefined;
                       const v = s ? p[s.backlogKey] : p.setKnown ? null : p[unknownBacklogKey(i)];

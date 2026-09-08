@@ -201,6 +201,15 @@ export function slotLabel(series: Pick<Series, "constraintSets" | "points">, ind
   return `C${index + 1} · ${parts.join(" then ")}`;
 }
 
+/**
+ * The unit a load band is measured over, in words: "second", "minute", "15 minutes". The band's
+ * meaning changes with the range, so every place that names it says which unit it measured.
+ */
+export function spreadUnitLabel(seconds: number): string {
+  const [width, unit] = seconds % 3600 === 0 ? [seconds / 3600, "hour"] : seconds % 60 === 0 ? [seconds / 60, "minute"] : [seconds, "second"];
+  return width === 1 ? unit : `${width} ${unit}s`;
+}
+
 export type ChartPoint = {
   t: number;
   feeAvg: number;
@@ -211,6 +220,9 @@ export type ChartPoint = {
   x: number;
   /** Receipt-backed compute gas per second. Null while poster gas or the rate's time divisor is unavailable. */
   gps: number | null;
+  /** The lowest and highest compute rate a unit inside the bucket carried, the band around `gps`. Null together when the api measured none. */
+  gpsMin: number | null;
+  gpsMax: number | null;
   feesEth: number;
   /** The compute-floor, compute-congestion, and poster parts of `feesEth`. */
   floorFeesEth: number | null;
@@ -281,6 +293,9 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
       x: bipsToXValue(p.exponentBips),
       // Missing and null both mean that receipt-backed compute gas is unknown.
       gps: pointCoverage === null || pointCoverage <= 0 ? null : (p.computeGasPerSecond ?? null),
+      // The band is measured over whole units, so it stands whatever the bucket's own coverage is.
+      gpsMin: p.computeGasPerSecondMin ?? null,
+      gpsMax: p.computeGasPerSecondMax ?? null,
       feesEth,
       floorFeesEth: feeSplitKnown ? weiToEthNumber(floorWei) : null,
       surplusFeesEth: feeSplitKnown ? weiToEthNumber(surplusWei) : null,
