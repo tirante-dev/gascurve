@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.4.0...gascurve-chart-v0.5.0) (2026-09-08)
+
+
+### Features
+
+* **collector:** backfill history newest first on archive networks ([#78](https://github.com/tirante-dev/gascurve/issues/78)) ([0031339](https://github.com/tirante-dev/gascurve/commit/00313398423083b00c5cd333ce8f2890dcb1613c))
+* **collector:** reach genesis, and let a widened backfill depth take effect ([#79](https://github.com/tirante-dev/gascurve/issues/79)) ([25fe560](https://github.com/tirante-dev/gascurve/commit/25fe560421716c52ea52b070d647d3f11c0d89a4))
+* **web:** draw the social card from the live gauge when a link is shared ([#83](https://github.com/tirante-dev/gascurve/issues/83)) ([0a14692](https://github.com/tirante-dev/gascurve/commit/0a146927a9972577cdde0206c67757b6f1a69b67))
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 1.4.0 ([#86](https://github.com/tirante-dev/gascurve/issues/86)) ([25418d5](https://github.com/tirante-dev/gascurve/commit/25418d56519b6fa0b2c9ca3912c2255c30c5a3aa))
+
 ## [0.4.0](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.3.1...gascurve-chart-v0.4.0) (2026-09-08)
 
 
