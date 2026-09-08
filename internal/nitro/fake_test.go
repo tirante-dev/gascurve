@@ -120,6 +120,27 @@ func (f *fakeRPC) holdAll(t *testing.T) {
 	t.Cleanup(f.release)
 }
 
+// holdMethod holds any batch carrying method until releaseMethod is called. The cleanup releases it
+// so a failed assertion reports itself rather than leaving the handler blocked and the package to
+// time out on the server's close.
+func (f *fakeRPC) holdMethod(t *testing.T, method string) {
+	t.Helper()
+	f.mu.Lock()
+	f.gate, f.gateMethod = make(chan struct{}), method
+	f.mu.Unlock()
+	t.Cleanup(f.releaseMethod)
+}
+
+func (f *fakeRPC) releaseMethod() {
+	f.mu.Lock()
+	g := f.gate
+	f.gate = nil
+	f.mu.Unlock()
+	if g != nil {
+		close(g)
+	}
+}
+
 func (f *fakeRPC) release() {
 	f.mu.Lock()
 	b := f.barrier

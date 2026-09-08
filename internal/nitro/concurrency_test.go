@@ -193,7 +193,7 @@ func TestBatchFansOutChunksInOrder(t *testing.T) {
 func TestBatchParallelChunkFailureReportsLowestChunk(t *testing.T) {
 	f := echoRPC(t)
 	f.failMethods = map[string]bool{"boom_early": true, "boom_late": true}
-	f.gate, f.gateMethod = make(chan struct{}), "boom_early"
+	f.holdMethod(t, "boom_early")
 	e := chunkedEndpoint(t, f, 2)
 	reqs := echoRequests(20)
 	reqs[2].Method = "boom_early"
@@ -203,12 +203,12 @@ func TestBatchParallelChunkFailureReportsLowestChunk(t *testing.T) {
 		_, err := e.batch(context.Background(), reqs)
 		done <- err
 	}()
-	// Every worker but the held one is finished: the late chunk has failed and been recorded, and
-	// no further range is handed out.
-	if !awaitSettled(f, 1) {
-		t.Fatalf("in flight %d, want only the held chunk left", inFlightOf(f))
+	// Every worker but the held one is finished: the whole first wave has been sent, the late chunk
+	// has failed and been recorded, and no further range is handed out.
+	if !awaitSettled(f, 1, maxUnmeteredSends) {
+		t.Fatalf("in flight %d after %d requests, want only the held chunk left", inFlightOf(f), f.requestCount())
 	}
-	close(f.gate)
+	f.releaseMethod()
 	err := <-done
 	if err == nil {
 		t.Fatal("want the failing chunk's error")
@@ -221,11 +221,12 @@ func TestBatchParallelChunkFailureReportsLowestChunk(t *testing.T) {
 	}
 }
 
-// awaitSettled waits until exactly n requests are in flight and stay there, so a test can tell that
-// the other workers have finished rather than merely not started.
-func awaitSettled(f *fakeRPC, n int) bool {
+// awaitSettled waits until exactly n requests are in flight and stay there, after at least sent have
+// been served, so a test can tell that the other workers have finished rather than merely not
+// started.
+func awaitSettled(f *fakeRPC, n, sent int) bool {
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
-		if in, _ := f.flight(); in == n {
+		if in, _ := f.flight(); in == n && f.requestCount() >= sent {
 			time.Sleep(50 * time.Millisecond)
 			if in, _ := f.flight(); in == n {
 				return true
@@ -238,13 +239,29 @@ func awaitSettled(f *fakeRPC, n int) bool {
 
 // TestBatchShrinksUnderConcurrentChunks walks the adaptive cap down from several workers at once.
 // The cut is monotonic and both sides of it take e.mu, so concurrent refusals commute; this is the
-// case -race is here to prove.
+// case -race is here to prove. The barrier is what makes it that case: without it a loopback server
+// can answer every refusal in turn, and the test would pass without the cuts ever overlapping.
 func TestBatchShrinksUnderConcurrentChunks(t *testing.T) {
 	f := echoRPC(t)
 	f.sizeLimit = 3
+	f.holdAll(t)
 	e := chunkedEndpoint(t, f, 8)
 	reqs := echoRequests(40)
-	results, err := e.batch(context.Background(), reqs)
+	type outcome struct {
+		results []Result
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		results, err := e.batch(context.Background(), reqs)
+		done <- outcome{results, err}
+	}()
+	if !f.awaitFlight(maxUnmeteredSends) {
+		t.Fatalf("only %d chunks were in flight, want %d refused together", inFlightOf(f), maxUnmeteredSends)
+	}
+	f.release()
+	got := <-done
+	results, err := got.results, got.err
 	if err != nil {
 		t.Fatalf("batch: %v", err)
 	}
@@ -256,8 +273,14 @@ func TestBatchShrinksUnderConcurrentChunks(t *testing.T) {
 			t.Fatalf("result %d is %s, want %s", i, r.Raw, want)
 		}
 	}
-	if got := e.BatchCap(); got > f.sizeLimit {
-		t.Fatalf("batch cap %d, want it cut to at most the %d items the node fits", got, f.sizeLimit)
+	// Four eight-item chunks refused together each compute min(cap, 4), then a wave at four is still
+	// refused and computes min(4, 2). Overlapping cuts must land on the same place a serial pair
+	// would, not on whichever answered last.
+	if got := e.BatchCap(); got != 2 {
+		t.Fatalf("batch cap %d, want 2 after two waves of refusals under the %d item limit", got, f.sizeLimit)
+	}
+	if _, peak := f.flight(); peak < maxUnmeteredSends {
+		t.Fatalf("peak in flight %d, want the refusals to have overlapped %d deep", peak, maxUnmeteredSends)
 	}
 }
 
