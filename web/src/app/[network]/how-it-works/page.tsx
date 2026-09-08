@@ -11,6 +11,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { network } = await params;
   const name = networkDisplayName(network);
   return pageMetadata({
+    network,
     title: `How the ${name} gas fee works`,
     description: `The multi-constraint base fee pricer explained for ${name}: how each constraint's backlog moves the price, the floor it cannot fall below, and where the fee ends up.`,
     path: `/${encodeURIComponent(network)}/how-it-works`,

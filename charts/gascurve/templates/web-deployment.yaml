@@ -42,6 +42,10 @@ spec:
               value: "3000"
             - name: HOSTNAME
               value: "0.0.0.0"
+            {{- with .Values.web.serverApiUrl }}
+            - name: GASCURVE_SERVER_API_URL
+              value: {{ . | quote }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /

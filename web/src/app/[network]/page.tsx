@@ -11,6 +11,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { network } = await params;
   const name = networkDisplayName(network);
   return pageMetadata({
+    network,
     title: `${name} gas tracker: live base fee`,
     description: `Live and historical gas prices for ${name}: the Nitro base fee pricer, its constraint backlogs, owner changes, fee destinations and ArbOS-attributed batch costs.`,
     path: `/${encodeURIComponent(network)}`,

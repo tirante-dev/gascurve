@@ -113,6 +113,11 @@ web:
   replicaCount: 2
   image:
     repository: gascurve-web
+  # Where the web pod fetches the live snapshot for a shared link's social card. Left empty it goes out
+  # through the ingress and back, which needs nothing configured. An in-cluster address such as
+  # http://RELEASE-api:8080/api/v1 skips that hop, but api.networkPolicy admits only the ingress
+  # controller and the monitoring peers, so add the web pod there first. See docs/ARCHITECTURE.md.
+  serverApiUrl: ""
   # Must match the image's numeric USER (nextjs, uid 1001).
   securityContext:
     runAsUser: 1001

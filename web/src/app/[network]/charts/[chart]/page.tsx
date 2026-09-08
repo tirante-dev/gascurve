@@ -16,8 +16,8 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const path = `/${encodeURIComponent(network)}/charts/${encodeURIComponent(chart)}`;
   // A chart id that is not one of ours has nothing to index: the page says so
   // and the route stays out of the index whichever form names the network.
-  if (view === null) return pageMetadata({ title: `Chart not found on ${name}`, description: `No such chart on ${name}.`, path, canonical: false });
-  return pageMetadata({ title: `${view.title} on ${name}`, description: view.description, path, canonical: !isChainIdParam(network) });
+  if (view === null) return pageMetadata({ network, title: `Chart not found on ${name}`, description: `No such chart on ${name}.`, path, canonical: false });
+  return pageMetadata({ network, title: `${view.title} on ${name}`, description: view.description, path, canonical: !isChainIdParam(network) });
 }
 
 export default async function Page({ params }: Props) {

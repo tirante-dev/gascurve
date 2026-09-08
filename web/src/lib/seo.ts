@@ -62,8 +62,8 @@ export const SITE_DESCRIPTION = `Live and historical gas prices for ${PRIMARY_NE
 
 export const SITE_TITLE = `${PRIMARY_NETWORK_NAME} gas tracker · ${SITE_NAME}`;
 
-/** The social card every page shares, named here rather than dropped in as an opengraph-image file: a page
- * that sets its own openGraph replaces the whole object, images included. */
+/** The card the pages outside a network share, named here rather than dropped in as an opengraph-image
+ * file: a page that sets its own openGraph replaces the whole object, images included. */
 export const CARD_IMAGE = {
   url: "/og-card.png",
   width: 1200,
@@ -71,13 +71,33 @@ export const CARD_IMAGE = {
   alt: `The ${SITE_NAME} wordmark over a rising base fee curve, above the line "Live and historical gas prices for ${PRIMARY_NETWORK_NAME}".`,
 } as const;
 
+export const CARD_SIZE = { width: 1200, height: 630 } as const;
+
+/** Where a network's card is drawn: app/[network]/card/route.tsx reads the live snapshot as the card is
+ * asked for, so a posted link previews the fee the chain was charging at that moment. */
+export function cardPath(network: string): string {
+  return `/${encodeURIComponent(network)}/card`;
+}
+
+/** A network's card, as a page's metadata names it. The alt text is written once and the card is not, so
+ * it says what the picture would have shown a reader who cannot see it, never what the reading was. */
+export function cardImage(network: string) {
+  const name = networkDisplayName(network);
+  return {
+    url: cardPath(network),
+    ...CARD_SIZE,
+    alt: `A gauge of the ${name} base fee against its floor as it stood when the card was drawn, with the fee in gwei and the block it came from, or an unlit gauge when no reading could be taken.`,
+  };
+}
+
 /** The metadata a network scoped page carries. Every route under /[network] builds it here, so they agree. */
-export function pageMetadata({ title, description, path, canonical }: { title: string; description: string; path: string; canonical: boolean }): Metadata {
+export function pageMetadata({ network, title, description, path, canonical }: { network: string; title: string; description: string; path: string; canonical: boolean }): Metadata {
+  const images = [cardImage(network)];
   return {
     title,
     description,
     ...(canonical ? { alternates: { canonical: path } } : { robots: { index: false, follow: true } }),
-    openGraph: { type: "website", siteName: SITE_NAME, url: absoluteUrl(path), title, description, images: [CARD_IMAGE] },
-    twitter: { card: "summary_large_image", title, description, images: [CARD_IMAGE] },
+    openGraph: { type: "website", siteName: SITE_NAME, url: absoluteUrl(path), title, description, images },
+    twitter: { card: "summary_large_image", title, description, images },
   };
 }
