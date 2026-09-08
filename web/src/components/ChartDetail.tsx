@@ -249,7 +249,7 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
   })();
 
   return (
-    <div className="mx-auto max-w-[1200px] px-4 pb-12 sm:px-6">
+    <div className="mx-auto max-w-page px-4 pb-12 sm:px-6">
       <PageHeader name={network} info={info}>
         <Link href={view === null ? `/${encodeURIComponent(network)}` : chartBackHref(network, view)} className="vw-control inline-flex items-center gap-1.5 px-3 py-1 text-sm text-ink-2 hover:text-ink">
           <MinimizeIcon className="h-3.5 w-3.5" />
