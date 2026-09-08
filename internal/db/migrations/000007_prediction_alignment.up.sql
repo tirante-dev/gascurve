@@ -13,7 +13,7 @@ ALTER TABLE blocks
 COMMENT ON COLUMN blocks.predicted_base_fee IS
     'the model''s fee for this block, computed while replaying its parent; NULL when the parent was not replayed';
 COMMENT ON COLUMN blocks.exponent_bips IS
-    'exponent that produced predicted_base_fee; 0 when there is no prediction';
+    'exponent that produced predicted_base_fee; meaningful only when that is not NULL, since 0 is also a valid exponent at the floor';
 COMMENT ON COLUMN blocks.constraint_bips IS
     'per-constraint shares of exponent_bips; NULL when there is no prediction or none was recorded';
 
