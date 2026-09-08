@@ -1997,3 +1997,38 @@ func TestSeriesSpreadStopsAtTheOldestRetainedRow(t *testing.T) {
 		t.Fatalf("a step wholly inside the retained rows keeps its band: %+v", hour.Points[1])
 	}
 }
+
+// A step reaches back to its own five second boundary. For a window that does not start on one the
+// seconds before it were never asked for, so that step is not one whose gaps are idle seconds.
+func TestSeriesSpreadStopsAtTheWindowEdge(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	var blocks []db.Block
+	for i := uint64(0); i < 2500; i++ {
+		blocks = append(blocks, db.Block{
+			ChainID: robinhood, Number: i, TS: now.Add(-time.Hour).Add(time.Duration(i) * time.Second), GasUsed: 100,
+			PosterGas: sql.NullInt64{Valid: true}, BaseFee: db.WeiFromUint64(100), PredictedBaseFee: db.NullWeiFromUint64(100),
+			Backlogs: db.Uint64Array{1}, ConstraintBips: pq.Int64Array{1}, MinBaseFee: db.NullWeiFromUint64(50), PricingVersion: db.PricingFull,
+		})
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	// A clock three seconds off the five second grid puts the window's start inside a step.
+	hour, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hour.Points[0].T >= hour.From {
+		t.Fatalf("the first step is expected to reach back past the window: %d, window from %d", hour.Points[0].T, hour.From)
+	}
+	if hour.Points[0].ComputeGasPerSecondMin != nil {
+		t.Fatalf("the step the window starts inside carries no band: %+v", hour.Points[0])
+	}
+	if hour.Points[1].ComputeGasPerSecondMin == nil {
+		t.Fatalf("a step wholly inside the window keeps its band: %+v", hour.Points[1])
+	}
+}

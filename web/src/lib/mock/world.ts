@@ -934,7 +934,9 @@ export class MockWorld {
       .map((b) => {
         const recorded = b.t >= recordedFrom;
         const coverage = Math.min(1, b.duration / spec.seconds);
-        const band = spreads.get(b.t);
+        // Only a whole bucket carries a band, as the api serves it: the extrema of a bucket the
+        // collector has part of are not over the same span as its average.
+        const band = coverage < 1 ? undefined : spreads.get(b.t);
         return {
           t: b.t,
           blocks: b.blocks,

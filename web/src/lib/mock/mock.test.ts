@@ -205,6 +205,10 @@ describe("mock world", () => {
     expect([hour.spreadSeconds, day.spreadSeconds, month.spreadSeconds]).toEqual([1, 1, 60]);
     const banded = month.points.filter((p) => p.computeGasPerSecondMin != null);
     expect(banded.length).toBeGreaterThan(month.points.length - 5);
+    // Only a whole bucket carries one: the bucket still filling has an average over its elapsed
+    // span and extrema over the units inside it, which are not the same population.
+    expect(month.points[month.points.length - 1].computeGasPerSecondMin).toBeNull();
+    expect(banded.every((p) => (p.coverage ?? 0) >= 1)).toBe(true);
     for (const p of banded) {
       expect(p.computeGasPerSecondMin).toBeLessThanOrEqual(p.computeGasPerSecond ?? 0);
       expect(p.computeGasPerSecondMax).toBeGreaterThanOrEqual(p.computeGasPerSecond ?? 0);

@@ -145,6 +145,10 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 			if err != nil {
 				return nil, err
 			}
+			// A step reaches back to its own five second boundary, which for a window that does not
+			// start on one is earlier than the rows were asked for: those seconds were never
+			// queried, so they are not idle ones either.
+			floor = max(floor, from.Add(time.Second-time.Nanosecond).Truncate(time.Second).Unix())
 			// After the timeline, which is what settles how much of a step the collector has.
 			for i := range out.Points {
 				settleBand(&out.Points[i], seconds[i], int64(stepDownWidth/rng.spreadUnit), floor)
