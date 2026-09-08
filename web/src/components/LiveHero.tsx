@@ -53,8 +53,8 @@ import { ChartReadout, type ReadoutGroup } from "./ChartReadout";
 import { EnlargeLink } from "./ChartActions";
 import { GapBands, GapNote } from "./ChartGaps";
 import { buildSeriesModel, bucketRowTitle, GasPerSecondChart } from "./SeriesCharts";
-import { FeeDial } from "./FeeDial";
-import { Figure, HoverNote, Label, type NoteAlign, Stat, StatusPill, Term, TIME_AXIS_RIGHT } from "./primitives";
+import { FeeGauge } from "./FeeGauge";
+import { Figure, HoverNote, Label, type NoteAlign, Stat, type StatTone, StatusPill, Term, TIME_AXIS_RIGHT } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
 
 export { SWAP_GAS, TRANSFER_GAS };
@@ -384,6 +384,20 @@ export const HeroThroughputPanel = memo(function HeroThroughputPanel({
   );
 });
 
+/** The rail's six supporting figures are set as instrument readouts: flat on the card in light, inset
+ * and lit in dark, which is where the two designs part company. */
+const STAT_TONE: StatTone = "readout";
+
+/** A band head in the rail, on the chrome rule the rest of the site breaks sections with. */
+function RailBand({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex items-center gap-3 font-display text-[11px] font-medium uppercase tracking-[0.16em] text-ink-3">
+      {children}
+      <span className="h-px flex-1" style={{ background: "var(--chrome-rule)" }} aria-hidden="true" />
+    </div>
+  );
+}
+
 /** What the live throughput chart reads out without a pointer. */
 const THROUGHPUT_READOUT: ReadoutGroup[] = [{ title: "second", rows: throughputTooltipRows() }];
 
@@ -415,8 +429,8 @@ export const HERO_TERMS = {
  * older than COLLECTOR_LAG_S the number would mostly measure the collector,
  * so the stat becomes a warning pill that names the lag instead.
  */
-function Freshness({ sinceBlock, age }: { sinceBlock: number; age: number }) {
-  if (age <= COLLECTOR_LAG_S) return <Stat label="Since last block" value={<Figure ch={4}>{sinceBlock.toFixed(1)}</Figure>} unit="s" />;
+function Freshness({ sinceBlock, age, tone }: { sinceBlock: number; age: number; tone?: StatTone }) {
+  if (age <= COLLECTOR_LAG_S) return <Stat label="Since last block" value={<Figure ch={4}>{sinceBlock.toFixed(1)}</Figure>} unit="s" tone={tone} />;
   return (
     <div className="min-w-0" aria-live="polite">
       <Label>Since last block</Label>
@@ -434,10 +448,10 @@ function Freshness({ sinceBlock, age }: { sinceBlock: number; age: number }) {
  * A gas rate tile: the figure in a reserved box and the unit beside it, so the
  * SI prefix rides on the unit ("Mgas/s") and the number never carries a letter.
  */
-export function GasRateTile({ label, gasPerSecond }: { label: ReactNode; gasPerSecond: number | null }) {
-  if (gasPerSecond === null) return <Stat label={label} value="n/a" />;
+export function GasRateTile({ label, gasPerSecond, tone }: { label: ReactNode; gasPerSecond: number | null; tone?: StatTone }) {
+  if (gasPerSecond === null) return <Stat label={label} value="n/a" tone={tone} />;
   const parts = gasPerSecondParts(gasPerSecond, true);
-  return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.gasPerSecond}>{parts.value}</Figure>} unit={parts.unit} />;
+  return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.gasPerSecond}>{parts.value}</Figure>} unit={parts.unit} tone={tone} />;
 }
 
 /**
@@ -446,15 +460,16 @@ export function GasRateTile({ label, gasPerSecond }: { label: ReactNode; gasPerS
  * in the accessible description. `align` is which way the note opens: the right-hand tile of a row has to
  * open leftwards to stay inside the card.
  */
-export function CostTile({ label, eth, ethUsd, nowMs, align }: { label: ReactNode; eth: number; ethUsd: EthUsd | null; nowMs: number; align?: NoteAlign }) {
+export function CostTile({ label, eth, ethUsd, nowMs, align, tone }: { label: ReactNode; eth: number; ethUsd: EthUsd | null; nowMs: number; align?: NoteAlign; tone?: StatTone }) {
   const math = usdMath(eth, ethUsd, nowMs);
   if (math === null) {
-    return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.eth}>{formatEthFixed(eth)}</Figure>} unit="ETH" size="sm" />;
+    return <Stat label={label} value={<Figure ch={FIXED_WIDTH_CH.eth}>{formatEthFixed(eth)}</Figure>} unit="ETH" size="sm" tone={tone} />;
   }
   return (
     <Stat
       label={label}
       size="sm"
+      tone={tone}
       value={
         <HoverNote lines={[math.line, math.provenance]} description={math.description} align={align}>
           {/* The dollar sign sits outside the reserved box, so a changing digit never shifts it. */}
@@ -664,36 +679,26 @@ export function LiveHeroView({
   const age = sampleAge(snapshot.sampledAt, nowMs);
   const floorText = formatGwei(snapshot.minBaseFee);
   return (
-    <div className="vw-card p-5">
+    <div className="vw-card vw-lit p-5">
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="flex flex-col gap-4 lg:col-span-4">
-          <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
-            <div>
-              <Label>
-                <Term lines={HERO_TERMS.baseFee.lines}>{HERO_TERMS.baseFee.label}</Term>
-              </Label>
-              <div className="num mt-1 text-4xl leading-none tracking-tight text-ink sm:text-5xl">
-                <Figure ch={FIXED_WIDTH_CH.gwei} className="vw-hero">
-                  {formatGweiFixed(v.baseFeeGwei)}
-                </Figure>
-                <span className="ml-1.5 text-lg font-normal text-ink-2">gwei</span>
-              </div>
-            </div>
-            {/* The multiplier tile, with the dial above the figure and the colour now meaning something. */}
-            <FeeDial baseFeeGwei={v.baseFeeGwei} floorGwei={floorText} multiplier={v.multiplier} />
-          </div>
-          <div className="num text-xs text-ink-3">
-            floor {floorText} gwei · x <Figure ch={FIXED_WIDTH_CH.x}>{v.exponent.toFixed(4)}</Figure>
+          {/* The gauge carries the figure now: the arc is the instrument, the readout under it is what
+              the instrument reads, and nothing but the needle is drawn inside the arc. */}
+          <FeeGauge baseFeeGwei={v.baseFeeGwei} floorGwei={floorText} multiplier={v.multiplier} exponent={v.exponent} />
+
+          <RailBand>Chain</RailBand>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-5">
+            <Stat label="Block" value={formatInteger(snapshot.block.number)} tone={STAT_TONE} />
+            <Freshness sinceBlock={sinceBlock} age={age} tone={STAT_TONE} />
+            <GasRateTile label={<Term lines={HERO_TERMS.load10.lines}>{HERO_TERMS.load10.label}</Term>} gasPerSecond={v.gasPerSecond10} tone={STAT_TONE} />
+            <GasRateTile label={<Term lines={HERO_TERMS.load60.lines} align="end">{HERO_TERMS.load60.label}</Term>} gasPerSecond={v.gasPerSecond60} tone={STAT_TONE} />
           </div>
 
+          <RailBand>What it costs</RailBand>
           <div className="grid grid-cols-2 gap-x-4 gap-y-5">
-            <Stat label="Block" value={formatInteger(snapshot.block.number)} />
-            <Freshness sinceBlock={sinceBlock} age={age} />
-            <GasRateTile label={<Term lines={HERO_TERMS.load10.lines}>{HERO_TERMS.load10.label}</Term>} gasPerSecond={v.gasPerSecond10} />
-            <GasRateTile label={<Term lines={HERO_TERMS.load60.lines} align="end">{HERO_TERMS.load60.label}</Term>} gasPerSecond={v.gasPerSecond60} />
             {/* No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all. */}
-            <CostTile label={<Term lines={HERO_TERMS.send.lines}>{HERO_TERMS.send.label}</Term>} eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
-            <CostTile label={<Term lines={HERO_TERMS.swap.lines} align="end">{HERO_TERMS.swap.label}</Term>} eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} align="end" />
+            <CostTile label={<Term lines={HERO_TERMS.send.lines}>{HERO_TERMS.send.label}</Term>} eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} tone={STAT_TONE} />
+            <CostTile label={<Term lines={HERO_TERMS.swap.lines} align="end">{HERO_TERMS.swap.label}</Term>} eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} align="end" tone={STAT_TONE} />
           </div>
         </div>
 

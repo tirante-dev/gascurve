@@ -22,14 +22,19 @@ export function Label({ children }: { children: ReactNode }) {
   return <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-label">{children}</div>;
 }
 
-export function Stat({ label, value, unit, hint, size = "md" }: { label: ReactNode; value: ReactNode; unit?: ReactNode; hint?: ReactNode; size?: "sm" | "md" | "lg" }) {
+/** Whether a stat is set plainly on the card or as an instrument readout. Both resolve through tokens,
+ * and in light they resolve to the same thing, so the variant only shows itself in dark. */
+export type StatTone = "ink" | "readout";
+
+export function Stat({ label, value, unit, hint, size = "md", tone = "ink" }: { label: ReactNode; value: ReactNode; unit?: ReactNode; hint?: ReactNode; size?: "sm" | "md" | "lg"; tone?: StatTone }) {
   const valueClass = size === "lg" ? "text-3xl sm:text-4xl" : size === "sm" ? "text-base" : "text-xl";
+  const readout = tone === "readout";
   return (
-    <div className="min-w-0">
+    <div className={`min-w-0 ${readout ? "vw-stat-panel" : ""}`}>
       <Label>{label}</Label>
-      <div className={`num mt-1 leading-none text-ink ${valueClass}`}>
+      <div className={`num mt-1 leading-none ${readout ? "vw-readout-ink" : "text-ink"} ${valueClass}`}>
         {value}
-        {unit ? <span className="ml-1 text-[0.6em] font-normal text-ink-2">{unit}</span> : null}
+        {unit ? <span className={`ml-1 text-[0.6em] font-normal ${readout ? "vw-readout-unit" : "text-ink-2"}`}>{unit}</span> : null}
       </div>
       {hint ? <div className="mt-1 text-xs text-ink-3">{hint}</div> : null}
     </div>
