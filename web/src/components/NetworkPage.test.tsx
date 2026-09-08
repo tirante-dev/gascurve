@@ -87,10 +87,11 @@ describe("NetworkPage with a chain-id route", () => {
     expect(screen.queryByText(/Parameters changed at block/)).toBeNull();
     expect(seriesRefreshMock).not.toHaveBeenCalled();
     // A floor change is history the range must be refetched for, but it does not redefine the cards.
+    // Both askers refetch: the history section and the hero each hold a range of their own.
     liveOwnerActions = [action(1_233, "setMinimumL2BaseFee")];
     rerender(<NetworkPage network="robinhood" />);
     expect(screen.queryByText(/Parameters changed at block/)).toBeNull();
-    expect(seriesRefreshMock).toHaveBeenCalledTimes(1);
+    expect(seriesRefreshMock).toHaveBeenCalledTimes(2);
     liveOwnerActions = [action(1_234, "setGasPricingConstraints"), ...liveOwnerActions];
     rerender(<NetworkPage network="robinhood" />);
     const notice = screen.getByText(/Parameters changed at block/);
@@ -98,9 +99,9 @@ describe("NetworkPage with a chain-id route", () => {
     expect(notice).toHaveTextContent("setGasPricingConstraints");
     expect(within(notice).getByRole("link", { name: "See the owner actions." })).toHaveAttribute("href", "#owner");
     // The 30d and all-time ranges never refetch on their own, so the socket is what refreshes them.
-    expect(seriesRefreshMock).toHaveBeenCalledTimes(2);
+    expect(seriesRefreshMock).toHaveBeenCalledTimes(4);
     rerender(<NetworkPage network="robinhood" />);
-    expect(seriesRefreshMock).toHaveBeenCalledTimes(2);
+    expect(seriesRefreshMock).toHaveBeenCalledTimes(4);
   });
 
   it("lets every heading stand alone, with no section description under it", () => {

@@ -112,7 +112,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         <div className="relative isolate">
           <div className="vw-horizon" aria-hidden="true" />
           <Section id="live" title="Live">
-            <LiveHero network={name} live={smooth} status={live.status} model={model} />
+            <LiveHero network={name} live={smooth} status={live.status} model={model} ownerActions={live.ownerActions} />
           </Section>
         </div>
 

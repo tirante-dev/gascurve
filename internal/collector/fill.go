@@ -428,11 +428,13 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 }
 
 // endsInKnownShape reports whether the shape the replay reaches the end of a range with agrees with
-// the block stored after it: the state it continues from, with every recorded set inside the range
-// applied. A pricer change no recorded set explains (an owner call the log scan has not found yet,
-// or one whose block is only known to lie somewhere in the range) would otherwise be filled with the
-// shape in force before it, pricing every block after the change with the wrong model. Such a range
-// waits instead, and becomes fillable as soon as the set explaining it is recorded.
+// what is stored after it: the state it continues from, with every recorded set through the block
+// after the range applied. A change no recorded set explains would otherwise be filled with the
+// shape in force before it, pricing every block after it with the wrong model. The range waits
+// instead, and fills when the set explaining it is recorded. The sample taken at that block settles
+// it exactly, since it carries the targets and windows really in force; without one only the block
+// row is left, and it holds backlogs alone, so a change that keeps the constraint count passes
+// unseen, as it does wherever else only slots are known.
 func (f *Follower) endsInKnownShape(ctx context.Context, h hole, st *pricer.State) (bool, error) {
 	next, err := f.store.BlockByNumber(ctx, f.chainID, h.To+1)
 	if err != nil {
@@ -441,18 +443,63 @@ func (f *Follower) endsInKnownShape(ctx context.Context, h hole, st *pricer.Stat
 	if next == nil || !next.Known() || len(next.Backlogs) == 0 {
 		return true, nil
 	}
-	slots := len(st.Backlogs())
+	sample, err := f.store.StateSampleAt(ctx, f.chainID, h.To+1)
+	if err != nil {
+		return false, fmt.Errorf("state sample at %d: %w", h.To+1, err)
+	}
+	end := st.Clone()
 	f.mu.Lock()
 	for _, cs := range f.sets {
-		if cs.EffectiveBlock < h.Start() || cs.EffectiveBlock > h.To {
+		if cs.EffectiveBlock < h.Start() || cs.EffectiveBlock > h.To+1 {
 			continue
 		}
-		if entries, decodeErr := setEntries(cs); decodeErr == nil && len(entries) > 0 {
-			slots = len(entries)
+		// An observed set at the block after the range is the shape someone saw there, not a change
+		// pinned to it: it is the record of the very change this range cannot place. Only a set from
+		// an owner call says the block after the range is where the pricer changed.
+		if cs.EffectiveBlock == h.To+1 && cs.Source == model.SourceObserved {
+			continue
 		}
+		entries, decodeErr := setEntries(cs)
+		if decodeErr != nil {
+			continue
+		}
+		applyPricingChange(end, pricingChange{set: &setChange{block: cs.EffectiveBlock, entries: entries}})
 	}
 	f.mu.Unlock()
-	return slots == len(next.Backlogs), nil
+	if sample != nil && sample.BlockNumber == h.To+1 {
+		known, ok := sampledConstraints(sample)
+		if ok {
+			return sameConstraints(end, known), nil
+		}
+	}
+	return len(end.Backlogs()) == len(next.Backlogs), nil
+}
+
+// sampledConstraints reads a stored sample's constraints, false when it recorded none (a legacy
+// sample, or one written before the shape was stored).
+func sampledConstraints(sample *db.StateSample) ([]model.Constraint, bool) {
+	if len(sample.Constraints) == 0 {
+		return nil, false
+	}
+	var out []model.Constraint
+	if err := sample.Constraints.Unmarshal(&out); err != nil || len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// sameConstraints reports whether a replay state carries exactly the constraints a sample recorded,
+// backlogs aside.
+func sameConstraints(st *pricer.State, constraints []model.Constraint) bool {
+	if len(st.Constraints) != len(constraints) {
+		return false
+	}
+	for i, c := range constraints {
+		if st.Constraints[i].Target != c.Target || st.Constraints[i].Window != c.Window {
+			return false
+		}
+	}
+	return true
 }
 
 // markHoles applies the reasons pickHole decided on, matching entries by start so a range

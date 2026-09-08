@@ -1102,12 +1102,17 @@ func (tl *timeline) changesAt(number uint64, transaction bool) []pricingChange {
 
 func applyPricingChange(st *pricer.State, change pricingChange) {
 	switch {
-	case change.set != nil && len(change.set.entries) > 0:
-		// A set installed on a legacy chain switches the model at that block: the constraints price
-		// every block after it, so the legacy parameters go with it rather than staying to be applied
-		// again. A set carrying no constraint describes no model and leaves the state alone.
+	case change.set != nil:
+		// A set replaces the constraints wherever it lands. Installed on a legacy chain it switches the
+		// model at that block, so the legacy parameters go with it rather than staying to be applied
+		// again. A set carrying no constraint switches back, since a chain with none prices on the
+		// legacy model, but the call does not say with which parameters: the state keeps whatever it
+		// had, which on a chain that was using constraints is nothing, and the replay prices at the
+		// floor until a sampled shape contradicts it.
 		st.Constraints = stateFromEntries(change.set.entries, st.MinBaseFee).Constraints
-		st.Legacy = nil
+		if len(st.Constraints) > 0 {
+			st.Legacy = nil
+		}
 	case change.fee != nil:
 		st.MinBaseFee = new(big.Int).Set(change.fee.fee)
 	case change.legacy != nil && st.Legacy != nil:
