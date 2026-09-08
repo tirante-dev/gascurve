@@ -167,12 +167,13 @@ export function Term({ children, lines, align, alignSm, flow }: { children: stri
 const BIPS_NOTE = "basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.";
 
 /**
- * What to print where the pricer's saturating arithmetic ran out of int64 and the api sent its ceiling.
- * A double cannot hold that integer either, so 9223372036854775807 arrives as 9223372036854776000: the
- * digits are neither the value sent nor a quantity worth reading, and only the saturation is true.
+ * What to print past 2^53, where a JSON number stops carrying an exact integer: the digits that arrive
+ * are not the ones the api sent, so there is no figure to quote. The pricer's int64 ceiling lands here
+ * (9223372036854775807 reads back as 9223372036854776000), but the range is wider than saturation and
+ * the note must not claim more than the value proves.
  */
 const OFF_SCALE = "off scale";
-const OFF_SCALE_NOTE = "past int64, where the pricer's arithmetic saturates. Nothing narrower is known.";
+const OFF_SCALE_NOTE = "past 2^53, where a JSON number stops being exact, so these are not the digits the api sent. The pricer's int64 ceiling saturates into this range.";
 
 /**
  * A figure quoted in basis points, with the unit's definition and its decimal value a hover away. The
