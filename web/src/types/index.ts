@@ -187,9 +187,10 @@ export type SeriesPoint = {
 };
 
 /**
- * `verified`: one ArbOS version, and one the pricer has been measured against. `boundary`: the bucket
- * spans an upgrade, so the replay carried backlogs from one pricing model into the next. `unverified`:
- * one known version nobody has measured. `unknown`: a block recorded no version.
+ * `verified`: the measurement covers the bucket, whether it ran one ArbOS version or spanned an upgrade
+ * someone replayed through. `boundary`: it spans an upgrade nobody has replayed through, so the replay
+ * carried backlogs from one pricing model into the next unchecked. `unverified`: one known version
+ * nobody has measured. `unknown`: a block recorded no version.
  */
 export type ReplayFidelity = "verified" | "boundary" | "unverified" | "unknown";
 

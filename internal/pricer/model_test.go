@@ -51,6 +51,34 @@ func TestVerifiedCoversTheMeasuredVersionsOnly(t *testing.T) {
 	}
 }
 
+// A crossing is measured separately from either version it joins, because carrying backlogs from one
+// model into the next is the thing in question. Two measured versions are not enough on their own.
+func TestVerifiedRangeNeedsTheCrossingMeasuredToo(t *testing.T) {
+	measured := VerifiedVersions()
+	for _, v := range measured {
+		if !VerifiedRange(v, v) {
+			t.Errorf("VerifiedRange(%d, %d) = false, want true", v, v)
+		}
+	}
+	unmeasured := measured[len(measured)-1] + 1
+	for _, tt := range [][2]uint64{{measured[0], unmeasured}, {unmeasured, unmeasured}, {0, 0}} {
+		if VerifiedRange(tt[0], tt[1]) {
+			t.Errorf("VerifiedRange(%d, %d) = true, want false", tt[0], tt[1])
+		}
+	}
+	crossings := 0
+	for _, low := range measured {
+		for _, high := range measured {
+			if low < high && VerifiedRange(low, high) {
+				crossings++
+			}
+		}
+	}
+	if crossings == 0 {
+		t.Error("no crossing is recorded as measured, so no bucket spanning an upgrade can be verified")
+	}
+}
+
 // A header that recorded no version is no evidence against the constraint set the collector holds, so
 // it must not be read as a chain too old for the model.
 func TestSupportsConstraintsTreatsAnUnrecordedVersionAsOpen(t *testing.T) {

@@ -636,7 +636,7 @@ func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) (mo
 		MinBaseFee: b.MinBaseFee.StringPtr(), FloorFeesWei: floorFees, SurplusFeesWei: surplusFees, PosterFeesWei: posterFees,
 		ConstraintSetID: setID, ReplayErrorBips: b.ReplayErrorBips,
 		ArbOSVersionMin: arbosMin, ArbOSVersionMax: arbosMax,
-		ReplayFidelity: model.ReplayFidelity(arbosMin, arbosMax, pricer.Verified),
+		ReplayFidelity: model.ReplayFidelity(arbosMin, arbosMax, pricer.VerifiedRange),
 	}, true
 }
 
@@ -673,7 +673,7 @@ func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint
 			ExponentBips: b.ExponentBips, ConstraintBips: int64s(b.ConstraintBips), Backlogs: b.Backlogs.Uint64s(), BacklogsMax: b.Backlogs.Uint64s(),
 			MinBaseFee: b.MinBaseFee.StringPtr(), ConstraintSetID: setIDAt(sets, b.Number, len(b.Backlogs)), ReplayErrorBips: replayError(b),
 			ArbOSVersionMin: arbos, ArbOSVersionMax: arbos,
-			ReplayFidelity: model.ReplayFidelity(arbos, arbos, pricer.Verified),
+			ReplayFidelity: model.ReplayFidelity(arbos, arbos, pricer.VerifiedRange),
 		}
 		if b.DestinationsKnown() {
 			posterGas := new(big.Int).SetInt64(b.PosterGas.Int64)
@@ -870,7 +870,8 @@ func (a *acc) addArbOS(v sql.NullInt64) {
 	if a.unknownArbOS {
 		return
 	}
-	if !v.Valid || v.Int64 < 0 {
+	// Version zero is what an unrecorded header decodes to, never a version a chain ran.
+	if !v.Valid || v.Int64 <= 0 {
 		a.arbosMin, a.arbosMax, a.unknownArbOS = 0, 0, true
 		return
 	}
@@ -922,7 +923,7 @@ func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
 		ExponentBips: a.exponent, ConstraintBips: a.constraintBips, Backlogs: a.backlogs, BacklogsMax: a.maxBacklog,
 		MinBaseFee: a.minBaseFee, ConstraintSetID: a.setID, ReplayErrorBips: a.errBips,
 		ArbOSVersionMin: arbosMin, ArbOSVersionMax: arbosMax,
-		ReplayFidelity: model.ReplayFidelity(arbosMin, arbosMax, pricer.Verified),
+		ReplayFidelity: model.ReplayFidelity(arbosMin, arbosMax, pricer.VerifiedRange),
 	}
 	if !a.unknownPoster {
 		p.PosterGas = &a.posterGas

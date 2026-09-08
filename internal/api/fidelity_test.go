@@ -57,7 +57,8 @@ func TestBucketPointReportsFidelity(t *testing.T) {
 		wantSpan bool
 	}{
 		{"one measured version", arbos(61), arbos(61), model.FidelityVerified, false},
-		{"across an upgrade", arbos(51), arbos(61), model.FidelityBoundary, true},
+		{"across a crossing the measurement replayed through", arbos(51), arbos(61), model.FidelityVerified, true},
+		{"across a crossing nobody replayed through", arbos(61), arbos(unmeasured), model.FidelityBoundary, true},
 		{"a version nobody measured", arbos(unmeasured), arbos(unmeasured), model.FidelityUnverified, false},
 		{"nothing recorded", sql.NullInt64{}, sql.NullInt64{}, model.FidelityUnknown, false},
 	}

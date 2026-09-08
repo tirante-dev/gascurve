@@ -8,14 +8,20 @@ import "sort"
 // the model it is about to apply against the block rather than assume it.
 const FirstConstraintVersion uint64 = 50
 
-// verifiedVersions are the ArbOS versions this package has been measured against on a live chain, one
-// entry per row of the table in docs/SPEC.md section 7.1. It is a set and not a range on purpose:
-// a version nobody has run is a version nobody has checked, and adding one here is a claim that
-// belongs with a new measurement rather than with the upgrade that produced it.
-var verifiedVersions = map[uint64]bool{
-	51: true,
-	61: true,
-}
+// verifiedVersions are the ArbOS versions this package has been measured against on a live chain, and
+// verifiedCrossings the upgrades measured by replaying straight through them. Both are sets and not
+// ranges on purpose: a version nobody has run is a version nobody has checked, and adding an entry is
+// a claim that belongs with a new measurement rather than with the upgrade that produced it. One row
+// of the table in docs/SPEC.md section 7.1 backs each entry.
+var (
+	verifiedVersions = map[uint64]bool{
+		51: true,
+		61: true,
+	}
+	verifiedCrossings = map[[2]uint64]bool{
+		{51, 61}: true,
+	}
+)
 
 // Names of the models, as the api and the docs spell them.
 const (
@@ -63,6 +69,17 @@ func Available(arbosVersion uint64) Model {
 // Version 0 is unknown rather than unverified, so it answers false as well.
 func Verified(arbosVersion uint64) bool {
 	return verifiedVersions[arbosVersion]
+}
+
+// VerifiedRange reports whether a replay over blocks running low through high is covered: both ends
+// measured, and, where they differ, the crossing between them measured by replaying through it. A
+// crossing is its own measurement because carrying backlogs from one model into the next is the thing
+// in question, not either model on its own.
+func VerifiedRange(low, high uint64) bool {
+	if !verifiedVersions[low] || !verifiedVersions[high] {
+		return false
+	}
+	return low == high || verifiedCrossings[[2]uint64{low, high}]
 }
 
 // VerifiedVersions lists the measured versions, ascending, for anything that reports what the replay

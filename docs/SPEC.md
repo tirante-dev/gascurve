@@ -233,9 +233,27 @@ Two things follow immediately. Arbitrum One's constraint model starts at 419,260
 
 **The measurement.** `internal/collector/fidelity_test.go` (build tag `fidelity`, `make test-fidelity`) replays a window of real headers with `internal/pricer` and scores each block against the header that carries its fee, shifted by one exactly as the collector stores it. Arbitrum One is the controlled case: one `setGasPricingConstraints` at block 419,260,973 (six constraints, all starting backlogs 0), one `setMinimumL2BaseFee` at 419,260,697 (0.02 gwei), and **neither changed again** through the 51 → 61 upgrade. Same parameters, same traffic profile, one variable.
 
-Each window starts at a block priced exactly at the floor, so every backlog is under its own exponent threshold (`W_i·T_i/10_000`, at most 86.4 M gas on the 86,400 s constraint) and the seed of all zeros is wrong by at most that plus one block of gas. Every constraint drains that in seconds, so the first 200 blocks are burned in and not scored.
+The starting backlogs come from one of two places, and the `Seed` column says which. A **floor**-seeded window starts at a block priced exactly at the floor, which puts every backlog under its own exponent threshold (`W_i·T_i/10_000`, at most 86.4 M gas on the 86,400 s constraint), so a seed of all zeros is wrong by at most that plus one block of gas; every constraint drains that in seconds, and the first 200 blocks are burned in and not scored either way. A **given** seed is read straight out of `getGasPricingConstraints` at the block before the window, which archive state serves for the last few minutes, and is ground truth. The harness also has a fitted-seed fallback for a window with neither; it does not converge reliably on six coupled constraints, so nothing here rests on one and the harness records the mode it used.
 
-RESULTS_TABLE_PLACEHOLDER
+| Window | Chain | From, blocks | ArbOS | Seed | Peak fee | Scored | Bit-exact | Median | p99 | Max |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `rh-arbos51` | Robinhood | 62,000, 2,000 | 51 | floor | 1.02× floor | 1,800 | 99.78% | 0 | 0 | 1 |
+| `rh-cross-51-61` | Robinhood | 62,000, 5,000 | 51 → 61 | floor | 1.02× floor | 4,800 | 99.79% | 0 | 0 | 1 |
+| `rh-arbos61` | Robinhood | 64,715, 2,000 | 61 | floor | 1.01× floor | 1,800 | 99.72% | 0 | 0 | 1 |
+| `rh-arbos61-congested` | Robinhood | 57,860,310, 2,000 | 61 | given | 12.51× floor | 1,800 | 99.89% | 0 | 0 | 1 |
+| `arb1-arbos51-early` | Arbitrum One | 420,009,996, 2,000 | 51 | floor | 1.06× floor | 1,800 | 100.00% | 0 | 0 | 0 |
+| `arb1-arbos51-late` | Arbitrum One | 496,511,772, 2,000 | 51 | floor | 1.04× floor | 1,800 | 99.72% | 0 | 0 | 48 |
+| `arb1-cross-51-61` | Arbitrum One | 496,576,465, 4,000 | 51 → 61 | floor | 1.14× floor | 3,800 | 99.66% | 0 | 0 | 52 |
+| `arb1-arbos61` | Arbitrum One | 496,582,627, 2,000 | 61 | floor | 1.11× floor | 1,800 | 99.94% | 0 | 0 | 1 |
+| `arb1-arbos61-recent` | Arbitrum One | 502,903,332, 2,000 | 61 | floor | 1.18× floor | 1,800 | 99.89% | 0 | 0 | 24 |
+
+Measured on 2026-09-08. `scored` is the window less its burn-in; `bit-exact` is the share of blocks whose predicted fee equalled the header exactly; the error columns are `|predicted - actual| * 10_000 / actual`.
+
+**The answer is that it is fine, and the crossing is not the hard part.** Median error is 0 bips everywhere and p99 is 0 bips everywhere: the replay reproduces the chain exactly for well over 99% of blocks on both sides of the boundary and through it. Crossing the boundary costs nothing measurable. On Arbitrum One, where the constraint set and floor are identical either side, the crossing window's worst block (52 bips, 0.5%) is no worse than the pure ArbOS 51 window just below it (48 bips), and both are worse than the pure ArbOS 61 windows. That is the signature of unanchored replay drift, which grows with the distance from a known starting state, not of a model change: a model change would move the median, and the median does not move.
+
+`rh-arbos61-congested` is the window that rules out the obvious objection to the rest. The others sit within a couple of percent of the floor, where `P4(x)` is nearly linear and a changed polynomial would barely show. That one starts from backlogs read out of the precompile at block 57,860,309 and runs at up to 12.5 times the floor, where the fee grows like `x⁴/24`, and it is 99.89% bit-exact with a maximum error of 1 bip.
+
+What cannot be measured is ArbOS 51 under real congestion: neither chain was congested while running it (Robinhood's ArbOS 51 era ended before its public launch, and Arbitrum One stayed within 6% of the floor). That is a limit of the chain history rather than of the method, and it is the one thing the table does not settle.
 
 **Re-running it.** Windows are JSON; the recorded constraint set comes from the owner-action history, never from a live call, since a live call reports today's set:
 
@@ -246,11 +264,13 @@ make test-fidelity FIDELITY_URL=https://arb1.arbitrum.io/rpc FIDELITY_CPS=4 \
     "windows":[9,52,329,2105,13485,86400],"seed":[0,0,0,0,0,0],"minFee":"20000000"}]'
 ```
 
-**What the collector does with it.** `internal/pricer` records the versions this measurement covers (`pricer.VerifiedVersions`), a set rather than a range: a version nobody has run is a version nobody has checked, and adding one is a claim that belongs with a new measurement. Three consequences:
+**What the collector does with it.** `internal/pricer` records what this measurement covers: the versions replayed (`pricer.VerifiedVersions`) and, separately, the upgrades replayed straight through (`51 → 61`). A crossing earns its own entry because carrying backlogs from one model into the next is the thing in question, not either model alone; two measured versions on their own do not make the crossing between them measured. Both are sets rather than ranges, since a version nobody has run is a version nobody has checked. Three consequences:
 
-- **Refuse, do not guess.** A replay holding a constraint set that meets a block whose header says ArbOS is below 50 stops. The range is recorded as a missing range with reason `unsupported model` and left unpriced, the same answer a range with no state to replay from gets. This is the case Arbitrum One below block 419,260,688 falls into.
-- **Carry the caveat.** Every block row stores its version and every bucket the range of versions folded into it. `/series` reports `arbosVersionMin`, `arbosVersionMax` and a `replayFidelity` of `verified`, `boundary` (the bucket spans an upgrade), `unverified` (one version, unmeasured) or `unknown` (a block recorded none). The web app marks the first two with a counter-hatch and a caption; `unknown` draws plainly, because it is most of a database written before the version was stored and shading all of it would say something the data does not.
+- **Refuse, do not guess.** A replay holding a constraint set that meets a block whose header says ArbOS is below 50 stops. The range is recorded as a missing range with reason `unsupported model` and left unpriced, the same answer a range with no state to replay from gets. This is the case Arbitrum One below block 419,260,688 falls into, and it is the one place the old warning understated the problem: that stretch was never drift, it was a different model.
+- **Carry the caveat, and only where it is one.** Every block row stores its version and every bucket the range of versions folded into it. `/series` reports `arbosVersionMin`, `arbosVersionMax` and a `replayFidelity` of `verified` (the measurement covers it, spanning `51 → 61` included), `boundary` (it spans an upgrade nobody replayed through), `unverified` (one version, unmeasured) or `unknown` (a block recorded none). The web app marks `boundary` and `unverified` with a counter-hatch and a caption. `unknown` draws plainly, because it is most of a database written before the version was stored and shading all of it would say something the data does not, and a `51 → 61` span draws plainly because the table above says it may.
 - **An upgrade is self-announcing.** `/live` reports `arbosVersion` and `replayFidelity` from the sampled head, so the day a chain moves to a version nobody has measured, the site says so without a redeploy.
+
+**For an operator staring at a nine-day genesis backfill**, the practical answer on Robinhood is: believe all of it. The chain has run ArbOS 51 and 61 only, both measured, with the one crossing between them measured too, so no bucket the backfill produces is marked. On Arbitrum One, believe everything from block 419,260,688 up; below that the collector will decline to reconstruct rather than hand back numbers from the wrong model.
 
 ---
 

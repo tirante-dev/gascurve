@@ -1106,7 +1106,7 @@ func liveArbOSVersion(h nitro.Header) *uint64 {
 
 func liveFidelity(h nitro.Header) string {
 	v := liveArbOSVersion(h)
-	return model.ReplayFidelity(v, v, pricer.Verified)
+	return model.ReplayFidelity(v, v, pricer.VerifiedRange)
 }
 
 func buildSnapshot(chainID uint64, sample *nitro.Sample, replayErrorBips int64, gps model.GasPerSecond, computeGPS model.NullableGasPerSecond, l1 *model.L1, accounts *model.Accounts, ethUsd *model.EthUsd) model.LiveSnapshot {

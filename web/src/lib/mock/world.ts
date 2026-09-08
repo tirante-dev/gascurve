@@ -66,13 +66,15 @@ export type WorldRecord = {
   arbosMax: number;
 };
 
-/** The ArbOS versions the pricer is measured against, mirroring internal/pricer so the mock reports the
- * fidelity a real api would. */
+/** The ArbOS versions and the upgrades the pricer is measured against, mirroring internal/pricer so the
+ * mock reports the fidelity a real api would. */
 export const MOCK_VERIFIED_VERSIONS: readonly number[] = [51, 61];
+export const MOCK_VERIFIED_CROSSINGS: readonly (readonly [number, number])[] = [[51, 61]];
 
 export function mockFidelity(min: number, max: number): ReplayFidelity {
-  if (min !== max) return "boundary";
-  return MOCK_VERIFIED_VERSIONS.includes(min) ? "verified" : "unverified";
+  const ends = MOCK_VERIFIED_VERSIONS.includes(min) && MOCK_VERIFIED_VERSIONS.includes(max);
+  if (ends && (min === max || MOCK_VERIFIED_CROSSINGS.some(([a, b]) => a === min && b === max))) return "verified";
+  return min === max ? "unverified" : "boundary";
 }
 
 export function isoToUnix(iso: string): number {
@@ -434,6 +436,7 @@ export class MockWorld {
       exponentBips: exponent,
       minBaseFee: this.minFee.toString(),
       anchored,
+      arbosVersion: this.arbosAt(ts),
     };
     this.blocks.push(block);
     this.lastFee = fee;

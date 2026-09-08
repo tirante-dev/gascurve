@@ -5,14 +5,11 @@ import (
 	"github.com/tirante-dev/gascurve/internal/pricer"
 )
 
-// unsupportedModel reports the first header a constraint replay must not price, and how far the run of
-// such headers reaches. Nitro records the ArbOS version that produced a block in its mix digest, so a
-// block older than the multi-constraint pricer says so itself. Pricing one with a constraint set is not
-// drift the replay error would show, it is a different model: the range is left unpriced instead, the
-// same answer a range with no state to replay from gets.
-//
-// A header carrying no version at all is not evidence and never triggers this, and neither is a legacy
-// replay state, which is the model those blocks actually ran.
+// unsupportedModel reports the lowest and highest header a constraint replay must not price: blocks
+// whose own header says ArbOS is older than the multi-constraint pricer. Pricing one with a constraint
+// set is not drift the replay error would show, it is a different model, so the range is left unpriced
+// instead. A header carrying no version is not evidence and never triggers this, and neither is a
+// legacy replay state, which is the model those blocks actually ran.
 func unsupportedModel(st *pricer.State, headers []nitro.Header) (from, to uint64, found bool) {
 	if st == nil || st.IsLegacy() {
 		return 0, 0, false

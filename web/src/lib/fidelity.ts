@@ -26,7 +26,7 @@ export function unvouchedKind(point: Versioned): UnvouchedKind | null {
   return fidelity === "boundary" || fidelity === "unverified" ? fidelity : null;
 }
 
-export const BOUNDARY_LABEL = "across an ArbOS upgrade";
+export const BOUNDARY_LABEL = "across an unmeasured ArbOS upgrade";
 
 export const UNVERIFIED_LABEL = "unverified pricing model";
 
@@ -48,7 +48,7 @@ export function versionRange(point: Versioned): string | null {
 export function unvouchedNote(kind: UnvouchedKind, versions: string | null): string {
   if (kind === "boundary") {
     const span = versions === null ? "an ArbOS upgrade" : `ArbOS ${versions}`;
-    return `spans ${span}; the replay crossed a pricing model change`;
+    return `spans ${span}; nobody has replayed through that upgrade`;
   }
   const version = versions === null ? "this ArbOS version" : `ArbOS ${versions}`;
   return `the pricer has not been measured against ${version}`;

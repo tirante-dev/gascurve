@@ -55,18 +55,18 @@ describe("versionRange", () => {
 
 describe("notes", () => {
   it("says which fact a bucket is marked for", () => {
-    expect(fidelityNote({ replayFidelity: "boundary", arbosVersionMin: 51, arbosVersionMax: 61 })).toBe("spans ArbOS 51 to 61; the replay crossed a pricing model change");
+    expect(fidelityNote({ replayFidelity: "boundary", arbosVersionMin: 61, arbosVersionMax: 62 })).toBe("spans ArbOS 61 to 62; nobody has replayed through that upgrade");
     expect(fidelityNote({ replayFidelity: "unverified", arbosVersionMin: 62, arbosVersionMax: 62 })).toBe("the pricer has not been measured against ArbOS 62");
     expect(fidelityNote({ replayFidelity: "verified" })).toBeNull();
   });
 
   it("still says it without the version numbers", () => {
-    expect(unvouchedNote("boundary", null)).toBe("spans an ArbOS upgrade; the replay crossed a pricing model change");
+    expect(unvouchedNote("boundary", null)).toBe("spans an ArbOS upgrade; nobody has replayed through that upgrade");
     expect(unvouchedNote("unverified", null)).toBe("the pricer has not been measured against this ArbOS version");
   });
 
   it("reads a hovered chart row", () => {
-    expect(fidelityRowNote({ fidelity: "boundary", arbosVersions: "51 to 61" })).toContain("spans ArbOS 51 to 61");
+    expect(fidelityRowNote({ fidelity: "boundary", arbosVersions: "61 to 62" })).toContain("spans ArbOS 61 to 62");
     expect(fidelityRowNote({ fidelity: "unverified", arbosVersions: 7 })).toBe("the pricer has not been measured against this ArbOS version");
     expect(fidelityRowNote({ fidelity: null })).toBeNull();
     expect(fidelityRowNote({})).toBeNull();

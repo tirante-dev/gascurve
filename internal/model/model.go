@@ -201,11 +201,11 @@ type BlockPoint struct {
 
 // Replay fidelity of a bucket: what the ArbOS versions behind it say the replay is worth.
 const (
-	// FidelityVerified: every block ran one ArbOS version, and that version is one the pricer has been
-	// measured against (docs/SPEC.md section 7.1).
+	// FidelityVerified: the measurement covers the bucket, whether it ran one ArbOS version or spanned
+	// an upgrade someone replayed through (docs/SPEC.md section 7.1).
 	FidelityVerified = "verified"
-	// FidelityBoundary: the bucket spans an ArbOS upgrade, so the replay carried backlogs from one
-	// pricing model into the next with nothing recording the change.
+	// FidelityBoundary: the bucket spans an upgrade nobody has replayed through, so the replay carried
+	// backlogs from one pricing model into the next with nothing having checked that it may.
 	FidelityBoundary = "boundary"
 	// FidelityUnverified: one known version, outside the measured range. The replay still ran; nobody
 	// has checked it against this version of the model.
@@ -214,19 +214,20 @@ const (
 	FidelityUnknown = "unknown"
 )
 
-// ReplayFidelity classifies a bucket from the ArbOS versions of the blocks folded into it. verified is
-// deliberately the narrowest answer: a bucket has to be wholly inside one measured version to earn it.
-func ReplayFidelity(minVersion, maxVersion *uint64, verified func(uint64) bool) string {
+// ReplayFidelity classifies a bucket from the ArbOS versions of the blocks folded into it. verified
+// answers for a whole range, so a bucket that spans an upgrade someone measured by replaying through
+// it is verified like any other: the point is what was measured, not whether a boundary exists.
+func ReplayFidelity(minVersion, maxVersion *uint64, verified func(low, high uint64) bool) string {
 	if minVersion == nil || maxVersion == nil {
 		return FidelityUnknown
+	}
+	if verified(*minVersion, *maxVersion) {
+		return FidelityVerified
 	}
 	if *minVersion != *maxVersion {
 		return FidelityBoundary
 	}
-	if !verified(*minVersion) {
-		return FidelityUnverified
-	}
-	return FidelityVerified
+	return FidelityUnverified
 }
 
 // SeriesPoint is one bucket of a Series, its pricing fields describing the bucket's last block.
