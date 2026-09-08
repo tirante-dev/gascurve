@@ -728,21 +728,21 @@ describe("DataFooter", () => {
   });
 
   it("says off scale rather than quoting int64 max, and counts one bucket as one", () => {
-    // The api saturates replay error at int64 max, which a JSON number cannot
-    // hold: printed it reads 9,223,372,036,854,776,000 bips, a figure neither
-    // the api nor the pricer ever produced.
+    // The api saturates replay error at int64 max, which survives the wire but
+    // not the parse into a double: printed it reads 9,223,372,036,854,776,000
+    // bips, a figure neither the api nor the pricer ever produced.
     const saturated: Series = { ...history, points: [history.points[0], { ...history.points[1], replayErrorBips: 9_223_372_036_854_775_807 }] };
     render(<DataFooter snapshot={null} series={saturated} networkInfo={null} status="open" apiStatus={null} now={0} />);
     expect(screen.queryByText(/9,223,372,036,854,776,000/)).toBeNull();
     expect(screen.getByText("off scale")).toBeInTheDocument();
-    expect(screen.getByText("past 2^53, where a JSON number stops being exact, so these are not the digits the api sent. The pricer's int64 ceiling saturates into this range.")).toBeInTheDocument();
-    expect(screen.getByText("off scale: past 2^53, where a JSON number stops being exact, so these are not the digits the api sent. The pricer's int64 ceiling saturates into this range. basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.")).toBeInTheDocument();
+    expect(screen.getByText("past 2^53, where a browser's numbers stop being exact, so these are not the digits the api sent. The pricer's int64 ceiling saturates into this range.")).toBeInTheDocument();
+    expect(screen.getByText("off scale: past 2^53, where a browser's numbers stop being exact, so these are not the digits the api sent. The pricer's int64 ceiling saturates into this range. basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.")).toBeInTheDocument();
     expect(screen.getByText("max in range").nextElementSibling).toHaveTextContent("(1 bucket above 2% is an estimate)");
   });
 
   it("says off scale below int64 too, wherever the digits stopped being the ones sent", () => {
     // 2^53 + 1 is a perfectly ordinary int64 that the api never saturated, and
-    // it still arrives as 9007199254740992: the cutoff is where JSON stops
+    // it still parses as 9007199254740992: the cutoff is where a double stops
     // being exact, not where the pricer stops counting.
     const inexact: Series = { ...history, points: [history.points[0], { ...history.points[1], replayErrorBips: 9_007_199_254_740_993 }] };
     render(<DataFooter snapshot={null} series={inexact} networkInfo={null} status="open" apiStatus={null} now={0} />);
