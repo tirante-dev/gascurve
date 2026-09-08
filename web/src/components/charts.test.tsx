@@ -102,6 +102,14 @@ describe("SeriesCharts", () => {
     expect(screen.getByText("2026-09-06 02:21 CDT")).toBeInTheDocument();
   });
 
+  it("keeps every chart inside its card on a phone rather than making it scroll sideways", () => {
+    render(<SeriesCharts network="robinhood" range="24h" series={series} loading={false} model="constraints" />);
+    for (const figure of screen.getAllByRole("figure")) {
+      const frame = figure.firstElementChild as HTMLElement;
+      expect(frame.style.minWidth).toMatch(/^min\(\d+px, 100%\)$/);
+    }
+  });
+
   it("draws the window that was asked for and shades what was never indexed", () => {
     // An hour of window with only the last three minutes indexed: the buckets
     // must not spread over the whole axis as though the hour were flat.
