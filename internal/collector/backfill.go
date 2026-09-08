@@ -312,7 +312,10 @@ func (f *Follower) resolveDepth(ctx context.Context, c *backfillCursor, gen uint
 	f.mu.Lock()
 	resolved, origin := f.depthResolved, f.scanOrigin
 	f.mu.Unlock()
-	resolve := !resolved || c.DepthTarget == 0
+	// A cursor with a floor but no position under it is one a rewind or a discard has just reset. Its
+	// floor is kept as the ratchet, but the resolution behind it is stale: a head that rolled back far
+	// enough leaves a target above it, which would report the backfill done over an empty chain.
+	resolve := !resolved || c.DepthTarget == 0 || cursorFloor(c) == 0
 	target := c.DepthTarget
 	if resolve {
 		if err := f.resolveDepthTarget(ctx, c); err != nil {
@@ -446,14 +449,17 @@ func (f *Follower) heldFloor(c *backfillCursor) uint64 {
 }
 
 // resetTarget is the floor a cursor about to be reset leaves behind: the one it was asked to reach,
-// raised under a held depth to where its walk had got. A reset can land on a tick before the first
-// backfill step resolves the hold, and preserving the target verbatim there would hand the rebuilt
-// walk the whole descent the hold was ending. Lock free: called inside the rewind's transaction.
+// except under a held depth, where it is the bottom of the history that reset just deleted. A reset
+// can land on a tick before the first backfill step resolves the hold, so the target the cursor still
+// carries is the previous configuration's and rebuilding to it would hand the walk back the whole
+// descent the hold was ending. The bottom is End rather than the run in flight's own floor: that run
+// will never finish now, so the history above it is where the contiguous part stops. Lock free, since
+// the rewind calls it inside its transaction.
 func (f *Follower) resetTarget(c *backfillCursor) uint64 {
-	if !f.cfg.BackfillDepth.IsHold() {
+	if !f.cfg.BackfillDepth.IsHold() || c.End == 0 {
 		return c.recordedTarget()
 	}
-	return max(c.recordedTarget(), cursorFloor(c))
+	return c.End
 }
 
 // checkCursor runs once per process: an active live-model segment (SetID 0) that was not verified

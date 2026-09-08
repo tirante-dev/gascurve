@@ -867,6 +867,84 @@ func TestBackfillDepthHoldWhenAResetBeatsIt(t *testing.T) {
 	}
 }
 
+// TestResetTargetKeepsTheBottomOfTheHistory: what a reset cursor leaves behind.
+// Under a held depth it is the bottom of the history the reset deleted, which
+// is End and not the run in flight's own floor, since that run will never
+// finish and the blocks it wrote sit under a gap. Every other depth keeps the
+// floor it was asked for, which is what a duration and genesis both want.
+func TestResetTargetKeepsTheBottomOfTheHistory(t *testing.T) {
+	f := newTestFollower(t, newFakeRPC(1000), dbtest.New())
+	for _, tc := range []struct {
+		name  string
+		depth config.Depth
+		c     backfillCursor
+		want  uint64
+	}{
+		{"a run in flight stops at the history above it", config.Hold,
+			backfillCursor{Active: true, SegStart: 800, Next: 830, End: 900, DepthTarget: 1}, 900},
+		{"a walk between runs stops where it is", config.Hold,
+			backfillCursor{End: 900, DepthTarget: 1}, 900},
+		{"a walk bottomed below the floor asked for keeps what it built", config.Hold,
+			backfillCursor{End: 500, DepthTarget: 950}, 500},
+		{"nothing built falls back to the floor asked for", config.Hold,
+			backfillCursor{DepthTarget: 700}, 700},
+		{"a cursor written before the target existed reads its floor", config.Hold,
+			backfillCursor{DepthStart: 500}, 500},
+		{"a duration keeps the floor asked for", config.Depth(time.Hour),
+			backfillCursor{Active: true, SegStart: 800, End: 900, DepthTarget: 1}, 1},
+		{"genesis keeps the floor asked for", config.Genesis,
+			backfillCursor{End: 900, DepthTarget: 1}, 1},
+	} {
+		f.cfg.BackfillDepth = tc.depth
+		if got := f.resetTarget(&tc.c); got != tc.want {
+			t.Fatalf("%s: %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestBackfillDepthResolvesAgainAfterAReset: a head that rolls back far enough
+// leaves the floor resolved before it above the chain, which would report the
+// backfill done over an empty one. The floor a reset preserves is the ratchet,
+// not a resolution: it is compared against a fresh cutoff rather than standing
+// in for one.
+func TestBackfillDepthResolvesAgainAfterAReset(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Depth(30 * time.Second) // block 700 at head 1000
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, f, 200)
+	c, err := f.loadCursor(ctx)
+	if err != nil || c.DepthTarget != 700 {
+		t.Fatalf("first floor: %+v %v", c, err)
+	}
+	// The node comes back on a shorter chain, below the backfill's top.
+	rpc.fork(950, "d")
+	rpc.setHead(990)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = f.loadCursor(ctx); err != nil || c.Top != 0 || c.DepthTarget != 700 {
+		t.Fatalf("the reset keeps the floor as the ratchet: %+v %v", c, err)
+	}
+	// The rollback tick rewinds and samples nothing; the next one re-establishes
+	// the live head the backfill needs before it decides anything.
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	if _, err := f.BackfillStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = f.loadCursor(ctx); err != nil || c.DepthTarget != 690 {
+		t.Fatalf("the window is measured back from the head the chain now has: %+v %v", c, err)
+	}
+}
+
 // TestBackfillDepthHoldOutlivesADiscardedCursor: the other reset. An
 // unverified live-model segment from an older collector is thrown away with
 // its buckets, and the floor the hold recorded has to survive that too, or the
