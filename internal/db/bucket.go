@@ -13,6 +13,16 @@ import (
 // ResolutionOrder fixes the fold order so output is deterministic.
 var ResolutionOrder = []string{Resolution1m, Resolution15m, Resolution1h}
 
+// ResolutionOf names the stored resolution of a width, when one of them is that wide.
+func ResolutionOf(width time.Duration) (string, bool) {
+	for _, name := range ResolutionOrder {
+		if Resolutions[name] == width {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 // BucketBuilder aggregates block rows into one bucket. It is the single definition of the bucket
 // arithmetic, shared by the collector's folds, the in-memory store and the tests that pin the SQL
 // rebuild to it.

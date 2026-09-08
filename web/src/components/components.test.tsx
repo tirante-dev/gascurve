@@ -283,6 +283,10 @@ describe("LiveHero", () => {
     expect(screen.getByRole("figure", { name: /^Compute gas used per second in .* with each constraint target/ })).toBeInTheDocument();
     expect(screen.getByText("Network load per bucket against each target in force, 24h")).toBeInTheDocument();
     expect(screen.getByText(/^· compute gas per second · /)).toBeInTheDocument();
+    // The band the api measured is named in the caption, because what it is a spread of changes with the range.
+    const banded = { ...history, spreadSeconds: 1, points: history.points.map((p) => ({ ...p, computeGasPerSecondMin: 1, computeGasPerSecondMax: 9 })) };
+    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={blocks} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" series={banded} model="constraints" />);
+    expect(screen.getByText(/· min to max per second$/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=24h");
   });
   it("draws the canonical blocks after a reorg, not the orphaned ones", () => {

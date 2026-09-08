@@ -19,6 +19,12 @@ const maxBlockPoints = 2000
 
 const stepDownWidth = 5 * time.Second
 
+// The resolutions the 1h range serves from block rows rather than from stored buckets.
+const (
+	resolutionBlock   = "block"
+	resolutionStepped = "5s"
+)
+
 // seriesRange describes one supported range and its resolutions.
 type seriesRange struct {
 	name            string
@@ -28,6 +34,10 @@ type seriesRange struct {
 	batchStep       time.Duration // 0 = one point per batch report
 	batchResolution string
 	l1Step          time.Duration
+	// spreadUnit is the width the points' compute rate spread is measured over: a second, read from
+	// the block rows, or the width of the stored resolution one step finer. Zero where the points are
+	// already that fine, which is the per-block resolution: a point with no interior has no spread.
+	spreadUnit time.Duration
 }
 
 // Range names.
@@ -39,10 +49,10 @@ const (
 )
 
 var ranges = map[string]seriesRange{
-	rangeHour:  {name: rangeHour, duration: time.Hour, resolution: "", cache: cacheHour, batchStep: 0, batchResolution: "batch", l1Step: time.Second},
-	rangeDay:   {name: rangeDay, duration: 24 * time.Hour, resolution: db.Resolution1m, cache: cacheDay, batchStep: time.Minute, batchResolution: db.Resolution1m, l1Step: time.Minute},
-	rangeMonth: {name: rangeMonth, duration: 30 * 24 * time.Hour, resolution: db.Resolution15m, cache: cacheMonth, batchStep: 15 * time.Minute, batchResolution: db.Resolution15m, l1Step: 15 * time.Minute},
-	rangeAll:   {name: rangeAll, duration: 0, resolution: db.Resolution1h, cache: cacheAll, batchStep: time.Hour, batchResolution: db.Resolution1h, l1Step: time.Hour},
+	rangeHour:  {name: rangeHour, duration: time.Hour, resolution: "", cache: cacheHour, batchStep: 0, batchResolution: "batch", l1Step: time.Second, spreadUnit: time.Second},
+	rangeDay:   {name: rangeDay, duration: 24 * time.Hour, resolution: db.Resolution1m, cache: cacheHistory, batchStep: time.Minute, batchResolution: db.Resolution1m, l1Step: time.Minute, spreadUnit: time.Second},
+	rangeMonth: {name: rangeMonth, duration: 30 * 24 * time.Hour, resolution: db.Resolution15m, cache: cacheHistory, batchStep: 15 * time.Minute, batchResolution: db.Resolution15m, l1Step: 15 * time.Minute, spreadUnit: time.Minute},
+	rangeAll:   {name: rangeAll, duration: 0, resolution: db.Resolution1h, cache: cacheHistory, batchStep: time.Hour, batchResolution: db.Resolution1h, l1Step: time.Hour, spreadUnit: 15 * time.Minute},
 }
 
 func parseRange(raw string) (seriesRange, bool) {
@@ -124,11 +134,14 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 		}
 		if len(blocks) > maxBlockPoints {
 			var numbers []uint64
-			out.Resolution = "5s"
+			out.Resolution = resolutionStepped
+			// The steps are folded from the rows in hand, so their spread is folded with them rather
+			// than asked of the store a second time.
 			out.Points, numbers = stepDown(blocks, sets, now)
+			out.SpreadSeconds = spreadSeconds(rng.spreadUnit)
 			timeline.apply(out.Points, numbers, stepDownWidth)
 		} else {
-			out.Resolution = "block"
+			out.Resolution = resolutionBlock
 			out.Points = blockPoints(blocks, sets)
 			timeline.mark(out.Points, blockNumbers(blocks))
 		}
@@ -152,8 +165,51 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 		}
 	}
 	timeline.apply(out.Points, bucketWatermarks(numbers), width)
+	if err := addRateSpread(ctx, store, chainID, out, from, to, width, rng.spreadUnit, now); err != nil {
+		return nil, err
+	}
 	out.From, out.To = rng.bounds(from, to, firstPoint(out.Points), len(out.Points) > 0)
 	return out, nil
+}
+
+// spreadSeconds is the unit a series reports its spread in, absent when it measures none.
+func spreadSeconds(unit time.Duration) *int64 {
+	if unit <= 0 {
+		return nil
+	}
+	secs := int64(unit / time.Second)
+	return &secs
+}
+
+// addRateSpread hangs the load band on the bucketed points: the lowest and highest compute rate any
+// unit inside a bucket carried. The window is cut back to the last whole unit, so the unit the
+// serving clock is still inside is not read as a quiet one.
+func addRateSpread(ctx context.Context, store db.Store, chainID uint64, out *model.Series, from, to time.Time, width, unit time.Duration, now time.Time) error {
+	if unit <= 0 || unit >= width {
+		return nil
+	}
+	whole := now.Truncate(unit)
+	if whole.Before(to) {
+		to = whole
+	}
+	spreads, err := store.ComputeRateSpread(ctx, chainID, from, to, width, unit)
+	if err != nil {
+		return err
+	}
+	out.SpreadSeconds = spreadSeconds(unit)
+	byStart := make(map[int64]db.RateSpread, len(spreads))
+	for _, s := range spreads {
+		byStart[s.Start.Unix()] = s
+	}
+	for i := range out.Points {
+		s, ok := byStart[out.Points[i].T]
+		if !ok {
+			continue
+		}
+		out.Points[i].ComputeGasPerSecondMin = uint64ValuePtr(uint64(max(s.MinRate, 0)))
+		out.Points[i].ComputeGasPerSecondMax = uint64ValuePtr(uint64(max(s.MaxRate, 0)))
+	}
+	return nil
 }
 
 // bucketWatermarks is the highest block of every bucket, or nothing when one of them was not recorded.
@@ -601,7 +657,7 @@ func stepDown(blocks []db.Block, sets []db.ConstraintSet, now time.Time) (points
 			if cur != nil {
 				points, numbers = append(points, cur.point(width, now)), append(numbers, cur.lastBlock)
 			}
-			cur = &acc{start: start, sum: new(big.Int), fees: new(big.Int), floor: new(big.Int), posterFees: new(big.Int)}
+			cur = &acc{start: start, cutoff: now.Truncate(time.Second).Unix(), sum: new(big.Int), fees: new(big.Int), floor: new(big.Int), posterFees: new(big.Int)}
 		}
 		cur.add(b, setIDAt(sets, b.Number, len(b.Backlogs)))
 	}
@@ -635,9 +691,59 @@ type acc struct {
 	minBaseFee          *string
 	setID               int64
 	errBips             int64
+	// The spread of the step, over the whole seconds of it: cutoff is the second the serving clock is
+	// inside, which is not one of them, second and secondGas the second being folded, and voided
+	// records that one of the seconds had no authoritative poster gas, which leaves the step with no
+	// spread at all rather than an understated one.
+	cutoff           int64
+	second           int64
+	secondGas        uint64
+	secondUnknown    bool
+	seconds          int
+	voided           bool
+	minRate, maxRate uint64
+}
+
+// closeSecond folds the second in hand into the step's spread. A second without authoritative poster
+// gas cannot be rated, and one unrated second voids the step's spread.
+func (a *acc) closeSecond() {
+	if a.second == 0 {
+		return
+	}
+	switch {
+	case a.secondUnknown:
+		a.voided = true
+	case a.seconds == 0:
+		a.minRate, a.maxRate = a.secondGas, a.secondGas
+	default:
+		a.minRate, a.maxRate = min(a.minRate, a.secondGas), max(a.maxRate, a.secondGas)
+	}
+	if !a.secondUnknown {
+		a.seconds++
+	}
+	a.second, a.secondGas, a.secondUnknown = 0, 0, false
+}
+
+// rate folds one block into the second it is stamped with, unless the serving clock is still inside
+// that second: a second still being filled would read as a quiet one.
+func (a *acc) rate(b db.Block) {
+	second := b.TS.Unix()
+	if second >= a.cutoff {
+		return
+	}
+	if second != a.second {
+		a.closeSecond()
+		a.second = second
+	}
+	if b.PosterGas.Valid && b.PosterGas.Int64 >= 0 && uint64(b.PosterGas.Int64) <= b.GasUsed {
+		a.secondGas += b.GasUsed - uint64(b.PosterGas.Int64)
+		return
+	}
+	a.secondUnknown = true
 }
 
 func (a *acc) add(b db.Block, setID int64) {
+	a.rate(b)
 	fee := b.BaseFee.BigInt()
 	if a.blocks == 0 || fee.Cmp(a.minFee) < 0 {
 		a.minFee = fee
@@ -708,6 +814,7 @@ func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
 		a.posterFees = new(big.Int)
 	}
 	pointCoverage, completeness := measuredCoverage(share)
+	a.closeSecond()
 	p := model.SeriesPoint{
 		T: a.start, Blocks: a.blocks, GasUsed: a.gas, GasPerSecond: a.gas / secs, Coverage: pointCoverage, Completeness: completeness,
 		FeesWei: a.fees.String(), BaseFeeMin: a.minFee.String(), BaseFeeAvg: avg.String(), BaseFeeMax: a.maxFee.String(),
@@ -726,6 +833,9 @@ func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
 	if !a.unknownDestinations {
 		p.FloorFeesWei = stringPtr(a.floor)
 		p.SurplusFeesWei = stringPtr(new(big.Int).Sub(new(big.Int).Sub(a.fees, a.floor), a.posterFees))
+	}
+	if a.seconds > 0 && !a.voided {
+		p.ComputeGasPerSecondMin, p.ComputeGasPerSecondMax = uint64ValuePtr(a.minRate), uint64ValuePtr(a.maxRate)
 	}
 	return p
 }

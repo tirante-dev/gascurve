@@ -92,7 +92,7 @@ export const CHART_VIEWS: readonly ChartView[] = [
     title: "Gas throughput",
     shortTitle: "Gas/s",
     description:
-      "What the chain actually carried, per second: every whole second of the block ring on Live, and the rate in each bucket against the target of every constraint in force at the time, drawn as a stepped line per set, over each history range. It sits under the base fee in the hero, on the hero's own range.",
+      "What the chain actually carried, per second: every whole second of the block ring on Live, and the rate in each bucket with its min-to-max band, against the target of every constraint in force at the time, drawn as a stepped line per set, over each history range. It sits under the base fee in the hero, on the hero's own range.",
     section: "live",
     range: "hero",
     live: true,

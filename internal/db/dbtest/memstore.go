@@ -706,6 +706,92 @@ func (m *MemStore) Buckets(_ context.Context, chainID uint64, resolution string,
 	return out, nil
 }
 
+// ComputeRateSpread mirrors the SQL: whole units are measured, a unit without authoritative poster
+// gas voids the window it falls in, and a window with no unit at all is not reported.
+func (m *MemStore) ComputeRateSpread(_ context.Context, chainID uint64, from, to time.Time, step, unit time.Duration) ([]db.RateSpread, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("ComputeRateSpread"); err != nil {
+		return nil, err
+	}
+	if step <= 0 || unit <= 0 || unit >= step || !to.After(from) {
+		return nil, nil
+	}
+	rates, err := m.unitRates(chainID, from, to, unit)
+	if err != nil {
+		return nil, err
+	}
+	windows := map[int64]*db.RateSpread{}
+	voided := map[int64]bool{}
+	for at, rate := range rates {
+		start := at.Unix() / int64(step/time.Second) * int64(step/time.Second)
+		if rate == nil {
+			voided[start] = true
+			continue
+		}
+		w, ok := windows[start]
+		if !ok {
+			windows[start] = &db.RateSpread{Start: time.Unix(start, 0).UTC(), MinRate: *rate, MaxRate: *rate}
+			continue
+		}
+		w.MinRate, w.MaxRate = min(w.MinRate, *rate), max(w.MaxRate, *rate)
+	}
+	var out []db.RateSpread
+	for start, w := range windows {
+		if !voided[start] {
+			out = append(out, *w)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
+	return out, nil
+}
+
+// unitRates is the rate of every unit starting inside the window, nil for one whose poster gas is
+// not authoritative: seconds of block rows for a one second unit, stored buckets for a wider one.
+func (m *MemStore) unitRates(chainID uint64, from, to time.Time, unit time.Duration) (map[time.Time]*int64, error) {
+	out := map[time.Time]*int64{}
+	if unit == time.Second {
+		for _, b := range m.sortedBlocks(chainID) {
+			if b.TS.Before(from) || !b.TS.Before(to) {
+				continue
+			}
+			at := b.TS.UTC().Truncate(time.Second)
+			rate, seen := out[at]
+			if seen && rate == nil {
+				continue
+			}
+			if !b.PosterGas.Valid || b.PosterGas.Int64 < 0 || uint64(b.PosterGas.Int64) > b.GasUsed {
+				out[at] = nil
+				continue
+			}
+			compute := int64(b.GasUsed) - b.PosterGas.Int64
+			if !seen {
+				out[at] = &compute
+				continue
+			}
+			*rate += compute
+		}
+		return out, nil
+	}
+	resolution, ok := db.ResolutionOf(unit)
+	if !ok {
+		return nil, fmt.Errorf("compute rate spread: no stored resolution is %v wide", unit)
+	}
+	for _, b := range m.BucketRows {
+		if b.ChainID != chainID || b.Resolution != resolution || b.BucketStart.Before(from) || !b.BucketStart.Before(to) {
+			continue
+		}
+		at := b.BucketStart.UTC()
+		if !b.PosterGas.Valid || uint64(b.PosterGas.Int64) > b.GasUsed {
+			out[at] = nil
+			continue
+		}
+		rate := (int64(b.GasUsed) - b.PosterGas.Int64) / int64(unit/time.Second)
+		out[at] = &rate
+	}
+	return out, nil
+}
+
 func (m *MemStore) InsertStateSample(_ context.Context, s db.StateSample) error {
 	m.hook("InsertStateSample")
 	m.mu.Lock()

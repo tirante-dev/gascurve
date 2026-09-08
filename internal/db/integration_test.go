@@ -1178,3 +1178,77 @@ func numbersOf(blocks []Block) []uint64 {
 	}
 	return out
 }
+
+// rateBlock is one block of the spread fixture: the compute gas of the second it lands in is the sum
+// of every block stamped with it, so a second's rate is not one block's gas.
+func rateBlock(n uint64, ts time.Time, gas uint64, poster sql.NullInt64) Block {
+	return Block{
+		ChainID: testChain, Number: n, Hash: fmt.Sprintf("0x%x", n), ParentHash: fmt.Sprintf("0x%x", n-1),
+		TS: ts, GasUsed: gas, PosterGas: poster, BaseFee: WeiFromUint64(20_000_000), L1Block: 50, TxCount: 1,
+		Backlogs: Uint64Array{1}, ConstraintBips: pq.Int64Array{1}, MinBaseFee: NullWeiFromUint64(10_000_000),
+		PricingVersion: PricingFull, PredictedBaseFee: NullWeiFromUint64(20_000_000),
+	}
+}
+
+func known(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+
+func TestIntegrationComputeRateSpread(t *testing.T) {
+	ctx := context.Background()
+	p := openIntegration(t)
+	base := time.Date(2026, 9, 6, 9, 0, 0, 0, time.UTC)
+	if err := p.UpsertNetwork(ctx, Network{ChainID: testChain, Name: "spread", DisplayName: "Spread", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	blocks := []Block{
+		// First minute: 300 in its first second, 45 in the next, 500 in the last.
+		rateBlock(300, base, 100, known(10)),
+		rateBlock(301, base, 250, known(40)),
+		rateBlock(302, base.Add(time.Second), 50, known(5)),
+		rateBlock(303, base.Add(59*time.Second), 500, known(0)),
+		// Second minute: one block without authoritative poster gas voids the whole window.
+		rateBlock(304, base.Add(time.Minute), 100, known(10)),
+		rateBlock(305, base.Add(61*time.Second), 100, sql.NullInt64{}),
+	}
+	if err := p.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.ComputeRateSpread(ctx, testChain, base, base.Add(2*time.Minute), time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !got[0].Start.Equal(base) || got[0].MinRate != 45 || got[0].MaxRate != 500 {
+		t.Fatalf("per-second spread: %+v", got)
+	}
+	// The window is the caller's: a to that stops short of a second leaves it out of the spread.
+	if short, err := p.ComputeRateSpread(ctx, testChain, base, base.Add(30*time.Second), time.Minute, time.Second); err != nil || len(short) != 1 || short[0].MaxRate != 300 {
+		t.Fatalf("short window: %+v %v", short, err)
+	}
+
+	// Buckets one resolution finer, whose rate is their compute gas over their own width.
+	minutes := []Bucket{}
+	for i, compute := range []uint64{600, 120, 6_000} {
+		b := NewBucketBuilder(testChain, Resolution1m, base.Add(time.Duration(i)*time.Minute))
+		b.Add(rateBlock(uint64(400+i), base.Add(time.Duration(i)*time.Minute), compute+7, known(7)), known(1))
+		minutes = append(minutes, b.Bucket())
+	}
+	// A minute whose poster gas is unknown voids the quarter hour it falls in.
+	unknown := NewBucketBuilder(testChain, Resolution1m, base.Add(20*time.Minute))
+	unknown.Add(rateBlock(410, base.Add(20*time.Minute), 900, sql.NullInt64{}), known(1))
+	if err := p.FoldBuckets(ctx, append(minutes, unknown.Bucket())); err != nil {
+		t.Fatal(err)
+	}
+	spread, err := p.ComputeRateSpread(ctx, testChain, base, base.Add(30*time.Minute), 15*time.Minute, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spread) != 1 || !spread[0].Start.Equal(base) || spread[0].MinRate != 2 || spread[0].MaxRate != 100 {
+		t.Fatalf("per-minute spread: %+v", spread)
+	}
+	if _, err := p.ComputeRateSpread(ctx, testChain, base, base.Add(time.Hour), time.Hour, 7*time.Minute); err == nil {
+		t.Fatal("a unit no stored resolution is wide must be refused")
+	}
+	// Nothing to measure: a unit as wide as the step, and an empty window.
+	if rows, err := p.ComputeRateSpread(ctx, testChain, base, base.Add(time.Hour), time.Minute, time.Minute); err != nil || rows != nil {
+		t.Fatalf("unit as wide as the step: %+v %v", rows, err)
+	}
+}

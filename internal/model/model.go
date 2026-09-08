@@ -203,24 +203,29 @@ type SeriesPoint struct {
 	// GasPerSecond is the rate over the covered span of the bucket. Coverage is the share of the
 	// bucket that span is, or null when the missing-range time bounds cannot measure it.
 	// Completeness separates a whole aggregate, a known partial one and one that cannot be located.
-	GasPerSecond        uint64   `json:"gasPerSecond"`
-	ComputeGasPerSecond *uint64  `json:"computeGasPerSecond"`
-	Coverage            *float64 `json:"coverage"`
-	Completeness        string   `json:"completeness"`
-	FeesWei             string   `json:"feesWei"`
-	PosterFeesWei       *string  `json:"posterFeesWei"`
-	BaseFeeMin          string   `json:"baseFeeMin"`
-	BaseFeeAvg          string   `json:"baseFeeAvg"`
-	BaseFeeMax          string   `json:"baseFeeMax"`
-	ExponentBips        int64    `json:"exponentBips"`
-	ConstraintBips      []int64  `json:"constraintBips"`
-	Backlogs            []uint64 `json:"backlogs"`
-	BacklogsMax         []uint64 `json:"backlogsMax"`
-	MinBaseFee          *string  `json:"minBaseFee"`
-	FloorFeesWei        *string  `json:"floorFeesWei"`
-	SurplusFeesWei      *string  `json:"surplusFeesWei"`
-	ConstraintSetID     int64    `json:"constraintSetId"`
-	ReplayErrorBips     int64    `json:"replayErrorBips"`
+	GasPerSecond        uint64  `json:"gasPerSecond"`
+	ComputeGasPerSecond *uint64 `json:"computeGasPerSecond"`
+	// The lowest and highest compute rate any unit of Series.SpreadSeconds inside the bucket carried,
+	// null unless every one of them has authoritative poster gas. A point that is itself one unit has
+	// no interior to measure and reports neither.
+	ComputeGasPerSecondMin *uint64  `json:"computeGasPerSecondMin"`
+	ComputeGasPerSecondMax *uint64  `json:"computeGasPerSecondMax"`
+	Coverage               *float64 `json:"coverage"`
+	Completeness           string   `json:"completeness"`
+	FeesWei                string   `json:"feesWei"`
+	PosterFeesWei          *string  `json:"posterFeesWei"`
+	BaseFeeMin             string   `json:"baseFeeMin"`
+	BaseFeeAvg             string   `json:"baseFeeAvg"`
+	BaseFeeMax             string   `json:"baseFeeMax"`
+	ExponentBips           int64    `json:"exponentBips"`
+	ConstraintBips         []int64  `json:"constraintBips"`
+	Backlogs               []uint64 `json:"backlogs"`
+	BacklogsMax            []uint64 `json:"backlogsMax"`
+	MinBaseFee             *string  `json:"minBaseFee"`
+	FloorFeesWei           *string  `json:"floorFeesWei"`
+	SurplusFeesWei         *string  `json:"surplusFeesWei"`
+	ConstraintSetID        int64    `json:"constraintSetId"`
+	ReplayErrorBips        int64    `json:"replayErrorBips"`
 }
 
 // Reorg is the WebSocket reorg message: the collector replaced blocks at or below the ring's tip,
@@ -239,8 +244,12 @@ type Series struct {
 	// From and To bound the requested window in unix seconds, whatever the points cover, so a chart
 	// draws the whole window and shows what is not indexed as missing. For the all range From is the
 	// first indexed point.
-	From           int64           `json:"from"`
-	To             int64           `json:"to"`
+	From int64 `json:"from"`
+	To   int64 `json:"to"`
+	// SpreadSeconds is the width of the unit the points' compute rate spread is measured over: the
+	// seconds of a bucket, or the finer stored buckets of a coarser one. Null for a resolution with
+	// nothing finer to measure, where no point carries a spread.
+	SpreadSeconds  *int64          `json:"spreadSeconds"`
 	ConstraintSets []ConstraintSet `json:"constraintSets"`
 	OwnerActions   []OwnerAction   `json:"ownerActions"`
 	Points         []SeriesPoint   `json:"points"`
