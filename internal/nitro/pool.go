@@ -120,7 +120,7 @@ func (p *Pool) newEndpoint(i int, ec config.EndpointConfig, batchSize int) *Endp
 	return newEndpoint(i, ec, batchSize, p.log, p.now, opts...)
 }
 
-// stillActive builds the check the endpoint makes under its send lock: an ordinary call that
+// stillActive builds the check the endpoint makes under its send gate: an ordinary call that
 // selected this endpoint before another caller failed over must not reach the wire.
 // Capability calls pick their own endpoint and are exempt.
 func (p *Pool) stillActive(e *Endpoint) func(context.Context) error {
@@ -589,7 +589,7 @@ func (p *Pool) do(ctx context.Context, fn func(*Endpoint) error) error {
 			return err
 		}
 		if errors.Is(err, ErrStaleEndpoint) {
-			// Another caller failed over while this one queued for the send lock: nothing was sent,
+			// Another caller failed over while this one queued for a send slot: nothing was sent,
 			// so pick again rather than fail over. The bound stops a pathological hand-off looping.
 			stale++
 			if stale > len(p.endpoints) {

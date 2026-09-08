@@ -85,19 +85,19 @@ func TestEndpointSizeShrinkHoldsBeforeRecovering(t *testing.T) {
 		t.Fatalf("HeadersByNumbers: %v", err)
 	}
 	shrunk := e.BatchCap()
-	e.observe(1, false)
+	e.observe(1, false, false)
 	if got := e.BatchCap(); got != shrunk {
 		t.Fatalf("batch cap %d grew before the recovery interval, want %d", got, shrunk)
 	}
 	clock.Advance(capRecoveryInterval)
-	e.observe(1, false)
+	e.observe(1, false, false)
 	if got := e.BatchCap(); got != shrunk*2 {
 		t.Fatalf("batch cap %d, want %d one step after the recovery interval", got, shrunk*2)
 	}
 }
 
 // TestEndpointSizeShrinkOnlyNarrows pins the cut as monotonic. Loops sharing an endpoint size their
-// chunks before queueing for the send lock, so a wide request can be refused after a narrower one
+// chunks before queueing for a send slot, so a wide request can be refused after a narrower one
 // has already cut the cap; its own halved width must not widen the cap back.
 func TestEndpointSizeShrinkOnlyNarrows(t *testing.T) {
 	f := newFakeRPC(t)
