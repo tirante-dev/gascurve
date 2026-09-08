@@ -167,11 +167,26 @@ export function Term({ children, lines, align, alignSm, flow }: { children: stri
 const BIPS_NOTE = "basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.";
 
 /**
+ * What to print where the pricer's saturating arithmetic ran out of int64 and the api sent its ceiling.
+ * A double cannot hold that integer either, so 9223372036854775807 arrives as 9223372036854776000: the
+ * digits are neither the value sent nor a quantity worth reading, and only the saturation is true.
+ */
+const OFF_SCALE = "off scale";
+const OFF_SCALE_NOTE = "past int64, where the pricer's arithmetic saturates. Nothing narrower is known.";
+
+/**
  * A figure quoted in basis points, with the unit's definition and its decimal value a hover away. The
  * pricer works in integer bips and the api hands them over unchanged, so rather than translate the unit
  * away the word carries what it means.
  */
 export function Bips({ value, align = "end" }: { value: number; align?: NoteAlign }) {
+  if (Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+    return (
+      <HoverNote flow="inline" align={align} lead="text" lines={[OFF_SCALE_NOTE, BIPS_NOTE]} description={`${OFF_SCALE}: ${OFF_SCALE_NOTE} ${BIPS_NOTE}`}>
+        {OFF_SCALE}
+      </HoverNote>
+    );
+  }
   const bips = Math.round(value);
   // Four places is what the constraint cards already print x to, so the note
   // reads back as the figure above it rather than as a second rounding.

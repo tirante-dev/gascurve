@@ -5,6 +5,11 @@ import type { LiveSnapshot, LiveStatus, Network, Series, StatusResponse } from "
 import { formatAgo, formatDateTime, formatInteger } from "@/utils/format";
 import { Bips, STATUS_COPY } from "./primitives";
 
+/** The count is one often enough that "1 buckets are estimates" would be on the page most days. */
+function estimatedNote(count: number): string {
+  return ` (${formatInteger(count)} ${count === 1 ? "bucket" : "buckets"} above 2% ${count === 1 ? "is an estimate" : "are estimates"})`;
+}
+
 /** `now` is for a caller that fixes the clock; left out, the footer keeps its own so the page above it does not tick. */
 export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, now }: { snapshot: LiveSnapshot | null; series: Series | null; networkInfo: Network | null; status: LiveStatus; apiStatus: StatusResponse | null; now?: number }) {
   const ticked = useTicker(now === undefined ? 1000 : 0);
@@ -37,7 +42,7 @@ export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, n
             <dt className="text-ink-3">max in range</dt>
             <dd className="relative">
               {series ? <Bips value={maxReplayError} /> : "n/a"}
-              {estimated > 0 ? ` (${formatInteger(estimated)} buckets above 2% are estimates)` : ""}
+              {estimated > 0 ? estimatedNote(estimated) : ""}
             </dd>
           </dl>
         </div>

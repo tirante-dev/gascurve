@@ -726,6 +726,25 @@ describe("DataFooter", () => {
     expect(versions.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByText(/api 1.2.3/)).toBeInTheDocument();
   });
+
+  it("says off scale rather than quoting int64 max, and counts one bucket as one", () => {
+    // The api saturates replay error at int64 max, which a JSON number cannot
+    // hold: printed it reads 9,223,372,036,854,776,000 bips, a figure neither
+    // the api nor the pricer ever produced.
+    const saturated: Series = { ...history, points: [history.points[0], { ...history.points[1], replayErrorBips: 9_223_372_036_854_775_807 }] };
+    render(<DataFooter snapshot={null} series={saturated} networkInfo={null} status="open" apiStatus={null} now={0} />);
+    expect(screen.queryByText(/9,223,372,036,854,776,000/)).toBeNull();
+    expect(screen.getByText("off scale")).toBeInTheDocument();
+    expect(screen.getByText("past int64, where the pricer's arithmetic saturates. Nothing narrower is known.")).toBeInTheDocument();
+    expect(screen.getByText("max in range").nextElementSibling).toHaveTextContent("(1 bucket above 2% is an estimate)");
+  });
+
+  it("keeps the plural when more than one bucket is estimated", () => {
+    const estimated: Series = { ...history, points: history.points.map((p) => ({ ...p, replayErrorBips: 7_093 })) };
+    render(<DataFooter snapshot={null} series={estimated} networkInfo={null} status="open" apiStatus={null} now={0} />);
+    expect(screen.getByText("7,093 bips = 0.7093")).toBeInTheDocument();
+    expect(screen.getByText("max in range").nextElementSibling).toHaveTextContent("(2 buckets above 2% are estimates)");
+  });
 });
 
 describe("HistoryTabs", () => {
