@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFrameStore, NO_PLACES, targetValues } from "@/lib/smoothing";
+import { approach, createFrameStore, NO_PLACES, targetValues } from "@/lib/smoothing";
 import type { BlockPoint, LiveSnapshot, OwnerAction } from "@/types";
 import { prefersReducedMotion, useLiveFrame, useSmoothedLive } from "./useSmoothedLive";
 
@@ -34,6 +34,9 @@ function shortOnly(n: number): LiveSnapshot {
   const s = snapshot(n);
   return { ...s, constraints: s.constraints.slice(0, 1) };
 }
+
+/** A ring that never changes identity: a fresh array each render would publish a frame the loop did not ask for. */
+const NO_BLOCKS: BlockPoint[] = [];
 
 let frames: FrameRequestCallback[] = [];
 let clock = 0;
@@ -73,7 +76,7 @@ describe("useSmoothedLive", () => {
   });
 
   it("commits the newest tick at most every 250 ms and moves the wall clock with it", () => {
-    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: [] }), { initialProps: { s: snapshot(1) as LiveSnapshot | null } });
+    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: NO_BLOCKS }), { initialProps: { s: snapshot(1) as LiveSnapshot | null } });
     expect(result.current.display).toBeNull();
     expect(frames).toHaveLength(1);
     runFrame(16);
@@ -99,10 +102,13 @@ describe("useSmoothedLive", () => {
     const first = result.current.frame.get().values?.baseFeeGwei ?? 0;
     expect(first).toBeGreaterThan(0.399726);
     expect(first).toBeLessThan(0.8);
+    const published = result.current.frame.get();
     runFrame(282);
+    expect(result.current.frame.get()).toBe(published);
+    runFrame(298);
     const second = result.current.frame.get().values?.baseFeeGwei ?? 0;
     expect(second).toBeGreaterThan(first);
-    let t = 282;
+    let t = 298;
     for (let i = 0; i < 400; i++) runFrame((t += 16));
     expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.8);
     expect(result.current.frame.get().values?.multiplier).toBe(40);
@@ -132,8 +138,31 @@ describe("useSmoothedLive", () => {
     expect(result.current.frame.get().values).toBe(settled.values);
   });
 
+  it("publishes eased values at the value interval rather than on every frame", () => {
+    // A backlog small enough that the tween eases rather than settling inside its tolerance, so the size
+    // of one step is what the assertions below can see.
+    const only = snapshot(1, "399726000", 500_000_000_000);
+    const { result } = renderHook(() => useSmoothedLive({ snapshot: only, recentBlocks: NO_BLOCKS }));
+    runFrame(16);
+    const first = result.current.frame.get();
+    // 16 ms on the long window has drained further, but nothing new is published.
+    runFrame(32);
+    expect(result.current.frame.get()).toBe(first);
+    // 32 ms after the last publish the figures move again, and by a whole 32 ms of easing: a skipped
+    // frame lengthens the next step rather than halving the rate the tween approaches its target at.
+    runFrame(48);
+    const second = result.current.frame.get();
+    expect(second).not.toBe(first);
+    const target = targetValues(only, [], 48 / 1000);
+    const stepped = approach(first.values?.backlogs[1] ?? 0, target.backlogs[1], 32);
+    expect(second.values?.backlogs[1]).toBeCloseTo(stepped, 0);
+    expect(stepped).toBeLessThan(approach(first.values?.backlogs[1] ?? 0, target.backlogs[1], 16));
+    runFrame(64);
+    expect(result.current.frame.get()).toBe(second);
+  });
+
   it("drains long windows toward a moving target so a new sample never snaps the gauge", () => {
-    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: [] }), { initialProps: { s: snapshot(1) } });
+    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: NO_BLOCKS }), { initialProps: { s: snapshot(1) } });
     runFrame(0);
     const seen: number[] = [];
     let t = 0;
@@ -157,7 +186,7 @@ describe("useSmoothedLive", () => {
   it("only applies the cadence under reduced motion: no tween, no drain", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: true }));
     expect(prefersReducedMotion()).toBe(true);
-    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: [] }), { initialProps: { s: snapshot(1) } });
+    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: NO_BLOCKS }), { initialProps: { s: snapshot(1) } });
     runFrame(16);
     expect(result.current.frame.get().values).toEqual(targetValues(snapshot(1), [], 0));
     runFrame(32);
@@ -206,7 +235,7 @@ describe("useSmoothedLive", () => {
   });
 
   it("treats the first tick after a reorg as a fresh commit: shown on the next frame, values snapped, never eased from the orphaned block", () => {
-    const { result, rerender } = renderHook(({ s, reorgs }) => useSmoothedLive({ snapshot: s, recentBlocks: [], reorgs }), { initialProps: { s: snapshot(1), reorgs: 0 } });
+    const { result, rerender } = renderHook(({ s, reorgs }) => useSmoothedLive({ snapshot: s, recentBlocks: NO_BLOCKS, reorgs }), { initialProps: { s: snapshot(1), reorgs: 0 } });
     runFrame(16);
     expect(result.current.display?.block.number).toBe(1);
     runFrame(100);
@@ -267,7 +296,7 @@ describe("useSmoothedLive", () => {
   });
 
   it("consumes the fresh flag only for a sample that arrived after the reorg", () => {
-    const { result, rerender } = renderHook(({ s, reorgs }) => useSmoothedLive({ snapshot: s, recentBlocks: [], reorgs }), { initialProps: { s: snapshot(1), reorgs: 0 } });
+    const { result, rerender } = renderHook(({ s, reorgs }) => useSmoothedLive({ snapshot: s, recentBlocks: NO_BLOCKS, reorgs }), { initialProps: { s: snapshot(1), reorgs: 0 } });
     runFrame(16);
     // A tick lands inside the cadence window, then the reorg that orphans it
     // arrives. That pending sample must not be committed as the fresh one.
@@ -286,7 +315,7 @@ describe("useSmoothedLive", () => {
   });
 
   it("clears the display for a reorg that orphaned the snapshot and says it is resyncing", () => {
-    const { result, rerender } = renderHook(({ s, reorgs, resyncing }) => useSmoothedLive({ snapshot: s, recentBlocks: [], reorgs, resyncing }), {
+    const { result, rerender } = renderHook(({ s, reorgs, resyncing }) => useSmoothedLive({ snapshot: s, recentBlocks: NO_BLOCKS, reorgs, resyncing }), {
       initialProps: { s: snapshot(1) as LiveSnapshot | null, reorgs: 0, resyncing: false },
     });
     runFrame(16);
@@ -316,7 +345,7 @@ describe("useSmoothedLive", () => {
       addEventListener: (_: string, listener: () => void) => listeners.add(listener),
       removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
     }));
-    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: [] }), { initialProps: { s: snapshot(1) } });
+    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: NO_BLOCKS }), { initialProps: { s: snapshot(1) } });
     runFrame(16);
     clock = 16;
     rerender({ s: snapshot(2, "800000000") });
@@ -339,6 +368,37 @@ describe("useSmoothedLive", () => {
     const back = result.current.frame.get().values?.baseFeeGwei ?? 0;
     expect(back).toBeGreaterThan(0.4);
     expect(back).toBeLessThan(0.8);
+  });
+
+  it("resumes easing where the figures are when reduced motion is turned off after a quiet stretch", () => {
+    const listeners = new Set<() => void>();
+    let matches = true;
+    vi.stubGlobal("matchMedia", () => ({
+      get matches() {
+        return matches;
+      },
+      addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+    }));
+    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: NO_BLOCKS }), { initialProps: { s: snapshot(1) } });
+    runFrame(16);
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.399726);
+    // A second of frames with the preference on: the figures stand still, and the tween clock keeps pace
+    // with them rather than banking the whole stretch.
+    let t = 16;
+    for (let i = 0; i < 63; i++) runFrame((t += 16));
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.399726);
+    // Motion is allowed again and the next cadence commits a much higher sample. One frame of easing is
+    // one frame, not the second the preference was on for.
+    matches = false;
+    act(() => listeners.forEach((listener) => listener()));
+    clock = t;
+    rerender({ s: snapshot(2, "800000000") });
+    runFrame((t += 16));
+    expect(result.current.display?.block.number).toBe(2);
+    const eased = result.current.frame.get().values?.baseFeeGwei ?? 0;
+    expect(eased).toBeGreaterThan(0.4);
+    expect(eased).toBeLessThan(0.45);
   });
 
   it("publishes a placement of the ring, assigned once per block and evicted with it", () => {
