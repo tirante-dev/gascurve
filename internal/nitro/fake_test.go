@@ -49,9 +49,12 @@ type fakeRPC struct {
 	// test can fail one chunk of a fanned out request and not the others. gate, when set, holds any
 	// batch carrying gateMethod until it is closed, which orders two failures that would otherwise
 	// race.
-	failMethods map[string]bool
-	gate        chan struct{}
-	gateMethod  string
+	// limitMethods answers any batch carrying one of them with HTTP 429, so a throttle can be aimed
+	// at one request rather than sequenced through the script.
+	failMethods  map[string]bool
+	limitMethods map[string]bool
+	gate         chan struct{}
+	gateMethod   string
 }
 
 type scriptStep struct {
@@ -253,6 +256,11 @@ func (f *fakeRPC) serve(w http.ResponseWriter, r *http.Request) {
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = io.WriteString(w, req.Method)
+			return
+		}
+		if f.limitMethods[req.Method] {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
 	}

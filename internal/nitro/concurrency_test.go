@@ -221,14 +221,16 @@ func TestBatchParallelChunkFailureReportsLowestChunk(t *testing.T) {
 	}
 }
 
-// awaitSettled waits until exactly n requests are in flight and stay there, after at least sent have
-// been served, so a test can tell that the other workers have finished rather than merely not
-// started.
+// awaitSettled waits until exactly n requests are in flight and the served count has stopped moving,
+// after at least sent have been served. A handler returning proves only that its answer left the
+// server; a count that stays put with ranges still unclaimed proves the client recorded the failure,
+// since the workers that finished would otherwise have taken the next range and sent it.
 func awaitSettled(f *fakeRPC, n, sent int) bool {
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
-		if in, _ := f.flight(); in == n && f.requestCount() >= sent {
+		served := f.requestCount()
+		if in, _ := f.flight(); in == n && served >= sent {
 			time.Sleep(50 * time.Millisecond)
-			if in, _ := f.flight(); in == n {
+			if in, _ := f.flight(); in == n && f.requestCount() == served {
 				return true
 			}
 		}
@@ -406,6 +408,62 @@ func TestSuppressedThrottleStillDelaysCapRecovery(t *testing.T) {
 	e.observe(1, false, false)
 	if got := e.BatchCap(); got != shrunk*2 {
 		t.Fatalf("batch cap %d, want %d once the interval has run from the last 429", got, shrunk*2)
+	}
+}
+
+func throttleRequests(method string, n int) []Request {
+	reqs := make([]Request, n)
+	for i := range reqs {
+		reqs[i] = Request{Method: method, Params: []any{i}}
+	}
+	return reqs
+}
+
+// TestStragglerThrottleIsSuppressedThroughTheCallSite drives a straggling 429 through send rather
+// than calling noteRateLimit and observe by hand, so the timestamp send passes and the observer call
+// it makes are covered too. The late request is held inside the handler, so it was already on the
+// wire when the early one opened the cooldown, and the clock is moved past that cooldown before its
+// answer is released: by arrival it looks like a new wave, by send time it is the same one.
+func TestStragglerThrottleIsSuppressedThroughTheCallSite(t *testing.T) {
+	f := echoRPC(t)
+	f.limitMethods = map[string]bool{"throttle_early": true, "throttle_late": true}
+	f.holdMethod(t, "throttle_late")
+	clock := newFakeClock()
+	e := newEndpoint(0, endpointOf(f, 0), MaxBatch, logger.Nop(), clock.Now,
+		WithHTTPClient(f.server.Client()), withClock(clock.Now, clock.Sleep), WithMaxAttempts(1))
+	late := make(chan error, 1)
+	go func() {
+		_, err := e.batch(context.Background(), throttleRequests("throttle_late", MaxBatch))
+		late <- err
+	}()
+	if !f.awaitFlight(1) {
+		t.Fatal("the late request never reached the server")
+	}
+	if _, err := e.batch(context.Background(), throttleRequests("throttle_early", MaxBatch)); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("early batch: %v, want a rate limit", err)
+	}
+	backoff, shrunk := e.Stats().Backoff, e.BatchCap()
+	if backoff != 2*minBackoff || shrunk != MaxBatch/2 {
+		t.Fatalf("back-off %s cap %d, want %s and %d from the 429 that opened the cooldown", backoff, shrunk, 2*minBackoff, MaxBatch/2)
+	}
+	half := capRecoveryInterval / 2
+	clock.Advance(half)
+	f.releaseMethod()
+	if err := <-late; !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("late batch: %v, want a rate limit", err)
+	}
+	if got := e.Stats().Backoff; got != backoff {
+		t.Fatalf("back-off %s, want %s: the straggler was sent before the cooldown and costs no step", got, backoff)
+	}
+	if got := e.BatchCap(); got != shrunk {
+		t.Fatalf("batch cap %d, want %d: the straggler must not halve it again", got, shrunk)
+	}
+	// One recovery interval after the first 429, but only half of one after the straggler, which the
+	// endpoint only knows about if the call site reported it.
+	clock.Advance(half)
+	e.observe(1, false, false)
+	if got := e.BatchCap(); got != shrunk {
+		t.Fatalf("batch cap %d recovered %s after the last 429, want it held for %s", got, half, capRecoveryInterval)
 	}
 }
 
