@@ -265,8 +265,8 @@ export const TIME_AXIS_RIGHT = 22;
 export type ChartHeight = number | string;
 
 /** The frame paints the chart surface, the colour every series palette was validated against. `minWidth`
- * is the width a chart asks for, not one it takes: it is clamped to the frame, so a column too narrow for
- * it shrinks the chart rather than handing a phone a card it has to scroll sideways. */
+ * is the width a chart is drawn for, capped at the frame: a card narrower than that shrinks the chart
+ * rather than scrolling sideways, which is what a phone got before the cap. */
 export function ChartFrame({ height, minWidth = 560, children, label }: { height: ChartHeight; minWidth?: number; children: ReactNode; label: string }) {
   const sized = typeof height === "string";
   return (
