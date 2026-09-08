@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { getSeries } from "@/lib/api/series";
-import type { Series, SeriesRange } from "@/types";
+import type { OwnerAction, Series, SeriesRange } from "@/types";
 import { useApi, type ApiState } from "./useApi";
 
 export const SERIES_REFETCH_MS = 60_000;
@@ -71,4 +71,21 @@ export function fetchSharedSeries(network: string, range: SeriesRange, signal?: 
 export function useSeries(network: string | null, range: SeriesRange | null): ApiState<Series> {
   const fetcher = useCallback((signal: AbortSignal) => fetchSharedSeries(network ?? "", range ?? "1h", signal), [network, range]);
   return useApi<Series>(network !== null && range !== null ? seriesKey(network, range) : null, fetcher, { refetchMs: range === null ? 0 : refetchIntervalFor(range) });
+}
+
+/**
+ * Refreshes a series whenever an owner action arrives over the socket. A pricing call changes what a
+ * whole range means, the set its points belong to and the markers drawn over them, and the 30d and
+ * all-time ranges have no interval of their own: without this they would keep the constraint set that
+ * was in force when the page loaded until the reader switched range.
+ */
+export function useRefreshOnOwnerAction(actions: readonly OwnerAction[], refresh: () => void): void {
+  const newest = actions.length > 0 ? `${actions[0].block}:${actions[0].txHash}` : "";
+  const seen = useRef(newest);
+  useEffect(() => {
+    if (newest === seen.current) return;
+    seen.current = newest;
+    if (newest === "") return;
+    refresh();
+  }, [newest, refresh]);
 }

@@ -626,9 +626,9 @@ func TestFillWithoutStoredTail(t *testing.T) {
 
 // TestFillRefusesMismatchedState: a stored block whose backlogs do not
 // match the pricer shape in force is no state to replay from. A stored
-// head after the range carrying another shape is not one to anchor to
-// either, but that only leaves its replay error unrecorded: the range
-// itself is still indexed.
+// head after the range carrying another shape means the pricer changed
+// inside it: until a recorded set explains where, the range is blocked
+// rather than filled with the shape in force before the change.
 func TestFillRefusesMismatchedState(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
@@ -650,16 +650,41 @@ func TestFillRefusesMismatchedState(t *testing.T) {
 	head := rows[1150]
 	head.Backlogs = db.Uint64Array{1}
 	rows[1150] = head
+	if st, err := f.FillStep(ctx); err != nil || st != FillNone {
+		t.Fatalf("a head of another shape leaves the change unexplained: %v %v", st, err)
+	}
+	if len(rpc.headerCalls) != 0 {
+		t.Fatalf("nothing may be fetched for it: %v", rpc.headerCalls)
+	}
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].Lifecycle != rangeBlocked || holes[0].Reason != reasonReplayDiscontinuity {
+		t.Fatalf("an unexplained change blocks the range: %+v", holes)
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 1149); b != nil {
+		t.Fatalf("no block may be written with the shape before the change: %+v", b)
+	}
+	// The owner call is recorded inside the range: the replay switches to it there, ends in the shape
+	// the head really carries, and the range fills.
+	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 4663, EffectiveBlock: 1100, EffectiveAt: time.Unix(int64(tsFor(1100)), 0).UTC(), Source: model.SourceOwnerAction,
+		Constraints: entriesJSON([]model.ConstraintSetEntry{{Target: 60_000_000, Window: 15, StartingBacklog: 1}})}); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	err := f.reloadSetsLocked(ctx)
+	f.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 	fillAll(t, f, 40)
 	if holesOf(t, store) != nil {
-		t.Fatalf("the range must still be indexed: %+v", holesOf(t, store))
+		t.Fatalf("the explained range must fill: %+v", holesOf(t, store))
 	}
-	if b, _ := store.BlockByNumber(ctx, 4663, 1149); b == nil {
-		t.Fatal("the last block of the range must be written")
+	if b, _ := store.BlockByNumber(ctx, 4663, 1149); b == nil || len(b.Backlogs) != 1 {
+		t.Fatalf("the blocks after the change carry the shape it installed: %+v", b)
 	}
 	after, _ := store.BlockByNumber(ctx, 4663, 1150)
-	if after.PredictedBaseFee.Valid {
-		t.Fatalf("a head with other backlogs must not be anchored to: %+v", after)
+	if !after.PredictedBaseFee.Valid {
+		t.Fatalf("the head the replay now agrees with must be anchored to: %+v", after)
 	}
 }
 
@@ -1334,5 +1359,68 @@ func TestFillLeavesADiscardedWindowAbsent(t *testing.T) {
 	}
 	if after, _ := store.Buckets(ctx, 4663, db.Resolution1m, minute, minute.Add(time.Minute)); len(after) != 0 {
 		t.Fatalf("a fold inserted a partial bucket into a discarded window: %+v", after[0])
+	}
+}
+
+// TestFillLegacyAdoptsConstraints: a legacy chain that adopts the constraint
+// model inside a skipped range. The replay switches to the recorded set at the
+// owner call's block instead of pricing the rest of the range with parameters
+// the chain no longer used, so the range fills and its later blocks carry the
+// backlogs the set installed.
+func TestFillLegacyAdoptsConstraints(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	rpc.legacy = &nitro.LegacyParams{SpeedLimit: 7_000_000, Inertia: 102, Tolerance: 10, Backlog: 100_000_000}
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(int64(tsFor(1100)), 0).UTC()
+	if _, err := store.InsertOwnerActions(ctx, []db.OwnerAction{{
+		ChainID: 4663, BlockNumber: 1100, TxHash: "0xconstraints", TS: at, Method: methodSetGasPricingConstraints,
+		Args: db.JSONB(`{"constraints":[{"gasTargetPerSecond":60000000,"adjustmentWindowSeconds":15,"startingBacklog":3111506},` +
+			`{"gasTargetPerSecond":40000000,"adjustmentWindowSeconds":86400,"startingBacklog":11194391810886}]}`),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	rpc.receipts["0xconstraints"] = nitro.Receipt{TxHash: "0xconstraints", BlockNumber: 1100, GasUsed: 100_000, CumulativeGasUsed: 500_000}
+	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 4663, EffectiveBlock: 1100, EffectiveAt: at, Source: model.SourceOwnerAction,
+		Constraints: entriesJSON([]model.ConstraintSetEntry{
+			{Target: 60_000_000, Window: 15, StartingBacklog: 3_111_506},
+			{Target: 40_000_000, Window: 86_400, StartingBacklog: 11_194_391_810_886},
+		})}); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	err := f.reloadSetsLocked(ctx)
+	f.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpc.mu.Lock()
+	rpc.legacy = nil
+	rpc.mu.Unlock()
+	rpc.setHead(gapHead)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].From != 1001 {
+		t.Fatalf("the gap must be recorded: %+v", holes)
+	}
+	fillAll(t, f, 40)
+	if holes := holesOf(t, store); holes != nil {
+		t.Fatalf("the range must fill across the model change: %+v", holes)
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 1099); b == nil || len(b.Backlogs) != 1 {
+		t.Fatalf("blocks before the call keep the legacy backlog: %+v", b)
+	}
+	after, _ := store.BlockByNumber(ctx, 4663, 1101)
+	if after == nil || len(after.Backlogs) != 2 {
+		t.Fatalf("blocks after the call carry the constraint backlogs: %+v", after)
+	}
+	head, _ := store.BlockByNumber(ctx, 4663, gapHead)
+	if head == nil || !head.PredictedBaseFee.Valid {
+		t.Fatalf("the replay must reach the sampled head it now agrees with: %+v", head)
 	}
 }

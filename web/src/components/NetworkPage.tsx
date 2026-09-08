@@ -4,10 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "@/hooks/useApi";
 import { useNetwork } from "@/hooks/useNetwork";
 import { useNetworkLive } from "@/hooks/useNetworkLive";
-import { useSeries } from "@/hooks/useSeries";
+import { useRefreshOnOwnerAction, useSeries } from "@/hooks/useSeries";
 import { getOwnerActions } from "@/lib/api/constraints";
 import { getStatus, listNetworks } from "@/lib/api/networks";
+import { latestConstraintAction } from "@/lib/ownerActions";
 import type { OwnerAction, SeriesRange } from "@/types";
+import { formatInteger } from "@/utils/format";
 import { canonicalNetworkName, findNetwork, isUnknownNetwork } from "@/utils/network";
 import { ConstraintCards } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
@@ -33,6 +35,25 @@ function mergeActions(fetched: OwnerAction[] | null, live: OwnerAction[]): Owner
   return [...fresh, ...fetched].sort((a, b) => b.block - a.block);
 }
 
+/**
+ * What the site owes a reader whose pricer is redefined under them: the cards below this describe a
+ * set that did not exist a moment ago, and the averages that reached back before it were dropped.
+ * Only calls that replace what prices a block raise it, and only from the socket: a change already on
+ * screen when the page loaded is history, not news.
+ */
+export function ParameterChangeNotice({ action }: { action: OwnerAction | null }) {
+  if (!action) return null;
+  return (
+    <div className="vw-card mb-4 p-3 text-sm text-ink-2" role="status">
+      Parameters changed at block <span className="num text-ink">{formatInteger(action.block)}</span>. <code>{action.method}</code> replaced what prices a block, so the figures below are the
+      new definition and nothing before it is averaged into them.{" "}
+      <a className="text-accent underline-offset-2 hover:underline" href="#owner">
+        See the owner actions.
+      </a>
+    </div>
+  );
+}
+
 export function NetworkPage({ network: routeNetwork }: { network: string }) {
   const { network, setNetwork, replaceNetwork } = useNetwork();
   const name = network || routeNetwork;
@@ -55,7 +76,11 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
     seenReorgs.current = live.reorgs;
     refreshOwnerActions();
   }, [live.reorgs, refreshOwnerActions]);
+  useRefreshOnOwnerAction(live.ownerActions, series.refresh);
   const actions = useMemo(() => mergeActions(ownerActions.data, live.ownerActions), [ownerActions.data, live.ownerActions]);
+  // Only the socket's actions: the REST list carries every historical change, and the newest of those
+  // is not news about this session.
+  const changed = useMemo(() => latestConstraintAction(live.ownerActions), [live.ownerActions]);
   const info = live.networkInfo ?? (networks.data ? findNetwork(networks.data, name) : undefined) ?? null;
   const unknown = isUnknownNetwork(networks.data, name);
   // Which pricer the history belongs to. The series carries no model of its
@@ -92,6 +117,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         </div>
 
         <Section id="pricer" title="The pricer, live">
+          <ParameterChangeNotice action={changed} />
           <ConstraintCards network={name} live={smooth} />
           <div className="mt-6">
             <PricerEquation snapshot={snapshot} />

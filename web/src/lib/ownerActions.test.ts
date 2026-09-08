@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OwnerAction } from "@/types";
-import { latestConstraintBlock, parseConstraintArg, rawConstraintArg, touchesConstraints } from "./ownerActions";
+import { latestConstraintAction, latestConstraintBlock, parseConstraintArg, rawConstraintArg, touchesConstraints } from "./ownerActions";
 
 function action(method: string, block: number, args: Record<string, unknown> = {}): OwnerAction {
   return { block, at: "2026-09-06T07:20:00Z", txHash: `0x${block}`, method, selector: "0x00000000", args };
@@ -41,5 +41,10 @@ describe("owner calls that replace what prices a block", () => {
     // The list is newest first, but the answer is the highest block whatever the order.
     expect(latestConstraintBlock([action("setGasPricingConstraints", 40), action("setMinimumL2BaseFee", 90), action("setGasPricingConstraints", 12)])).toBe(40);
     expect(latestConstraintBlock([{ ...action("setGasPricingConstraints", 0), block: Number.NaN }])).toBeNull();
+  });
+  it("hands back the call itself, so a notice can name what changed", () => {
+    expect(latestConstraintAction([])).toBeNull();
+    expect(latestConstraintAction([action("setMinimumL2BaseFee", 90)])).toBeNull();
+    expect(latestConstraintAction([action("setSpeedLimit", 12), action("setGasPricingConstraints", 40)])?.method).toBe("setGasPricingConstraints");
   });
 });

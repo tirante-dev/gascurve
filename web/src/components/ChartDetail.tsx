@@ -5,7 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useMemo, type ReactNode } from "react";
 import { useApi } from "@/hooks/useApi";
 import { useNetworkLive } from "@/hooks/useNetworkLive";
-import { useSeries } from "@/hooks/useSeries";
+import { useRefreshOnOwnerAction, useSeries } from "@/hooks/useSeries";
 import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
 import { listNetworks } from "@/lib/api/networks";
 import {
@@ -178,6 +178,7 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
   // asks for none at all.
   const seriesRange: SeriesRange | null = range === null || range === "live" ? null : (range as SeriesRange);
   const series = useSeries(seriesRange === null ? null : network, seriesRange);
+  useRefreshOnOwnerAction(live.ownerActions, series.refresh);
   const m = useMemo(() => (series.data ? buildSeriesModel(series.data, model) : null), [series.data, model]);
 
   const viewId = view === null ? null : view.id;

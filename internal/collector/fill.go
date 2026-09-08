@@ -403,6 +403,19 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 				}
 				continue
 			}
+			explained, err := f.endsInKnownShape(ctx, h, target.state)
+			if err != nil {
+				return nil, reasons, err
+			}
+			if !explained {
+				f.log.Warn("the block after a queued range carries a pricer shape no recorded set explains, leaving the range for the set that does",
+					"from", h.From, "to", h.To)
+				if reasons == nil {
+					reasons = map[uint64]string{}
+				}
+				reasons[h.From] = reasonReplayDiscontinuity
+				continue
+			}
 			if effectiveLifecycle(h) == rangeBlocked {
 				f.log.Info("a hole recorded without state can be replayed now", "from", h.From, "to", h.To)
 				target.h.Reason = ""
@@ -412,6 +425,34 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 		}
 	}
 	return nil, reasons, nil
+}
+
+// endsInKnownShape reports whether the shape the replay reaches the end of a range with agrees with
+// the block stored after it: the state it continues from, with every recorded set inside the range
+// applied. A pricer change no recorded set explains (an owner call the log scan has not found yet,
+// or one whose block is only known to lie somewhere in the range) would otherwise be filled with the
+// shape in force before it, pricing every block after the change with the wrong model. Such a range
+// waits instead, and becomes fillable as soon as the set explaining it is recorded.
+func (f *Follower) endsInKnownShape(ctx context.Context, h hole, st *pricer.State) (bool, error) {
+	next, err := f.store.BlockByNumber(ctx, f.chainID, h.To+1)
+	if err != nil {
+		return false, fmt.Errorf("block %d: %w", h.To+1, err)
+	}
+	if next == nil || !next.Known() || len(next.Backlogs) == 0 {
+		return true, nil
+	}
+	slots := len(st.Backlogs())
+	f.mu.Lock()
+	for _, cs := range f.sets {
+		if cs.EffectiveBlock < h.Start() || cs.EffectiveBlock > h.To {
+			continue
+		}
+		if entries, decodeErr := setEntries(cs); decodeErr == nil && len(entries) > 0 {
+			slots = len(entries)
+		}
+	}
+	f.mu.Unlock()
+	return slots == len(next.Backlogs), nil
 }
 
 // markHoles applies the reasons pickHole decided on, matching entries by start so a range
@@ -424,7 +465,9 @@ func (f *Follower) markHoles(ctx context.Context, s db.Store, reasons map[uint64
 	changed := false
 	for i := range holes {
 		reason, ok := reasons[holes[i].From]
-		if !ok || holes[i].Reason == reason {
+		// A range already carrying the reason may still be queued: the tick records a discontinuity
+		// as pending work, and it is this pass that decides nothing can replay it yet.
+		if !ok || (holes[i].Reason == reason && holes[i].Lifecycle == rangeBlocked) {
 			continue
 		}
 		holes[i].Reason = reason

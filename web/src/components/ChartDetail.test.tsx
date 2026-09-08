@@ -129,7 +129,8 @@ const series: Series = {
 
 const seriesCalls: (string | null)[][] = [];
 let seriesData: Series | null = series;
-vi.mock("@/hooks/useSeries", () => ({
+vi.mock("@/hooks/useSeries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useSeries")>()),
   useSeries: (network: string | null, range: string | null) => {
     seriesCalls.push([network, range]);
     return { ...emptyApi, data: seriesData };
