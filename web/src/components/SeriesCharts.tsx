@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { memo, useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { PricerModel, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
@@ -275,7 +275,7 @@ const bucketTitle = (t: number) => formatDateTime(t);
 export const bucketRowTitle = (row: Record<string, unknown>) => formatDateTime(Number(row.t));
 
 /** Each constraint's share of the exponent, stacked, one series per constraint set. */
-export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
+export const ContributionChart = memo(function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
   return (
     <>
       <ChartFrame height={height} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
@@ -299,7 +299,7 @@ export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: Seri
       <GapNote gaps={m.gaps} />
     </>
   );
-}
+});
 
 /**
  * Gas carried per second against the target of every constraint in force, at
@@ -308,7 +308,7 @@ export function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: Seri
  * axis carries one unit for the whole scale, named in the caption beside the
  * chart, so every label is a bare figure of the same width.
  */
-export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth = GAS_AXIS_WIDTH, minWidth }: { m: SeriesModel; height?: ChartHeight; axisWidth?: number; minWidth?: number }) {
+export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth = GAS_AXIS_WIDTH, minWidth }: { m: SeriesModel; height?: ChartHeight; axisWidth?: number; minWidth?: number }) {
   return (
     <>
       <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit} with each constraint target in force drawn as a stepped line`}>
@@ -334,10 +334,10 @@ export function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth =
       <MissingNote runs={m.gasMissing} />
     </>
   );
-}
+});
 
 /** One slot's backlog over time, on its own scale. A replaced constraint starts a new series. */
-export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }: { m: SeriesModel; index: number; label: string; height?: ChartHeight }) {
+export const BacklogChart = memo(function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }: { m: SeriesModel; index: number; label: string; height?: ChartHeight }) {
   return (
     <>
       <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
@@ -369,7 +369,7 @@ export function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }:
       <MissingNote runs={m.backlogMissingFor(index)} />
     </>
   );
-}
+});
 
 /** The card a history chart sits in: its name, its legend and the control that enlarges it. */
 function ChartBlock({ title, legend, action, children }: { title: string; legend?: { label: string; color: string; kind?: "rect" | "line" }[]; action?: ReactNode; children: ReactNode }) {
@@ -393,7 +393,7 @@ function ChartBlock({ title, legend, action, children }: { title: string; legend
  * constraint-set list means "no set known", never "legacy". Every card links
  * to the chart's own page at the range on screen.
  */
-export function SeriesCharts({ network, range, series, loading, model }: { network: string; range: SeriesRange; series: Series | null; loading: boolean; model: PricerModel }) {
+export const SeriesCharts = memo(function SeriesCharts({ network, range, series, loading, model }: { network: string; range: SeriesRange; series: Series | null; loading: boolean; model: PricerModel }) {
   const m = useMemo(() => (series ? buildSeriesModel(series, model) : null), [series, model]);
   const [tableOpen, setTableOpen] = useState(false);
 
@@ -533,4 +533,4 @@ export function SeriesCharts({ network, range, series, loading, model }: { netwo
       </details>
     </div>
   );
-}
+});

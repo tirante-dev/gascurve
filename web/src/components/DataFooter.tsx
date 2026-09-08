@@ -1,13 +1,17 @@
 "use client";
 
+import { useTicker } from "@/hooks/useTicker";
 import type { LiveSnapshot, LiveStatus, Network, Series, StatusResponse } from "@/types";
 import { formatAgo, formatDateTime, formatInteger } from "@/utils/format";
 import { Bips, STATUS_COPY } from "./primitives";
 
-export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, now }: { snapshot: LiveSnapshot | null; series: Series | null; networkInfo: Network | null; status: LiveStatus; apiStatus: StatusResponse | null; now: number }) {
+/** `now` is for a caller that fixes the clock; left out, the footer keeps its own so the page above it does not tick. */
+export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, now }: { snapshot: LiveSnapshot | null; series: Series | null; networkInfo: Network | null; status: LiveStatus; apiStatus: StatusResponse | null; now?: number }) {
+  const ticked = useTicker(now === undefined ? 1000 : 0);
+  const clock = now ?? ticked;
   const maxReplayError = series ? Math.max(0, ...series.points.map((p) => p.replayErrorBips)) : 0;
   const estimated = series ? series.points.filter((p) => p.replayErrorBips > 200).length : 0;
-  const sampledAgo = snapshot ? (now - new Date(snapshot.sampledAt).getTime()) / 1000 : null;
+  const sampledAgo = snapshot ? (clock - new Date(snapshot.sampledAt).getTime()) / 1000 : null;
   const networkStatus = apiStatus?.networks.find((n) => n.name === networkInfo?.name);
   const webVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "dev";
   return (

@@ -36,4 +36,15 @@ describe("useTicker", () => {
     });
     expect(result.current).toBe(1_001_350);
   });
+
+  it("holds the first reading and starts no timer at an interval of zero", () => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+    const { result } = renderHook(() => useTicker(0));
+    expect(result.current).toBe(1_000_000);
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(result.current).toBe(1_000_000);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
