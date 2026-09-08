@@ -382,9 +382,10 @@ func (f *Follower) resolveDepthTarget(ctx context.Context, c *backfillCursor) er
 // keeping everything already reconstructed. The run in flight finishes rather than being cut off: it
 // walks up towards the history above it, so stopping it early would leave a gap between the two, and
 // its blocks fold additively where a later widening would fold them again. The floor that run walks
-// to is therefore all hold can offer, and where nothing bounds a run (no archive endpoint, or
-// backfill_window 0) that floor is the whole constraint set. Every outcome is logged, the ones that
-// move nothing included: a hold reading as a silent no-op is the defect this setting exists to end.
+// to is therefore all hold can offer, and where nothing bounds a run (no archive endpoint, a
+// backfill_window of 0, a seed the archive answers with another model) that floor is the whole
+// constraint set. Every outcome is logged, the ones that move nothing included: a hold reading as a
+// silent no-op is the defect this setting exists to end.
 func (f *Follower) holdDepthTarget(c *backfillCursor) {
 	floor := f.heldFloor(c)
 	remaining := uint64(0)
@@ -398,7 +399,7 @@ func (f *Follower) holdDepthTarget(c *backfillCursor) {
 			"floor", floor, "previousTarget", c.DepthTarget, "runRemaining", remaining)
 		c.DepthTarget = floor
 	case c.Active:
-		f.log.Info("backfill depth held, but the run in flight already walks to the recorded floor and finishes first",
+		f.log.Info("backfill depth held, but the run in flight bottoms at or below the floor recorded and finishes first",
 			"floor", floor, "target", c.DepthTarget, "runRemaining", remaining)
 	default:
 		f.log.Info("backfill depth held at the floor already reached", "floor", floor, "target", c.DepthTarget)
