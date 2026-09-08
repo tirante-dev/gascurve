@@ -731,10 +731,10 @@ func (m *MemStore) ComputeRateSpread(_ context.Context, chainID uint64, from, to
 		}
 		w, ok := windows[start]
 		if !ok {
-			windows[start] = &db.RateSpread{Start: time.Unix(start, 0).UTC(), MinRate: *rate, MaxRate: *rate}
+			windows[start] = &db.RateSpread{Start: time.Unix(start, 0).UTC(), MinRate: *rate, MaxRate: *rate, Units: 1}
 			continue
 		}
-		w.MinRate, w.MaxRate = min(w.MinRate, *rate), max(w.MaxRate, *rate)
+		w.MinRate, w.MaxRate, w.Units = min(w.MinRate, *rate), max(w.MaxRate, *rate), w.Units+1
 	}
 	var out []db.RateSpread
 	for start, w := range windows {

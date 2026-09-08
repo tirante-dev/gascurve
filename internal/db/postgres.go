@@ -766,7 +766,7 @@ const blockRateSpread = `
 		GROUP BY ts
 	)
 	SELECT to_timestamp(floor(extract(epoch FROM ts) / $4::BIGINT) * $4::BIGINT) AS start,
-		min(rate)::BIGINT AS min_rate, max(rate)::BIGINT AS max_rate
+		min(rate)::BIGINT AS min_rate, max(rate)::BIGINT AS max_rate, count(*)::BIGINT AS units
 	FROM per_unit GROUP BY 1 HAVING count(*) = count(rate) ORDER BY 1`
 
 // bucketRateSpread measures the spread over the stored buckets one resolution finer, whose rate is
@@ -777,7 +777,7 @@ const bucketRateSpread = `
 		FROM buckets WHERE chain_id = $1 AND resolution = $2 AND bucket_start >= $3 AND bucket_start < $4
 	)
 	SELECT to_timestamp(floor(extract(epoch FROM bucket_start) / $6::BIGINT) * $6::BIGINT) AS start,
-		min(rate)::BIGINT AS min_rate, max(rate)::BIGINT AS max_rate
+		min(rate)::BIGINT AS min_rate, max(rate)::BIGINT AS max_rate, count(*)::BIGINT AS units
 	FROM per_unit GROUP BY 1 HAVING count(*) = count(rate) ORDER BY 1`
 
 func (p *Postgres) ComputeRateSpread(ctx context.Context, chainID uint64, from, to time.Time, step, unit time.Duration) ([]RateSpread, error) {

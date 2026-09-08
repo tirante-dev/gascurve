@@ -1216,7 +1216,9 @@ func TestIntegrationComputeRateSpread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || !got[0].Start.Equal(base) || got[0].MinRate != 45 || got[0].MaxRate != 500 {
+	// Units is what the caller needs to tell an idle second from a measured one: three of the
+	// minute's sixty seconds carried blocks.
+	if len(got) != 1 || !got[0].Start.Equal(base) || got[0].MinRate != 45 || got[0].MaxRate != 500 || got[0].Units != 3 {
 		t.Fatalf("per-second spread: %+v", got)
 	}
 	// The window is the caller's: a to that stops short of a second leaves it out of the spread.
@@ -1241,7 +1243,7 @@ func TestIntegrationComputeRateSpread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spread) != 1 || !spread[0].Start.Equal(base) || spread[0].MinRate != 2 || spread[0].MaxRate != 100 {
+	if len(spread) != 1 || !spread[0].Start.Equal(base) || spread[0].MinRate != 2 || spread[0].MaxRate != 100 || spread[0].Units != 3 {
 		t.Fatalf("per-minute spread: %+v", spread)
 	}
 	if _, err := p.ComputeRateSpread(ctx, testChain, base, base.Add(time.Hour), time.Hour, 7*time.Minute); err == nil {

@@ -662,7 +662,7 @@ func TestSeriesPosterGasFeeDestinations(t *testing.T) {
 	if p.PosterGas == nil || *p.PosterGas != 767 || p.ComputeGasPerSecond == nil || *p.ComputeGasPerSecond != 421_949 || p.FeesWei != "8469537776000" || p.FloorFeesWei == nil || *p.FloorFeesWei != "8438980000000" || *p.SurplusFeesWei != "15190164000" || *p.PosterFeesWei != "15367612000" {
 		t.Fatalf("block destination split: %+v", p)
 	}
-	steps, _ := stepDown([]db.Block{b}, nil, now)
+	steps, _, _ := stepDown([]db.Block{b}, nil, now)
 	stepped := steps[0]
 	if stepped.PosterGas == nil || *stepped.PosterGas != 767 || stepped.PosterFeesWei == nil || *stepped.PosterFeesWei != "15367612000" {
 		t.Fatalf("step destination split: %+v", stepped)
@@ -732,7 +732,7 @@ func TestUnknownHistoryIsNull(t *testing.T) {
 		t.Fatalf("block points: %+v", pts)
 	}
 	// Stepping down folds unknown blocks into an unknown split.
-	if p, _ := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}, nil, now); len(p) != 1 || p[0].FloorFeesWei != nil {
+	if p, _, _ := stepDown([]db.Block{{TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), ConstraintBips: pq.Int64Array{}}, {TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}, nil, now); len(p) != 1 || p[0].FloorFeesWei != nil {
 		t.Fatalf("step down with an unknown block: %+v", p)
 	}
 }
@@ -1571,7 +1571,7 @@ func TestMissingTimelineLocatesRangesAmongBlockPoints(t *testing.T) {
 	}
 
 	// Stepping down carries the highest block of each step, so the range lands on the same two steps.
-	steps, numbers := stepDown(blocks, nil, now)
+	steps, numbers, _ := stepDown(blocks, nil, now)
 	if len(steps) != 2 || numbers[0] != 99 || numbers[1] != 110 {
 		t.Fatalf("step watermarks: %+v %v", steps, numbers)
 	}
@@ -1858,25 +1858,34 @@ func TestSeriesComputeRateSpread(t *testing.T) {
 		t.Fatalf("per-block points carry no band: %s %v %+v", perBlock.Resolution, perBlock.SpreadSeconds, perBlock.Points[0])
 	}
 
-	// A quarter hour reads its spread from the minutes inside it.
-	for i, compute := range []uint64{600, 120, 6_000} {
-		start := now.Add(-time.Hour).Truncate(time.Minute).Add(time.Duration(i) * time.Minute)
-		bucket := db.Bucket{
-			ChainID: robinhood, Resolution: db.Resolution1m, BucketStart: start, Blocks: 1, GasUsed: compute + 7,
+	// Two quarter hours read their spread from the minutes inside them: one with every minute
+	// stored, one with three, whose twelve idle minutes carried nothing.
+	minute := func(start time.Time, compute uint64, resolution string) db.Bucket {
+		return db.Bucket{
+			ChainID: robinhood, Resolution: resolution, BucketStart: start, Blocks: 1, GasUsed: compute + 7,
 			PosterGas: sql.NullInt64{Int64: 7, Valid: true}, FeesWei: db.WeiFromUint64(1), BaseFeeMin: db.WeiFromUint64(1),
-			BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1), LastBlock: uint64(9000 + i), PricingVersion: db.PricingFull,
+			BaseFeeAvg: db.WeiFromUint64(1), BaseFeeMax: db.WeiFromUint64(1), LastBlock: uint64(9000 + start.Unix()), PricingVersion: db.PricingFull,
 		}
-		if err := store.FoldBuckets(ctx, []db.Bucket{bucket}); err != nil {
-			t.Fatal(err)
+	}
+	whole := now.Add(-time.Hour).Truncate(15 * time.Minute)
+	sparse := whole.Add(15 * time.Minute)
+	rows := make([]db.Bucket, 0, 20)
+	for i := range 15 {
+		compute := uint64(600)
+		switch i {
+		case 3:
+			compute = 120
+		case 7:
+			compute = 6_000
 		}
-		quarter := bucket
-		quarter.Resolution, quarter.BucketStart = db.Resolution15m, start.Truncate(15*time.Minute)
-		quarter.GasUsed, quarter.PosterGas = 0, sql.NullInt64{Int64: 0, Valid: true}
-		if i == 0 {
-			if err := store.FoldBuckets(ctx, []db.Bucket{quarter}); err != nil {
-				t.Fatal(err)
-			}
-		}
+		rows = append(rows, minute(whole.Add(time.Duration(i)*time.Minute), compute, db.Resolution1m))
+	}
+	for i, compute := range []uint64{600, 120, 6_000} {
+		rows = append(rows, minute(sparse.Add(time.Duration(i)*time.Minute), compute, db.Resolution1m))
+	}
+	rows = append(rows, minute(whole, 0, db.Resolution15m), minute(sparse, 0, db.Resolution15m))
+	if err := store.FoldBuckets(ctx, rows); err != nil {
+		t.Fatal(err)
 	}
 	month, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeMonth], now)
 	if err != nil {
@@ -1885,7 +1894,58 @@ func TestSeriesComputeRateSpread(t *testing.T) {
 	if month.SpreadSeconds == nil || *month.SpreadSeconds != 60 {
 		t.Fatalf("month spread unit: %v", month.SpreadSeconds)
 	}
-	if len(month.Points) != 1 || month.Points[0].ComputeGasPerSecondMin == nil || *month.Points[0].ComputeGasPerSecondMin != 2 || *month.Points[0].ComputeGasPerSecondMax != 100 {
-		t.Fatalf("quarter hour band: %+v", month.Points)
+	if len(month.Points) != 2 {
+		t.Fatalf("quarter hours: %+v", month.Points)
+	}
+	if *month.Points[0].ComputeGasPerSecondMin != 2 || *month.Points[0].ComputeGasPerSecondMax != 100 {
+		t.Fatalf("a quarter hour with every minute stored bands over what it measured: %+v", month.Points[0])
+	}
+	if *month.Points[1].ComputeGasPerSecondMin != 0 || *month.Points[1].ComputeGasPerSecondMax != 100 {
+		t.Fatalf("an idle minute inside a whole quarter hour carried nothing: %+v", month.Points[1])
+	}
+}
+
+// A second with no blocks at all is not an unmeasured one: it carried nothing, and a band that
+// leaves it out reports a minimum above the bucket's own average.
+func TestSeriesSpreadCountsIdleUnits(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: robinhood, Name: "robinhood", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Four blocks in the first second of every five, so each step of the hour holds one measured
+	// second and four idle ones, and enough of them for the range to step down.
+	base := now.Add(-time.Hour).Truncate(stepDownWidth)
+	var blocks []db.Block
+	for i := uint64(0); i < 2500; i++ {
+		at := base.Add(time.Duration(i/4) * stepDownWidth)
+		blocks = append(blocks, db.Block{
+			ChainID: robinhood, Number: i, TS: at, GasUsed: 100, PosterGas: sql.NullInt64{Valid: true},
+			BaseFee: db.WeiFromUint64(100), PredictedBaseFee: db.NullWeiFromUint64(100), Backlogs: db.Uint64Array{1},
+			ConstraintBips: pq.Int64Array{1}, MinBaseFee: db.NullWeiFromUint64(50), PricingVersion: db.PricingFull,
+		})
+	}
+	if err := store.UpsertBlocks(ctx, blocks); err != nil {
+		t.Fatal(err)
+	}
+	hour, err := buildSeriesIn(ctx, store, robinhood, ranges[rangeHour], now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hour.Resolution != resolutionStepped {
+		t.Fatalf("resolution %q", hour.Resolution)
+	}
+	p := hour.Points[0]
+	if p.Completeness != model.SeriesComplete || p.ComputeGasPerSecondMin == nil || *p.ComputeGasPerSecondMin != 0 || *p.ComputeGasPerSecondMax != 400 {
+		t.Fatalf("four idle seconds floor the step's band: %+v", p)
+	}
+	// The average of a step is a mean over its whole span, so it can never leave its own band.
+	for _, p := range hour.Points {
+		if p.ComputeGasPerSecondMin == nil || p.ComputeGasPerSecond == nil {
+			continue
+		}
+		if *p.ComputeGasPerSecond < *p.ComputeGasPerSecondMin || *p.ComputeGasPerSecond > *p.ComputeGasPerSecondMax {
+			t.Fatalf("average outside its band: %+v", p)
+		}
 	}
 }

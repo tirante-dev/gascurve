@@ -112,11 +112,12 @@ type Bucket struct {
 	PricingVersion int16 `db:"pricing_version"`
 }
 
-// RateSpread is the lowest and highest compute gas rate the units inside one window carried.
+// RateSpread is the lowest and highest compute gas rate over the Units of a window that had blocks.
 type RateSpread struct {
 	Start   time.Time `db:"start"`
 	MinRate int64     `db:"min_rate"`
 	MaxRate int64     `db:"max_rate"`
+	Units   int64     `db:"units"`
 }
 
 // StateSample is a row of the state_samples table.

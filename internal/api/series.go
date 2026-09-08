@@ -137,9 +137,15 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 			out.Resolution = resolutionStepped
 			// The steps are folded from the rows in hand, so their spread is folded with them rather
 			// than asked of the store a second time.
-			out.Points, numbers = stepDown(blocks, sets, now)
-			out.SpreadSeconds = spreadSeconds(rng.spreadUnit)
+			var seconds []int64
+			out.Points, numbers, seconds = stepDown(blocks, sets, now)
 			timeline.apply(out.Points, numbers, stepDownWidth)
+			// After the timeline, which is what settles whether a step is whole: an idle unit can
+			// only be told from an unindexed one in a step the collector has all of.
+			for i := range out.Points {
+				zeroFloor(&out.Points[i], seconds[i], int64(stepDownWidth/rng.spreadUnit))
+			}
+			out.SpreadSeconds = spreadSeconds(rng.spreadUnit, out.Points)
 		} else {
 			out.Resolution = resolutionBlock
 			out.Points = blockPoints(blocks, sets)
@@ -172,13 +178,26 @@ func buildSeriesIn(ctx context.Context, store db.Store, chainID uint64, rng seri
 	return out, nil
 }
 
-// spreadSeconds is the unit a series reports its spread in, absent when it measures none.
-func spreadSeconds(unit time.Duration) *int64 {
-	if unit <= 0 {
+// spreadSeconds is the unit a series reports its spread in, absent when no point ended up with a
+// band: the block rows a per-second unit is read from are pruned well before the coarsest bucket
+// that stands on them, so a range can ask for a spread the store cannot reconstruct.
+func spreadSeconds(unit time.Duration, points []model.SeriesPoint) *int64 {
+	if unit <= 0 || !slices.ContainsFunc(points, func(p model.SeriesPoint) bool { return p.ComputeGasPerSecondMin != nil }) {
 		return nil
 	}
 	secs := int64(unit / time.Second)
 	return &secs
+}
+
+// zeroFloor drops a point's band minimum to zero when its window holds a unit with no blocks at
+// all. A whole bucket short of units has idle ones in it, and an idle unit carried nothing, so
+// leaving it out would report a minimum above the bucket's own average. A bucket the collector has
+// only part of is short for another reason, and its minimum stands as measured.
+func zeroFloor(p *model.SeriesPoint, measured, units int64) {
+	if p.ComputeGasPerSecondMin == nil || p.Completeness != model.SeriesComplete || measured >= units {
+		return
+	}
+	p.ComputeGasPerSecondMin = uint64ValuePtr(0)
 }
 
 // addRateSpread hangs the load band on the bucketed points: the lowest and highest compute rate any
@@ -196,7 +215,6 @@ func addRateSpread(ctx context.Context, store db.Store, chainID uint64, out *mod
 	if err != nil {
 		return err
 	}
-	out.SpreadSeconds = spreadSeconds(unit)
 	byStart := make(map[int64]db.RateSpread, len(spreads))
 	for _, s := range spreads {
 		byStart[s.Start.Unix()] = s
@@ -208,7 +226,9 @@ func addRateSpread(ctx context.Context, store db.Store, chainID uint64, out *mod
 		}
 		out.Points[i].ComputeGasPerSecondMin = uint64ValuePtr(uint64(max(s.MinRate, 0)))
 		out.Points[i].ComputeGasPerSecondMax = uint64ValuePtr(uint64(max(s.MaxRate, 0)))
+		zeroFloor(&out.Points[i], s.Units, int64(width/unit))
 	}
+	out.SpreadSeconds = spreadSeconds(unit, out.Points)
 	return nil
 }
 
@@ -647,24 +667,28 @@ func uint64ValuePtr(v uint64) *uint64 { return &v }
 // stepDown folds blocks into stepDownWidth buckets, taking each step's rate over the span it covers
 // exactly as a stored bucket does. numbers is the highest block of each step, so a missing range the
 // collector could not put a time on can still be placed among the steps.
-func stepDown(blocks []db.Block, sets []db.ConstraintSet, now time.Time) (points []model.SeriesPoint, numbers []uint64) {
+func stepDown(blocks []db.Block, sets []db.ConstraintSet, now time.Time) (points []model.SeriesPoint, numbers []uint64, seconds []int64) {
 	const width = stepDownWidth
 	secs := int64(width / time.Second)
 	var cur *acc
+	closeStep := func() {
+		points = append(points, cur.point(width, now))
+		numbers, seconds = append(numbers, cur.lastBlock), append(seconds, int64(cur.seconds))
+	}
 	for _, b := range blocks {
 		start := (b.TS.Unix() / secs) * secs
 		if cur == nil || cur.start != start {
 			if cur != nil {
-				points, numbers = append(points, cur.point(width, now)), append(numbers, cur.lastBlock)
+				closeStep()
 			}
 			cur = &acc{start: start, cutoff: now.Truncate(time.Second).Unix(), sum: new(big.Int), fees: new(big.Int), floor: new(big.Int), posterFees: new(big.Int)}
 		}
 		cur.add(b, setIDAt(sets, b.Number, len(b.Backlogs)))
 	}
 	if cur != nil {
-		points, numbers = append(points, cur.point(width, now)), append(numbers, cur.lastBlock)
+		closeStep()
 	}
-	return points, numbers
+	return points, numbers, seconds
 }
 
 type acc struct {
