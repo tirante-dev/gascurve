@@ -379,17 +379,30 @@ func (f *Follower) resolveDepthTarget(ctx context.Context, c *backfillCursor) er
 }
 
 // holdDepthTarget raises the target to where the descent has reached, abandoning the rest of it and
-// keeping everything already reconstructed. The run in flight is left to finish rather than cut off
-// halfway: its blocks are folded additively below the history above them, and a later widening
-// starting a fresh run over the same range would fold them a second time.
+// keeping everything already reconstructed. The run in flight finishes rather than being cut off: it
+// walks up towards the history above it, so stopping it early would leave a gap between the two, and
+// its blocks fold additively where a later widening would fold them again. The floor that run walks
+// to is therefore all hold can offer, and where nothing bounds a run (no archive endpoint, or
+// backfill_window 0) that floor is the whole constraint set. Every outcome is logged, the ones that
+// move nothing included: a hold reading as a silent no-op is the defect this setting exists to end.
 func (f *Follower) holdDepthTarget(c *backfillCursor) {
 	floor := f.heldFloor(c)
-	if floor == 0 || floor <= c.DepthTarget {
-		return
+	remaining := uint64(0)
+	if c.Active {
+		remaining = pricer.SaturatingUSub(c.End, c.Next)
 	}
-	f.log.Info("backfill depth held, keeping the floor reached and abandoning the rest of the descent",
-		"floor", floor, "previousTarget", c.DepthTarget)
-	c.DepthTarget = floor
+	switch {
+	case floor == 0:
+	case floor > c.DepthTarget:
+		f.log.Info("backfill depth held, keeping the floor reached and abandoning the rest of the descent",
+			"floor", floor, "previousTarget", c.DepthTarget, "runRemaining", remaining)
+		c.DepthTarget = floor
+	case c.Active:
+		f.log.Info("backfill depth held, but the run in flight already walks to the recorded floor and finishes first",
+			"floor", floor, "target", c.DepthTarget, "runRemaining", remaining)
+	default:
+		f.log.Info("backfill depth held at the floor already reached", "floor", floor, "target", c.DepthTarget)
+	}
 }
 
 // heldFloor is where a held descent settles: the bottom of the run in flight, else the bottom of the

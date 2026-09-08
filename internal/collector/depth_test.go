@@ -703,6 +703,45 @@ func TestBackfillDepthHoldStopsTheDescent(t *testing.T) {
 	}
 }
 
+// TestBackfillDepthHoldStopsAtTheSegmentFloor: nothing bounds a run without an
+// archive endpoint, so the floor a hold can offer is the whole constraint set
+// the run is replaying. It still stops the descent, at the end of that run
+// rather than within a window, and still replays nothing below it.
+func TestBackfillDepthHoldStopsAtTheSegmentFloor(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Genesis
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("first step: %v %v", st, err)
+	}
+	c, err := f.loadCursor(ctx)
+	if err != nil || !c.Active || c.SegStart != 500 || c.End != 1000 {
+		t.Fatalf("unwindowed run: %+v %v", c, err)
+	}
+	held := newTestFollower(t, newFakeRPC(1000), store)
+	held.cfg.BackfillDepth = config.Hold
+	if err := held.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, held, 200)
+	if c, err = held.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 500 || c.End != 500 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 499); err != nil || b != nil {
+		t.Fatalf("the segment below the held floor must not be replayed: %+v %v", b, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 500); err != nil || b == nil {
+		t.Fatalf("the run in flight must finish: %+v %v", b, err)
+	}
+}
+
 // TestBackfillDepthHoldIsIdempotent: the word says where the floor is, not
 // that it moves, so a pod restarting on the same configuration holds where it
 // held and does not walk on.
