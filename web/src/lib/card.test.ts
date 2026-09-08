@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CARD_DIAL_H, CARD_DIAL_W, CARD_TONE_COLORS, OFF_SCALE, baseFeeSize, cardDialSvg, cardNumerals, cardReading, svgDataUri } from "@/lib/card";
+import { CARD_DIAL_H, CARD_DIAL_W, CARD_TONE_COLORS, FEE_SIZES, FEE_UNIT_W, MAX_FIGURE_CHARS, MULTIPLIER_SIZES, MULTIPLIER_UNIT_W, OFF_SCALE, cardDialSvg, cardNumerals, cardReading, figureFits, readoutSize, svgDataUri } from "@/lib/card";
 import { AMBER_TO, DIAL_CY, DIAL_MAX, DIAL_VIEW_H, DIAL_VIEW_W, GREEN_TO, dialPoint, dialPosition, needlePoints, R_NUMERAL } from "@/lib/dial";
 import type { LiveSnapshot } from "@/types";
 
@@ -87,14 +87,43 @@ describe("svgDataUri", () => {
   });
 });
 
+describe("readout sizing", () => {
+  it.each([
+    ["fee", FEE_SIZES, FEE_UNIT_W],
+    ["multiplier", MULTIPLIER_SIZES, MULTIPLIER_UNIT_W],
+  ])("sets every %s step at a size its longest figure fits", (_name, steps, unitW) => {
+    for (const [length, size] of steps) expect(figureFits(length, size, unitW)).toBe(true);
+  });
+
+  it.each([
+    ["fee", FEE_SIZES, MAX_FIGURE_CHARS],
+    // The multiplier's own figure is two characters shorter than the fee's, and carries a sign.
+    ["multiplier", MULTIPLIER_SIZES, MAX_FIGURE_CHARS - 4],
+  ])("has a %s step for the longest figure it can be handed", (_name, steps, longest) => {
+    expect(steps[steps.length - 1][0]).toBeGreaterThanOrEqual(longest);
+  });
+
+  it("falls back to the smallest step for a figure longer than any of them", () => {
+    // The off scale cutoff means nothing that long reaches here, so this is what happens if it ever does.
+    expect(readoutSize("x".repeat(MAX_FIGURE_CHARS + 10), FEE_SIZES)).toBe(FEE_SIZES[FEE_SIZES.length - 1][1]);
+  });
+
+  it("keeps the everyday fee at full size and steps down only as the figure grows", () => {
+    expect(readoutSize("0.4090", FEE_SIZES)).toBe(96);
+    expect(readoutSize("9,007,199,254,740,991.0", FEE_SIZES)).toBe(32);
+    expect(readoutSize("1.00×", MULTIPLIER_SIZES)).toBe(44);
+    expect(readoutSize(OFF_SCALE, MULTIPLIER_SIZES)).toBe(34);
+  });
+});
+
 describe("cardReading", () => {
   it("formats every figure the card prints", () => {
     expect(cardReading(snapshot)).toEqual({
       baseFee: "0.4090",
-      baseFeeSize: 96,
       multiplier: 20.45,
       multiplierText: "20.45",
       offScale: false,
+      feeOffScale: false,
       tone: "critical",
       floor: "0.02",
       block: "62,912,450",
@@ -109,11 +138,27 @@ describe("cardReading", () => {
     expect(cardReading(under)).toMatchObject({ multiplierText: "900,719,925,474.10", offScale: false });
   });
 
-  it("sets a long fee smaller, since the card has no room to reflow it", () => {
-    expect(baseFeeSize("0.4090")).toBe(96);
-    const sizes = ["0.4090", "12345678.1", "123456789012.1", "12345678901234567.1"].map(baseFeeSize);
-    expect(sizes).toEqual([...sizes].sort((a, b) => b - a));
-    expect(new Set(sizes).size).toBe(sizes.length);
+  it("says off scale for a fee whose digits a double no longer carries", () => {
+    const huge = { ...snapshot, baseFee: "9007199254740992000000000" } as LiveSnapshot;
+    expect(cardReading(huge)).toMatchObject({ baseFee: OFF_SCALE, feeOffScale: true });
+    // Just under the cutoff still prints, and it is the longest figure the fee line is sized for.
+    const edge = { ...snapshot, baseFee: "9007199254740991000000000" } as LiveSnapshot;
+    const printed = cardReading(edge);
+    expect(printed?.feeOffScale).toBe(false);
+    expect(printed?.baseFee.length).toBeLessThanOrEqual(MAX_FIGURE_CHARS);
+  });
+
+  it("has no reading at all for a figure the pricer cannot produce, rather than a red n/a", () => {
+    // A fee cannot sit below its own floor, so a negative multiplier is a broken reading, not a low one:
+    // drawn as a figure it would be a green needle pinned left under a minus sign.
+    for (const bips of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, -50_000]) {
+      expect(cardReading({ ...snapshot, multiplierBips: bips } as LiveSnapshot)).toBeNull();
+    }
+  });
+
+  it("bands a figure past a thousand, where its printed form carries a separator", () => {
+    const thousand = { ...snapshot, multiplierBips: 12_340_000 } as LiveSnapshot;
+    expect(cardReading(thousand)).toMatchObject({ multiplierText: "1,234.00", tone: "critical" });
   });
 
   it("takes the tone from the figure as printed, so a rounded reading matches its band", () => {

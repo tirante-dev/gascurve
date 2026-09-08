@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
 import { serverApiBase } from "@/lib/api/core";
 import { getLive } from "@/lib/api/live";
-import { CARD_COLORS, CARD_DIAL_H, CARD_DIAL_W, CARD_TONE_COLORS, cardDialSvg, cardNumerals, cardReading, svgDataUri, type CardReading } from "@/lib/card";
+import { CARD_COLORS, CARD_DIAL_H, CARD_DIAL_W, CARD_PAD_X, CARD_TONE_COLORS, FEE_SIZES, MULTIPLIER_SIZES, READOUT_GAP, cardDialSvg, cardNumerals, cardReading, readoutSize, svgDataUri, type CardReading } from "@/lib/card";
 import { CARD_SIZE, networkDisplayName, SITE_NAME, SITE_URL } from "@/lib/seo";
 
 /** The line under the wordmark on the static card too, so the two read as one set. */
@@ -72,14 +72,19 @@ function Readout({ reading }: { reading: CardReading }) {
     <div style={{ display: "flex", flexDirection: "column", flexGrow: 1 }}>
       <div style={{ display: "flex", fontSize: 19, letterSpacing: 3, color: CARD_COLORS.label }}>BASE FEE NOW</div>
       <div style={{ display: "flex", alignItems: "flex-end", marginTop: 10 }}>
-        <div style={{ display: "flex", fontSize: reading === null ? 96 : reading.baseFeeSize, lineHeight: 1, color: CARD_COLORS.ink }}>{reading === null ? "n/a" : reading.baseFee}</div>
-        {reading !== null && <div style={{ display: "flex", fontSize: 32, marginLeft: 12, marginBottom: 6, color: CARD_COLORS.ink2 }}>gwei</div>}
+        <div style={{ display: "flex", fontSize: reading === null ? 96 : readoutSize(reading.baseFee, FEE_SIZES), lineHeight: 1, color: CARD_COLORS.ink }}>
+          {reading === null ? "n/a" : reading.baseFee}
+        </div>
+        {/* No unit after "off scale": there is no figure for it to be the unit of. */}
+        {reading !== null && !reading.feeOffScale && <div style={{ display: "flex", fontSize: 32, marginLeft: 12, marginBottom: 6, color: CARD_COLORS.ink2 }}>gwei</div>}
       </div>
       {reading === null ? (
         <div style={{ display: "flex", marginTop: 22, fontSize: 24, color: CARD_COLORS.ink3 }}>no reading right now</div>
       ) : (
         <div style={{ display: "flex", alignItems: "baseline", marginTop: 22 }}>
-          <div style={{ display: "flex", fontSize: 44, color: CARD_TONE_COLORS[reading.tone] }}>{reading.offScale ? reading.multiplierText : `${reading.multiplierText}×`}</div>
+          <div style={{ display: "flex", fontSize: readoutSize(reading.multiplierText, MULTIPLIER_SIZES), color: CARD_TONE_COLORS[reading.tone] }}>
+            {reading.offScale ? reading.multiplierText : `${reading.multiplierText}×`}
+          </div>
           <div style={{ display: "flex", fontSize: 19, letterSpacing: 2, marginLeft: 12, color: CARD_COLORS.ink3 }}>OVER FLOOR</div>
         </div>
       )}
@@ -105,7 +110,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ net
           height: "100%",
           display: "flex",
           flexDirection: "column",
-          padding: "52px 64px",
+          padding: `52px ${CARD_PAD_X}px`,
           backgroundColor: CARD_COLORS.page,
           backgroundImage: `linear-gradient(135deg, ${CARD_COLORS.panel} 0%, ${CARD_COLORS.page} 55%, #1a0940 100%)`,
         }}
@@ -119,7 +124,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ net
         </div>
         <div style={{ display: "flex", alignItems: "center", flexGrow: 1, marginTop: 8 }}>
           <Dial multiplier={reading === null ? null : reading.multiplier} />
-          <div style={{ display: "flex", flexGrow: 1, marginLeft: 44 }}>
+          <div style={{ display: "flex", flexGrow: 1, marginLeft: READOUT_GAP }}>
             <Readout reading={reading} />
           </div>
         </div>

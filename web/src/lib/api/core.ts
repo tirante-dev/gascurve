@@ -70,9 +70,12 @@ export function serverApiBase(origin: string, base: string = API_BASE_URL, overr
   return isRelativeBase(base) ? origin.replace(/\/+$/, "") + base : base;
 }
 
-/** `value` as an absolute http(s) base with no trailing slash, or null for anything `fetch` could not use.
- * An override that is not one is dropped rather than obeyed: a relative path has nothing to resolve
- * against on the server, and the public route it falls back to is the one that works everywhere. */
+/**
+ * `value` as an absolute http(s) base with no trailing slash, or null for anything this path could not
+ * use. An override that is not one is dropped rather than obeyed: the public route it falls back to works
+ * everywhere. Rejected along with a relative path and a foreign scheme: credentials, which `fetch` itself
+ * refuses, and a query or fragment, which buildUrl would append the endpoint inside of.
+ */
 function absoluteHttpBase(value: string | undefined): string | null {
   const text = value?.trim();
   if (text === undefined || text === "") return null;
@@ -83,6 +86,7 @@ function absoluteHttpBase(value: string | undefined): string | null {
     return null;
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") return null;
   return text.replace(/\/+$/, "");
 }
 

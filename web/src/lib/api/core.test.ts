@@ -62,7 +62,9 @@ describe("serverApiBase", () => {
 
   it("drops an override fetch could not use, rather than handing it a URL that throws", () => {
     // A path has nothing to resolve against on the server, and a non-HTTP scheme is not a base at all.
-    for (const bad of ["/api/v1", "api/v1", "gascurve-api:8080", "file:///api/v1", "ws://gascurve-api/api/v1"]) {
+    // Credentials are refused by fetch itself; a query or fragment would swallow the endpoint buildUrl
+    // appends after it.
+    for (const bad of ["/api/v1", "api/v1", "gascurve-api:8080", "file:///api/v1", "ws://gascurve-api/api/v1", "http://user:pass@gascurve-api/api/v1", "http://gascurve-api/api/v1?token=x", "http://gascurve-api/api/v1#frag"]) {
       expect(serverApiBase("https://gascurve.com", "/api/v1", bad)).toBe("https://gascurve.com/api/v1");
     }
   });
