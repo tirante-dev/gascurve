@@ -10,6 +10,8 @@ import (
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
 	"github.com/tirante-dev/gascurve/internal/model"
+
+	"github.com/tirante-dev/gascurve/internal/config"
 )
 
 // historyStore is a chain whose history has been reconstructed once: a
@@ -363,7 +365,7 @@ func TestHistoryEpochRebuildsTheBackfill(t *testing.T) {
 	store := dbtest.New()
 	seedSets(t, store)
 	f := newTestFollower(t, rpc, store)
-	f.cfg.BackfillDepth = 70 * time.Second
+	f.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +379,7 @@ func TestHistoryEpochRebuildsTheBackfill(t *testing.T) {
 	}
 
 	f2 := epochFollower(t, store, 1)
-	f2.cfg.BackfillDepth = 70 * time.Second
+	f2.cfg.BackfillDepth = config.Depth(70 * time.Second)
 	if err := f2.ensureInit(ctx); err != nil {
 		t.Fatal(err)
 	}

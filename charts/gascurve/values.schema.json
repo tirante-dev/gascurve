@@ -170,7 +170,7 @@
             "header_batch_size": { "type": "integer", "minimum": 1, "maximum": 100 },
             "block_retention": { "$ref": "#/definitions/duration" },
             "sample_retention": { "$ref": "#/definitions/duration" },
-            "backfill_depth": { "$ref": "#/definitions/duration" },
+            "backfill_depth": { "$ref": "#/definitions/backfillDepth" },
             "backfill_anchor_interval": { "type": "integer", "minimum": 1 },
             "backfill_window": { "type": "integer", "minimum": 0 },
             "max_catch_up_batches": { "type": "integer", "minimum": 1 },
@@ -477,6 +477,14 @@
             ]
           }
         }
+      ]
+    },
+    "backfillDepth": {
+      "title": "History depth",
+      "description": "How far back the owner scan and the resumable backfill reach: a positive Go duration, or \"genesis\" for the whole chain from the first block. Widening it takes effect on the next collector start without touching the database; narrowing it keeps the history already built. See the full-chain history section of charts/gascurve/README.md before setting genesis: the cost is time, not storage.",
+      "oneOf": [
+        { "$ref": "#/definitions/duration" },
+        { "const": "genesis" }
       ]
     },
     "duration": {

@@ -38,6 +38,7 @@ type databaseStats interface {
 }
 
 type loopRuntime struct {
+	phase       string
 	lastSuccess time.Time
 	lastError   time.Time
 	err         string
@@ -138,6 +139,18 @@ func (m *Monitor) observeLoop(chainID uint64, loop string, start time.Time, err 
 	if instruments != nil {
 		instruments.ObserveLoop(loop, at, duration, err != nil)
 	}
+}
+
+// observePhase records what a loop is currently doing, so a long first pass is reported as itself
+// rather than as a loop that has never succeeded.
+func (m *Monitor) observePhase(chainID uint64, loop, phase string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := m.networks[chainID]
+	if n == nil || n.loops[loop] == nil {
+		return
+	}
+	n.loops[loop].phase = phase
 }
 
 func (m *Monitor) observeHead(chainID, observed, indexed uint64) {
@@ -291,6 +304,7 @@ func loopModel(l *loopRuntime) model.LoopStatus {
 		LastDurationMS: l.duration.Milliseconds(),
 		StaleAfterSecs: int64(l.staleAfter / time.Second),
 		ErrorStreak:    l.errorStreak,
+		Phase:          l.phase,
 	}
 	if !l.lastSuccess.IsZero() {
 		at := l.lastSuccess.UTC().Format(time.RFC3339Nano)

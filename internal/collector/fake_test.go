@@ -469,7 +469,7 @@ func fixtureLogs(t *testing.T) []nitro.Log {
 func testConfig() config.CollectorConfig {
 	return config.CollectorConfig{
 		TickInterval: time.Second, SlowInterval: time.Minute, HeaderBatchSize: 10,
-		BlockRetention: 48 * time.Hour, SampleRetention: 168 * time.Hour, BackfillDepth: 700 * time.Second,
+		BlockRetention: 48 * time.Hour, SampleRetention: 168 * time.Hour, BackfillDepth: config.Depth(700 * time.Second),
 	}
 }
 

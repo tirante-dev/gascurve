@@ -239,6 +239,31 @@ Treat those numbers as a starting point to be replaced by measurements from your
 
 The collector is a single replica by design (it is the only RPC client and the only writer), so it scales vertically only. There is no horizontal option to fall back on.
 
+## Full-chain history
+
+`config.collector.backfill_depth` is how far back the owner-action scan and the resumable backfill reach. It takes a duration (`720h`, the default, is thirty days) or the word `genesis`, which reaches the first block of the chain however old it is:
+
+```yaml
+config:
+  collector:
+    backfill_depth: genesis
+```
+
+A zero or negative duration is refused at load, so a stray value cannot start a nine-day replay or silently mean no history at all.
+
+**Storage is not the constraint.** Pruning removes only block rows and raw state samples; buckets are never deleted once written. A whole 57-million-block Arbitrum Nitro chain is on the order of 200 thousand bucket rows across the 1m, 15m and 1h resolutions, roughly 100 to 150 MB.
+
+**Time is.** Two phases, in order:
+
+1. The owner-action scan sweeps `eth_getLogs` from the first block to the head before the backfill starts any segment, because the historical constraint sets and minimum fees are unknown until it finishes. On a 57M-block chain against an unmetered in-cluster node that is tens of minutes, spread over many slow ticks since the scan yields to the live path between chunks. It logs its position every thirty seconds and `/status` reports `slow loop on its first pass: scanning owner actions, N of M blocks` for as long as it runs, so it can be told from a hang. The network is degraded until it completes.
+2. The backfill then walks the chain backwards. At the roughly 70 blocks per second an unmetered archive node sustains, 57M blocks is around nine days. `gascurve_collector_backfill_cursor_block` and `gascurve_collector_backfill_floor_block` are what to watch; the gap between them, over time, is the rate.
+
+**Set `archive: true`** on an endpoint that serves historical `eth_call` before asking for genesis. A chain with a genesis `setGasPricingConstraints` set (`robinhood`, `arbitrum-one`, `arbitrum-sepolia`) replays from that set and needs nothing else. A legacy chain (`robinhood-testnet` has no constraint sets at all) has nothing to replay from, so the collector samples the state at block 1 and records it as the scan origin; the replay then starts at block 2, since block 1's own state is what the sample describes. Without an archive endpoint nothing below the earliest recorded constraint set can be priced: that range is reported as missing rather than guessed, and on a legacy chain the depth buys nothing at all.
+
+**Changing the depth later** no longer needs the database dropped. Widening it (a longer duration, or `genesis`) lowers the floor on the next start, extends the owner scan down to meet the new cutoff and resumes the backfill below what it had already built. Narrowing it is logged and otherwise ignored: history already built is kept. Every one of those decisions is logged at info, so `kubectl logs` says what a redeploy did. Use `history_epoch` only to rebuild history you want replaced (after giving a network an archive endpoint, say), not to widen the depth.
+
+**Batch response limits.** A from-genesis backfill walks four times more chain than the default window and is correspondingly more likely to meet a range whose headers plus receipts exceed the node's response cap. The collector halves its batch cap when an endpoint refuses a batch as too large and recovers a step per quiet minute, so it finds the working width on its own. On a self-hosted nitro node, raising `--rpc.max-batch-response-size` above the 10 MB default lets it stay at `header_batch_size: 100` (200 items per batch) and is worth doing before starting a walk this long.
+
 ## Releasing
 
 The chart is versioned and released separately from the application. release-please keeps two release PRs open on `main`: one for the application (tag `v<version>`, publishes the three images) and one for the chart (tag `gascurve-chart-v<version>`, packages and pushes the chart to the OCI registry). `Chart.yaml` `appVersion` is what a published chart pulls, and it is the version Helm Publish packages and verifies, so the chart tag and the application version it ships are fixed together at tag time.

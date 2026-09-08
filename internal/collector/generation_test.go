@@ -128,7 +128,7 @@ func TestGenerationDiscardsStaleWork(t *testing.T) {
 	_ = f.reloadSetsLocked(ctx)
 	f.mu.Unlock()
 	scanned(f)
-	f.cfg.BackfillDepth = 30 * time.Second
+	f.cfg.BackfillDepth = config.Depth(30 * time.Second)
 	if _, err := f.BackfillStep(ctx); err != nil { // start the segment
 		t.Fatal(err)
 	}

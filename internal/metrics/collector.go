@@ -133,7 +133,7 @@ func NewCollector(reg prometheus.Registerer) *Collector {
 		Help: "1 while an endpoint's WebSocket is cooled down; its JSON-RPC keeps serving.",
 	}, endpointLabels)
 	c.backfillCursor = gauge("backfill_cursor_block", "Block the resumable backfill has replayed up to in its current segment.")
-	c.backfillFloor = gauge("backfill_floor_block", "Oldest block the backfill will reach, derived from collector.backfill_depth.")
+	c.backfillFloor = gauge("backfill_floor_block", "Oldest block the backfill will reach: the floor collector.backfill_depth asks for, raised to the owner scan origin where that clamps it.")
 	c.backfillLeft = gauge("backfill_blocks_remaining", "Blocks between the cursor and the depth floor.")
 	c.backfillDone = gauge("backfill_done", "1 once the backfill cursor reports the configured depth is rebuilt.")
 	c.holesPending = gauge("holes_pending", "Ranges queued for the gap filler.")

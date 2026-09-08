@@ -591,7 +591,7 @@ func TestTickReorgResetsBackfill(t *testing.T) {
 	// are recorded before it starts filling rows below the live start.
 	seedSets(t, store)
 	f := newTestFollower(t, rpc, store)
-	f.cfg.BackfillDepth = 30 * time.Second // block 700
+	f.cfg.BackfillDepth = config.Depth(30 * time.Second) // block 700
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1595,7 +1595,7 @@ func TestRewindDiscardsBucketsStraddlingThePruneFrontier(t *testing.T) {
 	// The same setup as the reorg test above: a backfill supplies the
 	// replay state a fork below the live start needs, so the rows the
 	// rewind re-fetches are real rows and the bucket over them a real one.
-	f.cfg.BackfillDepth = 30 * time.Second
+	f.cfg.BackfillDepth = config.Depth(30 * time.Second)
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}

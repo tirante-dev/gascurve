@@ -239,7 +239,7 @@ func TestLoopsRespectEndpointBudget(t *testing.T) {
 		Network: config.NetworkConfig{Name: "robinhood", ChainID: 4663, Enabled: true, CallsPerSecond: rate, TickInterval: 250 * time.Millisecond},
 		Collector: config.CollectorConfig{
 			TickInterval: time.Second, SlowInterval: 500 * time.Millisecond, HeaderBatchSize: 100,
-			BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: 30 * time.Second,
+			BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: config.Depth(30 * time.Second),
 		},
 		RPC:   pool,
 		Store: store,

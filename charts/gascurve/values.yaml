@@ -206,6 +206,11 @@ config:
     header_batch_size: 100
     block_retention: 48h
     sample_retention: 168h
+    # A duration, or "genesis" for the whole chain from the first block.
+    # Widening it takes effect on the next start without touching the
+    # database; narrowing it keeps the history already built. See the
+    # full-chain history section of charts/gascurve/README.md before
+    # setting genesis: the cost is time, not storage.
     backfill_depth: 720h
   # enabled: false takes a network off the site: the collector stops indexing
   # it and records the flag, so the api hides it and the web app no longer

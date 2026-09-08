@@ -13,6 +13,8 @@ import (
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
+
+	"github.com/tirante-dev/gascurve/internal/config"
 )
 
 // gapHead is the head every skipped-gap test jumps to: 150 blocks past
@@ -207,7 +209,7 @@ func TestFillLeavesUnfillableHoles(t *testing.T) {
 	}
 	// The state appears (the backfill reached block 949): the hole above
 	// it becomes work, the one recorded without state stays unfillable.
-	f.cfg.BackfillDepth = 96 * time.Second
+	f.cfg.BackfillDepth = config.Depth(96 * time.Second)
 	seedSets(t, store)
 	f.mu.Lock()
 	_ = f.reloadSetsLocked(ctx)

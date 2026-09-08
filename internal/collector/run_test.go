@@ -39,7 +39,7 @@ func quickSleep(ctx context.Context, d time.Duration) error {
 func fastConfig() config.CollectorConfig {
 	return config.CollectorConfig{
 		TickInterval: 5 * time.Millisecond, SlowInterval: 10 * time.Millisecond, HeaderBatchSize: 10,
-		BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: 30 * time.Second,
+		BlockRetention: time.Hour, SampleRetention: time.Hour, BackfillDepth: config.Depth(30 * time.Second),
 	}
 }
 

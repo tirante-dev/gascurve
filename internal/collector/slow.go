@@ -147,6 +147,9 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := f.extendScanOrigin(ctx, head, gen); err != nil {
+		return err
+	}
 	var from uint64
 	if ok {
 		last, perr := strconv.ParseUint(cursor, 10, 64)
@@ -157,6 +160,7 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 	} else if from, err = f.scanStart(ctx, head, gen); err != nil {
 		return err
 	}
+	progress := f.newScanProgress("scanning owner actions", from, head)
 	for chunks := 0; from <= head; chunks++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -169,6 +173,8 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 		// a scan short of head from being recorded as complete.
 		if chunks > 0 && f.ownerScanMustWait() {
 			f.log.Info("owner scan yielding to the live path, resuming next turn", "from", from, "head", head)
+			// The phase is left standing: the scan is unfinished, and the turn it resumes on is a
+			// different slow tick, which /status would otherwise report as an idle loop.
 			return nil
 		}
 		to := min(from+ownerLogChunk-1, head)
@@ -176,7 +182,9 @@ func (f *Follower) scanOwnerActions(ctx context.Context) error {
 			return err
 		}
 		from = to + 1
+		progress.at(from)
 	}
+	progress.finish()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.reloadSetsLocked(ctx); err != nil {
@@ -203,22 +211,32 @@ const originMargin = 10 * time.Minute
 // scanStart is where a fresh owner scan begins: backfill_depth (plus originMargin) before the head's
 // own timestamp, so the scan covers the history the backfill can use and no more. The depth is
 // bounded before the margin is added, so no configured value can overflow. A chain younger than the
-// depth starts at genesis, whose pricing state is nitro's default; otherwise the state at the cutoff
-// is established first. A cutoff that cannot be resolved is an error: the next pass tries again,
+// depth, and a depth of genesis, start at the first block, whose pricing state is nitro's default;
+// otherwise the state at the cutoff is established first. A cutoff that cannot be resolved is an error: the next pass tries again,
 // rather than an origin at the head marking all the history before it unavailable.
 func (f *Follower) scanStart(ctx context.Context, head, gen uint64) (uint64, error) {
-	cutoff, err := f.historyStart(ctx, head, f.historyDepth(f.cfg.BackfillDepth)+originMargin)
+	cutoff, err := f.depthCutoff(ctx, head, originMargin)
 	if err != nil {
 		return 0, err
 	}
 	if cutoff <= 1 {
+		// Not a truncation: the scan covers the whole chain. The state at the first block is still
+		// sampled where an archive endpoint can, because a legacy chain has no constraint set to replay
+		// from and without a sampled origin its whole history would be reported missing instead.
+		if f.archive != nil {
+			return 0, f.establishOrigin(ctx, firstOriginBlock, gen, true)
+		}
 		return 0, nil
 	}
-	if err := f.establishOrigin(ctx, cutoff, gen); err != nil {
+	if err := f.establishOrigin(ctx, cutoff, gen, false); err != nil {
 		return 0, err
 	}
 	return cutoff, nil
 }
+
+// firstOriginBlock is the lowest block an origin samples. Block 0 is the genesis header, whose state
+// precedes ArbOS, so the first end-of-block state that can be read is block 1's.
+const firstOriginBlock = 1
 
 // establishOrigin records the pricing state in force at the block a truncated owner scan starts
 // from, once. With an archive endpoint the whole state is sampled there. The sample is end-of-block
@@ -226,13 +244,24 @@ func (f *Follower) scanStart(ctx context.Context, head, gen uint64) (uint64, err
 // the block after it and the replay starts there: adding the cutoff's gas again would inflate every
 // backlog from the origin to the next anchor. Without archive, nothing before the cutoff can be
 // priced, so the range is recorded as a hole rather than guessing the state in force.
-func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64) error {
+func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64, onlyLegacy bool) error {
 	f.mu.Lock()
 	known := f.scanOrigin != nil
 	f.mu.Unlock()
 	if known {
 		return nil
 	}
+	return f.writeOrigin(ctx, cutoff, gen, onlyLegacy)
+}
+
+// writeOrigin samples the pricing state at cutoff and records it as the scan origin, replacing any
+// origin already held. extendScanOrigin calls it again with a lower cutoff once the actions below the
+// old origin have been read. onlyLegacy is for a cutoff at the first block, where the scan is not
+// truncated and so needs no origin to bound it: a constraints chain has its genesis set to replay
+// from and any origin it holds is dropped, where a legacy chain has no set anywhere and the sampled
+// state is the only thing it can replay from. Recording one on a constraints chain would put an
+// observed set above the genesis set and clamp the floor past the first block for nothing.
+func (f *Follower) writeOrigin(ctx context.Context, cutoff, gen uint64, onlyLegacy bool) error {
 	origin := &scanOrigin{Block: cutoff}
 	var set *db.ConstraintSet
 	if f.archive != nil {
@@ -243,6 +272,9 @@ func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64) erro
 		l1, err := f.archive.L1SampleAt(ctx, cutoff)
 		if err != nil {
 			return fmt.Errorf("origin L1 state at %d: %w", cutoff, err)
+		}
+		if onlyLegacy && !sample.IsLegacy() {
+			return f.clearOrigin(ctx, gen)
 		}
 		origin.Archive = true
 		origin.MinBaseFee = bigOrZero(sample.MinBaseFee).String()
@@ -290,9 +322,168 @@ func (f *Follower) establishOrigin(ctx context.Context, cutoff, gen uint64) erro
 	if err != nil {
 		return fmt.Errorf("owner scan origin: %w", err)
 	}
+	// The origin and the caches its constraint set belongs to become visible together: the history loop
+	// reads both, and one that saw a lowered origin against sets that still lacked its set would
+	// record the range it just released as missing. Read before the lock, never under it.
+	sets, actions, err := f.loadSets(ctx)
+	if err != nil {
+		return err
+	}
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.applySetsLocked(sets, actions)
 	f.scanOrigin = origin
+	return nil
+}
+
+// extendScanOrigin lowers a truncated owner scan's origin to meet a backfill_depth that now reaches
+// below it, once per process. Without an archive endpoint there is nothing to lower it to: the state
+// at a new cutoff cannot be sampled, so the extra actions would price nothing and the walk is
+// refused rather than spent. The actions below the old origin are read and stored first and the new
+// origin written last: a crash in between leaves the old origin standing over a range already
+// scanned, which the next pass reads again, where the reverse order would leave an origin claiming
+// knowledge of a range nothing had looked at.
+func (f *Follower) extendScanOrigin(ctx context.Context, head, gen uint64) error {
+	f.mu.Lock()
+	checked, origin := f.scanExtended, f.scanOrigin
 	f.mu.Unlock()
+	if checked {
+		return nil
+	}
+	cutoff, err := f.depthCutoff(ctx, head, originMargin)
+	if err != nil {
+		return err
+	}
+	target := max(cutoff, firstOriginBlock)
+	if origin == nil {
+		return f.originateAtFirstBlock(ctx, target, gen)
+	}
+	if target >= origin.Block {
+		f.markScanExtended()
+		return nil
+	}
+	if f.archive == nil {
+		f.log.Warn("backfill depth reaches below the owner scan origin but no endpoint serves archive state, the floor stays at the origin",
+			"depth", f.cfg.BackfillDepth.String(), "origin", origin.Block, "wanted", cutoff)
+		f.markScanExtended()
+		return nil
+	}
+	f.log.Info("backfill depth reaches below the owner scan origin, extending the scan down to it",
+		"depth", f.cfg.BackfillDepth.String(), "origin", origin.Block, "to", cutoff, "blocks", origin.Block-cutoff)
+	progress := f.newScanProgress("extending the owner action scan", cutoff, origin.Block)
+	defer progress.finish()
+	for from := cutoff; from <= origin.Block; {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		to := min(from+ownerLogChunk-1, origin.Block)
+		if err := f.scanOwnerFloor(ctx, from, to, gen); err != nil {
+			return err
+		}
+		from = to + 1
+		progress.at(from)
+	}
+	if err := f.writeOrigin(ctx, target, gen, target == firstOriginBlock); err != nil {
+		return err
+	}
+	f.markScanExtended()
+	f.log.Info("owner scan origin lowered, the backfill resumes below it", "origin", target)
+	return nil
+}
+
+// originateAtFirstBlock samples the state at the first block for a scan that already reaches it and
+// recorded no origin, which is what an untruncated scan leaves behind: an owner log cursor means
+// scanStart never runs again, so nothing else would ever take that sample. The sample decides what to
+// do with it (writeOrigin's onlyLegacy), which is also why the count of recorded constraint sets is
+// no substitute: a chain that was legacy and later upgraded has sets, and still needs the state at
+// block 1 to replay the stretch below the upgrade. Once an origin is recorded the block comparison in
+// the caller skips this for good; on a chain that needs none it costs one call per process.
+func (f *Follower) originateAtFirstBlock(ctx context.Context, target, gen uint64) error {
+	if target == firstOriginBlock && f.archive != nil {
+		if err := f.writeOrigin(ctx, firstOriginBlock, gen, true); err != nil {
+			return err
+		}
+	}
+	f.markScanExtended()
+	return nil
+}
+
+func (f *Follower) markScanExtended() {
+	f.mu.Lock()
+	f.scanExtended = true
+	f.mu.Unlock()
+}
+
+// scanOwnerFloor records the actions in [from, to] without touching the owner log cursor, which
+// tracks the top of the scanned range and would restart the whole scan if it were moved down.
+func (f *Follower) scanOwnerFloor(ctx context.Context, from, to, gen uint64) error {
+	actions, err := f.fetchOwnerActions(ctx, from, to)
+	if err != nil {
+		return err
+	}
+	return f.withGeneration(ctx, gen, func(s db.Store) error {
+		_, err := f.storeOwnerActions(ctx, s, actions)
+		return err
+	})
+}
+
+// ownerScanLogEvery bounds how often a long owner-action scan reports where it is. The first scan of
+// a large chain walks tens of millions of blocks over many minutes, and the slow loop does not tick
+// at all while it runs: silence there reads exactly like a hang.
+const ownerScanLogEvery = 30 * time.Second
+
+// scanProgress reports a long block walk: a log line at most every ownerScanLogEvery, and the slow
+// loop's phase throughout, which is what lets /status tell a first pass still running from one that
+// is failing.
+type scanProgress struct {
+	f     *Follower
+	what  string
+	from  uint64
+	to    uint64
+	since time.Time
+	last  time.Time
+}
+
+func (f *Follower) newScanProgress(what string, from, to uint64) *scanProgress {
+	now := f.now()
+	return &scanProgress{f: f, what: what, from: from, to: to, since: now, last: now}
+}
+
+func (p *scanProgress) at(block uint64) {
+	if p.to < p.from || block > p.to {
+		return
+	}
+	done, total := block-p.from, p.to-p.from+1
+	p.f.setSlowPhase(fmt.Sprintf("%s, %d of %d blocks", p.what, done, total))
+	now := p.f.now()
+	if now.Sub(p.last) < ownerScanLogEvery {
+		return
+	}
+	p.last = now
+	p.f.log.Info(p.what, "block", block, "through", p.to, "blocks", done, "of", total,
+		"elapsed", now.Sub(p.since).Truncate(time.Second).String())
+}
+
+func (p *scanProgress) finish() { p.f.setSlowPhase("") }
+
+// clearOrigin forgets a recorded scan origin: the scan now reaches the first block, so nothing
+// truncates it and nothing should bound the backfill's floor. Publishing the caches alongside it
+// keeps the pairing writeOrigin relies on, and reading them before the lock keeps the order in which
+// f.mu and a database connection are acquired the same everywhere.
+func (f *Follower) clearOrigin(ctx context.Context, gen uint64) error {
+	sets, actions, err := f.loadSets(ctx)
+	if err != nil {
+		return err
+	}
+	if err := f.withGeneration(ctx, gen, func(s db.Store) error {
+		return s.DeleteState(ctx, f.chainID, db.StateOwnerScanOrigin)
+	}); err != nil {
+		return fmt.Errorf("clear owner scan origin: %w", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.applySetsLocked(sets, actions)
+	f.scanOrigin = nil
 	return nil
 }
 
