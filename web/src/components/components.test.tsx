@@ -271,7 +271,7 @@ describe("LiveHero", () => {
     const throughput = screen.getByRole("figure", { name: /^Compute gas carried per second over the last 120 seconds/ });
     expect(throughput.firstElementChild).toHaveClass("h-[120px]");
     expect(throughput.firstElementChild).toHaveClass("lg:h-[240px]");
-    expect(throughput.firstElementChild).toHaveClass("xl:h-[252px]");
+    expect(throughput.firstElementChild).toHaveClass("page:h-[252px]");
     // The caption leads with the plain reading and keeps the measurement after it.
     expect(screen.getByText("Network load, second by second, over the last 120 s")).toBeInTheDocument();
     expect(screen.getByText(/compute gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
@@ -423,7 +423,7 @@ describe("LiveHero", () => {
     expect(box()).toHaveClass("lg:h-[260px]");
     expect(throughputBox()).toHaveClass("h-[120px]");
     expect(throughputBox()).toHaveClass("lg:h-[240px]");
-    expect(throughputBox()).toHaveClass("xl:h-[252px]");
+    expect(throughputBox()).toHaveClass("page:h-[252px]");
 
     rerender(<LiveHeroView {...props} series={{ ...history, points: [] }} />);
     expect(screen.getAllByText("Nothing indexed for this range yet.").length).toBeGreaterThan(0);
