@@ -92,7 +92,10 @@ const series: Series = {
   })),
 };
 
-vi.mock("@/hooks/useSeries", () => ({ useSeries: () => ({ ...emptyApi, data: series }) }));
+vi.mock("@/hooks/useSeries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useSeries")>()),
+  useSeries: () => ({ ...emptyApi, data: series }),
+}));
 
 // The live feed as the page consumes it, already smoothed: the network page's
 // own hook is exercised by the hook tests.

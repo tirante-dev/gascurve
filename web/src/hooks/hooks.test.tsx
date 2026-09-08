@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BlockPoint, LiveSnapshot, Series } from "@/types";
+import type { BlockPoint, LiveSnapshot, OwnerAction, Series } from "@/types";
 import { SOCKET_OPEN, type SocketLike } from "@/lib/api/ws";
 
 const pushMock = vi.fn();
@@ -68,7 +68,7 @@ vi.mock("@/lib/api/series", async (importOriginal) => {
 
 import { appendBlocks, applyReorg, feedMatches, isNewerSnapshot, useLive } from "./useLive";
 import { useApi } from "./useApi";
-import { fetchSharedSeries, refetchIntervalFor, resetSharedSeries, seriesKey, useSeries } from "./useSeries";
+import { fetchSharedSeries, refetchIntervalFor, resetSharedSeries, seriesKey, useRefreshOnOwnerAction, useSeries } from "./useSeries";
 import { DEFAULT_NETWORK, isValidNetworkName, NETWORK_STORAGE_KEY, readStoredNetwork, storeNetwork, useNetwork } from "./useNetwork";
 import { useDocumentVisible } from "./useDocumentVisible";
 
@@ -689,6 +689,23 @@ describe("useApi and useSeries", () => {
     expect(result.current.data).toBe("second");
     expect(refetchIntervalFor("all")).toBe(0);
     expect(refetchIntervalFor("24h")).toBe(60_000);
+  });
+
+  it("refetches a range when an owner action arrives, once per action", () => {
+    const action = (block: number): OwnerAction => ({ block, at: "2026-09-06T07:20:00Z", txHash: `0x${block}`, method: "setGasPricingConstraints", selector: "0xcc0d556a", args: {} });
+    const refresh = vi.fn();
+    const { rerender } = renderHook(({ actions }) => useRefreshOnOwnerAction(actions, refresh), { initialProps: { actions: [] as OwnerAction[] } });
+    expect(refresh).not.toHaveBeenCalled();
+    rerender({ actions: [action(10)] });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    // The same feed rendered again is not a new action.
+    rerender({ actions: [action(10)] });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    rerender({ actions: [action(11), action(10)] });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    // A reorg that takes the action back leaves nothing to fetch a range for.
+    rerender({ actions: [] });
+    expect(refresh).toHaveBeenCalledTimes(2);
   });
 });
 

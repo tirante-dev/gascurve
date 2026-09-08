@@ -22,7 +22,8 @@ const seriesMock = vi.hoisted(() => ({
   calls: [] as (string | null)[][],
   state: { data: null as Series | null, error: null as string | null, loading: false, updatedAt: null as number | null, refresh: () => undefined },
 }));
-vi.mock("@/hooks/useSeries", () => ({
+vi.mock("@/hooks/useSeries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useSeries")>()),
   useSeries: (network: string | null, range: string | null) => {
     seriesMock.calls.push([network, range]);
     return seriesMock.state;

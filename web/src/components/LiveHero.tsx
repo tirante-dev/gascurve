@@ -3,7 +3,7 @@
 import { memo, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
-import { useSeries } from "@/hooks/useSeries";
+import { useRefreshOnOwnerAction, useSeries } from "@/hooks/useSeries";
 import { bucketNote, feeChartCaption, feeChartData, feeChartLabel, feeTooltipRows, type FeeChartData } from "@/lib/feeChart";
 import { emptyRangeNote } from "@/lib/gaps";
 import {
@@ -28,7 +28,7 @@ import {
   type ThroughputPoint,
 } from "@/lib/hero";
 import { assignPlaces, NO_PLACES, SWAP_GAS, targetValues, TRANSFER_GAS, type BlockPlaces, type LiveValues } from "@/lib/smoothing";
-import type { BlockPoint, EthUsd, LiveSnapshot, LiveStatus, PricerModel, Series } from "@/types";
+import type { BlockPoint, EthUsd, LiveSnapshot, LiveStatus, OwnerAction, PricerModel, Series } from "@/types";
 import { FLOOR_COLOR, MARKER_COLOR } from "@/utils/chart";
 import {
   FIXED_WIDTH_CH,
@@ -594,13 +594,16 @@ export const WAITING_COPY = "Waiting for the first sample.";
  * choice: only the chart body follows it, so the socket, the smoothing and
  * every figure on the left keep running at every range.
  */
-export function LiveHero({ network, live, status, model }: { network: string; live: SmoothedLive; status: LiveStatus; model: PricerModel }) {
+export function LiveHero({ network, live, status, model, ownerActions = [] }: { network: string; live: SmoothedLive; status: LiveStatus; model: PricerModel; ownerActions?: readonly OwnerAction[] }) {
   const frame = useLiveFrame(live.frame);
   // The range is an external store, so the server renders Live and hydration
   // has nothing to reconcile; the stored choice arrives on the next render.
   const range = useSyncExternalStore(subscribeHeroRange, heroRange, heroRangeOnServer);
   const historical = range === "live" ? null : range;
   const series = useSeries(historical === null ? null : network, historical);
+  // The hero asks for its own range, so it needs the trigger too: nothing else refetches 30d or all
+  // when an owner call redefines what their points mean.
+  useRefreshOnOwnerAction(ownerActions, series.refresh);
   return (
     <LiveHeroView
       network={network}

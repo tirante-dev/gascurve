@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Network, Series } from "@/types";
+import type { Network, OwnerAction, Series } from "@/types";
 
 vi.mock("recharts", async (importOriginal) => {
   const original = await importOriginal<typeof import("recharts")>();
@@ -30,12 +30,17 @@ vi.mock("@/hooks/useApi", () => ({
   },
 }));
 let seriesData: Series | null = null;
-vi.mock("@/hooks/useSeries", () => ({ useSeries: () => ({ ...emptyApi, data: seriesData }) }));
+const seriesRefreshMock = vi.fn();
+vi.mock("@/hooks/useSeries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useSeries")>()),
+  useSeries: () => ({ ...emptyApi, data: seriesData, refresh: seriesRefreshMock }),
+}));
 
 let liveInfo: Network | null = null;
 let liveReorgs = 0;
+let liveOwnerActions: OwnerAction[] = [];
 vi.mock("@/hooks/useLive", () => ({
-  useLive: () => ({ snapshot: null, recentBlocks: [], status: "connecting", networkInfo: liveInfo, ownerActions: [], reorgs: liveReorgs, resyncing: false, error: null }),
+  useLive: () => ({ snapshot: null, recentBlocks: [], status: "connecting", networkInfo: liveInfo, ownerActions: liveOwnerActions, reorgs: liveReorgs, resyncing: false, error: null }),
 }));
 
 import { NetworkPage, OWNER_ACTION_REFETCH_MS } from "./NetworkPage";
@@ -49,7 +54,9 @@ describe("NetworkPage with a chain-id route", () => {
     liveInfo = null;
     seriesData = null;
     liveReorgs = 0;
+    liveOwnerActions = [];
     refreshMock.mockReset();
+    seriesRefreshMock.mockReset();
     apiOptions.clear();
   });
 
@@ -71,6 +78,30 @@ describe("NetworkPage with a chain-id route", () => {
     liveReorgs = 2;
     rerender(<NetworkPage network="robinhood" />);
     expect(refreshMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("says the parameters changed when a pricing call arrives, and refetches the range that call redefined", () => {
+    routeParams = { network: "robinhood" };
+    const action = (block: number, method: string): OwnerAction => ({ block, at: "2026-09-06T07:20:00Z", txHash: `0x${block}`, method, selector: "0xcc0d556a", args: {} });
+    const { rerender } = render(<NetworkPage network="robinhood" />);
+    expect(screen.queryByText(/Parameters changed at block/)).toBeNull();
+    expect(seriesRefreshMock).not.toHaveBeenCalled();
+    // A floor change is history the range must be refetched for, but it does not redefine the cards.
+    // Both askers refetch: the history section and the hero each hold a range of their own.
+    liveOwnerActions = [action(1_233, "setMinimumL2BaseFee")];
+    rerender(<NetworkPage network="robinhood" />);
+    expect(screen.queryByText(/Parameters changed at block/)).toBeNull();
+    expect(seriesRefreshMock).toHaveBeenCalledTimes(2);
+    liveOwnerActions = [action(1_234, "setGasPricingConstraints"), ...liveOwnerActions];
+    rerender(<NetworkPage network="robinhood" />);
+    const notice = screen.getByText(/Parameters changed at block/);
+    expect(notice).toHaveTextContent("Parameters changed at block 1,234");
+    expect(notice).toHaveTextContent("setGasPricingConstraints");
+    expect(within(notice).getByRole("link", { name: "See the owner actions." })).toHaveAttribute("href", "#owner");
+    // The 30d and all-time ranges never refetch on their own, so the socket is what refreshes them.
+    expect(seriesRefreshMock).toHaveBeenCalledTimes(4);
+    rerender(<NetworkPage network="robinhood" />);
+    expect(seriesRefreshMock).toHaveBeenCalledTimes(4);
   });
 
   it("lets every heading stand alone, with no section description under it", () => {

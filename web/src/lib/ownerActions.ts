@@ -39,13 +39,18 @@ export function touchesConstraints(action: Pick<OwnerAction, "method">): boolean
   return PRICING_METHODS.includes(action.method);
 }
 
+/** The newest of those calls, or null: what the figures on screen are now priced by. */
+export function latestConstraintAction(actions: readonly OwnerAction[]): OwnerAction | null {
+  let newest: OwnerAction | null = null;
+  for (const a of actions) {
+    if (!touchesConstraints(a) || !Number.isFinite(a.block)) continue;
+    if (newest === null || a.block > newest.block) newest = a;
+  }
+  return newest;
+}
+
 /** The highest block one of those calls landed at, or null. Nothing before it is averaged into a
  * figure that stands for the new definition. */
 export function latestConstraintBlock(actions: readonly OwnerAction[]): number | null {
-  let highest: number | null = null;
-  for (const a of actions) {
-    if (!touchesConstraints(a) || !Number.isFinite(a.block)) continue;
-    if (highest === null || a.block > highest) highest = a.block;
-  }
-  return highest;
+  return latestConstraintAction(actions)?.block ?? null;
 }

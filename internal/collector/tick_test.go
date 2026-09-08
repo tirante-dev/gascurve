@@ -578,6 +578,18 @@ func TestTickCatchUpBoundaries(t *testing.T) {
 	if tl.legacyAt(1, nil) != nil || tl.boundaryAt(1) {
 		t.Fatal("empty timeline")
 	}
+	// A set lands whatever model the state is in: it switches a legacy chain to the constraints it
+	// installs, and an empty one switches back, since a chain with no constraint prices on the legacy
+	// model. The parameters that model then runs on are not in the call, so none are invented.
+	legacy := &pricer.State{MinBaseFee: big.NewInt(7), Legacy: &pricer.Legacy{SpeedLimit: 5, Backlog: 9}}
+	applyPricingChange(legacy, pricingChange{set: &setChange{block: 1, entries: []model.ConstraintSetEntry{{Target: 3, Window: 4, StartingBacklog: 8}}}})
+	if legacy.IsLegacy() || legacy.Legacy != nil || legacy.Constraints[0].Target != 3 || legacy.Backlogs()[0] != 8 {
+		t.Fatalf("a set switches a legacy state to its constraints: %+v", legacy)
+	}
+	applyPricingChange(legacy, pricingChange{set: &setChange{block: 2}})
+	if !legacy.IsLegacy() || legacy.Legacy != nil {
+		t.Fatalf("an empty set leaves the constraints model with no parameters to invent: %+v", legacy)
+	}
 }
 
 // TestTickReorgResetsBackfill: a reorg whose ancestor lies below the top

@@ -126,6 +126,7 @@ const (
 
 // Owner methods that change the pricer.
 const (
+	methodSetGasPricingConstraints = "setGasPricingConstraints"
 	methodSetMinimumL2BaseFee      = "setMinimumL2BaseFee"
 	methodSetSpeedLimit            = "setSpeedLimit"
 	methodSetL2GasPricingInertia   = "setL2GasPricingInertia"
@@ -811,7 +812,7 @@ func pendingPositionOf(a *nitro.OwnerAction) actionPosition {
 
 // setChangeOf decodes a recorded setGasPricingConstraints action.
 func setChangeOf(block uint64, method string, args db.JSONB) (setChange, bool) {
-	if method != "setGasPricingConstraints" {
+	if method != methodSetGasPricingConstraints {
 		return setChange{}, false
 	}
 	var a struct {
@@ -1101,8 +1102,17 @@ func (tl *timeline) changesAt(number uint64, transaction bool) []pricingChange {
 
 func applyPricingChange(st *pricer.State, change pricingChange) {
 	switch {
-	case change.set != nil && !st.IsLegacy():
+	case change.set != nil:
+		// A set replaces the constraints wherever it lands. Installed on a legacy chain it switches the
+		// model at that block, so the legacy parameters go with it rather than staying to be applied
+		// again. A set carrying no constraint switches back, since a chain with none prices on the
+		// legacy model, but the call does not say with which parameters: the state keeps whatever it
+		// had, which on a chain that was using constraints is nothing, and the replay prices at the
+		// floor until a sampled shape contradicts it.
 		st.Constraints = stateFromEntries(change.set.entries, st.MinBaseFee).Constraints
+		if len(st.Constraints) > 0 {
+			st.Legacy = nil
+		}
 	case change.fee != nil:
 		st.MinBaseFee = new(big.Int).Set(change.fee.fee)
 	case change.legacy != nil && st.Legacy != nil:
@@ -1142,8 +1152,8 @@ func (tl *timeline) boundaryAt(number uint64) bool {
 }
 
 // applyAt applies every change effective exactly at number to st: a constraint set replaces the
-// constraints and resets the backlogs (constraints model only), a fee change replaces the floor, a
-// legacy change replaces its parameter.
+// constraints and resets the backlogs (switching a legacy chain to the constraints model), a fee
+// change replaces the floor, a legacy change replaces its parameter.
 func (tl *timeline) applyAt(st *pricer.State, number uint64) {
 	for _, transaction := range []bool{false, true} {
 		for _, change := range tl.changesAt(number, transaction) {

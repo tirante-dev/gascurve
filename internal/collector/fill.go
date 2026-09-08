@@ -403,6 +403,19 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 				}
 				continue
 			}
+			explained, err := f.endsInKnownShape(ctx, h, target.state)
+			if err != nil {
+				return nil, reasons, err
+			}
+			if !explained {
+				f.log.Warn("the block after a queued range carries a pricer shape no recorded set explains, leaving the range for the set that does",
+					"from", h.From, "to", h.To)
+				if reasons == nil {
+					reasons = map[uint64]string{}
+				}
+				reasons[h.From] = reasonReplayDiscontinuity
+				continue
+			}
 			if effectiveLifecycle(h) == rangeBlocked {
 				f.log.Info("a hole recorded without state can be replayed now", "from", h.From, "to", h.To)
 				target.h.Reason = ""
@@ -412,6 +425,81 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 		}
 	}
 	return nil, reasons, nil
+}
+
+// endsInKnownShape reports whether the shape the replay reaches the end of a range with agrees with
+// what is stored after it: the state it continues from, with every recorded set through the block
+// after the range applied. A change no recorded set explains would otherwise be filled with the
+// shape in force before it, pricing every block after it with the wrong model. The range waits
+// instead, and fills when the set explaining it is recorded. The sample taken at that block settles
+// it exactly, since it carries the targets and windows really in force; without one only the block
+// row is left, and it holds backlogs alone, so a change that keeps the constraint count passes
+// unseen, as it does wherever else only slots are known.
+func (f *Follower) endsInKnownShape(ctx context.Context, h hole, st *pricer.State) (bool, error) {
+	next, err := f.store.BlockByNumber(ctx, f.chainID, h.To+1)
+	if err != nil {
+		return false, fmt.Errorf("block %d: %w", h.To+1, err)
+	}
+	if next == nil || !next.Known() || len(next.Backlogs) == 0 {
+		return true, nil
+	}
+	sample, err := f.store.StateSampleAt(ctx, f.chainID, h.To+1)
+	if err != nil {
+		return false, fmt.Errorf("state sample at %d: %w", h.To+1, err)
+	}
+	end := st.Clone()
+	f.mu.Lock()
+	for _, cs := range f.sets {
+		if cs.EffectiveBlock < h.Start() || cs.EffectiveBlock > h.To+1 {
+			continue
+		}
+		// An observed set at the block after the range is the shape someone saw there, not a change
+		// pinned to it: it is the record of the very change this range cannot place. Only a set from
+		// an owner call says the block after the range is where the pricer changed.
+		if cs.EffectiveBlock == h.To+1 && cs.Source == model.SourceObserved {
+			continue
+		}
+		entries, decodeErr := setEntries(cs)
+		if decodeErr != nil {
+			continue
+		}
+		applyPricingChange(end, pricingChange{set: &setChange{block: cs.EffectiveBlock, entries: entries}})
+	}
+	f.mu.Unlock()
+	if sample != nil && sample.BlockNumber == h.To+1 {
+		known, ok := sampledConstraints(sample)
+		if ok {
+			return sameConstraints(end, known), nil
+		}
+	}
+	return len(end.Backlogs()) == len(next.Backlogs), nil
+}
+
+// sampledConstraints reads a stored sample's constraints, false when it recorded none (a legacy
+// sample, or one written before the shape was stored).
+func sampledConstraints(sample *db.StateSample) ([]model.Constraint, bool) {
+	if len(sample.Constraints) == 0 {
+		return nil, false
+	}
+	var out []model.Constraint
+	if err := sample.Constraints.Unmarshal(&out); err != nil || len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// sameConstraints reports whether a replay state carries exactly the constraints a sample recorded,
+// backlogs aside.
+func sameConstraints(st *pricer.State, constraints []model.Constraint) bool {
+	if len(st.Constraints) != len(constraints) {
+		return false
+	}
+	for i, c := range constraints {
+		if st.Constraints[i].Target != c.Target || st.Constraints[i].Window != c.Window {
+			return false
+		}
+	}
+	return true
 }
 
 // markHoles applies the reasons pickHole decided on, matching entries by start so a range
@@ -424,7 +512,9 @@ func (f *Follower) markHoles(ctx context.Context, s db.Store, reasons map[uint64
 	changed := false
 	for i := range holes {
 		reason, ok := reasons[holes[i].From]
-		if !ok || holes[i].Reason == reason {
+		// A range already carrying the reason may still be queued: the tick records a discontinuity
+		// as pending work, and it is this pass that decides nothing can replay it yet.
+		if !ok || (holes[i].Reason == reason && holes[i].Lifecycle == rangeBlocked) {
 			continue
 		}
 		holes[i].Reason = reason
