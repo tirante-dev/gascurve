@@ -59,6 +59,22 @@
   --dial-band-warning: #a67400;
   --dial-band-critical: #c0263d;
 
+  /* The gauge and its readouts. Light draws the instrument straight on the card;
+     dark insets it on its own face and lights the figures, which is the whole of
+     the difference between the two. */
+  --gauge-face: transparent;
+  --gauge-face-border: transparent;
+  --gauge-wash: var(--surface);
+  --gauge-chrome-mid: #5e36cc;
+  --gauge-horizon: var(--accent-2);
+  --readout-pad: 0;
+  --readout-radius: 0;
+  --readout-bg: transparent;
+  --readout-border: transparent;
+  --readout-ink: var(--ink);
+  --readout-unit: var(--ink-2);
+  --readout-glow: none;
+
   --series-1: #c0189a;
   --series-2: #0f855c;
   --series-3: #5e36cc;
@@ -132,6 +148,17 @@
     --dial-band-good: #3ddc97;
     --dial-band-warning: #ffb020;
     --dial-band-critical: #ff5c7a;
+    --gauge-face: var(--chart);
+    --gauge-face-border: rgba(255, 79, 216, 0.3);
+    --gauge-wash: var(--chart);
+    --gauge-chrome-mid: #b07cff;
+    --readout-pad: 0.45rem 0.6rem 0.5rem;
+    --readout-radius: 0.25rem;
+    --readout-bg: var(--chart);
+    --readout-border: rgba(46, 230, 255, 0.28);
+    --readout-ink: var(--accent-2);
+    --readout-unit: #9fe4f2;
+    --readout-glow: 0 0 6px rgba(46, 230, 255, 0.32);
 
     --series-1: #d62aa8;
     --series-2: #1fae78;
@@ -202,6 +229,17 @@
   --dial-band-good: #3ddc97;
   --dial-band-warning: #ffb020;
   --dial-band-critical: #ff5c7a;
+  --gauge-face: var(--chart);
+  --gauge-face-border: rgba(255, 79, 216, 0.3);
+  --gauge-wash: var(--chart);
+  --gauge-chrome-mid: #b07cff;
+  --readout-pad: 0.45rem 0.6rem 0.5rem;
+  --readout-radius: 0.25rem;
+  --readout-bg: var(--chart);
+  --readout-border: rgba(46, 230, 255, 0.28);
+  --readout-ink: var(--accent-2);
+  --readout-unit: #9fe4f2;
+  --readout-glow: 0 0 6px rgba(46, 230, 255, 0.32);
 
   --series-1: #d62aa8;
   --series-2: #1fae78;
@@ -357,13 +395,56 @@ body {
   filter: drop-shadow(0 0 10px var(--glow));
 }
 
-/* The live base fee: the sunset gradient with a soft glow. */
+/* The live base fee: the sunset gradient. No glow behind it: the figure is set
+   on the gauge's perspective grid, and a bloom there fills in its counters. */
 @utility vw-hero {
   background: var(--sunset-text);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  filter: drop-shadow(0 0 14px var(--glow));
+}
+
+/* The gauge panel: nothing at all in light, an inset instrument face in dark. */
+@utility vw-gauge {
+  background: var(--gauge-face);
+  border: 1px solid var(--gauge-face-border);
+  overflow: hidden;
+}
+
+/* What holds the figure off the perspective grid it is set on. */
+@utility vw-readout {
+  background: radial-gradient(ellipse 74% 86% at 50% 52%, var(--gauge-wash) 0%, var(--gauge-wash) 44%, transparent 100%);
+}
+
+/* A stat as an instrument readout: flat on the card in light, inset and lit in dark. */
+@utility vw-stat-panel {
+  padding: var(--readout-pad);
+  border: 1px solid var(--readout-border);
+  border-radius: var(--readout-radius);
+  background: var(--readout-bg);
+}
+
+@utility vw-readout-ink {
+  color: var(--readout-ink);
+  text-shadow: var(--readout-glow);
+}
+
+@utility vw-readout-unit {
+  color: var(--readout-unit);
+}
+
+/* A lit top edge, for the card the gauge sits on. */
+@utility vw-lit {
+  &::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 1px;
+    pointer-events: none;
+    background: var(--chrome-rule);
+  }
 }
 
 /* The multiplier tile: an inset hairline and a glow in the tile's own colour. */
