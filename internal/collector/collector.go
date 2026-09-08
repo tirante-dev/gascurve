@@ -1316,8 +1316,10 @@ func (f *Follower) withGeneration(ctx context.Context, gen uint64, fn func(db.St
 	})
 }
 
-// fastLoopBusy reports whether every spare call belongs to the live path: the fast loop is rewinding a
-// reorg, or its last tick found the stored head more than a header batch behind.
+// fastLoopBusy reports whether history work should yield the call budget to the live path: the fast loop
+// is rewinding a reorg, or its last tick found the stored head more than a header batch behind. It is
+// the condition to defer on, not a veto: deferredWait still lets each caller through one turn in
+// maxRecoveryDeferrals.
 func (f *Follower) fastLoopBusy() bool {
 	return f.rewinding.Load() || f.behind.Load() > uint64(f.cfg.HeaderBatchSize)
 }

@@ -350,9 +350,10 @@ func TestFillRestartedByReorg(t *testing.T) {
 	}
 }
 
-// TestFillYieldsWhileCatchingUp: the fast loop's catch-up owns the budget,
-// so the filler stands down until it is done.
-func TestFillYieldsWhileCatchingUp(t *testing.T) {
+// TestFillYieldsWhileTheFastLoopIsBusy: a rewind and a lag of more than one
+// header batch each own the budget, so the filler stands down for both, and
+// takes its guaranteed turn once it has deferred maxRecoveryDeferrals times.
+func TestFillYieldsWhileTheFastLoopIsBusy(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
