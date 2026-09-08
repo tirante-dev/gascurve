@@ -84,7 +84,7 @@ Replay validation vector (Robinhood, 2026-09-06): constraints `[60e6,15,3_111_50
 
 `Exponent` per constraint (`c.Backlog / (c.Window*c.Target)` in bips) is exposed to the API as `exponentBips` so the UI can show each constraint's share.
 
-Replay comparison: ArbOS computes the fee in block N's `startBlock` and it applies to header N+1's `baseFeePerGas`; the replay compares `predicted(N)` with header N, so `replayErrorBips` carries at most one block of lag. Batch-report `gasSpent` is separate and reproduces Nitro's report-version path, including the effective per-batch charge and the ArbOS 50+ parent calldata floor.
+Replay comparison: ArbOS computes the fee in block N's `startBlock` and it applies to header N+1's `baseFeePerGas`, so the replay's output at N describes N+1 and the collector moves the whole pricing group (`predicted_base_fee`, `exponent_bips`, `constraint_bips`) forward one block before storing it. A row therefore holds the model's fee for its own header and `replayErrorBips` is a real model error, not a block of lag: on a matched chain it is 0. The group is carried across header batches, fill batches and backfill segments; the first block of a contiguous run has no replayed parent and stores no prediction (`predictedBaseFee` null, `exponentBips` 0, `constraintBips` null), which is not the same as a zero error. `min_base_fee` is not shifted: it stays the floor in force at the block, which is what its own fee split needs, so at a `setMinimumL2BaseFee` block the stored floor and the floor behind that row's prediction differ for exactly one block. Batch-report `gasSpent` is separate and reproduces Nitro's report-version path, including the effective per-batch charge and the ArbOS 50+ parent calldata floor.
 
 ## 4. Database (PostgreSQL 16, migrations in `internal/db/migrations`)
 
@@ -240,15 +240,15 @@ type LiveSnapshot = {
   l1?: { baseFeeEstimate: string; surplus: string; feesAvailable: string; unitsSinceUpdate: number;
          lastUpdateAt: string; equilibrationUnits: number; perBatchGasCharge: number; rewardRate: number };
   accounts?: { infra: Account; network: Account; l1Reward: Account };
-  replayErrorBips: number;                 // |predicted - actual| for the latest block
+  replayErrorBips: number;                 // |predicted - actual| for the latest block, 0 when it carries no prediction
   ethUsd: { price: string; at: string; source: string } | null;   // ETH/USD spot fetched by the collector's slow loop (server side, never the browser), null when unavailable or stale
 }
 type Account = { address: string; balance: string }
 
 type BlockPoint = {
-  number: number; ts: number; gasUsed: number; posterGas: number | null; baseFee: string; predictedBaseFee: string;
+  number: number; ts: number; gasUsed: number; posterGas: number | null; baseFee: string; predictedBaseFee: string | null;  // the model's fee for THIS block, computed while replaying its parent; null when the parent was not replayed
   backlogs: number[];        // end-of-block backlogs (after AddGas)
-  constraintBips: number[] | null;  // start-of-block per-constraint exponent, the values that priced this block; sums to exponentBips; null only for pricing version 0 rows (history recorded before the breakdown existed)
+  constraintBips: number[] | null;  // per-constraint exponents that priced this block; sums to exponentBips; null when the block carries no prediction, and for pricing version 0 rows (history recorded before the breakdown existed)
   exponentBips: number; minBaseFee: string | null; anchored: boolean;   // minBaseFee null for pricing version 0 (history without the breakdown)
 }
 

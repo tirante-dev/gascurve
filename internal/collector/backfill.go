@@ -48,6 +48,21 @@ type backfillCursor struct {
 	LastAnchor          uint64   `json:"lastAnchor,omitempty"`
 	LastAnchorErrorBips int64    `json:"lastAnchorErrorBips,omitempty"`
 	AnchorMinFee        string   `json:"anchorMinFee,omitempty"`
+	// The pricing group the last replayed block computed, which prices the first block of the next
+	// batch. Empty at a segment start, leaving that block without a prediction.
+	PendingFee      string  `json:"pendingFee,omitempty"`
+	PendingExponent int64   `json:"pendingExponent,omitempty"`
+	PendingBips     []int64 `json:"pendingBips,omitempty"`
+}
+
+// carry reads the pricing group held for the next batch's first block.
+func (c *backfillCursor) carry() prediction {
+	return decodeCarry(c.PendingFee, c.PendingExponent, c.PendingBips)
+}
+
+// setCarry stores the group for the next batch, or clears it when the replay produced none.
+func (c *backfillCursor) setCarry(p prediction) {
+	c.PendingFee, c.PendingExponent, c.PendingBips = p.encode()
 }
 
 // backfillState renders the cursor for the instruments: where the active segment has replayed to,
@@ -370,6 +385,7 @@ func (f *Follower) replaySegment(ctx context.Context, st *pricer.State, c *backf
 		prevTs = chunk[len(chunk)-1].Timestamp
 		start = end
 	}
+	c.setCarry(shiftPredictions(rows, c.carry()))
 	return rows, nil
 }
 
@@ -467,6 +483,7 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 	c.PrevTs = 0
 	c.PrevHash = ""
 	c.LastAnchor, c.LastAnchorErrorBips, c.AnchorMinFee = 0, 0, ""
+	c.setCarry(prediction{})
 	f.log.Info("backfill segment", "from", c.SegStart, "to", c.End, "setId", c.SetID)
 	return BackfillProgressed, f.withGeneration(ctx, gen, func(s db.Store) error { return f.saveCursor(ctx, s, c) })
 }

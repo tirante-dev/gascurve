@@ -25,7 +25,7 @@ func seedBlocksWithoutPosterGas(t *testing.T, rpc *fakeRPC, store *dbtest.MemSto
 			ChainID: 4663, Number: n, Hash: rpc.hashFor(n), ParentHash: rpc.hashFor(n - 1),
 			TS: time.Unix(int64(tsFor(n)), 0).UTC(), GasUsed: gasFor(n),
 			BaseFee: db.NewWei(feeFor(n)), TxCount: 1, PricingVersion: db.PricingFull,
-			PredictedBaseFee: db.NewWei(feeFor(n)),
+			PredictedBaseFee: db.NewNullWei(feeFor(n)),
 			MinBaseFee:       db.NullWei{Wei: db.NewWei(feeFor(n)), Valid: true},
 		})
 	}
@@ -680,7 +680,7 @@ func TestPruneDoesNothingToBlocksBeforeALiveStart(t *testing.T) {
 	stale := time.Unix(int64(tsFor(900)), 0).UTC().Add(-48 * time.Hour)
 	if err := store.UpsertBlocks(ctx, []db.Block{{
 		ChainID: 4663, Number: 1, Hash: "0x1", ParentHash: "0x0", TS: stale, GasUsed: 1,
-		BaseFee: db.NewWei(feeFor(1)), PredictedBaseFee: db.NewWei(feeFor(1)), TxCount: 1, PricingVersion: db.PricingFull,
+		BaseFee: db.NewWei(feeFor(1)), PredictedBaseFee: db.NewNullWei(feeFor(1)), TxCount: 1, PricingVersion: db.PricingFull,
 	}}); err != nil {
 		t.Fatal(err)
 	}

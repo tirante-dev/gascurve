@@ -197,12 +197,15 @@ type Follower struct {
 	mu          sync.Mutex
 	initialized bool
 	// The last committed tick, published only after the transaction that wrote it committed.
-	head             uint64
-	headHash         string
-	prevTs           uint64
-	state            *pricer.State
-	lastSample       *nitro.Sample
-	lastResult       *pricer.Result
+	head       uint64
+	headHash   string
+	prevTs     uint64
+	state      *pricer.State
+	lastSample *nitro.Sample
+	lastResult *pricer.Result
+	// lastErrBips is the replay error published with the last committed tick, reported again by a
+	// tick that writes no row for the sampled head.
+	lastErrBips      int64
 	sets             []db.ConstraintSet
 	setChanges       []setChange
 	minFeeChanges    []minFeeChange
@@ -617,7 +620,7 @@ func (f *Follower) reloadHeadLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("latest block: %w", err)
 	}
-	f.head, f.headHash, f.prevTs, f.state, f.lastResult = 0, "", 0, nil, nil
+	f.head, f.headHash, f.prevTs, f.state, f.lastResult, f.lastErrBips = 0, "", 0, nil, nil, 0
 	if last != nil {
 		f.head = last.Number
 		f.headHash = last.Hash

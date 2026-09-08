@@ -130,9 +130,13 @@ func addNullWei(a, b NullWei) NullWei {
 // Blocks returns how many blocks were folded.
 func (a *BucketBuilder) Blocks() int64 { return a.b.Blocks }
 
-// ReplayErrorBips is |predicted - actual| in bips for a stored block.
+// ReplayErrorBips is |predicted - actual| in bips for a stored block, and zero for a block that
+// carries no prediction: an absent one is not a perfect one, so it must not widen the bucket's max.
 func ReplayErrorBips(blk Block) int64 {
-	return pricer.ErrorBips(blk.PredictedBaseFee.BigInt(), blk.BaseFee.BigInt())
+	if !blk.PredictedBaseFee.Valid {
+		return 0
+	}
+	return pricer.ErrorBips(blk.PredictedBaseFee.Wei.BigInt(), blk.BaseFee.BigInt())
 }
 
 // BucketStarts returns the distinct window starts of rows at a resolution, ascending.

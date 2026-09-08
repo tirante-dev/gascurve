@@ -125,7 +125,7 @@ func TestWebSocketFlow(t *testing.T) {
 
 	// A new block lands and the collector ticks: tick then blocks.
 	ctx := context.Background()
-	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now, GasUsed: 1, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1), Backlogs: nil}}); err != nil {
+	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now, GasUsed: 1, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1), Backlogs: nil}}); err != nil {
 		t.Fatal(err)
 	}
 	h.hub.Handle(ctx, liveNotification(robinhood))
@@ -419,7 +419,7 @@ func TestHubReorg(t *testing.T) {
 		t.Fatal(err)
 	}
 	mk := func(n uint64, tag string) db.Block {
-		return db.Block{ChainID: robinhood, Number: n, Hash: "0x" + tag + strconv.FormatUint(n, 10), TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.WeiFromUint64(n)}
+		return db.Block{ChainID: robinhood, Number: n, Hash: "0x" + tag + strconv.FormatUint(n, 10), TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.NullWeiFromUint64(n)}
 	}
 	var blocks []db.Block
 	for n := uint64(100); n <= 110; n++ {
@@ -709,7 +709,7 @@ func TestWebSocketHelloAtomic(t *testing.T) {
 	conn := h.dial(t, "robinhood")
 	// While the hello waits, a new block and a tick arrive.
 	time.Sleep(20 * time.Millisecond)
-	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}}); err != nil {
+	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}); err != nil {
 		t.Fatal(err)
 	}
 	go hub.Handle(ctx, liveNotification(robinhood))
@@ -761,7 +761,7 @@ func TestWebSocketHelloAtomic(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			if i%2 == 0 {
-				_ = store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1040 + uint64(i), TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}})
+				_ = store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1040 + uint64(i), TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}})
 			}
 			_, _ = hub.refreshBlocks(ctx, robinhood)
 		}(i)
@@ -799,7 +799,7 @@ func TestHubReconcile(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)}}); err != nil {
+	if err := store.UpsertBlocks(ctx, []db.Block{{ChainID: robinhood, Number: 1031, TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)}}); err != nil {
 		t.Fatal(err)
 	}
 	// One of the two was already delivered by NOTIFY before the outage.
@@ -948,7 +948,7 @@ func TestHubRun(t *testing.T) {
 	ctx2 := context.Background()
 	var blocks []db.Block
 	for i := uint64(0); i < ringSize+50; i++ {
-		blocks = append(blocks, db.Block{ChainID: robinhood, Number: 2000 + i, TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.WeiFromUint64(1)})
+		blocks = append(blocks, db.Block{ChainID: robinhood, Number: 2000 + i, TS: now, BaseFee: db.WeiFromUint64(1), PredictedBaseFee: db.NullWeiFromUint64(1)})
 	}
 	if err := store.UpsertBlocks(ctx2, blocks); err != nil {
 		t.Fatal(err)
@@ -984,7 +984,7 @@ func TestHubHelloBroadcastsItsRefresh(t *testing.T) {
 	blocks := make([]db.Block, 0, 3)
 	for n := uint64(200); n < 203; n++ {
 		blocks = append(blocks, db.Block{ChainID: robinhood, Number: n, Hash: "0x" + strconv.FormatUint(n, 10),
-			TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.WeiFromUint64(n)})
+			TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.NullWeiFromUint64(n)})
 	}
 	if err := store.UpsertBlocks(ctx, blocks); err != nil {
 		t.Fatal(err)
@@ -1014,7 +1014,7 @@ func TestHubRefreshPagesToTheTip(t *testing.T) {
 	h := newWSHarness(t, store, time.Hour)
 	mk := func(n uint64) db.Block {
 		return db.Block{ChainID: robinhood, Number: n, Hash: "0x" + strconv.FormatUint(n, 10),
-			TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.WeiFromUint64(n)}
+			TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.NullWeiFromUint64(n)}
 	}
 	if err := store.UpsertBlocks(ctx, []db.Block{mk(1)}); err != nil {
 		t.Fatal(err)
@@ -1052,7 +1052,7 @@ func TestHubReorgRewindsOwnerCursor(t *testing.T) {
 	}
 	mk := func(n uint64, tag string) db.Block {
 		return db.Block{ChainID: robinhood, Number: n, Hash: "0x" + tag + strconv.FormatUint(n, 10),
-			TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.WeiFromUint64(n)}
+			TS: now.Add(time.Duration(n) * time.Second), BaseFee: db.WeiFromUint64(n), PredictedBaseFee: db.NullWeiFromUint64(n)}
 	}
 	var blocks []db.Block
 	for n := uint64(50); n <= 55; n++ {

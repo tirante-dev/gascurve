@@ -11,7 +11,7 @@ import (
 )
 
 func mkBlock(n uint64, ts time.Time, fee int64, gas uint64, minFee int64, backlogs ...uint64) Block {
-	return Block{ChainID: 1, Number: n, TS: ts, GasUsed: gas, PosterGas: sql.NullInt64{Valid: true}, BaseFee: WeiFromUint64(uint64(fee)), PredictedBaseFee: WeiFromUint64(uint64(fee + 1)),
+	return Block{ChainID: 1, Number: n, TS: ts, GasUsed: gas, PosterGas: sql.NullInt64{Valid: true}, BaseFee: WeiFromUint64(uint64(fee)), PredictedBaseFee: NullWeiFromUint64(uint64(fee + 1)),
 		MinBaseFee: NullWeiFromUint64(uint64(minFee)), PricingVersion: PricingFull, Backlogs: Uint64Array(backlogs), ConstraintBips: pq.Int64Array{int64(n), 1}, ExponentBips: int64(n)}
 }
 
@@ -88,11 +88,11 @@ func TestFoldBlocks(t *testing.T) {
 	if FoldBlocks(nil, setID) != nil {
 		t.Fatal("no rows, no buckets")
 	}
-	zero := Block{BaseFee: NewWei(nil), PredictedBaseFee: WeiFromUint64(5)}
+	zero := Block{BaseFee: NewWei(nil), PredictedBaseFee: NullWeiFromUint64(5)}
 	if ReplayErrorBips(zero) != 0 {
 		t.Fatal("zero actual fee yields zero error")
 	}
-	huge := Block{BaseFee: WeiFromUint64(1), PredictedBaseFee: NewWei(new(big.Int).Lsh(big.NewInt(1), 90))}
+	huge := Block{BaseFee: WeiFromUint64(1), PredictedBaseFee: NewNullWei(new(big.Int).Lsh(big.NewInt(1), 90))}
 	if ReplayErrorBips(huge) != math.MaxInt64 {
 		t.Fatal("saturated error")
 	}

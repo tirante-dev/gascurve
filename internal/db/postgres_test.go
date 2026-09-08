@@ -468,7 +468,7 @@ func TestPostgresSetBasedRoundTrips(t *testing.T) {
 	for i := range rows {
 		start := now.Add(time.Duration(i) * time.Minute)
 		starts[i] = start
-		blocks[i] = Block{ChainID: 4663, Number: uint64(i + 1), TS: start, BaseFee: WeiFromUint64(1), PredictedBaseFee: WeiFromUint64(1)}
+		blocks[i] = Block{ChainID: 4663, Number: uint64(i + 1), TS: start, BaseFee: WeiFromUint64(1), PredictedBaseFee: NullWeiFromUint64(1)}
 		buckets[i] = Bucket{ChainID: 4663, Resolution: Resolution1m, BucketStart: start, Blocks: 1,
 			FeesWei: WeiFromUint64(1), BaseFeeMin: WeiFromUint64(1), BaseFeeAvg: WeiFromUint64(1), BaseFeeMax: WeiFromUint64(1)}
 	}
@@ -500,7 +500,7 @@ func TestPostgresSetBasedRoundTrips(t *testing.T) {
 func TestPostgresDuplicateConflictKeys(t *testing.T) {
 	p, mock := newMock(t)
 	ctx := context.Background()
-	block := Block{ChainID: 4663, Number: 1, TS: now, BaseFee: WeiFromUint64(1), PredictedBaseFee: WeiFromUint64(1)}
+	block := Block{ChainID: 4663, Number: 1, TS: now, BaseFee: WeiFromUint64(1), PredictedBaseFee: NullWeiFromUint64(1)}
 	mock.ExpectExec("INSERT INTO blocks").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO blocks").WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := p.UpsertBlocks(ctx, []Block{block, block}); err != nil {

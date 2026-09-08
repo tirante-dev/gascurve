@@ -120,7 +120,7 @@ describe("mock world", () => {
       expect(s.constraints[0].backlog).toBe(b.backlogs[0]);
       expect(s.constraints[0].backlog).toBeGreaterThan(prev);
       prev = s.constraints[0].backlog;
-      expect(s.replayErrorBips).toBe(Math.round((Number(BigInt(b.baseFee) - BigInt(b.predictedBaseFee)) * 10_000) / Number(b.baseFee)));
+      expect(s.replayErrorBips).toBe(Math.round((Number(BigInt(b.baseFee) - BigInt(b.predictedBaseFee ?? b.baseFee)) * 10_000) / Number(b.baseFee)));
       expect(s.gasPerSecond.s10).toBeLessThanOrEqual(live.gasPerSecond.s10 + 1);
       expect(s.sampledAt).toBe(new Date(b.ts * 1000 + 100).toISOString());
     }

@@ -240,9 +240,9 @@ func TestErrorBips(t *testing.T) {
 func TestReplay(t *testing.T) {
 	s := robinhoodState()
 	blocks := []Block{
-		{Number: 100, Timestamp: 1000, GasUsed: 10_000_000, BaseFee: big.NewInt(395_726_000)},
-		{Number: 101, Timestamp: 1000, GasUsed: 5_000_000, BaseFee: big.NewInt(396_000_000)},
-		{Number: 102, Timestamp: 1001, GasUsed: 0, BaseFee: big.NewInt(0)},
+		{Number: 100, Timestamp: 1000, GasUsed: 10_000_000},
+		{Number: 101, Timestamp: 1000, GasUsed: 5_000_000},
+		{Number: 102, Timestamp: 1001, GasUsed: 0},
 	}
 	anchor := func(n uint64) ([]uint64, bool) {
 		if n == 101 {
@@ -255,7 +255,7 @@ func TestReplay(t *testing.T) {
 		t.Fatalf("results = %d", len(res))
 	}
 	// Block 100: dt=0, predicted from the vector, then 10M gas added.
-	if res[0].Predicted.Int64() != 395_726_000 || res[0].ErrorBips != 0 || res[0].Exponent != 32_425 {
+	if res[0].Predicted.Int64() != 395_726_000 || res[0].Exponent != 32_425 {
 		t.Fatalf("block 100: %+v", res[0])
 	}
 	if res[0].Backlogs[0] != 13_111_506 || res[0].Anchored {
@@ -265,11 +265,8 @@ func TestReplay(t *testing.T) {
 	if res[1].Exponent <= 32_425 || !res[1].Anchored || res[1].Backlogs[0] != 1 || res[1].Backlogs[1] != 2 {
 		t.Fatalf("block 101: %+v", res[1])
 	}
-	if res[1].ErrorBips == 0 {
-		t.Fatalf("block 101 should record an error against 396000000: %+v", res[1])
-	}
 	// Block 102: dt=1 drains the tiny anchored backlogs to zero, fee at floor.
-	if res[2].Predicted.Int64() != 20_000_000 || res[2].Backlogs[0] != 0 || res[2].Backlogs[1] != 0 || res[2].ErrorBips != 0 {
+	if res[2].Predicted.Int64() != 20_000_000 || res[2].Backlogs[0] != 0 || res[2].Backlogs[1] != 0 {
 		t.Fatalf("block 102: %+v", res[2])
 	}
 	// Continuing from a previous timestamp applies dt to the first block.

@@ -425,7 +425,7 @@ func TestIntegrationStore(t *testing.T) {
 			TS: base.Add(time.Duration(i) * time.Second), GasUsed: 1_000_000 * (i + 1), PosterGas: sql.NullInt64{Valid: true},
 			BaseFee: WeiFromUint64(20_000_000 + i), L1Block: 50, TxCount: txs, Backlogs: Uint64Array{i, math.MaxUint64 - i},
 			ConstraintBips: pq.Int64Array{int64(i), 1}, MinBaseFee: NullWeiFromUint64(10_000_000), PricingVersion: PricingFull,
-			ExponentBips: int64(i), PredictedBaseFee: WeiFromUint64(20_000_000), Anchored: i == 10,
+			ExponentBips: int64(i), PredictedBaseFee: NullWeiFromUint64(20_000_000), Anchored: i == 10,
 		})
 	}
 	blocks[1].PosterGas.Int64 = 767
@@ -913,7 +913,7 @@ func TestIntegrationSetBasedEquivalence(t *testing.T) {
 	base := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 
 	seed := Block{ChainID: testChain, Number: 1, Hash: "seed", TS: base, GasUsed: 1, BaseFee: WeiFromUint64(10),
-		Backlogs: Uint64Array{1}, ConstraintBips: pq.Int64Array{2}, PredictedBaseFee: WeiFromUint64(11),
+		Backlogs: Uint64Array{1}, ConstraintBips: pq.Int64Array{2}, PredictedBaseFee: NullWeiFromUint64(11),
 		MinBaseFee: NullWeiFromUint64(5), PricingVersion: PricingFull}
 	if err := p.UpsertBlocks(ctx, []Block{seed}); err != nil {
 		t.Fatal(err)
@@ -923,7 +923,7 @@ func TestIntegrationSetBasedEquivalence(t *testing.T) {
 	other := Block{ChainID: testChain, Number: 2, Hash: "other", TS: base.Add(time.Minute), GasUsed: 3,
 		PosterGas: sql.NullInt64{Int64: 1, Valid: true},
 		BaseFee:   WeiFromUint64(20), Backlogs: Uint64Array{4, 5}, ConstraintBips: pq.Int64Array{6, 7},
-		PredictedBaseFee: WeiFromUint64(19), MinBaseFee: NullWeiFromUint64(7), PricingVersion: PricingFull}
+		PredictedBaseFee: NullWeiFromUint64(19), MinBaseFee: NullWeiFromUint64(7), PricingVersion: PricingFull}
 	final := update
 	final.Hash, final.GasUsed, final.PricingVersion = "final", 4, PricingUnknown
 	final.ConstraintBips, final.MinBaseFee = nil, NullWei{}
@@ -1086,7 +1086,7 @@ func TestIntegrationPosterGasRepair(t *testing.T) {
 			ChainID: testChain, Number: 200 + i, Hash: fmt.Sprintf("0x%x", 200+i), ParentHash: fmt.Sprintf("0x%x", 199+i),
 			TS: base.Add(time.Duration(i) * time.Second), GasUsed: 1_000, BaseFee: WeiFromUint64(20_000_000),
 			L1Block: 50, TxCount: 1, Backlogs: Uint64Array{i}, ConstraintBips: pq.Int64Array{int64(i)},
-			MinBaseFee: NullWeiFromUint64(10_000_000), PricingVersion: PricingFull, PredictedBaseFee: WeiFromUint64(20_000_000),
+			MinBaseFee: NullWeiFromUint64(10_000_000), PricingVersion: PricingFull, PredictedBaseFee: NullWeiFromUint64(20_000_000),
 		})
 	}
 	// One row already has the value, so it must not come back as work.
