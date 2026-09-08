@@ -95,3 +95,26 @@ func TestEndpointSizeShrinkHoldsBeforeRecovering(t *testing.T) {
 		t.Fatalf("batch cap %d, want %d one step after the recovery interval", got, shrunk*2)
 	}
 }
+
+// TestEndpointSizeShrinkOnlyNarrows pins the cut as monotonic. Loops sharing an endpoint size their
+// chunks before queueing for the send lock, so a wide request can be refused after a narrower one
+// has already cut the cap; its own halved width must not widen the cap back.
+func TestEndpointSizeShrinkOnlyNarrows(t *testing.T) {
+	f := newFakeRPC(t)
+	e, _ := rangeEndpoint(t, f)
+
+	for _, items := range []int{100, 50} {
+		if !e.shrinkForSize(items) {
+			t.Fatalf("shrinkForSize(%d) reported no narrower retry", items)
+		}
+	}
+	if got := e.BatchCap(); got != 25 {
+		t.Fatalf("batch cap %d after two cuts, want 25", got)
+	}
+	if !e.shrinkForSize(100) {
+		t.Fatal("a stale wide chunk still retries narrower against the cut cap")
+	}
+	if got := e.BatchCap(); got != 25 {
+		t.Fatalf("a stale refusal of 100 items raised the cap to %d, want it held at 25", got)
+	}
+}

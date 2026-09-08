@@ -250,13 +250,17 @@ func (e *Endpoint) batch(ctx context.Context, reqs []Request) ([]Result, error) 
 // reports whether the retry will be narrower. The new cap is taken from the chunk that actually
 // failed rather than from the current cap, so a short chunk at the end of a range shrinks too
 // instead of being re-sent at its own width until the caller gives up.
+//
+// It can only ever lower the cap. Every loop sharing the endpoint sizes its chunk before queueing
+// for the send lock, so a wide request can be refused long after a narrower one has already cut the
+// cap; taking its halved width unclamped would widen the cap back and walk the same refusals again.
 func (e *Endpoint) shrinkForSize(items int) bool {
 	if items <= sizeBatchFloor {
 		return false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.batchCap = max(items/2, sizeBatchFloor)
+	e.batchCap = min(e.batchCap, max(items/2, sizeBatchFloor))
 	// Recorded on the same clock a 429 uses: the cap has to hold for capRecoveryInterval before it
 	// doubles again, or a range of dense blocks would shrink and grow on alternate batches.
 	e.lastLimit = e.now()
