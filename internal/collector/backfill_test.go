@@ -937,3 +937,204 @@ func TestBackfillAnchorEdgeCases(t *testing.T) {
 		t.Fatal("archive state from another fork must fail")
 	}
 }
+
+// blockDigest renders the reconstructed pricing of a row, so two backfills
+// that walked the same blocks in a different order can be compared.
+func blockDigest(b *db.Block) string {
+	if b == nil {
+		return "<missing>"
+	}
+	return fmt.Sprintf("%d gas=%d fee=%s min=%v/%s predicted=%v/%s exp=%d bips=%v backlogs=%v anchored=%v",
+		b.Number, b.GasUsed, b.BaseFee.BigInt(), b.MinBaseFee.Valid, b.MinBaseFee.Wei.BigInt(),
+		b.PredictedBaseFee.Valid, b.PredictedBaseFee.Wei.BigInt(), b.ExponentBips, b.ConstraintBips, b.Backlogs, b.Anchored)
+}
+
+// TestBackfillWindowsDescend: on an archive network the backfill walks a
+// segment in windows, newest first, each seeded from the state the archive
+// reports below it. The reconstruction must be the one a single forward
+// replay produces, block for block, including the predictions across every
+// window boundary.
+func TestBackfillWindowsDescend(t *testing.T) {
+	ctx := context.Background()
+	forward := dbtest.New()
+	seedSets(t, forward)
+	fwd := newTestFollower(t, newFakeRPC(1000), forward)
+	if err := fwd.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, fwd, 300)
+
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	// The archive answers with the state the forward replay ended each
+	// block on, which is what a real archive node holds.
+	archive := newFakeRPC(1000)
+	archive.minFee = big.NewInt(pricer.InitialMinimumBaseFeeWei)
+	archive.backlogsAt = func(n uint64) []uint64 {
+		b, err := forward.BlockByNumber(ctx, 4663, n)
+		if err != nil || b == nil {
+			t.Errorf("no forward row at %d: %v", n, err)
+			return nil
+		}
+		return b.Backlogs
+	}
+	archive.constraintsAt = func(n uint64) []nitro.Constraint {
+		if n < 500 {
+			return []nitro.Constraint{{Target: 60_000_000, Window: 15}, {Target: 20_000_000, Window: 86_400}}
+		}
+		return archive.constraints
+	}
+	f := newTestFollower(t, rpc, store)
+	f.archive = archive
+	f.cfg.BackfillWindow = 137
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	// The first run reconstructs the blocks just below the live data, not
+	// the segment's oldest ones.
+	for {
+		st, err := f.BackfillStep(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != BackfillProgressed {
+			t.Fatalf("first window: %v", st)
+		}
+		if b, _ := store.BlockByNumber(ctx, 4663, 863); b != nil {
+			break
+		}
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 600); b != nil {
+		t.Fatal("the first run must start a window below the live data, not at the segment floor")
+	}
+	runBackfill(t, f, 300)
+	if fmt.Sprint(archive.sampleAt) != "[861 724 587 361 224]" {
+		t.Fatalf("window seeds must descend, one below each window: %v", archive.sampleAt)
+	}
+	for n := uint64(100); n < 1000; n++ {
+		got, _ := store.BlockByNumber(ctx, 4663, n)
+		want, _ := forward.BlockByNumber(ctx, 4663, n)
+		if blockDigest(got) != blockDigest(want) {
+			t.Fatalf("block %d\n windowed: %s\n forward:  %s", n, blockDigest(got), blockDigest(want))
+		}
+	}
+	if a, b := blockCountIn(store, db.Resolution1m), blockCountIn(forward, db.Resolution1m); a != b {
+		t.Fatalf("folded blocks = %d, forward folded %d", a, b)
+	}
+	c, err := f.loadCursor(ctx)
+	if err != nil || !c.Done || c.SkipFirst {
+		t.Fatalf("cursor: %+v %v", c, err)
+	}
+}
+
+// TestBackfillWindowSeedFallbacks: a window that cannot be seeded leaves
+// the run where it always was, at the segment floor, and a window is never
+// placed below the configured depth.
+func TestBackfillWindowSeedFallbacks(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	archive := newFakeRPC(1000)
+	f := newTestFollower(t, rpc, store)
+	f.archive = archive
+	f.cfg.BackfillWindow = 137
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	// An archive that cannot serve the seed fails the step, so it is
+	// retried rather than silently replaying the whole set forward.
+	archive.errs["PricingSampleAt"] = errRPC
+	if _, err := f.BackfillStep(ctx); !errors.Is(err, errRPC) {
+		t.Fatalf("a failing seed must fail the step: %v", err)
+	}
+	if c, _ := f.loadCursor(ctx); c.Active {
+		t.Fatalf("no run may be committed on a failed seed: %+v", c)
+	}
+	// A sampled model of another shape cannot seed the segment's replay
+	// state, so the run starts at the floor instead.
+	delete(archive.errs, "PricingSampleAt")
+	archive.constraintsAt = func(uint64) []nitro.Constraint {
+		return []nitro.Constraint{{Target: 60_000_000, Window: 15}}
+	}
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("shape mismatch: %v %v", st, err)
+	}
+	c, _ := f.loadCursor(ctx)
+	if c.SegStart != 500 || c.SkipFirst {
+		t.Fatalf("a skipped seed must leave the run at the segment floor: %+v", c)
+	}
+
+	// The window bottoms out at the configured depth, so an archive
+	// network never reconstructs history nobody asked for.
+	store2 := dbtest.New()
+	seedSets(t, store2)
+	f2 := newTestFollower(t, newFakeRPC(1000), store2)
+	f2.archive = newFakeRPC(1000)
+	f2.cfg.BackfillWindow = 800
+	f2.cfg.BackfillDepth = 40 * time.Second // block 600, inside the newest set
+	if err := f2.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f2)
+	if st, err := f2.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("depth-clamped window: %v %v", st, err)
+	}
+	c2, _ := f2.loadCursor(ctx)
+	if c2.SegStart != 600 || c2.LastAnchor != 598 {
+		t.Fatalf("the window must stop at the depth: %+v", c2)
+	}
+	runBackfill(t, f2, 100)
+	if b, _ := store2.BlockByNumber(ctx, 4663, 600); b == nil {
+		t.Fatal("the depth block must be reconstructed")
+	}
+	if b, _ := store2.BlockByNumber(ctx, 4663, 599); b != nil {
+		t.Fatal("nothing below the depth may be reconstructed")
+	}
+}
+
+// TestBackfillLegacyWindowSeed: a legacy chain's windows are seeded too,
+// against the parameters in force at the seed rather than the current ones.
+func TestBackfillLegacyWindowSeed(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	lp := legacyParams()
+	rpc.legacy = &lp
+	store := dbtest.New()
+	origin := `{"block":500,"minBaseFee":"30000000","archive":true,"legacy":{"speedLimit":3000000,"inertia":50,"tolerance":5,"backlog":900000}}`
+	if err := store.SetState(ctx, 4663, db.StateOwnerScanOrigin, origin); err != nil {
+		t.Fatal(err)
+	}
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = 70 * time.Second
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	archive := newFakeRPC(1000)
+	// The archive holds the origin's parameters, which is what the replay
+	// state carries at the seed, and a backlog no pure replay would reach.
+	archive.legacy = &nitro.LegacyParams{SpeedLimit: 3_000_000, Inertia: 50, Tolerance: 5}
+	archive.backlogsAt = func(uint64) []uint64 { return []uint64{500_000_000} }
+	f.archive = archive
+	f.cfg.BackfillWindow = 200
+	f.cfg.BackfillAnchorInterval = 100_000
+	runBackfill(t, f, 200)
+	if fmt.Sprint(archive.sampleAt) != "[798 598]" {
+		t.Fatalf("legacy window seeds: %v", archive.sampleAt)
+	}
+	b800, _ := store.BlockByNumber(ctx, 4663, 800)
+	if b800 == nil || b800.Backlogs[0] < 400_000_000 {
+		t.Fatalf("the sampled backlog must seed the window: %+v", b800)
+	}
+	// The block below a window is priced by the run under it, exactly once.
+	b799, _ := store.BlockByNumber(ctx, 4663, 799)
+	if b799 == nil || !b799.PredictedBaseFee.Valid || !b800.PredictedBaseFee.Valid {
+		t.Fatalf("a window boundary must not drop a prediction: %+v %+v", b799, b800)
+	}
+	if got, want := blockCountIn(store, db.Resolution1m), int64(1000-501+1); got != want {
+		t.Fatalf("folded blocks = %d, want %d", got, want)
+	}
+}

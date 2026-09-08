@@ -77,7 +77,7 @@ func TestLoadWith(t *testing.T) {
 	if cfg.LogLevel != "info" || cfg.Database.MaxOpen != 25 {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}
-	if cfg.Collector.BackfillAnchorInterval != 1000 || cfg.Collector.MaxCatchUpBatches != 10 || cfg.Collector.FailoverCooldown != time.Minute {
+	if cfg.Collector.BackfillAnchorInterval != 1000 || cfg.Collector.BackfillWindow != 10_000 || cfg.Collector.MaxCatchUpBatches != 10 || cfg.Collector.FailoverCooldown != time.Minute {
 		t.Fatalf("collector defaults not applied: %+v", cfg.Collector)
 	}
 	if cfg.Collector.EthUsdSource != "coinbase" || cfg.Collector.EthUsdMaxAge != DefaultEthUsdMaxAge {
@@ -367,6 +367,7 @@ func TestValidate(t *testing.T) {
 		"fallback rpc ws":  func(c *Config) { c.Networks[0].Fallbacks[0].RPCURL = "ws://y" },
 		"rpc url unparsed": func(c *Config) { c.Networks[0].RPCURL = "http://a b.example" },
 		"anchor interval":  func(c *Config) { c.Collector.BackfillAnchorInterval = 0 },
+		"backfill window":  func(c *Config) { c.Collector.BackfillWindow = -1 },
 		"catch up":         func(c *Config) { c.Collector.MaxCatchUpBatches = 0 },
 		"missing rpc url":  func(c *Config) { c.Networks[0].RPCURL = "" },
 		"cooldown":         func(c *Config) { c.Collector.FailoverCooldown = 0 },
