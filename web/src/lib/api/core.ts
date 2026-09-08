@@ -87,7 +87,9 @@ function absoluteHttpBase(value: string | undefined): string | null {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") return null;
-  return text.replace(/\/+$/, "");
+  // Rebuilt from the parsed URL rather than handed back as written: a bare "?" or "#" leaves search and
+  // hash empty but survives in the text, and buildUrl would then append the endpoint after it.
+  return (url.origin + url.pathname).replace(/\/+$/, "");
 }
 
 /**

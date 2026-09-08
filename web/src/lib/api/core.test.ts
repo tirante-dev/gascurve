@@ -60,6 +60,13 @@ describe("serverApiBase", () => {
     }
   });
 
+  it("hands back a base with no delimiter left on it, whatever the override was written as", () => {
+    // A bare "?" or "#" leaves search and hash empty, so it survives any check on those alone.
+    for (const trailing of ["http://gascurve-api/api/v1?", "http://gascurve-api/api/v1#", "http://gascurve-api/api/v1/"]) {
+      expect(serverApiBase("https://gascurve.com", "/api/v1", trailing)).toBe("http://gascurve-api/api/v1");
+    }
+  });
+
   it("drops an override fetch could not use, rather than handing it a URL that throws", () => {
     // A path has nothing to resolve against on the server, and a non-HTTP scheme is not a base at all.
     // Credentials are refused by fetch itself; a query or fragment would swallow the endpoint buildUrl
