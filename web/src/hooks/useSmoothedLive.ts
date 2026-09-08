@@ -201,6 +201,10 @@ export function useSmoothedLive(
       const still = reduced.current;
       const stillChanged = still !== s.wasStill;
       s.wasStill = still;
+      // Nothing eases under reduced motion, but the tween clock keeps pace with the frames: a preference
+      // turned off mid-page then resumes from where the figures are, rather than taking the whole quiet
+      // stretch as one dt and snapping.
+      if (still) s.lastEase = t;
       // A frame that only advanced the clock still moves every long-window backlog, so easing on each one
       // publishes at the display's rate for as long as the page is open. Frames that carry something new
       // ease at once; the rest wait for VALUE_INTERVAL_MS.

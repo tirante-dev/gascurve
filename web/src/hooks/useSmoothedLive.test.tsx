@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFrameStore, NO_PLACES, targetValues } from "@/lib/smoothing";
+import { approach, createFrameStore, NO_PLACES, targetValues } from "@/lib/smoothing";
 import type { BlockPoint, LiveSnapshot, OwnerAction } from "@/types";
 import { prefersReducedMotion, useLiveFrame, useSmoothedLive } from "./useSmoothedLive";
 
@@ -139,18 +139,24 @@ describe("useSmoothedLive", () => {
   });
 
   it("publishes eased values at the value interval rather than on every frame", () => {
-    const only = snapshot(1);
+    // A backlog small enough that the tween eases rather than settling inside its tolerance, so the size
+    // of one step is what the assertions below can see.
+    const only = snapshot(1, "399726000", 500_000_000_000);
     const { result } = renderHook(() => useSmoothedLive({ snapshot: only, recentBlocks: NO_BLOCKS }));
     runFrame(16);
     const first = result.current.frame.get();
     // 16 ms on the long window has drained further, but nothing new is published.
     runFrame(32);
     expect(result.current.frame.get()).toBe(first);
-    // 32 ms after the last publish, the eased figures move again.
+    // 32 ms after the last publish the figures move again, and by a whole 32 ms of easing: a skipped
+    // frame lengthens the next step rather than halving the rate the tween approaches its target at.
     runFrame(48);
     const second = result.current.frame.get();
     expect(second).not.toBe(first);
-    expect(second.values?.backlogs[1]).toBeLessThan(first.values?.backlogs[1] ?? 0);
+    const target = targetValues(only, [], 48 / 1000);
+    const stepped = approach(first.values?.backlogs[1] ?? 0, target.backlogs[1], 32);
+    expect(second.values?.backlogs[1]).toBeCloseTo(stepped, 0);
+    expect(stepped).toBeLessThan(approach(first.values?.backlogs[1] ?? 0, target.backlogs[1], 16));
     runFrame(64);
     expect(result.current.frame.get()).toBe(second);
   });
@@ -362,6 +368,37 @@ describe("useSmoothedLive", () => {
     const back = result.current.frame.get().values?.baseFeeGwei ?? 0;
     expect(back).toBeGreaterThan(0.4);
     expect(back).toBeLessThan(0.8);
+  });
+
+  it("resumes easing where the figures are when reduced motion is turned off after a quiet stretch", () => {
+    const listeners = new Set<() => void>();
+    let matches = true;
+    vi.stubGlobal("matchMedia", () => ({
+      get matches() {
+        return matches;
+      },
+      addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+    }));
+    const { result, rerender } = renderHook(({ s }) => useSmoothedLive({ snapshot: s, recentBlocks: NO_BLOCKS }), { initialProps: { s: snapshot(1) } });
+    runFrame(16);
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.399726);
+    // A second of frames with the preference on: the figures stand still, and the tween clock keeps pace
+    // with them rather than banking the whole stretch.
+    let t = 16;
+    for (let i = 0; i < 63; i++) runFrame((t += 16));
+    expect(result.current.frame.get().values?.baseFeeGwei).toBe(0.399726);
+    // Motion is allowed again and the next cadence commits a much higher sample. One frame of easing is
+    // one frame, not the second the preference was on for.
+    matches = false;
+    act(() => listeners.forEach((listener) => listener()));
+    clock = t;
+    rerender({ s: snapshot(2, "800000000") });
+    runFrame((t += 16));
+    expect(result.current.display?.block.number).toBe(2);
+    const eased = result.current.frame.get().values?.baseFeeGwei ?? 0;
+    expect(eased).toBeGreaterThan(0.4);
+    expect(eased).toBeLessThan(0.45);
   });
 
   it("publishes a placement of the ring, assigned once per block and evicted with it", () => {
