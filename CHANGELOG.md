@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.4.0](https://github.com/tirante-dev/gascurve/compare/v1.3.0...v1.4.0) (2026-09-08)
+
+
+### Features
+
+* band the network load chart with its per-bucket spread ([#82](https://github.com/tirante-dev/gascurve/issues/82)) ([ad1125a](https://github.com/tirante-dev/gascurve/commit/ad1125ac52f97c04f36ae0053be62063ad669a1b))
+* **collector:** backfill history newest first on archive networks ([#78](https://github.com/tirante-dev/gascurve/issues/78)) ([0031339](https://github.com/tirante-dev/gascurve/commit/00313398423083b00c5cd333ce8f2890dcb1613c))
+* **collector:** reach genesis, and let a widened backfill depth take effect ([#79](https://github.com/tirante-dev/gascurve/issues/79)) ([25fe560](https://github.com/tirante-dev/gascurve/commit/25fe560421716c52ea52b070d647d3f11c0d89a4))
+* **web:** draw the social card from the live gauge when a link is shared ([#83](https://github.com/tirante-dev/gascurve/issues/83)) ([0a14692](https://github.com/tirante-dev/gascurve/commit/0a146927a9972577cdde0206c67757b6f1a69b67))
+
+
+### Bug Fixes
+
+* **collector:** retry a size-refused batch narrower and yield the owner scan ([#75](https://github.com/tirante-dev/gascurve/issues/75)) ([608a31d](https://github.com/tirante-dev/gascurve/commit/608a31da14775d25636ceecc019b20e89478d0d3))
+* complete constraint-change handling in the filler and the page ([#81](https://github.com/tirante-dev/gascurve/issues/81)) ([6385985](https://github.com/tirante-dev/gascurve/commit/6385985113ffeaf2b27ab2b9abcf3971e446c735))
+* **web:** print an inexact bips value as off scale, not as 19 digits ([#77](https://github.com/tirante-dev/gascurve/issues/77)) ([fd47921](https://github.com/tirante-dev/gascurve/commit/fd47921efffe4a4780a70f16d9d178e4b2eb3146))
+* **web:** stand the network load chart up to the hero's rail ([#84](https://github.com/tirante-dev/gascurve/issues/84)) ([8e853b7](https://github.com/tirante-dev/gascurve/commit/8e853b7e852cf317422cdb4ce423bb39cf2f05e0))
+
 ## [1.3.0](https://github.com/tirante-dev/gascurve/compare/v1.2.0...v1.3.0) (2026-09-08)
 
 
