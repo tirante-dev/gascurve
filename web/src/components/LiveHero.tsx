@@ -52,7 +52,7 @@ import { chartView } from "@/lib/chartViews";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { ChartReadout, type ReadoutGroup } from "./ChartReadout";
 import { EnlargeLink } from "./ChartActions";
-import { gapBands, GapNote } from "./ChartGaps";
+import { GapBands, GapNote } from "./ChartGaps";
 import { buildSeriesModel, bucketRowTitle, GasPerSecondChart } from "./SeriesCharts";
 import { FeeDial } from "./FeeDial";
 import { Figure, HoverNote, Label, type NoteAlign, Stat, StatusPill, Term, TIME_AXIS_RIGHT } from "./primitives";
@@ -196,7 +196,7 @@ export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabe
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data.drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
             <CartesianGrid vertical={false} />
-            {gapBands(data.gaps.gaps, data.gaps.window)}
+            <GapBands gaps={data.gaps.gaps} window={data.gaps.window} />
             {/* The axis is the window that was asked for, so the buckets that
                 exist sit where they happened rather than filling the frame. */}
             <XAxis dataKey="t" type="number" domain={[data.gaps.window.from, data.gaps.window.to]} tickFormatter={(t: number) => formatTick(t, data.span)} tickLine axisLine={false} height={18} minTickGap={48} />

@@ -22,6 +22,10 @@ import { FeeFlows, feeFlowRows, feeTotals, incompleteTotalsNote, unsplitNote } f
 import { L1Section } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
 import { buildSeriesModel, describeSplit, GasPerSecondChart, SeriesCharts } from "./SeriesCharts";
+import { LineChart, XAxis, YAxis } from "recharts";
+import { GAP_LABEL_MIN_SHARE, GapBands, PartialBands, PartialNote } from "./ChartGaps";
+import { partialBands } from "@/lib/partial";
+import type { Gap } from "@/lib/gaps";
 
 function point(overrides: Partial<SeriesPoint>): SeriesPoint {
   return {
@@ -768,5 +772,56 @@ describe("L1Section", () => {
     render(<L1Section network="robinhood" range="1h" snapshot={null} series={null} />);
     expect(screen.getByText(/L1 values arrive with the slow/)).toBeInTheDocument();
     expect(screen.getByText("No batch reports in this range.")).toBeInTheDocument();
+  });
+});
+
+describe("the band layer", () => {
+  // One layer of rects per kind rather than a ReferenceArea per band: a day of
+  // minute buckets otherwise puts thousands of store subscribers on the page.
+  const WINDOW = { from: 0, to: 600 };
+  const bandChart = (children: React.ReactNode) =>
+    render(
+      <LineChart width={400} height={100} data={[{ t: WINDOW.from }, { t: WINDOW.to }]}>
+        <XAxis dataKey="t" type="number" domain={[WINDOW.from, WINDOW.to]} />
+        <YAxis />
+        {children}
+      </LineChart>,
+    ).container;
+
+  const rects = (container: HTMLElement, kind: string) => [...container.querySelectorAll(`rect[data-band="${kind}"]`)];
+
+  const gapChart = (gaps: Gap[]) => bandChart(<GapBands gaps={gaps} window={WINDOW} />);
+
+  it("clamps a band that runs past the window to the plot area", () => {
+    const wide = rects(gapChart([{ from: -600, to: 1200, kind: "interior" }]), "gap");
+    const whole = rects(gapChart([{ from: WINDOW.from, to: WINDOW.to, kind: "interior" }]), "gap");
+    expect(wide).toHaveLength(1);
+    expect(wide[0].getAttribute("x")).toBe(whole[0].getAttribute("x"));
+    expect(wide[0].getAttribute("width")).toBe(whole[0].getAttribute("width"));
+    expect(Number(wide[0].getAttribute("x"))).toBeGreaterThan(0);
+    expect(Number(wide[0].getAttribute("x")) + Number(wide[0].getAttribute("width"))).toBeLessThanOrEqual(400);
+  });
+
+  it("draws nothing at all for a band that clamps to nothing", () => {
+    expect(rects(gapChart([{ from: -1200, to: -600, kind: "leading" }]), "gap")).toHaveLength(0);
+  });
+
+  it("leaves a band too narrow for its word unlabelled", () => {
+    const narrow = gapChart([{ from: 0, to: 600 * (GAP_LABEL_MIN_SHARE / 2), kind: "interior" }]);
+    expect(rects(narrow, "gap")).toHaveLength(1);
+    expect(within(narrow).queryByText("gap")).toBeNull();
+    expect(within(gapChart([{ from: 0, to: 300, kind: "interior" }])).getByText("gap")).toBeInTheDocument();
+  });
+
+  it("coalesces hundreds of partial buckets into a handful of rects and one short caption", () => {
+    // Four hundred one-second buckets, half partly indexed and half of unknown
+    // completeness, in eight stretches: eight rects, not four hundred.
+    const points = Array.from({ length: 400 }, (_, i) => ({ t: i, coverage: i % 100 < 50 ? 0.5 : null }));
+    const bands = partialBands(points, 1, 4000);
+    expect(bands).toHaveLength(400);
+    const container = bandChart(<PartialBands bands={bands} window={{ from: 0, to: 400 }} />);
+    expect(rects(container, "partial")).toHaveLength(8);
+    render(<PartialNote bands={bands} />);
+    expect(screen.getByText("Hatched and left out: partly indexed for 200 buckets in 4 stretches · coverage unknown for 200 buckets in 4 stretches")).toBeInTheDocument();
   });
 });

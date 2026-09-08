@@ -12,7 +12,7 @@ import { chartView } from "@/lib/chartViews";
 import { formatFloor } from "@/lib/feeChart";
 import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
-import { gapBands, GapNote, PartialHatch, PartialNote, partialBandAreas } from "./ChartGaps";
+import { GapBands, GapNote, PartialBands, PartialHatch, PartialNote } from "./ChartGaps";
 import { Card, ChartFrame, HatchPattern, HoverNote, Label, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight, type NoteAlign } from "./primitives";
 
 const FLOOR_FILL = "var(--seq-2)";
@@ -203,8 +203,8 @@ export const FeeFlowChart = memo(function FeeFlowChart({ points, gaps = NO_GAPS,
               <PartialHatch />
             </defs>
             <CartesianGrid vertical={false} />
-            {gapBands(gaps.gaps, window)}
-            {partialBandAreas(bands, window)}
+            <GapBands gaps={gaps.gaps} window={window} />
+            <PartialBands bands={bands} window={window} />
             <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={feeFlowRows(unsplit)} note={(r) => partialRowNote(r, true)} />} />

@@ -12,7 +12,7 @@ import { gapModel, irregularStep, withGapBreaks, NO_GAPS, type GapModel } from "
 import { formatDateTime, formatDuration, formatEth, formatGas, formatGwei, formatInteger, formatSignificant, formatTick } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip } from "./ChartTooltip";
-import { gapBands, GapNote } from "./ChartGaps";
+import { GapBands, GapNote } from "./ChartGaps";
 import { Card, ChartFrame, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
 
 // "batch" is exactly one point per posting report (every 12 to 24 s on Robinhood).
@@ -89,7 +89,7 @@ export const L1CostChart = memo(function L1CostChart({ rows, span, domain, gaps 
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
-            {gapBands(gaps.gaps, window)}
+            <GapBands gaps={gaps.gaps} window={window} />
             <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
             <Tooltip
