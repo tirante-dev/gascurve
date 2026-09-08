@@ -85,12 +85,12 @@ func TestEndpointSizeShrinkHoldsBeforeRecovering(t *testing.T) {
 		t.Fatalf("HeadersByNumbers: %v", err)
 	}
 	shrunk := e.BatchCap()
-	e.observe(1, false)
+	e.observe(1, false, false)
 	if got := e.BatchCap(); got != shrunk {
 		t.Fatalf("batch cap %d grew before the recovery interval, want %d", got, shrunk)
 	}
 	clock.Advance(capRecoveryInterval)
-	e.observe(1, false)
+	e.observe(1, false, false)
 	if got := e.BatchCap(); got != shrunk*2 {
 		t.Fatalf("batch cap %d, want %d one step after the recovery interval", got, shrunk*2)
 	}

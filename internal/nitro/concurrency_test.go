@@ -41,7 +41,7 @@ func chunkedEndpoint(t *testing.T, f *fakeRPC, batchSize int) *Endpoint {
 func TestSendGateBoundsInFlightRequests(t *testing.T) {
 	t.Run("unmetered", func(t *testing.T) {
 		f := echoRPC(t)
-		f.holdAll()
+		f.holdAll(t)
 		c, _ := newTestClient(t, f, 0)
 		if got := c.sendConcurrency(); got != maxUnmeteredSends {
 			t.Fatalf("send concurrency %d, want %d", got, maxUnmeteredSends)
@@ -56,24 +56,33 @@ func TestSendGateBoundsInFlightRequests(t *testing.T) {
 		}
 		f.release()
 		drain(t, done, maxUnmeteredSends+2)
+		if _, peak := f.flight(); peak != maxUnmeteredSends {
+			t.Fatalf("peak in flight %d over the whole run, want %d", peak, maxUnmeteredSends)
+		}
 	})
 	t.Run("metered", func(t *testing.T) {
 		f := echoRPC(t)
-		f.holdAll()
+		f.holdAll(t)
 		c, _ := newTestClient(t, f, 1000)
 		if got := c.sendConcurrency(); got != 1 {
 			t.Fatalf("send concurrency %d, want 1 on a budgeted endpoint", got)
 		}
-		done := callAll(c, 6)
+		const callers = 6
+		available := c.pacer.Available()
+		done := callAll(c, callers)
 		if !f.awaitFlight(1) {
 			t.Fatal("no request reached the server")
 		}
-		time.Sleep(50 * time.Millisecond)
+		// Every caller has paid the pacer, so all of them are contending for the gate rather than
+		// merely not started yet: what holds the other five back is the single slot.
+		if !awaitAvailable(c, available-callers) {
+			t.Fatalf("pacer availability %d, want all %d callers to have paid", c.pacer.Available(), callers)
+		}
 		if in, peak := f.flight(); in != 1 || peak != 1 {
 			t.Fatalf("in flight %d peak %d, want 1: a budgeted endpoint sends one request at a time", in, peak)
 		}
 		f.release()
-		drain(t, done, 6)
+		drain(t, done, callers)
 		if _, peak := f.flight(); peak != 1 {
 			t.Fatalf("peak in flight %d, want 1", peak)
 		}
@@ -111,7 +120,7 @@ func inFlightOf(f *fakeRPC) int {
 // the single send lock this replaced.
 func TestFastCallDoesNotQueueBehindBulk(t *testing.T) {
 	f := echoRPC(t)
-	f.holdAll()
+	f.holdAll(t)
 	c, _ := newTestClient(t, f, 0)
 	bulk := callAll(c, maxUnmeteredSends)
 	if !f.awaitFlight(maxUnmeteredSends) {
@@ -141,7 +150,7 @@ func TestFastCallDoesNotQueueBehindBulk(t *testing.T) {
 func TestBatchFansOutChunksInOrder(t *testing.T) {
 	f := echoRPC(t)
 	f.reverse = true
-	f.holdAll()
+	f.holdAll(t)
 	e := chunkedEndpoint(t, f, 2)
 	reqs := echoRequests(12)
 	type outcome struct {
@@ -260,7 +269,7 @@ func TestConcurrent429IsOneThrottleWave(t *testing.T) {
 	for range maxUnmeteredSends {
 		f.script = append(f.script, scriptStep{status: http.StatusTooManyRequests})
 	}
-	f.holdAll()
+	f.holdAll(t)
 	clock := newFakeClock()
 	c := NewClient(f.server.URL, 0, WithPacer(NewPacer(0).withClock(clock.Now, clock.Sleep)),
 		withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()), WithMaxAttempts(1))
@@ -290,7 +299,7 @@ func TestConcurrent429HalvesTheBatchCapOnce(t *testing.T) {
 	for range maxUnmeteredSends {
 		f.script = append(f.script, scriptStep{status: http.StatusTooManyRequests})
 	}
-	f.holdAll()
+	f.holdAll(t)
 	clock := newFakeClock()
 	e := newEndpoint(0, endpointOf(f, 0), MaxBatch, logger.Nop(), clock.Now,
 		WithHTTPClient(f.server.Client()), withClock(clock.Now, clock.Sleep), WithMaxAttempts(1))
@@ -311,11 +320,116 @@ func TestConcurrent429HalvesTheBatchCapOnce(t *testing.T) {
 	}
 }
 
+// TestThrottleWaveIsDecidedBySendTime pins the wave on when a request left rather than on when its
+// answer came back. Answers of one wave can straggle across the growing cooldown boundary, and
+// classifying them by arrival would let each straggler take another exponential step.
+func TestThrottleWaveIsDecidedBySendTime(t *testing.T) {
+	f := echoRPC(t)
+	clock := newFakeClock()
+	c := NewClient(f.server.URL, 0, WithPacer(NewPacer(0).withClock(clock.Now, clock.Sleep)),
+		withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()))
+	sent := clock.Now()
+	if !c.noteRateLimit(sent) {
+		t.Fatal("the first 429 of a wave opens the cooldown")
+	}
+	if got := c.Stats().Backoff; got != 2*minBackoff {
+		t.Fatalf("back-off %s, want one step from %s", got, minBackoff)
+	}
+	// A straggler of the same wave, answering past the boundary the first one set.
+	clock.Advance(minBackoff + time.Second)
+	if c.noteRateLimit(sent) {
+		t.Fatal("a 429 answering a request sent before the cooldown must not open another one")
+	}
+	if got := c.Stats().Backoff; got != 2*minBackoff {
+		t.Fatalf("back-off %s, want the straggler to cost nothing", got)
+	}
+	// A request sent after the cooldown had to be waited out is a new wave.
+	if !c.noteRateLimit(clock.Now()) {
+		t.Fatal("a 429 answering a request sent past the cooldown opens a new one")
+	}
+	if got := c.Stats().Backoff; got != 4*minBackoff {
+		t.Fatalf("back-off %s, want a second step", got)
+	}
+	if got := c.Stats().RateLimitEvents; got != 3 {
+		t.Fatalf("rate limit events %d, want every 429 recorded whether or not it cost a step", got)
+	}
+}
+
+// TestSuppressedThrottleStillDelaysCapRecovery keeps a wave's later 429s from being forgotten
+// entirely: they must not halve the cap again, but the cap they left must still hold for the
+// recovery interval measured from the last of them.
+func TestSuppressedThrottleStillDelaysCapRecovery(t *testing.T) {
+	f := echoRPC(t)
+	clock := newFakeClock()
+	e := newEndpoint(0, endpointOf(f, 0), MaxBatch, logger.Nop(), clock.Now,
+		WithHTTPClient(f.server.Client()), withClock(clock.Now, clock.Sleep))
+	e.observe(MaxBatch, true, true)
+	shrunk := e.BatchCap()
+	if shrunk != MaxBatch/2 {
+		t.Fatalf("batch cap %d, want %d after the throttle that opened the cooldown", shrunk, MaxBatch/2)
+	}
+	half := capRecoveryInterval / 2
+	clock.Advance(half)
+	e.observe(MaxBatch, true, false)
+	if got := e.BatchCap(); got != shrunk {
+		t.Fatalf("batch cap %d, want %d: a straggler of the wave must not halve it again", got, shrunk)
+	}
+	clock.Advance(capRecoveryInterval - half)
+	e.observe(1, false, false)
+	if got := e.BatchCap(); got != shrunk {
+		t.Fatalf("batch cap %d recovered %s after the last 429, want it held for %s", got, capRecoveryInterval-half, capRecoveryInterval)
+	}
+	clock.Advance(half)
+	e.observe(1, false, false)
+	if got := e.BatchCap(); got != shrunk*2 {
+		t.Fatalf("batch cap %d, want %d once the interval has run from the last 429", got, shrunk*2)
+	}
+}
+
+// TestSendSpendsNothingOnACanceledContext covers the race a select cannot resolve: with a free slot
+// and a done context both ready, either case may win, so the context is checked again afterwards.
+// A Fast call skips the gate entirely and needs the same check.
+func TestSendSpendsNothingOnACanceledContext(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cps   float64
+		class Class
+	}{
+		{"metered bulk", 4, Bulk},
+		{"unmetered fast", 0, Fast},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := echoRPC(t)
+			c, _ := newTestClient(t, f, tc.cps)
+			ctx, cancel := context.WithCancel(WithClass(context.Background(), tc.class))
+			cancel()
+			available := c.pacer.Available()
+			if err := c.pacer.Wait(context.Background(), 1); err != nil {
+				t.Fatalf("pay the pacer: %v", err)
+			}
+			if _, _, _, _, err := c.send(ctx, []byte("[]"), 1); !errors.Is(err, context.Canceled) {
+				t.Fatalf("send: %v, want the context error", err)
+			}
+			if got := c.pacer.Available(); got != available {
+				t.Fatalf("pacer availability %d, want the %d tokens of an unsent request refunded", got, available)
+			}
+			// An unlimited pacer reports no availability to compare, so the call accounting is what
+			// says the request was abandoned before it was charged for.
+			if got := c.Stats().Calls; got != 0 {
+				t.Fatalf("%d calls counted for a request that never left", got)
+			}
+			if got := f.requestCount(); got != 0 {
+				t.Fatalf("%d requests reached the server on a canceled context", got)
+			}
+		})
+	}
+}
+
 // TestSendSlotHonorsCancellation stops a caller waiting for a send slot from outliving its deadline,
 // and gives the pacer back the tokens it paid before queueing.
 func TestSendSlotHonorsCancellation(t *testing.T) {
 	f := echoRPC(t)
-	f.holdAll()
+	f.holdAll(t)
 	c, _ := newTestClient(t, f, 4)
 	first := make(chan error, 1)
 	go func() {
@@ -374,8 +488,8 @@ func TestPooledTransportClearsTheWorstCase(t *testing.T) {
 	if tr.MaxConnsPerHost < 2*maxUnmeteredSends {
 		t.Fatalf("MaxConnsPerHost %d, want at least %d bulk plus fanned out fast requests", tr.MaxConnsPerHost, 2*maxUnmeteredSends)
 	}
-	if tr.MaxIdleConnsPerHost <= maxUnmeteredSends {
-		t.Fatalf("MaxIdleConnsPerHost %d, want more than the %d concurrent senders", tr.MaxIdleConnsPerHost, maxUnmeteredSends)
+	if tr.MaxIdleConnsPerHost < 2*maxUnmeteredSends {
+		t.Fatalf("MaxIdleConnsPerHost %d, want the %d a full wave opens kept rather than re-dialed", tr.MaxIdleConnsPerHost, 2*maxUnmeteredSends)
 	}
 }
 

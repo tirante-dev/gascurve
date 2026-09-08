@@ -211,9 +211,9 @@ type Client struct {
 	sleep       func(context.Context, time.Duration) error
 	now         func() time.Time
 	maxAttempts int
-	// observe, when set, sees every batch attempt: its item count and whether the endpoint answered
-	// 429. An Endpoint adapts its batch cap from it.
-	observe func(items int, limited bool)
+	// observe, when set, sees every batch attempt: its item count, whether the endpoint answered 429
+	// and whether that 429 opened the cooldown. An Endpoint adapts its batch cap from it.
+	observe func(items int, limited, fresh bool)
 	// chunk splits a request list of any length into HTTP batches. batchCapped by default; an
 	// Endpoint replaces it with one that also honors the adaptive batch cap, so every typed call is
 	// chunked the same way the header batches are.
@@ -255,8 +255,9 @@ func WithLogger(l *logger.Logger) Option { return func(c *Client) { c.log = l } 
 
 func WithMaxAttempts(n int) Option { return func(c *Client) { c.maxAttempts = n } }
 
-// withBatchObserver reports every batch attempt's item count and whether it was throttled.
-func withBatchObserver(fn func(items int, limited bool)) Option {
+// withBatchObserver reports every batch attempt's item count, whether it was throttled and whether
+// that throttle opened the cooldown.
+func withBatchObserver(fn func(items int, limited, fresh bool)) Option {
 	return func(c *Client) { c.observe = fn }
 }
 
@@ -277,17 +278,18 @@ func withClock(now func() time.Time, sleep func(context.Context, time.Duration) 
 }
 
 // pooledTransport keeps enough idle connections for the requests an unmetered endpoint runs at
-// once: http.DefaultTransport holds two per host, so concurrent senders re-dial every step. The
-// connection cap has to clear the worst case rather than the usual one, because a Fast sample takes
-// no send slot and would otherwise queue at the transport instead: a small batch cap splits it into
-// as many chunks as the fan out allows, alongside a full set of bulk requests.
+// once: http.DefaultTransport holds two per host, so concurrent senders re-dial every step. Both
+// limits clear the worst case rather than the usual one, because a Fast sample takes no send slot: a
+// small batch cap splits it into as many chunks as the fan out allows, alongside a full set of bulk
+// requests. A tighter cap would queue the head sample inside the transport, and a smaller idle pool
+// would discard the connections of every wave and re-dial them on the next.
 func pooledTransport() http.RoundTripper {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return http.DefaultTransport
 	}
 	t := base.Clone()
-	t.MaxIdleConnsPerHost = maxUnmeteredSends + 1
+	t.MaxIdleConnsPerHost = 2*maxUnmeteredSends + 1
 	t.MaxConnsPerHost = 2*maxUnmeteredSends + 1
 	return t
 }
@@ -474,10 +476,8 @@ func (c *Client) attempt(ctx context.Context, reqs []Request) (results []Result,
 	if err != nil {
 		return nil, false, err
 	}
-	// A 429 answering a request that was already on the wire when the cooldown started is the same
-	// wave the first one reported, so it must not halve the cap a second time.
-	if c.observe != nil && (!limited || fresh) {
-		c.observe(len(reqs), limited)
+	if c.observe != nil {
+		c.observe(len(reqs), limited, fresh)
 	}
 	if limited {
 		return nil, true, nil
@@ -511,6 +511,12 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 		}
 		defer func() { <-c.sendSlots }()
 	}
+	// select is free to take the slot when the context is done too, and a Fast call skips the gate
+	// entirely, so nothing is spent on a request that cannot leave.
+	if err := ctx.Err(); err != nil {
+		c.pacer.Refund(calls)
+		return nil, false, false, time.Time{}, err
+	}
 	for {
 		wait := c.cooldown()
 		if wait <= 0 {
@@ -535,7 +541,7 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 	responses, limited, err = c.post(ctx, payload)
 	c.recordRequest(c.now().Sub(sentAt), limited || err != nil)
 	if limited {
-		fresh = c.noteRateLimit()
+		fresh = c.noteRateLimit(sentAt)
 	}
 	return responses, limited, fresh, sentAt, err
 }
@@ -624,16 +630,18 @@ func matchResults(ids []uint64, responses []rpcResponse) []Result {
 }
 
 // noteRateLimit records a 429 and reports whether it opened the network-wide cooldown, doubling the
-// back-off when it did. A 429 answering a request that was already on the wire when the cooldown
-// started belongs to the same wave: charging every one of them a step would take a single throttle
-// straight to the ceiling and delay failover by minutes.
-func (c *Client) noteRateLimit() bool {
+// back-off when it did. A request sent before the running cooldown was due to end was already on the
+// wire when that cooldown opened, since anything sent after waits it out first, so its 429 belongs
+// to the same wave: charging every one of them a step would take a single throttle straight to the
+// ceiling and delay failover by minutes. The test is on when the request left, not on when its
+// answer came back, so a wave whose answers straggle across the boundary still costs one step.
+func (c *Client) noteRateLimit(sentAt time.Time) bool {
 	c.mu.Lock()
 	now := c.now()
 	c.trimCallsLocked(now)
 	c.rateLimitEvents++
 	c.last429 = now
-	if now.Before(c.blockedUntil) {
+	if sentAt.Before(c.blockedUntil) {
 		c.mu.Unlock()
 		return false
 	}

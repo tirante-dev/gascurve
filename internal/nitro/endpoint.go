@@ -183,14 +183,17 @@ func (e *Endpoint) disable(reason string) {
 	e.disabled, e.reason = true, reason
 }
 
-// observe adapts the batch cap from a batch attempt's outcome.
-func (e *Endpoint) observe(items int, limited bool) {
+// observe adapts the batch cap from a batch attempt's outcome. Every 429 marks the endpoint recently
+// limited, so recovery is measured from the last one whatever opened the cooldown, but only the one
+// that opened it teaches a width: the others answer requests that were already on the wire, and
+// halving per response would take the cap to its floor on a single wave.
+func (e *Endpoint) observe(items int, limited, fresh bool) {
 	now := e.now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if limited {
 		e.lastLimit = now
-		if items > 1 && e.batchCap > e.minBatchCap {
+		if fresh && items > 1 && e.batchCap > e.minBatchCap {
 			e.batchCap = max(e.batchCap/2, e.minBatchCap)
 			e.log.Warn("batch answered with 429, batch cap halved", "batchCap", e.batchCap, "items", items)
 		}

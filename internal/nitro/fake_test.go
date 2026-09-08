@@ -110,11 +110,14 @@ func carries(reqs []rpcRequest, method string) bool {
 }
 
 // holdAll makes every request wait until release is called, so a test can pin how many the client
-// keeps in flight at once.
-func (f *fakeRPC) holdAll() {
+// keeps in flight at once. The cleanup releases whatever is still held, so a failed assertion
+// reports itself instead of leaving the held callers to time the package out.
+func (f *fakeRPC) holdAll(t *testing.T) {
+	t.Helper()
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.barrier = make(chan struct{})
+	f.mu.Unlock()
+	t.Cleanup(f.release)
 }
 
 func (f *fakeRPC) release() {
