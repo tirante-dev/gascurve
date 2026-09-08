@@ -13,6 +13,14 @@ import { costWei, weiToEthNumber, weiToGweiNumber } from "@/utils/format";
 
 /** The display snapshot changes at most this often. */
 export const DISPLAY_INTERVAL_MS = 250;
+/**
+ * Eased values are published at most this often, between the frames that carry a commit or new blocks. The
+ * tween integrates with dt, so a coarser step holds the same time constant rather than easing at half
+ * speed. It samples that curve rather than reproducing it exactly: a step is 10% of the gap where a frame
+ * was 5%. A figure printed at fixed decimals cannot change 60 times a second, and every publish re-renders
+ * the hero and every constraint card.
+ */
+export const VALUE_INTERVAL_MS = 32;
 /** Time constant of the exponential approach: about 95% of a step in three of these. */
 export const TWEEN_TAU_MS = 300;
 /** Windows of this length or less are shown as a moving average with a sawtooth. */
