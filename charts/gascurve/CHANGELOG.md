@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.3.1...gascurve-chart-v0.4.0) (2026-09-08)
+
+
+### Features
+
+* take a network off the site with enabled: false ([#70](https://github.com/tirante-dev/gascurve/issues/70)) ([6abef99](https://github.com/tirante-dev/gascurve/commit/6abef997b174acd59a8221468990535c9e3eefb7))
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 1.3.0 ([#74](https://github.com/tirante-dev/gascurve/issues/74)) ([48077b5](https://github.com/tirante-dev/gascurve/commit/48077b5055cd24e5bcfdf38a4b5a657d362a069f))
+
 ## [0.3.1](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.3.0...gascurve-chart-v0.3.1) (2026-09-08)
 
 
