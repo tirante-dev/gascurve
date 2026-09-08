@@ -156,6 +156,11 @@ func TestRunManager(t *testing.T) {
 	if rpcs["a"].calledTimes("FastSample") == 0 {
 		t.Fatal("follower never ticked")
 	}
+	// b has no follower to register it, so the manager records it as off; the failing UpsertNetwork
+	// above means it only lands on a retry.
+	if row, err := store.NetworkByRef(ctx, "b"); err != nil || row == nil || row.Enabled {
+		t.Fatalf("disabled network row: %+v %v", row, err)
+	}
 	if clockNow == nil {
 		t.Fatal("clock")
 	}
@@ -610,5 +615,27 @@ func TestEveryHistoryGateHasAFloor(t *testing.T) {
 		if gate() {
 			t.Fatalf("%s: waiting on an idle fast loop", name)
 		}
+	}
+}
+
+// TestRunManagerRetiresNetworkTurnedOff: a network that was followed before and is now enabled:
+// false has no follower to update its row, so the manager writes the flag itself. Without it the api
+// would keep listing a chain whose head never moves again.
+func TestRunManagerRetiresNetworkTurnedOff(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	if err := store.UpsertNetwork(ctx, db.Network{ChainID: 2, Name: "b", DisplayName: "Old name", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Collector: fastConfig(),
+		Networks:  []config.NetworkConfig{{Name: "b", ChainID: 2, DisplayName: "B", Enabled: false}},
+	}
+	runCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	Run(runCtx, cfg, store, func(config.NetworkConfig) RPC { t.Fatal("RPC constructed for a disabled network"); return nil }, logger.Nop(), func(o *Options) { o.Sleep = quickSleep })
+	row, err := store.NetworkByRef(ctx, "b")
+	if err != nil || row == nil || row.Enabled || row.DisplayName != "B" {
+		t.Fatalf("retired network row: %+v %v", row, err)
 	}
 }

@@ -301,18 +301,23 @@ func Run(ctx context.Context, cfg *config.Config, store db.Store, newRPC func(co
 			monitors[f.monitor] = true
 		}
 	}
+	base := Options{}
+	for _, apply := range opts {
+		apply(&base)
+	}
 	// A collector with no enabled networks still has a live health server: discover its monitor from the
 	// process option so startup can complete instead of entering a probe restart loop.
-	if len(followers) == 0 {
-		o := Options{}
-		for _, apply := range opts {
-			apply(&o)
-		}
-		if o.Monitor != nil {
-			monitors[o.Monitor] = true
-		}
+	if len(followers) == 0 && base.Monitor != nil {
+		monitors[base.Monitor] = true
 	}
 	var wg sync.WaitGroup
+	if disabled := cfg.DisabledNetworks(); len(disabled) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			retireNetworks(ctx, store, disabled, base.Sleep, log)
+		}()
+	}
 	for monitor := range monitors {
 		wg.Add(1)
 		go func() {
@@ -335,6 +340,34 @@ func Run(ctx context.Context, cfg *config.Config, store db.Store, newRPC func(co
 		}(f)
 	}
 	wg.Wait()
+}
+
+// retireNetworks marks the configured networks that are switched off, so the api stops listing and
+// serving them. A follower registers the network it runs; one with enabled: false has no follower, and
+// without this its row would keep the flag it was last started with and the chain would stay on the
+// site with a head that never moves. Registration is retried because it is the only write these
+// networks ever get: a database that is briefly unavailable at start must not leave one showing.
+func retireNetworks(ctx context.Context, store db.Store, nets []config.NetworkConfig, sleep func(context.Context, time.Duration) error, log *logger.Logger) {
+	if sleep == nil {
+		sleep = sleepContext
+	}
+	for _, n := range nets {
+		row := db.Network{ChainID: n.ChainID, Name: n.Name, DisplayName: n.DisplayName, ExplorerURL: n.ExplorerURL, Enabled: false}
+		for ctx.Err() == nil {
+			err := store.UpsertNetwork(ctx, row)
+			if err == nil {
+				log.Info("network disabled", "network", n.Name, "chain_id", n.ChainID)
+				break
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			log.Error("could not record disabled network, retrying", "network", n.Name, "err", err.Error())
+			if err := sleep(ctx, restartDelay); err != nil {
+				return
+			}
+		}
+	}
 }
 
 // clockNow is the default clock, exposed for tests to compare against.

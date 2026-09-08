@@ -154,42 +154,60 @@ describe("LiveHero", () => {
     expect(screen.queryByText("150k swap")).toBeNull();
     expect(screen.queryByText("Compute gas/s (10 s)")).toBeNull();
   });
-  it("draws the multiplier over the floor as a speedometer, coloured by which of three bands it falls in", () => {
+  it("draws the multiplier over the floor as a lit gauge, coloured by which of three bands it falls in", () => {
     const at = (multiplier: number) => ({ ...targetValues(snapshot, [], 0), multiplier });
-    // The sample is 19.99 times its floor: on the red band, and the needle just short of the top (a decade per half turn).
+    const position = (gauge: HTMLElement) => within(gauge).getByTestId("fee-gauge-needle").getAttribute("data-position");
+    // The sample is 19.99 times its floor: on the red band, and the needle two thirds round (a decade per half turn).
     const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    const dial = screen.getByTestId("fee-dial");
-    expect(reservedWidth(within(dial).getByText("19.99"))).toBe("5ch");
-    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-critical");
-    expect(within(dial).getByText("over floor")).toBeInTheDocument();
-    expect(dial.querySelectorAll("[data-band]")).toHaveLength(3);
-    expect(dial.querySelector("[data-band='warning']")).toHaveAttribute("stroke", "var(--dial-band-warning)");
-    const needle = within(dial).getByTestId("fee-dial-needle");
-    expect(Number(needle.getAttribute("x2"))).toBeGreaterThan(50);
-    expect(Number(needle.getAttribute("x2"))).toBeLessThan(70);
+    const gauge = screen.getByTestId("fee-gauge");
+    expect(reservedWidth(within(gauge).getByText("19.99"))).toBe("5ch");
+    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-critical");
+    expect(within(gauge).getByText("over floor")).toBeInTheDocument();
+    expect(gauge.querySelectorAll("[data-band]")).toHaveLength(3);
+    expect(gauge.querySelector("[data-band='warning']")).toHaveAttribute("stroke", "var(--dial-band-warning)");
+    // Past the last threshold every band is lit, and the reading cuts the last one short.
+    expect(gauge.querySelectorAll("[data-lit]")).toHaveLength(3);
+    expect(position(gauge)).toBe("0.6504");
+    // The base fee itself is inside the gauge now, and nothing but the needle is drawn inside the arc.
+    expect(within(gauge).getByText("0.3997")).toBeInTheDocument();
     // The working is the hover note, and the description says the same to a screen reader.
-    expect(within(dial).getByText("19.99× the 0.02 gwei floor")).toBeInTheDocument();
-    expect(within(dial).getByText("0.3997 gwei ≈ 19.99 × 0.02 gwei")).toBeInTheDocument();
-    expect(within(dial).getByText("19.99 times the 0.02 gwei floor, far above the floor.")).toBeInTheDocument();
-    // At the floor the needle rests at the left end, in the green.
+    expect(within(gauge).getByText("19.99× the 0.02 gwei floor")).toBeInTheDocument();
+    expect(within(gauge).getByText("0.3997 gwei ≈ 19.99 × 0.02 gwei")).toBeInTheDocument();
+    expect(within(gauge).getByText("19.99 times the 0.02 gwei floor, far above the floor.")).toBeInTheDocument();
+    // The arc is decoration: everything it shows is in the readout below it, so it is not announced twice.
+    expect(gauge.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    // At the floor the needle rests at the left end, in the green, and no stretch of the ring is lit.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(1)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-good");
-    expect(Number(within(dial).getByTestId("fee-dial-needle").getAttribute("x2"))).toBeLessThan(20);
-    // Ten times the floor is the top of the dial, still amber; a hair over is red.
+    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-good");
+    expect(position(gauge)).toBe("0.0000");
+    expect(gauge.querySelectorAll("[data-lit]")).toHaveLength(0);
+    // Ten times the floor is the top of the arc, still amber, with the green and amber bands lit.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-warning");
-    expect(Number(within(dial).getByTestId("fee-dial-needle").getAttribute("x2"))).toBeCloseTo(50, 1);
+    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-warning");
+    expect(position(gauge)).toBe("0.5000");
+    expect(gauge.querySelectorAll("[data-lit]")).toHaveLength(2);
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10.01)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-critical");
+    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-critical");
     // The tone follows the printed figure: 10.004 prints as "10.00×", which is still amber.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10.004)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(within(dial).getByText("10.00")).toBeInTheDocument();
-    expect(within(dial).getByTestId("fee-dial-multiplier")).toHaveClass("text-dial-warning");
+    expect(within(gauge).getByText("10.00")).toBeInTheDocument();
+    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-warning");
     // A thousandfold spike pins the needle at the right end rather than swinging it off the dial.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(1000)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(Number(within(dial).getByTestId("fee-dial-needle").getAttribute("x2"))).toBeGreaterThan(80);
-    // The line under the fee keeps the floor and x; the multiplier lives in the tile alone.
-    expect(screen.getByText(/floor 0.02 gwei ·/)).toHaveTextContent("floor 0.02 gwei · x 3.2425");
+    expect(position(gauge)).toBe("1.0000");
+    // The floor and x moved into the readout with the figure they qualify.
+    expect(within(gauge).getByText(/floor 0.02 gwei/)).toHaveTextContent("floor 0.02 gwei · x 3.2425");
+  });
+  it("keeps the lagging-collector pill set as a readout, like the stats beside it", () => {
+    const stale = { ...snapshot, sampledAt: new Date(Date.parse(snapshot.sampledAt) - 120_000).toISOString() };
+    render(<LiveHeroView network="robinhood" snapshot={stale} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    const pill = screen.getByText(/collector lagging/);
+    expect(pill.closest(".vw-stat-panel")).not.toBeNull();
+  });
+  it("bands the rail into what the chain is doing and what it costs", () => {
+    render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
+    expect(screen.getByText("Chain")).toBeInTheDocument();
+    expect(screen.getByText("What it costs")).toBeInTheDocument();
   });
   it("renders the eased figures rather than the sample when a frame has them", () => {
     const values = { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.5, multiplier: 25, gasPerSecond10: 41_000_000, transferEth: 1.05e-5, exponent: 3.3 };
@@ -744,16 +762,22 @@ describe("HistoryTabs", () => {
 describe("NetworkSwitcher", () => {
   const networks: Network[] = [
     { name: "robinhood", displayName: "Robinhood Chain", chainId: 4663, explorerUrl: "", model: "constraints", headBlock: 1, headAt: null, lagSeconds: null, enabled: true },
+    { name: "robinhood-testnet", displayName: "Robinhood Chain Testnet", chainId: 46630, explorerUrl: "", model: "constraints", headBlock: 1, headAt: null, lagSeconds: null, enabled: true },
     { name: "arbitrum-one", displayName: "Arbitrum One", chainId: 42161, explorerUrl: "", model: "constraints", headBlock: 1, headAt: "", lagSeconds: 0, enabled: false },
   ];
-  it("lists networks and changes selection", async () => {
+  it("lists the networks that are on and changes selection", async () => {
     const onChange = vi.fn();
     render(<NetworkSwitcher networks={networks} current="robinhood" onChange={onChange} loading={false} />);
     const select = screen.getByRole("combobox", { name: "Network" });
     expect(within(select).getAllByRole("option")).toHaveLength(2);
-    expect(screen.getByRole("option", { name: "Arbitrum One (42161)" })).toBeDisabled();
-    await userEvent.selectOptions(select, "arbitrum-one");
-    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("option", { name: "Arbitrum One (42161)" })).not.toBeInTheDocument();
+    await userEvent.selectOptions(select, "robinhood-testnet");
+    expect(onChange).toHaveBeenCalledWith("robinhood-testnet");
+  });
+  it("keeps a disabled current network named while it is still the route", () => {
+    render(<NetworkSwitcher networks={networks} current="arbitrum-one" onChange={vi.fn()} loading={false} />);
+    expect(screen.getByRole("option", { name: "arbitrum-one" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Arbitrum One (42161)" })).not.toBeInTheDocument();
   });
   it("keeps an unknown current network selectable while the list loads", () => {
     render(<NetworkSwitcher networks={null} current="mystery" onChange={vi.fn()} loading />);

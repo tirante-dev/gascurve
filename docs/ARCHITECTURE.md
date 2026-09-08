@@ -33,6 +33,8 @@ Configured in `config.yaml` (`networks:`), overridable by `NETWORK_<NAME>_*` env
 
 All four report ArbOS 61 (`ArbSys.arbOSVersion()` = 116).
 
+`enabled` decides whether a network is part of the site at all. `false` stops every loop that would index it, and the collector writes the flag to `networks.enabled` so the change leaves the process: the api then drops the network from `/networks` and answers 404 for every route and socket below it, which is how it disappears from the web app. Its rows are kept, so `true` brings the chain back with the history it had and the collector fills the gap. `/status` still reports it, with `status: disabled`, because an operator needs to see what is configured. A network with no `enabled` key is off.
+
 Per-network optional settings: `calls_per_second` (0 = unlimited, otherwise at least 0.1, for dedicated nodes; the public defaults stay at 4), `ws_url` (subscribe to `newHeads` and sample state at each head instead of polling), `archive` (historical `eth_call` works, so the backfill anchors replay to real backlogs every `collector.backfill_anchor_interval` blocks), `history_epoch` (raise it to rebuild the reconstructed history once, see below). Production runs on dedicated nodes; the public-RPC pacing exists for development and for anyone running the collector without one.
 
 ### Multiple endpoints per network
@@ -193,7 +195,7 @@ Rate limiting is recognised from HTTP 429 and from JSON-RPC errors with codes -3
 
 Conventions: JSON, `Cache-Control` set per endpoint, CORS from `server.cors_origins`, rate limited per IP (the client IP is taken from `X-Forwarded-For` only when the peer is in `server.trusted_proxies`, a list of CIDRs, walking the chain right to left past trusted hops), request ID header. WebSocket connections are capped per IP and globally (`server.ws_max_per_ip`, `server.ws_max_total`) and messages are rate limited per connection. Wei values are decimal strings. Gas, bips, block numbers and unix timestamps are JSON numbers. Timestamps named `*At` are RFC 3339 UTC. Errors: `{ "error": { "code": "not_found", "message": "..." } }`.
 
-`{network}` accepts the name (`robinhood`) or chain id (`4663`).
+`{network}` accepts the name (`robinhood`) or chain id (`4663`). A network configured with `enabled: false` is not one of them: `/networks` leaves it out and everything below `/networks/{network}` is a 404, the same answer a name the api never knew gets. `/status` is the exception and reports it as `disabled`.
 
 | Method and path | Purpose |
 |---|---|
@@ -297,7 +299,7 @@ Server to client, one JSON object per message:
 { type: 'ping' }                                         // every 30 s; client replies { type: 'pong' }
 ```
 
-Client to server: `{ type: 'pong' }` and `{ type: 'subscribe', network: string }` to switch networks on the same socket. The server closes idle sockets that miss two pings. The web client reconnects with exponential back-off (1 s to 30 s) and falls back to polling `/live` every 2 s while disconnected.
+Client to server: `{ type: 'pong' }` and `{ type: 'subscribe', network: string }` to switch networks on the same socket. A disabled network is unknown here too: the handshake is refused with 404 and a `subscribe` to one gets an `error` message, leaving the client on the network it already had. The server closes idle sockets that miss two pings. The web client reconnects with exponential back-off (1 s to 30 s) and falls back to polling `/live` every 2 s while disconnected.
 
 lib/pq owns the notification connection and reconnects it on its own, re-issuing every LISTEN and marking the gap with a reconnect notification. The hub reconciles from that marker: it refreshes stored blocks, rebuilds a newer live snapshot and delivers missed owner actions before resuming normal fan-out. The API adds only the health lib/pq reports through its event callback, so a replica whose feed is down answers `/ready` with 503 and leaves the Service, even though its query pool is healthy and its REST answers would have been correct.
 

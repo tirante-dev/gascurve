@@ -207,6 +207,10 @@ config:
     block_retention: 48h
     sample_retention: 168h
     backfill_depth: 720h
+  # enabled: false takes a network off the site: the collector stops indexing
+  # it and records the flag, so the api hides it and the web app no longer
+  # offers it. Stored history is kept for whenever it comes back. It stays in
+  # /status, reported as disabled. Omitting the key leaves the network off.
   networks:
     - name: robinhood
       display_name: Robinhood Chain

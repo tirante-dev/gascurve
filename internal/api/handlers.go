@@ -60,12 +60,18 @@ func (s *Server) resolveNetwork(w http.ResponseWriter, r *http.Request) (*db.Net
 		s.internal(w, err)
 		return nil, false
 	}
-	if n == nil {
+	if !served(n) {
 		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("unknown network %q", ref))
 		return nil, false
 	}
 	return n, true
 }
+
+// served reports whether a resolved row is one the public routes answer for. A network switched off in
+// the collector's configuration keeps its rows, and its history stops where indexing stopped, so every
+// route below /networks treats it as unknown rather than serving a chain the site no longer covers.
+// /status is the exception: an operator still needs to see it, reported as disabled.
+func served(n *db.Network) bool { return n != nil && n.Enabled }
 
 func (s *Server) internal(w http.ResponseWriter, err error) {
 	s.log.Error("request failed", "err", err.Error())
@@ -122,6 +128,9 @@ func (s *Server) handleNetworks(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]model.Network, 0, len(rows))
 	for _, n := range rows {
+		if !served(&n) {
+			continue
+		}
 		m, err := s.networkModel(r.Context(), n)
 		if err != nil {
 			s.internal(w, err)
