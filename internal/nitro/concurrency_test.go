@@ -221,15 +221,22 @@ func TestBatchParallelChunkFailureReportsLowestChunk(t *testing.T) {
 	}
 }
 
+// settleWindow is how long the served count must stay put before the fan out counts as settled. It
+// is generous because it is paid once, and because widening it is what makes the reasoning below
+// hold against a loaded machine.
+const settleWindow = 200 * time.Millisecond
+
 // awaitSettled waits until exactly n requests are in flight and the served count has stopped moving,
 // after at least sent have been served. A handler returning proves only that its answer left the
-// server; a count that stays put with ranges still unclaimed proves the client recorded the failure,
-// since the workers that finished would otherwise have taken the next range and sent it.
+// server, so the count is what carries the argument: with ranges still unclaimed and workers idle, a
+// count that stays put means take is handing nothing out, which happens only once a failure has been
+// recorded. The alternative, that the idle workers are descheduled too, needs every one of them
+// stalled for the whole window rather than just the one that failed.
 func awaitSettled(f *fakeRPC, n, sent int) bool {
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
 		served := f.requestCount()
 		if in, _ := f.flight(); in == n && served >= sent {
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(settleWindow)
 			if in, _ := f.flight(); in == n && f.requestCount() == served {
 				return true
 			}
