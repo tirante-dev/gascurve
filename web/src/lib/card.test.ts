@@ -147,6 +147,15 @@ describe("cardReading", () => {
     expect(printed?.fee.text.length).toBeLessThanOrEqual(MAX_FIGURE_CHARS);
   });
 
+  it("sizes the multiplier on the sign as well as the figure", () => {
+    // 100.00x is seven characters and steps down; the figure alone is six and would not. The width model
+    // has slack enough that figureFits passes either way, so only the step itself proves this.
+    const boundary = cardReading({ ...snapshot, multiplierBips: 1_000_000 } as LiveSnapshot);
+    expect(boundary?.multiplier).toEqual({ text: "100.00×", size: 34 });
+    const under = cardReading({ ...snapshot, multiplierBips: 100_000 } as LiveSnapshot);
+    expect(under?.multiplier).toEqual({ text: "10.00×", size: 44 });
+  });
+
   it("fits both lines as they are drawn, at every reading the card can be handed", () => {
     const bips = [10_000, 15_000, 20_049, 204_500, 12_340_000, 100_000_000, Number.MAX_SAFE_INTEGER, 9_223_372_036_854_775_807];
     const fees = ["409000000", "20000000", "9007199254740991000000000", "9007199254740992000000000"];

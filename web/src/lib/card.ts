@@ -193,7 +193,8 @@ export const MULTIPLIER_SIZES: readonly (readonly [number, number])[] = [
  * 9,007,199,254,740,991 with a decimal place. The multiplier's sign puts it in the same place. */
 export const MAX_FIGURE_CHARS = 23;
 
-/** `text` as a line, at the largest size in `steps` that it fits. */
+/** `text` as a line, at the size for the first step its length falls within. Not the largest size it would
+ * physically fit at: the steps are the ladder, so a figure of a given length is always set the same. */
 export function fit(text: string, steps: readonly (readonly [number, number])[]): CardLine {
   for (const [length, size] of steps) {
     if (text.length <= length) return { text, size };
