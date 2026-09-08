@@ -69,6 +69,9 @@ func (f *Follower) tickWith(ctx context.Context, pinned bool, sampleFn func(cont
 	}
 	capacity := f.rpcCapacity(sample, stored, pinned)
 	if head >= stored {
+		// The lag is what history work yields to, and it is recorded for the whole tick. Nothing else
+		// marks an ordinary catch-up: a chain producing blocks faster than a tick completes is mid-tick
+		// almost always, so a flag raised on every tick that moved the head is a permanent one.
 		f.behind.Store(head - stored)
 	}
 
@@ -82,11 +85,10 @@ func (f *Follower) tickWith(ctx context.Context, pinned bool, sampleFn func(cont
 		return f.sampleOnly(ctx, sample, capacity)
 	}
 
-	f.catchingUp.Store(true)
-	defer f.catchingUp.Store(false)
-
 	if head == stored {
 		// Same height, different hash: the stored head is off-chain.
+		f.rewinding.Store(true)
+		defer f.rewinding.Store(false)
 		if stored, err = f.rewindToAncestor(ctx, stored-1); err != nil {
 			return f.fail(ctx, err)
 		}
@@ -100,6 +102,8 @@ func (f *Follower) tickWith(ctx context.Context, pinned bool, sampleFn func(cont
 	}
 	if hashMismatch(f.headHashOf(stored), headers[0].ParentHash) {
 		// The first missing block does not build on the stored head.
+		f.rewinding.Store(true)
+		defer f.rewinding.Store(false)
 		ancestor, err := f.rewindToAncestor(ctx, stored-1)
 		if err != nil {
 			return f.fail(ctx, err)
@@ -180,8 +184,8 @@ func (f *Follower) headBehind(ctx context.Context, sample *nitro.Sample, stored 
 		return nil
 	}
 	f.log.Warn("head behind the stored head and its hash differs, rewinding the rollback", "head", head, "stored", stored)
-	f.catchingUp.Store(true)
-	defer f.catchingUp.Store(false)
+	f.rewinding.Store(true)
+	defer f.rewinding.Store(false)
 	if _, err := f.rewindToAncestor(ctx, head); err != nil {
 		return f.fail(ctx, err)
 	}

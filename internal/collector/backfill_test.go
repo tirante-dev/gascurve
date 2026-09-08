@@ -147,12 +147,12 @@ func TestBackfillSegments(t *testing.T) {
 	f.mu.Lock()
 	f.ownerScanThrough = 999
 	f.mu.Unlock()
-	// Nothing happens while the fast loop is catching up.
-	f.catchingUp.Store(true)
+	// Nothing happens while the fast loop is rewinding a reorg.
+	f.rewinding.Store(true)
 	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {
-		t.Fatalf("catching up: %v %v", st, err)
+		t.Fatalf("rewinding: %v %v", st, err)
 	}
-	f.catchingUp.Store(false)
+	f.rewinding.Store(false)
 	// Nor while the last tick found the stored head over a batch behind.
 	f.behind.Store(uint64(f.cfg.HeaderBatchSize) + 1)
 	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillIdle {

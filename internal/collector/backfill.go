@@ -154,7 +154,7 @@ func (f *Follower) backfillStep(ctx context.Context) (BackfillStatus, error) {
 			return status, err
 		}
 	}
-	if f.historyMustWait() {
+	if f.backfillMustWait() {
 		return BackfillIdle, nil
 	}
 	remaining := c.End - c.Next
