@@ -1,8 +1,9 @@
-import { render } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveSnapshot, Series, SeriesPoint } from "@/types";
 
 const enlarged = vi.hoisted(() => vi.fn());
+const framed = vi.hoisted(() => vi.fn());
 
 vi.mock("recharts", async (importOriginal) => {
   const original = await importOriginal<typeof import("recharts")>();
@@ -17,7 +18,20 @@ vi.mock("./ChartActions", async (importOriginal) => {
     ...original,
     EnlargeLink: (props: Parameters<typeof original.EnlargeLink>[0]) => {
       enlarged();
-      return original.EnlargeLink(props);
+      return <original.EnlargeLink {...props} />;
+    },
+  };
+});
+
+// Every chart body sits in a ChartFrame, so its call count is the render count
+// of the charts inside a card rather than of the card itself.
+vi.mock("./primitives", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./primitives")>();
+  return {
+    ...original,
+    ChartFrame: (props: Parameters<typeof original.ChartFrame>[0]) => {
+      framed();
+      return <original.ChartFrame {...props} />;
     },
   };
 });
@@ -28,6 +42,7 @@ vi.mock("@/lib/gaps", async (importOriginal) => {
 });
 
 import { withGapBreaks } from "@/lib/gaps";
+import { DataFooter } from "./DataFooter";
 import { FeeFlows } from "./FeeFlows";
 import { SeriesCharts } from "./SeriesCharts";
 
@@ -89,11 +104,11 @@ function snapshotAt(sampledAt: string): LiveSnapshot {
 }
 
 /** The page around the charts: `tick` stands in for a live message or the ticker. */
-function Page({ tick }: { tick: number }) {
+function Page({ tick, loading = false }: { tick: number; loading?: boolean }) {
   return (
     <div>
       <span data-testid="tick">{tick}</span>
-      <SeriesCharts network="robinhood" range="24h" series={series} loading={false} model="constraints" />
+      <SeriesCharts network="robinhood" range="24h" series={series} loading={loading} model="constraints" />
     </div>
   );
 }
@@ -108,11 +123,40 @@ describe("history charts across live re-renders", () => {
     expect(enlarged.mock.calls.length).toBe(drawn);
   });
 
+  it("does not redraw the charts inside SeriesCharts when a refetch flips loading", () => {
+    const { rerender } = render(<Page tick={0} />);
+    const cards = enlarged.mock.calls.length;
+    const charts = framed.mock.calls.length;
+    expect(charts).toBeGreaterThan(0);
+    rerender(<Page tick={0} loading />);
+    expect(enlarged.mock.calls.length).toBeGreaterThan(cards);
+    expect(framed.mock.calls.length).toBe(charts);
+  });
+
   it("does not rebuild the fee chart rows when only the live snapshot changes", () => {
     const { rerender } = render(<FeeFlows network="robinhood" range="24h" snapshot={snapshotAt("2026-09-06T07:20:00Z")} series={series} model="constraints" nowMs={1788679380000} />);
     const built = vi.mocked(withGapBreaks).mock.calls.length;
     expect(built).toBeGreaterThan(0);
     rerender(<FeeFlows network="robinhood" range="24h" snapshot={snapshotAt("2026-09-06T07:20:01Z")} series={series} model="constraints" nowMs={1788679381000} />);
     expect(vi.mocked(withGapBreaks).mock.calls.length).toBe(built);
+  });
+});
+
+describe("components that keep their own clock", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse("2026-09-06T07:20:03Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("ages the footer's last sample without a clock from the page", () => {
+    render(<DataFooter snapshot={snapshotAt("2026-09-06T07:20:00Z")} series={series} networkInfo={null} status="open" apiStatus={null} />);
+    expect(screen.getByText(/\(3 s ago\)/)).toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(screen.getByText(/\(5 s ago\)/)).toBeInTheDocument();
   });
 });

@@ -5,9 +5,9 @@ import { useDocumentVisible } from "./useDocumentVisible";
 
 /**
  * Current time in milliseconds, refreshed every `intervalMs` while the tab is
- * visible. An interval of 0 holds the first reading and starts no timer, which
- * is what a component that took its clock as a prop passes so it re-renders on
- * the prop alone.
+ * visible. An interval of 0 starts no timer, so the reading stands where it
+ * was: that is what a component with a clock of its own passes, so it
+ * re-renders on the prop alone.
  */
 export function useTicker(intervalMs = 250): number {
   const [now, setNow] = useState<number>(() => Date.now());
