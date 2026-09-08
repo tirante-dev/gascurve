@@ -176,10 +176,10 @@ func TestCooldownSharedAcrossCallers(t *testing.T) {
 	// The cooldown sleep honors cancellation.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, _, err := c2.send(ctx, []byte("[]"), 1); err == nil {
+	if _, _, _, _, err := c2.send(ctx, []byte("[]"), 1); err == nil {
 		t.Fatal("expected context error")
 	}
-	// The cooldown is published before the send lock is released: a caller
+	// The cooldown is published before the send slot is released: a caller
 	// that queued behind the throttled request sleeps through the cooldown
 	// instead of sending into the throttle.
 	f.script = []scriptStep{{status: http.StatusTooManyRequests}}
@@ -394,7 +394,7 @@ func TestJSONRPCRateLimit(t *testing.T) {
 }
 
 // TestReservationRefundedOnCooldown: tokens are taken before a caller
-// queues for the send lock, so a 429 another caller saw meanwhile
+// queues for a send slot, so a 429 another caller saw meanwhile
 // invalidates the reservation. It is refunded, the cooldown is waited out
 // and the tokens are paid for again under the lock, instead of a queue of
 // waiters bursting through the moment the lock opens with tokens they
@@ -434,7 +434,7 @@ func TestReservationRefundedOnCooldown(t *testing.T) {
 	if _, err := c.Batch(ctx, reqs[:1]); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled cooldown: %v", err)
 	}
-	// A request refused under the send lock (its endpoint is no longer the
+	// A request refused under the send gate (its endpoint is no longer the
 	// active one) is refunded too and never reaches the wire.
 	c.mu.Lock()
 	c.blockedUntil = time.Time{}

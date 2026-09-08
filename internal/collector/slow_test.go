@@ -20,7 +20,7 @@ import (
 
 // TestSlowTickOwnerScanYieldsToFastLoop covers the starvation a cold owner scan used to cause. The
 // scan runs on the slow loop but shares the endpoint with the fast one, and on a chain producing ten
-// blocks a second a scan back to the depth floor is hundreds of eth_getLogs holding the send lock for
+// blocks a second a scan back to the depth floor is hundreds of eth_getLogs occupying the endpoint for
 // minutes, which puts the live path far enough behind to be visible on the site.
 func TestSlowTickOwnerScanYieldsToFastLoop(t *testing.T) {
 	ctx := context.Background()

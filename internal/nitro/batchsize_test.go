@@ -97,7 +97,7 @@ func TestEndpointSizeShrinkHoldsBeforeRecovering(t *testing.T) {
 }
 
 // TestEndpointSizeShrinkOnlyNarrows pins the cut as monotonic. Loops sharing an endpoint size their
-// chunks before queueing for the send lock, so a wide request can be refused after a narrower one
+// chunks before queueing for a send slot, so a wide request can be refused after a narrower one
 // has already cut the cap; its own halved width must not widen the cap back.
 func TestEndpointSizeShrinkOnlyNarrows(t *testing.T) {
 	f := newFakeRPC(t)

@@ -133,7 +133,7 @@ func newEndpoint(index int, cfg config.EndpointConfig, batchSize int, log *logge
 	return e
 }
 
-// setPreSend installs the check the pool makes under the send lock, so a
+// setPreSend installs the check the pool makes under the send gate, so a
 // call that selected this endpoint before another caller failed over is
 // rejected before it reaches the wire.
 func (e *Endpoint) setPreSend(fn func(context.Context) error) { e.preSend = fn }
@@ -322,7 +322,7 @@ func (e *Endpoint) sendRange(ctx context.Context, reqs []Request, out []Result, 
 // instead of being re-sent at its own width until the caller gives up.
 //
 // It can only ever lower the cap. Every loop sharing the endpoint sizes its chunk before queueing
-// for the send lock, so a wide request can be refused long after a narrower one has already cut the
+// for a send slot, so a wide request can be refused long after a narrower one has already cut the
 // cap; taking its halved width unclamped would widen the cap back and walk the same refusals again.
 func (e *Endpoint) shrinkForSize(items int) bool {
 	if items <= sizeBatchFloor {

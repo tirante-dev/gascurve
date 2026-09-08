@@ -218,7 +218,7 @@ type Client struct {
 	// Endpoint replaces it with one that also honors the adaptive batch cap, so every typed call is
 	// chunked the same way the header batches are.
 	chunk batcher
-	// preSend, when set, is the last check before the request leaves, under the send lock: it rejects
+	// preSend, when set, is the last check before the request leaves, under the send gate: it rejects
 	// a call whose endpoint is no longer the pool's active one.
 	preSend func(context.Context) error
 
@@ -240,7 +240,7 @@ type Client struct {
 	last429         time.Time
 	backoff         time.Duration
 	// blockedUntil is the network-wide cooldown after a 429: no request is
-	// sent before it, whichever caller holds the send lock.
+	// sent before it, whichever caller holds a send slot.
 	blockedUntil time.Time
 }
 
@@ -277,9 +277,10 @@ func withClock(now func() time.Time, sleep func(context.Context, time.Duration) 
 }
 
 // pooledTransport keeps enough idle connections for the requests an unmetered endpoint runs at
-// once. http.DefaultTransport holds two per host, so concurrent senders re-dial every step. The
-// spare connection above maxUnmeteredSends is for the Fast sample, which takes no send slot and
-// must not queue at the transport instead.
+// once: http.DefaultTransport holds two per host, so concurrent senders re-dial every step. The
+// connection cap has to clear the worst case rather than the usual one, because a Fast sample takes
+// no send slot and would otherwise queue at the transport instead: a small batch cap splits it into
+// as many chunks as the fan out allows, alongside a full set of bulk requests.
 func pooledTransport() http.RoundTripper {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -287,7 +288,7 @@ func pooledTransport() http.RoundTripper {
 	}
 	t := base.Clone()
 	t.MaxIdleConnsPerHost = maxUnmeteredSends + 1
-	t.MaxConnsPerHost = maxUnmeteredSends + 1
+	t.MaxConnsPerHost = 2*maxUnmeteredSends + 1
 	return t
 }
 
@@ -406,7 +407,8 @@ func (c *Client) Call(ctx context.Context, method string, params ...any) (json.R
 // Batch sends up to MaxBatch calls in one HTTP request and returns one Result per request, in
 // order. Throttling retries the whole batch with exponential back-off. Every attempt pays for its
 // calls at the pacer, in the lane the context's Class selects, and honors the network-wide
-// cooldown, so a retry can never exceed the budget or race other callers.
+// cooldown, so a retry can never exceed the budget. On an unmetered endpoint it can run alongside
+// other callers; see docs/ARCHITECTURE.md section 5.
 func (c *Client) Batch(ctx context.Context, reqs []Request) ([]Result, error) {
 	if len(reqs) == 0 {
 		return nil, nil
@@ -468,11 +470,13 @@ func (c *Client) attempt(ctx context.Context, reqs []Request) (results []Result,
 	if err := c.pacer.Wait(ctx, len(reqs)); err != nil {
 		return nil, false, err
 	}
-	responses, limited, sentAt, err := c.send(ctx, payload, len(reqs))
+	responses, limited, fresh, sentAt, err := c.send(ctx, payload, len(reqs))
 	if err != nil {
 		return nil, false, err
 	}
-	if c.observe != nil {
+	// A 429 answering a request that was already on the wire when the cooldown started is the same
+	// wave the first one reported, so it must not halve the cap a second time.
+	if c.observe != nil && (!limited || fresh) {
 		c.observe(len(reqs), limited)
 	}
 	if limited {
@@ -496,10 +500,15 @@ func (c *Client) cooldown() time.Duration {
 // several are, since a request already in flight observes neither; see docs/ARCHITECTURE.md section
 // 5. A Fast call on an unmetered endpoint takes no slot: there is no budget to protect and the head
 // sample must not queue behind bulk work.
-func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses []rpcResponse, limited bool, sentAt time.Time, err error) {
+func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses []rpcResponse, limited, fresh bool, sentAt time.Time, err error) {
 	class := ClassOf(ctx)
 	if !c.pacer.Unlimited() || class != Fast {
-		c.sendSlots <- struct{}{}
+		select {
+		case c.sendSlots <- struct{}{}:
+		case <-ctx.Done():
+			c.pacer.Refund(calls)
+			return nil, false, false, time.Time{}, ctx.Err()
+		}
 		defer func() { <-c.sendSlots }()
 	}
 	for {
@@ -509,16 +518,16 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 		}
 		c.pacer.Refund(calls)
 		if err := c.sleep(ctx, wait); err != nil {
-			return nil, false, time.Time{}, err
+			return nil, false, false, time.Time{}, err
 		}
 		if err := c.pacer.Wait(ctx, calls); err != nil {
-			return nil, false, time.Time{}, err
+			return nil, false, false, time.Time{}, err
 		}
 	}
 	if c.preSend != nil {
 		if err := c.preSend(ctx); err != nil {
 			c.pacer.Refund(calls)
-			return nil, false, time.Time{}, err
+			return nil, false, false, time.Time{}, err
 		}
 	}
 	c.recordCalls(class, calls)
@@ -526,9 +535,9 @@ func (c *Client) send(ctx context.Context, payload []byte, calls int) (responses
 	responses, limited, err = c.post(ctx, payload)
 	c.recordRequest(c.now().Sub(sentAt), limited || err != nil)
 	if limited {
-		c.noteRateLimit()
+		fresh = c.noteRateLimit()
 	}
-	return responses, limited, sentAt, err
+	return responses, limited, fresh, sentAt, err
 }
 
 // isEndpointStatus reports whether an HTTP status is the endpoint failing rather than the node
@@ -614,13 +623,20 @@ func matchResults(ids []uint64, responses []rpcResponse) []Result {
 	return out
 }
 
-// noteRateLimit records a 429, starts the network-wide cooldown and doubles the back-off.
-func (c *Client) noteRateLimit() {
+// noteRateLimit records a 429 and reports whether it opened the network-wide cooldown, doubling the
+// back-off when it did. A 429 answering a request that was already on the wire when the cooldown
+// started belongs to the same wave: charging every one of them a step would take a single throttle
+// straight to the ceiling and delay failover by minutes.
+func (c *Client) noteRateLimit() bool {
 	c.mu.Lock()
 	now := c.now()
 	c.trimCallsLocked(now)
 	c.rateLimitEvents++
 	c.last429 = now
+	if now.Before(c.blockedUntil) {
+		c.mu.Unlock()
+		return false
+	}
 	wait := c.backoff
 	c.blockedUntil = now.Add(wait)
 	c.backoff *= 2
@@ -630,6 +646,7 @@ func (c *Client) noteRateLimit() {
 	recent := len(c.callTimes)
 	c.mu.Unlock()
 	c.log.Warn("rpc rate limited", "backoff", wait.String(), "callsLast10s", recent)
+	return true
 }
 
 // resetBackoff returns the back-off to its minimum after a request sent past the cooldown

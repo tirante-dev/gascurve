@@ -2,7 +2,9 @@ package nitro
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -247,6 +249,133 @@ func TestBatchShrinksUnderConcurrentChunks(t *testing.T) {
 	}
 	if got := e.BatchCap(); got > f.sizeLimit {
 		t.Fatalf("batch cap %d, want it cut to at most the %d items the node fits", got, f.sizeLimit)
+	}
+}
+
+// TestConcurrent429IsOneThrottleWave keeps a single throttle from costing several exponential steps.
+// Every request already on the wire when the cooldown opens answers 429 too, and charging each of
+// them a step would reach the ceiling on the first throttle and delay failover by minutes.
+func TestConcurrent429IsOneThrottleWave(t *testing.T) {
+	f := echoRPC(t)
+	for range maxUnmeteredSends {
+		f.script = append(f.script, scriptStep{status: http.StatusTooManyRequests})
+	}
+	f.holdAll()
+	clock := newFakeClock()
+	c := NewClient(f.server.URL, 0, WithPacer(NewPacer(0).withClock(clock.Now, clock.Sleep)),
+		withClock(clock.Now, clock.Sleep), WithHTTPClient(f.server.Client()), WithMaxAttempts(1))
+	done := callAll(c, maxUnmeteredSends)
+	if !f.awaitFlight(maxUnmeteredSends) {
+		t.Fatalf("only %d requests were in flight, want %d", inFlightOf(f), maxUnmeteredSends)
+	}
+	f.release()
+	for range maxUnmeteredSends {
+		if err := <-done; !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("call: %v, want a rate limit", err)
+		}
+	}
+	st := c.Stats()
+	if st.RateLimitEvents != uint64(maxUnmeteredSends) {
+		t.Fatalf("rate limit events %d, want every 429 recorded", st.RateLimitEvents)
+	}
+	if st.Backoff != 2*minBackoff {
+		t.Fatalf("back-off %s, want one step from %s: the wave must cost one doubling", st.Backoff, minBackoff)
+	}
+}
+
+// TestConcurrent429HalvesTheBatchCapOnce is the same rule for the adaptive cap: one wave teaches the
+// endpoint one thing, so the cap comes down one step rather than to its floor.
+func TestConcurrent429HalvesTheBatchCapOnce(t *testing.T) {
+	f := echoRPC(t)
+	for range maxUnmeteredSends {
+		f.script = append(f.script, scriptStep{status: http.StatusTooManyRequests})
+	}
+	f.holdAll()
+	clock := newFakeClock()
+	e := newEndpoint(0, endpointOf(f, 0), MaxBatch, logger.Nop(), clock.Now,
+		WithHTTPClient(f.server.Client()), withClock(clock.Now, clock.Sleep), WithMaxAttempts(1))
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.batch(context.Background(), echoRequests(MaxBatch*maxUnmeteredSends))
+		done <- err
+	}()
+	if !f.awaitFlight(maxUnmeteredSends) {
+		t.Fatalf("only %d chunks were in flight, want %d", inFlightOf(f), maxUnmeteredSends)
+	}
+	f.release()
+	if err := <-done; !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("batch: %v, want a rate limit", err)
+	}
+	if got := e.BatchCap(); got != MaxBatch/2 {
+		t.Fatalf("batch cap %d, want %d: one wave halves it once, not down to the floor", got, MaxBatch/2)
+	}
+}
+
+// TestSendSlotHonorsCancellation stops a caller waiting for a send slot from outliving its deadline,
+// and gives the pacer back the tokens it paid before queueing.
+func TestSendSlotHonorsCancellation(t *testing.T) {
+	f := echoRPC(t)
+	f.holdAll()
+	c, _ := newTestClient(t, f, 4)
+	first := make(chan error, 1)
+	go func() {
+		_, err := c.Call(context.Background(), "echo", "held")
+		first <- err
+	}()
+	if !f.awaitFlight(1) {
+		t.Fatal("the first request never reached the server")
+	}
+	available := c.pacer.Available()
+	ctx, cancel := context.WithCancel(context.Background())
+	queued := make(chan error, 1)
+	go func() {
+		_, err := c.Call(ctx, "echo", "queued")
+		queued <- err
+	}()
+	// The queued caller has paid the pacer and is waiting on the single slot the budgeted endpoint
+	// has, which the held request owns.
+	if !awaitAvailable(c, available-1) {
+		t.Fatalf("pacer availability %d, want the queued call to have paid %d", c.pacer.Available(), available-1)
+	}
+	cancel()
+	if err := <-queued; !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued call: %v, want the context error", err)
+	}
+	if got := c.pacer.Available(); got != available {
+		t.Fatalf("pacer availability %d, want the %d tokens of an unsent request refunded", got, available)
+	}
+	f.release()
+	if err := <-first; err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if got := f.requestCount(); got != 1 {
+		t.Fatalf("%d requests reached the server, want only the held one", got)
+	}
+}
+
+func awaitAvailable(c *Client, want int) bool {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if c.pacer.Available() <= want {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
+}
+
+// TestPooledTransportClearsTheWorstCase pins the connection ceiling against what the send gate lets
+// through: a full set of bulk requests plus a Fast sample that takes no slot and can itself fan out
+// to as many chunks. A tighter cap would put the head sample back in a queue, inside the transport.
+func TestPooledTransportClearsTheWorstCase(t *testing.T) {
+	tr, ok := pooledTransport().(*http.Transport)
+	if !ok {
+		t.Skip("http.DefaultTransport is not an *http.Transport")
+	}
+	if tr.MaxConnsPerHost < 2*maxUnmeteredSends {
+		t.Fatalf("MaxConnsPerHost %d, want at least %d bulk plus fanned out fast requests", tr.MaxConnsPerHost, 2*maxUnmeteredSends)
+	}
+	if tr.MaxIdleConnsPerHost <= maxUnmeteredSends {
+		t.Fatalf("MaxIdleConnsPerHost %d, want more than the %d concurrent senders", tr.MaxIdleConnsPerHost, maxUnmeteredSends)
 	}
 }
 

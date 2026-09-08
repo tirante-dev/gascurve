@@ -1373,7 +1373,7 @@ func (f *Follower) backfillMustWait() bool { return f.deferredWait(&f.backfillDe
 
 // ownerScanMustWait is the same policy for the owner-action scan, checked between log chunks. A cold
 // scan covers everything back to the depth floor, which on a chain producing ten blocks a second is
-// tens of millions of blocks and minutes of eth_getLogs holding the endpoint's send lock, so the
+// tens of millions of blocks and minutes of eth_getLogs occupying the endpoint, so the
 // live path has to be able to interrupt it rather than wait it out.
 func (f *Follower) ownerScanMustWait() bool { return f.deferredWait(&f.ownerScanDeferrals) }
 
