@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.3.0](https://github.com/tirante-dev/gascurve/compare/v1.2.0...v1.3.0) (2026-09-08)
+
+
+### Features
+
+* take a network off the site with enabled: false ([#70](https://github.com/tirante-dev/gascurve/issues/70)) ([6abef99](https://github.com/tirante-dev/gascurve/commit/6abef997b174acd59a8221468990535c9e3eefb7))
+* **web:** draw the base fee as a lit gauge over a horizon ([#71](https://github.com/tirante-dev/gascurve/issues/71)) ([c00a757](https://github.com/tirante-dev/gascurve/commit/c00a757d91f017114e4a593aff3b5f583e5dd37f))
+
+
+### Bug Fixes
+
+* **api:** place undated missing ranges by block number ([#64](https://github.com/tirante-dev/gascurve/issues/64)) ([140b744](https://github.com/tirante-dev/gascurve/commit/140b744951d9ef348d777f5dcdbd579e27484da9))
+* **collector:** give history work a counted share against a busy fast loop ([#73](https://github.com/tirante-dev/gascurve/issues/73)) ([5784ac9](https://github.com/tirante-dev/gascurve/commit/5784ac94b17478932b023dc34e02f5ee6290f056))
+* **collector:** store each block's prediction against its own header ([#65](https://github.com/tirante-dev/gascurve/issues/65)) ([2a4550e](https://github.com/tirante-dev/gascurve/commit/2a4550e6a9fc4bbcc003aaab01fc4f6d8d6d037f))
+* **web:** shrink charts to fit a narrow card instead of scrolling it sideways ([#66](https://github.com/tirante-dev/gascurve/issues/66)) ([c5f5fd0](https://github.com/tirante-dev/gascurve/commit/c5f5fd004de34f5c890a7ff200bb897a0ef1ffc6))
+
+
+### Performance Improvements
+
+* **web:** draw gap, partial and missing bands as one layer per chart ([#63](https://github.com/tirante-dev/gascurve/issues/63)) ([a1d0a46](https://github.com/tirante-dev/gascurve/commit/a1d0a4662c408003ee91fa17df105d45fa4ebd68))
+* **web:** keep feed and ticker re-renders out of the history charts ([#61](https://github.com/tirante-dev/gascurve/issues/61)) ([24d37c5](https://github.com/tirante-dev/gascurve/commit/24d37c5341cdf80df1d7a09056460b617b3f88fa))
+* **web:** publish eased live values at 30 Hz instead of every frame ([#62](https://github.com/tirante-dev/gascurve/issues/62)) ([e782c89](https://github.com/tirante-dev/gascurve/commit/e782c899b2d9ec54c19d336ab4306e0b2a6e2cf3))
+
 ## [1.2.0](https://github.com/tirante-dev/gascurve/compare/v1.1.0...v1.2.0) (2026-09-07)
 
 
