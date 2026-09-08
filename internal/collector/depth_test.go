@@ -806,6 +806,67 @@ func TestBackfillDepthHoldSurvivesARewind(t *testing.T) {
 	}
 }
 
+// TestBackfillDepthHoldWhenAResetBeatsIt: a rewind lands on a tick, which can
+// come before the first backfill step of the process resolves the hold. The
+// cursor it resets still carries the deep target the previous configuration
+// was walking to, and preserving that verbatim would hand the rebuilt walk the
+// whole descent the hold was there to end.
+func TestBackfillDepthHoldWhenAResetBeatsIt(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	archive := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.archive = archive
+	f.cfg.BackfillWindow = 100
+	f.cfg.BackfillDepth = config.Genesis
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	// One whole window, so the rows above the reorg are contiguous and the
+	// ancestor it finds lies below the backfill's top.
+	var c *backfillCursor
+	var err error
+	for i := 0; i < 30; i++ {
+		if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+			t.Fatalf("step %d: %v %v", i, st, err)
+		}
+		if c, err = f.loadCursor(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if !c.Active {
+			break
+		}
+	}
+	if c.Active || c.DepthTarget != 1 || c.End != 900 {
+		t.Fatalf("one window under genesis: %+v", c)
+	}
+	rpc.fork(890, "d")
+	archive.fork(890, "d")
+	rpc.setHead(1005)
+	archive.setHead(1005)
+	held := newTestFollower(t, rpc, store)
+	held.archive = archive
+	held.cfg.BackfillWindow = 100
+	held.cfg.BackfillDepth = config.Hold
+	// The rewind runs here, before any backfill step has read the depth.
+	if err := held.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = held.loadCursor(ctx); err != nil || c.Top != 0 || c.DepthTarget != 900 {
+		t.Fatalf("the reset must leave the floor the walk had reached, not the one it was aiming at: %+v %v", c, err)
+	}
+	runBackfill(t, held, 200)
+	if c, err = held.loadCursor(ctx); err != nil || !c.Done || c.DepthStart != 900 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 899); err != nil || b != nil {
+		t.Fatalf("the descent the hold ended must not restart: %+v %v", b, err)
+	}
+}
+
 // TestBackfillDepthHoldOutlivesADiscardedCursor: the other reset. An
 // unverified live-model segment from an older collector is thrown away with
 // its buckets, and the floor the hold recorded has to survive that too, or the

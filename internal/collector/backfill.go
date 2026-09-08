@@ -416,17 +416,23 @@ func (f *Follower) holdDepthTarget(c *backfillCursor) {
 	}
 }
 
-// heldFloor is where a held descent settles: the bottom of the run in flight, else the bottom of the
-// history already reconstructed, else the first live block, which is what a chain that has backfilled
-// nothing yet holds at. Zero where a floor is recorded with no cursor position under it, which is a
-// rewind or a discard having just dropped the walk and the buckets with it: the floor asked for
-// stands and is rebuilt to, rather than an emptied cursor reading as history nobody wants.
-func (f *Follower) heldFloor(c *backfillCursor) uint64 {
+// cursorFloor is how far down the walk has actually got: the bottom of the run in flight, else the
+// bottom of the history reconstructed above it. Zero for a cursor with no position at all.
+func cursorFloor(c *backfillCursor) uint64 {
 	if c.Active && c.SegStart > 0 {
 		return c.SegStart
 	}
-	if c.End > 0 {
-		return c.End
+	return c.End
+}
+
+// heldFloor is where a held descent settles: how far the walk has got, else the first live block,
+// which is what a chain that has backfilled nothing yet holds at. Zero where a floor is recorded with
+// no position under it, which is a rewind or a discard having just dropped the walk and the buckets
+// with it: the floor asked for stands and is rebuilt to, rather than an emptied cursor reading as
+// history nobody wants.
+func (f *Follower) heldFloor(c *backfillCursor) uint64 {
+	if floor := cursorFloor(c); floor > 0 {
+		return floor
 	}
 	if c.DepthTarget > 0 {
 		return 0
@@ -437,6 +443,17 @@ func (f *Follower) heldFloor(c *backfillCursor) uint64 {
 		return 0
 	}
 	return f.liveStart.Block
+}
+
+// resetTarget is the floor a cursor about to be reset leaves behind: the one it was asked to reach,
+// raised under a held depth to where its walk had got. A reset can land on a tick before the first
+// backfill step resolves the hold, and preserving the target verbatim there would hand the rebuilt
+// walk the whole descent the hold was ending. Lock free: called inside the rewind's transaction.
+func (f *Follower) resetTarget(c *backfillCursor) uint64 {
+	if !f.cfg.BackfillDepth.IsHold() {
+		return c.recordedTarget()
+	}
+	return max(c.recordedTarget(), cursorFloor(c))
 }
 
 // checkCursor runs once per process: an active live-model segment (SetID 0) that was not verified
@@ -460,7 +477,7 @@ func (f *Follower) checkCursor(ctx context.Context, c *backfillCursor, gen uint6
 		return c, nil
 	}
 	f.log.Warn("discarding an unverified live-model backfill segment, its buckets are re-backfilled", "from", c.SegStart, "next", c.Next)
-	fresh := &backfillCursor{DepthTarget: c.recordedTarget()}
+	fresh := &backfillCursor{DepthTarget: f.resetTarget(c)}
 	err := f.withGeneration(ctx, gen, func(s db.Store) error {
 		if hasBoundary {
 			if _, err := s.DeleteBucketsBefore(ctx, f.chainID, boundary); err != nil {

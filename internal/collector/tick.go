@@ -458,7 +458,7 @@ func (f *Follower) rewindBackfill(ctx context.Context, s db.Store, ancestor uint
 		}
 		cleared = true
 	}
-	return cleared, f.saveCursor(ctx, s, &backfillCursor{DepthTarget: c.recordedTarget()})
+	return cleared, f.saveCursor(ctx, s, &backfillCursor{DepthTarget: f.resetTarget(c)})
 }
 
 // rewindCursor lowers a numeric checkpoint to block when it is beyond it.
