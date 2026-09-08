@@ -303,13 +303,16 @@
   --font-display: var(--font-display);
 }
 
-/* Where the page reaches its own width: NetworkPage caps at max-w-[1200px], so past this
-   nothing in the layout grows and the hero's rail stops getting taller. Its own breakpoint,
-   because xl lands 80 px later. In rem (75rem = 1200px) because a px-valued breakpoint is
-   emitted ahead of the rem ones Tailwind ships with, and a variant that sorts before lg
-   loses to it at the widths where both apply. */
+/* The width the page settles at: 75rem is what every route caps its column at (max-w-page)
+   and the width past which nothing in the layout grows, so the hero's rail stops getting
+   taller there. One measure serving as both the cap and the breakpoint, because a step that
+   fires anywhere else is a step at a width where the rail is still moving. xl would be 80 px
+   late. In rem, and not 1200px, on two counts: a px-valued breakpoint is emitted ahead of the
+   rem ones Tailwind ships with, where it would lose the cascade to lg at every width they
+   share, and a rem cap keeps the two in step when the reader's own font size is not 16 px. */
 @theme {
   --breakpoint-page: 75rem;
+  --container-page: 75rem;
 }
 
 html {

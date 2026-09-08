@@ -15,7 +15,7 @@ export const metadata: Metadata = { alternates: { canonical: "/" } };
 export default function IndexPage() {
   const others = SITE_NETWORKS.filter((n) => !n.primary);
   return (
-    <main className="mx-auto max-w-[1200px] px-4 py-16">
+    <main className="mx-auto max-w-page px-4 py-16">
       <NetworkRedirect />
       <h1 className="vw-wordmark text-2xl sm:text-3xl">gascurve</h1>
       <p className="mt-2 text-[11px] uppercase tracking-[0.18em] text-label">{SITE_TAGLINE}</p>
