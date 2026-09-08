@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.2.0](https://github.com/tirante-dev/gascurve/compare/v1.1.0...v1.2.0) (2026-09-07)
+
+
+### Features
+
+* **web:** define bips on hover ([#52](https://github.com/tirante-dev/gascurve/issues/52)) ([11f4d94](https://github.com/tirante-dev/gascurve/commit/11f4d9450226d01eefe2eb8a45120c0a8597646e))
+* **web:** make the live hero readable at a glance ([#57](https://github.com/tirante-dev/gascurve/issues/57)) ([bce2ecb](https://github.com/tirante-dev/gascurve/commit/bce2ecbb214501e83f435382a0fd632dd8e61b47))
+
+
+### Bug Fixes
+
+* **collector:** backfill poster gas for blocks stored without receipts ([#47](https://github.com/tirante-dev/gascurve/issues/47)) ([8b470f8](https://github.com/tirante-dev/gascurve/commit/8b470f8694b30e4f64039699578e6e78fd335f52))
+* **collector:** require a streak of failures to fail readiness ([#48](https://github.com/tirante-dev/gascurve/issues/48)) ([92ae302](https://github.com/tirante-dev/gascurve/commit/92ae3029425637ef2179126866dd015fb7a3de7b))
+* **web:** make the USD working discoverable ([#49](https://github.com/tirante-dev/gascurve/issues/49)) ([465ae7a](https://github.com/tirante-dev/gascurve/commit/465ae7a11d671097a08a534e34516211b4a0df16))
+* **web:** open the fee flow USD notes as notes, not titles ([#54](https://github.com/tirante-dev/gascurve/issues/54)) ([e470684](https://github.com/tirante-dev/gascurve/commit/e4706846b6af160763829bd4e44990ec2564299f))
+* **web:** shade the buckets a series has no data for ([#53](https://github.com/tirante-dev/gascurve/issues/53)) ([522afb8](https://github.com/tirante-dev/gascurve/commit/522afb806d719775cbcf5b8ffe6a834b8666a662))
+
 ## [1.1.0](https://github.com/tirante-dev/gascurve/compare/v1.0.1...v1.1.0) (2026-09-07)
 
 
