@@ -5,7 +5,6 @@ import { useApi } from "@/hooks/useApi";
 import { useNetwork } from "@/hooks/useNetwork";
 import { useNetworkLive } from "@/hooks/useNetworkLive";
 import { useSeries } from "@/hooks/useSeries";
-import { useTicker } from "@/hooks/useTicker";
 import { getOwnerActions } from "@/lib/api/constraints";
 import { getStatus, listNetworks } from "@/lib/api/networks";
 import type { OwnerAction, SeriesRange } from "@/types";
@@ -56,7 +55,6 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
     seenReorgs.current = live.reorgs;
     refreshOwnerActions();
   }, [live.reorgs, refreshOwnerActions]);
-  const now = useTicker(1000);
   const actions = useMemo(() => mergeActions(ownerActions.data, live.ownerActions), [ownerActions.data, live.ownerActions]);
   const info = live.networkInfo ?? (networks.data ? findNetwork(networks.data, name) : undefined) ?? null;
   const unknown = isUnknownNetwork(networks.data, name);
@@ -121,7 +119,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         </Section>
 
         <Section id="fees" title="Fee flows">
-          <FeeFlows network={name} range={range} snapshot={snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} nowMs={now} />
+          <FeeFlows network={name} range={range} snapshot={snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} />
         </Section>
 
         <Section id="l1" title="L1">
@@ -133,7 +131,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
         </Section>
       </main>
 
-      <DataFooter snapshot={snapshot} series={series.data} networkInfo={info} status={live.status} apiStatus={apiStatus.data} now={now} />
+      <DataFooter snapshot={snapshot} series={series.data} networkInfo={info} status={live.status} apiStatus={apiStatus.data} />
     </div>
   );
 }
