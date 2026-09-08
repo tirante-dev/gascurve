@@ -535,7 +535,7 @@ func (f *Follower) seedWindow(ctx context.Context, c *backfillCursor) error {
 	}
 	// The depth is where the descent bottoms out, and bounds the subtraction with it.
 	floor, first := c.SegStart, c.DepthStart
-	if c.End > window+c.DepthStart {
+	if pricer.SaturatingUSub(c.End, c.DepthStart) > window {
 		first = c.End - window
 	}
 	if first < floor+2 {
