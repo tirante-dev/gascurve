@@ -722,7 +722,8 @@ func TestBackfillDepthHoldIsIdempotent(t *testing.T) {
 		t.Fatalf("first floor: %+v %v", c, err)
 	}
 	for range 2 {
-		held := newTestFollower(t, rpc, store)
+		fresh := newFakeRPC(1000)
+		held := newTestFollower(t, fresh, store)
 		held.cfg.BackfillDepth = config.Hold
 		if err := held.Tick(ctx); err != nil {
 			t.Fatal(err)
@@ -734,6 +735,11 @@ func TestBackfillDepthHoldIsIdempotent(t *testing.T) {
 		if c, err = held.loadCursor(ctx); err != nil || c.DepthTarget != 700 || c.DepthStart != 700 {
 			t.Fatalf("held cursor: %+v %v", c, err)
 		}
+		// The held floor is the one already recorded, so no cutoff is searched
+		// for: it is the search, not the comparison, that hold avoids here.
+		if calls := fresh.calledTimes("HeaderByNumber"); calls != 0 {
+			t.Fatalf("a held depth resolves no cutoff: %d header reads", calls)
+		}
 	}
 	if b, err := store.BlockByNumber(ctx, 4663, 499); err != nil || b != nil {
 		t.Fatalf("nothing below the held floor may be replayed: %+v %v", b, err)
@@ -741,70 +747,66 @@ func TestBackfillDepthHoldIsIdempotent(t *testing.T) {
 }
 
 // TestBackfillDepthHoldThenWidened: a held floor is not a state to be dug out
-// of. Widening again resumes below it and rebuilds the same history, fold for
-// fold, as a walk that was never held: the run the hold let finish is not
-// counted a second time.
+// of. The run in flight finishes, so its blocks are folded once and once only,
+// and widening again resumes below the held floor rather than over it. The
+// chain is long enough to have an hour below the live start's, where buckets
+// fold additively: inside the boundary hour they are rebuilt from rows, which
+// would mask a block counted twice.
 func TestBackfillDepthHoldThenWidened(t *testing.T) {
 	ctx := context.Background()
-	archive := newFakeRPC(1000)
-	control := dbtest.New()
-	seedSets(t, control)
-	straight := newTestFollower(t, newFakeRPC(1000), control)
-	straight.archive = archive
-	straight.cfg.BackfillWindow = 100
-	straight.cfg.BackfillDepth = config.Genesis
-	if err := straight.Tick(ctx); err != nil {
-		t.Fatal(err)
-	}
-	runBackfill(t, straight, 400)
-
+	rpc := newFakeRPC(40_000) // ts base + 4000 s, so the hour from base is additive
+	archive := newFakeRPC(40_000)
 	store := dbtest.New()
-	seedSets(t, store)
-	f := newTestFollower(t, newFakeRPC(1000), store)
-	f.archive = archive
-	f.cfg.BackfillWindow = 100
-	f.cfg.BackfillDepth = config.Genesis
-	if err := f.Tick(ctx); err != nil {
+	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 4663, EffectiveBlock: 100,
+		EffectiveAt: baseTime.Add(10 * time.Second), Source: model.SourceGenesis,
+		Constraints: entriesJSON([]model.ConstraintSetEntry{{Target: 60_000_000, Window: 15}, {Target: 40_000_000, Window: 86_400}})}); err != nil {
 		t.Fatal(err)
 	}
+	deep := func(depth config.Depth) *Follower {
+		f := newTestFollower(t, rpc, store, func(o *Options) { o.Network.CallsPerSecond = 0 })
+		f.archive = archive
+		f.now = func() time.Time { return baseTime.Add(4000 * time.Second) }
+		f.cfg.HeaderBatchSize = 100
+		f.cfg.BackfillWindow = 5000
+		f.cfg.BackfillDepth = depth
+		if err := f.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	boundary := baseTime.Add(3600 * time.Second)
+	f := deep(config.Genesis)
 	scanned(f)
-	for i := 0; i < 4; i++ {
+	for i := range 3 {
 		if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
 			t.Fatalf("step %d: %v %v", i, st, err)
 		}
 	}
-	held := newTestFollower(t, newFakeRPC(1000), store)
-	held.archive = archive
-	held.cfg.BackfillWindow = 100
-	held.cfg.BackfillDepth = config.Hold
-	if err := held.Tick(ctx); err != nil {
-		t.Fatal(err)
+	c, err := f.loadCursor(ctx)
+	if err != nil || !c.Active || c.SegStart != 35_000 || c.Next >= c.End {
+		t.Fatalf("mid descent: %+v %v", c, err)
 	}
-	runBackfill(t, held, 50)
 
-	deep := newTestFollower(t, newFakeRPC(1000), store)
-	deep.archive = archive
-	deep.cfg.BackfillWindow = 100
-	deep.cfg.BackfillDepth = config.Genesis
-	if err := deep.Tick(ctx); err != nil {
-		t.Fatal(err)
+	runBackfill(t, deep(config.Hold), 100)
+	if c, err = f.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 35_000 || c.End != 35_000 {
+		t.Fatalf("held cursor: %+v %v", c, err)
 	}
-	runBackfill(t, deep, 400)
-	c, err := deep.loadCursor(ctx)
-	if err != nil || !c.Done || c.DepthTarget != 1 || c.End != 1 {
+	// The run in flight ran to its own floor rather than stopping where the
+	// hold found it, so the additive hour holds the whole of its lower half.
+	early, _ := store.Buckets(ctx, 4663, db.Resolution1h, baseTime, boundary)
+	if len(early) != 1 || early[0].Blocks != 1000 || early[0].LastBlock != 35_999 {
+		t.Fatalf("the held run must finish: %+v", early)
+	}
+
+	runBackfill(t, deep(config.Genesis), 600)
+	if c, err = f.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 1 || c.End != 1 {
 		t.Fatalf("widened cursor: %+v %v", c, err)
 	}
-	want, err := control.Buckets(ctx, 4663, db.Resolution1m, baseTime, baseTime.Add(time.Minute))
-	if err != nil || len(want) != 1 || want[0].Blocks != 500 {
-		t.Fatalf("control buckets: %+v %v", want, err)
-	}
-	got, err := store.Buckets(ctx, 4663, db.Resolution1m, baseTime, baseTime.Add(time.Minute))
-	if err != nil || len(got) != 1 {
-		t.Fatalf("held buckets: %+v %v", got, err)
-	}
-	if got[0].Blocks != want[0].Blocks || got[0].GasUsed != want[0].GasUsed {
-		t.Fatalf("a held and resumed walk folds every block once: %d/%d blocks, %d/%d gas",
-			got[0].Blocks, want[0].Blocks, got[0].GasUsed, want[0].GasUsed)
+	// Blocks 100 (the earliest constraint set) to 35_999 (the last before the
+	// boundary hour), each folded exactly once. A run resumed over a range the
+	// hold had already folded would push this above 35_900.
+	if early, _ = store.Buckets(ctx, 4663, db.Resolution1h, baseTime, boundary); len(early) != 1 || early[0].Blocks != 35_900 {
+		t.Fatalf("a held and resumed walk folds every block once: %+v", early)
 	}
 }
 
@@ -813,24 +815,34 @@ func TestBackfillDepthHoldThenWidened(t *testing.T) {
 // asks for live data and no history at all.
 func TestBackfillDepthHoldWithNothingBuilt(t *testing.T) {
 	ctx := context.Background()
-	rpc := newFakeRPC(1000)
 	store := dbtest.New()
 	seedSets(t, store)
-	f := newTestFollower(t, rpc, store)
+	f := newTestFollower(t, newFakeRPC(1000), store)
 	f.cfg.BackfillDepth = config.Hold
 	if err := f.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	scanned(f)
-	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillDone {
+	// The head has moved on since the live start, so a floor resolved from the
+	// configuration would land above it rather than on it.
+	later := newFakeRPC(1500)
+	held := newTestFollower(t, later, store)
+	held.cfg.BackfillDepth = config.Hold
+	if err := held.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(held)
+	if st, err := held.BackfillStep(ctx); err != nil || st != BackfillDone {
 		t.Fatalf("a held backfill with nothing built is done: %v %v", st, err)
 	}
-	c, err := f.loadCursor(ctx)
+	c, err := held.loadCursor(ctx)
 	if err != nil || !c.Done || c.DepthTarget != 1000 || c.DepthStart != 1000 {
 		t.Fatalf("held cursor: %+v %v", c, err)
 	}
 	if b, err := store.BlockByNumber(ctx, 4663, 999); err != nil || b != nil {
 		t.Fatalf("a held chain reconstructs nothing: %+v %v", b, err)
+	}
+	if calls := later.calledTimes("HeaderByNumber"); calls != 0 {
+		t.Fatalf("a held depth resolves no cutoff: %d header reads", calls)
 	}
 }
 
