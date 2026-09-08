@@ -482,10 +482,11 @@
     },
     "backfillDepth": {
       "title": "History depth",
-      "description": "How far back the owner scan and the resumable backfill reach: a positive Go duration, or \"genesis\" for the whole chain from the first block. Widening it takes effect on the next collector start without touching the database; narrowing it keeps the history already built. See the full-chain history section of charts/gascurve/README.md before setting genesis: the cost is time, not storage.",
+      "description": "How far back the owner scan and the resumable backfill reach: a positive Go duration, \"genesis\" for the whole chain from the first block, or \"hold\" to keep the floor the backfill has already reached and stop descending. Widening it takes effect on the next collector start without touching the database; a shorter duration is ignored, since it cannot be told from the window sliding forward. See the full-chain history section of charts/gascurve/README.md before setting genesis: the cost is time, not storage.",
       "oneOf": [
         { "$ref": "#/definitions/duration" },
-        { "const": "genesis" }
+        { "const": "genesis" },
+        { "const": "hold" }
       ]
     },
     "duration": {

@@ -260,7 +260,19 @@ A zero or negative duration is refused at load, so a stray value cannot start a 
 
 **Set `archive: true`** on an endpoint that serves historical `eth_call` before asking for genesis. A chain with a genesis `setGasPricingConstraints` set (`robinhood`, `arbitrum-one`, `arbitrum-sepolia`) replays from that set and needs nothing else. A legacy chain (`robinhood-testnet` has no constraint sets at all) has nothing to replay from, so the collector samples the state at block 1 and records it as the scan origin; the replay then starts at block 2, since block 1's own state is what the sample describes. Without an archive endpoint nothing below the earliest recorded constraint set can be priced: that range is reported as missing rather than guessed, and on a legacy chain the depth buys nothing at all.
 
-**Changing the depth later** no longer needs the database dropped. Widening it (a longer duration, or `genesis`) lowers the floor on the next start, extends the owner scan down to meet the new cutoff and resumes the backfill below what it had already built. Narrowing it is logged and otherwise ignored: history already built is kept. Every one of those decisions is logged at info, so `kubectl logs` says what a redeploy did. Use `history_epoch` only to rebuild history you want replaced (after giving a network an archive endpoint, say), not to widen the depth.
+**Changing the depth later** no longer needs the database dropped. Widening it (a longer duration, or `genesis`) lowers the floor on the next start, extends the owner scan down to meet the new cutoff and resumes the backfill below what it had already built. A shorter duration is logged and otherwise ignored, because it is also what a window measured back from a growing head looks like and honouring it would hand history back on every restart of an unchanged values file. Every one of those decisions is logged at info, so `kubectl logs` says what a redeploy did.
+
+**Backing out of a walk** is `hold`, the word that says a narrowing deliberately:
+
+```yaml
+config:
+  collector:
+    backfill_depth: hold
+```
+
+It keeps every bucket already reconstructed and abandons the rest of the descent, so a `genesis` walk three days into its nine stops within one `backfill_window` (the run in flight finishes, which is what keeps its blocks from being folded a second time later) and reports `done` at the floor it reached. Nothing is deleted and nothing is lost: put a duration or `genesis` back later and the walk resumes below the held floor. On a chain that has reconstructed nothing yet, `hold` holds at the first live block, which is how a deployment asks for live data and no history at all. Note that `backfill_depth` is collector-wide, so `hold` holds every network the collector follows.
+
+**Reclaiming the history below a shorter depth** is a different thing and a destructive one. Buckets are never deleted by pruning or by a narrowed depth, so holding stops the cost without recovering the storage (which, per above, is not the constraint anyway). To actually discard what is below a shorter depth, set that depth and raise the network's `history_epoch`: the reconstructed buckets, the backfill cursor and the owner-scan checkpoints are dropped and rebuilt to the depth now configured. That is a rebuild rather than a trim, so the retained window is walked again, and the only way back is to backfill the discarded range once more. Use `history_epoch` for history you want replaced (after giving a network an archive endpoint, say), never to widen the depth.
 
 **Batch response limits.** A from-genesis backfill walks four times more chain than the default window and is correspondingly more likely to meet a range whose headers plus receipts exceed the node's response cap. The collector halves its batch cap when an endpoint refuses a batch as too large and recovers a step per quiet minute, so it finds the working width on its own. On a self-hosted nitro node, raising `--rpc.max-batch-response-size` above the 10 MB default lets it stay at `header_batch_size: 100` (200 items per batch) and is worth doing before starting a walk this long.
 

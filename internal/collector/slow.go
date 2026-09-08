@@ -350,6 +350,14 @@ func (f *Follower) extendScanOrigin(ctx context.Context, head, gen uint64) error
 	if checked {
 		return nil
 	}
+	if f.cfg.BackfillDepth.IsHold() {
+		// A held depth asks for nothing further down, so there is nothing to lower the origin to and no
+		// reason to spend the header search that would say so. Left where it is rather than raised: an
+		// origin below the held floor costs nothing, and a later widening finds its range already scanned.
+		f.log.Info("backfill depth held, the owner scan origin stays where it is", "origin", origin.block())
+		f.markScanExtended()
+		return nil
+	}
 	cutoff, err := f.depthCutoff(ctx, head, originMargin)
 	if err != nil {
 		return err

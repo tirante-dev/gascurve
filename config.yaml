@@ -34,7 +34,12 @@ collector:
                              # however old the chain is: buckets are permanent (prune never deletes them), so the
                              # cost is time, not storage, and a whole 57M-block chain is days of backfill.
                              # Widening it on a running collector extends the floor on the next start and logs
-                             # what it did; narrowing it is reported and otherwise ignored.
+                             # what it did; a shorter duration is reported and otherwise ignored, since it cannot
+                             # be told from the window sliding forward as the chain grows. "hold" is how a
+                             # narrowing is said deliberately: it keeps everything already reconstructed and
+                             # abandons the rest of the descent, once the run in flight has finished. To discard
+                             # history below a shorter depth as well, set that depth and raise the network's
+                             # history_epoch, which rebuilds from scratch.
   backfill_anchor_interval: 1000  # blocks between state anchors when a network is archive: true
   backfill_window: 10000     # blocks per backfill run on archive networks: history is reconstructed
                              # newest first, a window at a time, each seeded from archive state.
@@ -102,7 +107,9 @@ collector:
 #            finished and its buckets are never revisited. The rebuild
 #            drops the backfill's buckets and checkpoints and replays them
 #            again, anchored this time; block rows, owner actions and
-#            constraint sets are kept. Environment:
+#            constraint sets are kept. Raising it alongside a shorter
+#            backfill_depth is also how history below the new floor is
+#            discarded, since nothing else deletes a bucket. Environment:
 #            NETWORK_<NAME>_HISTORY_EPOCH.
 #   fallbacks: further endpoints for the same chain, each with the same four
 #            fields (rpc_url, ws_url, archive, calls_per_second) and its own

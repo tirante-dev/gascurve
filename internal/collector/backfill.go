@@ -291,13 +291,14 @@ func (f *Follower) historyReady() bool {
 	return f.ownerScanThrough > 0 && f.liveStart != nil && f.ownerScanThrough+1 >= f.liveStart.Block
 }
 
-// resolveDepth settles the floor the backfill walks down to, and re-opens a finished backfill when
-// that floor moves down. The configured depth is resolved once per process, since it only changes
-// across a restart and each resolution costs a binary search over headers; the target it produces
-// only ever falls, so the window sliding forward as the chain grows never gives back history already
-// built, and a depth an operator has narrowed is reported rather than acted on. The owner scan origin
-// clamps the effective floor without touching the target, so a scan later extended down to meet a
-// widened depth (see extendScanOrigin) puts the rest of the range back to work.
+// resolveDepth settles the floor the backfill walks down to, re-opens a finished backfill when that
+// floor moves down, and settles a held one where it has reached. The configured depth is resolved
+// once per process, since it only changes across a restart and each resolution costs a binary search
+// over headers; a duration only ever lowers the target, so the window sliding forward as the chain
+// grows never gives back history already built, and a narrower one is reported rather than acted on.
+// config.Hold is the one thing that raises it. The owner scan origin clamps the effective floor
+// without touching the target, so a scan later extended down to meet a widened depth (see
+// extendScanOrigin) puts the rest of the range back to work.
 func (f *Follower) resolveDepth(ctx context.Context, c *backfillCursor, gen uint64) error {
 	f.mu.Lock()
 	resolved, origin := f.depthResolved, f.scanOrigin
@@ -342,15 +343,21 @@ func (f *Follower) resolveDepth(ctx context.Context, c *backfillCursor, gen uint
 	return nil
 }
 
-// resolveDepthTarget reads the configured depth into the cursor's target, never raising one already
-// recorded: a floor once reached is history the operator has, and a shallower configuration is a
-// reason to stop going deeper rather than to discard it. A cursor written before the target existed
-// carries only the floor it settled on, which is that same history and so seeds the target: reading
-// the configuration into it instead would raise the floor of every unfinished backfill on upgrade,
-// since the window has slid forward since it was first resolved.
+// resolveDepthTarget reads the configured depth into the cursor's target. A duration never raises a
+// target already recorded: a floor once reached is history the operator has, and a shallower window
+// cannot be told apart from one that has slid forward. config.Hold is how a narrowing is said
+// deliberately, and is the only thing that raises the target.
+//
+// A cursor written before the target existed carries only the floor it settled on, which is that same
+// history and so seeds the target: reading the configuration into it instead would raise the floor of
+// every unfinished backfill on upgrade, since the window has slid forward since it was resolved.
 func (f *Follower) resolveDepthTarget(ctx context.Context, c *backfillCursor) error {
 	if c.DepthTarget == 0 {
 		c.DepthTarget = c.DepthStart
+	}
+	if f.cfg.BackfillDepth.IsHold() {
+		f.holdDepthTarget(c)
+		return nil
 	}
 	start, err := f.findDepthCutoff(ctx, 0)
 	if err != nil {
@@ -369,6 +376,38 @@ func (f *Follower) resolveDepthTarget(ctx context.Context, c *backfillCursor) er
 			"depth", f.cfg.BackfillDepth.String(), "floor", c.DepthTarget, "configured", want)
 	}
 	return nil
+}
+
+// holdDepthTarget raises the target to where the descent has reached, abandoning the rest of it and
+// keeping everything already reconstructed. The run in flight is left to finish rather than cut off
+// halfway: its blocks are folded additively below the history above them, and a later widening
+// starting a fresh run over the same range would fold them a second time.
+func (f *Follower) holdDepthTarget(c *backfillCursor) {
+	floor := f.heldFloor(c)
+	if floor == 0 || floor <= c.DepthTarget {
+		return
+	}
+	f.log.Info("backfill depth held, keeping the floor reached and abandoning the rest of the descent",
+		"floor", floor, "previousTarget", c.DepthTarget)
+	c.DepthTarget = floor
+}
+
+// heldFloor is where a held descent settles: the bottom of the run in flight, else the bottom of the
+// history already reconstructed, else the first live block, which is what a chain that has backfilled
+// nothing yet holds at. Zero when even that is unknown, which leaves the target alone until it is.
+func (f *Follower) heldFloor(c *backfillCursor) uint64 {
+	if c.Active && c.SegStart > 0 {
+		return c.SegStart
+	}
+	if c.End > 0 {
+		return c.End
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.liveStart == nil {
+		return 0
+	}
+	return f.liveStart.Block
 }
 
 // checkCursor runs once per process: an active live-model segment (SetID 0) that was not verified
@@ -754,7 +793,10 @@ func (f *Follower) historyDepth(d time.Duration) time.Duration {
 
 // depthCutoff is the first block collector.backfill_depth reaches below head, margin further back
 // still. Genesis is block 0 and needs no search: every caller reads that as the first block, and
-// blockAt would spend a header read per halving to arrive at the same answer.
+// blockAt would spend a header read per halving to arrive at the same answer. A held depth asks for
+// no window at all, so what is left is the margin: a scan that has none of its own to resume covers
+// the last few minutes and reports everything below as missing, which is what holding at the first
+// live block means for the owner timeline.
 func (f *Follower) depthCutoff(ctx context.Context, head uint64, margin time.Duration) (uint64, error) {
 	if f.cfg.BackfillDepth.IsGenesis() {
 		return 0, nil
