@@ -678,7 +678,24 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	h.Next, h.State = from+n, end
 	h.CursorAt = time.Unix(int64(headers[len(headers)-1].Timestamp), 0).UTC().Format(time.RFC3339)
 	h.Lifecycle, h.NextRetryAt, h.LastError = rangePending, "", ""
-	return FillProgressed, f.commitFill(ctx, gen, h, rows, filledTail, h.Next > h.To)
+	if err := f.commitFill(ctx, gen, h, rows, filledTail, h.Next > h.To); err != nil {
+		return FillProgressed, err
+	}
+	f.noteFilledHead(filledTail)
+	return FillProgressed, nil
+}
+
+// noteFilledHead republishes the replay error when the fill gave the current head its prediction.
+// Without it the next snapshot keeps reporting the head's old error until a new block arrives.
+func (f *Follower) noteFilledHead(filled *db.Block) {
+	if filled == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if filled.Number == f.head {
+		f.lastErrBips = db.ReplayErrorBips(*filled)
+	}
 }
 
 // startAmong reports whether start is one of starts.

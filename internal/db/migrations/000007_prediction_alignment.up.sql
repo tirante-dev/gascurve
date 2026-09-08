@@ -17,25 +17,51 @@ COMMENT ON COLUMN blocks.exponent_bips IS
 COMMENT ON COLUMN blocks.constraint_bips IS
     'per-constraint shares of exponent_bips; NULL when there is no prediction or none was recorded';
 
+-- A row only takes its predecessor's group when that predecessor is the parent
+-- it actually builds on. Adjacent numbers are not enough: a partially repaired
+-- reorg can leave a row whose parent_hash names a block the stored predecessor
+-- is not. Rows written before hashes were stored carry '' and cannot be
+-- checked, matching the collector's own convention.
 WITH shifted AS (
     SELECT chain_id,
            number,
-           LAG(predicted_base_fee) OVER w AS fee,
-           LAG(exponent_bips) OVER w      AS exponent,
-           LAG(constraint_bips) OVER w    AS bips,
-           LAG(number) OVER w             AS parent
-    FROM blocks
-    WINDOW w AS (PARTITION BY chain_id ORDER BY number)
+           fee,
+           exponent,
+           bips,
+           parent = number - 1
+               AND (parent_hash = '' OR own_parent_hash = '' OR parent_hash = own_parent_hash) AS links
+    FROM (
+        SELECT chain_id,
+               number,
+               parent_hash                    AS own_parent_hash,
+               LAG(predicted_base_fee) OVER w AS fee,
+               LAG(exponent_bips) OVER w      AS exponent,
+               LAG(constraint_bips) OVER w    AS bips,
+               LAG(number) OVER w             AS parent,
+               LAG(hash) OVER w               AS parent_hash
+        FROM blocks
+        WINDOW w AS (PARTITION BY chain_id ORDER BY number)
+    ) neighbours
 )
 UPDATE blocks b
-SET predicted_base_fee = CASE WHEN s.parent = b.number - 1 THEN s.fee END,
-    exponent_bips      = CASE WHEN s.parent = b.number - 1 THEN s.exponent ELSE 0 END,
-    constraint_bips    = CASE WHEN s.parent = b.number - 1 THEN s.bips END
+SET predicted_base_fee = CASE WHEN s.links THEN s.fee END,
+    exponent_bips      = CASE WHEN s.links THEN s.exponent ELSE 0 END,
+    constraint_bips    = CASE WHEN s.links THEN s.bips END
 FROM shifted s
 WHERE s.chain_id = b.chain_id AND s.number = b.number;
 
--- Stored buckets folded the misaligned per-block error, and the blocks behind
--- the older ones are no longer retained, so the aggregate cannot be recomputed.
--- Clearing it reports no error until the buckets are folded again, which is
--- honest where keeping a number that measured the wrong thing is not.
+-- A bucket copies the pricing group of its last block, so the shift above left
+-- every stored bucket describing the block before the one it names. Rejoin on
+-- last_block to take the aligned group. A bucket whose last block has aged out
+-- keeps a group that is one block stale and cannot be recovered.
+UPDATE buckets b
+SET exponent_end_bips   = bl.exponent_bips,
+    constraint_bips_end = bl.constraint_bips
+FROM blocks bl
+WHERE bl.chain_id = b.chain_id AND bl.number = b.last_block;
+
+-- The stored error is a maximum over every block of the bucket, most of which
+-- have aged out, so unlike the end group it cannot be rejoined. It measured the
+-- fee moving between blocks rather than the model, and reporting no error until
+-- the buckets fold again is honest where keeping that number is not.
 UPDATE buckets SET replay_error_bips = 0;

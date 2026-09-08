@@ -620,11 +620,22 @@ func (f *Follower) reloadHeadLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("latest block: %w", err)
 	}
-	f.head, f.headHash, f.prevTs, f.state, f.lastResult, f.lastErrBips = 0, "", 0, nil, nil, 0
+	// A failed tick reloads through here, and a metered public RPC fails ticks routinely. When the
+	// stored head is still the one in memory, the committed result describes it and the pricing group
+	// it carries into the next block survives; a head that moved or forked invalidates it, and the
+	// error is then read back from the stored row rather than reported as a fresh zero.
+	same := last != nil && f.head != 0 && last.Number == f.head && !hashMismatch(last.Hash, f.headHash)
+	if !same {
+		f.lastResult, f.lastErrBips = nil, 0
+	}
+	f.head, f.headHash, f.prevTs, f.state = 0, "", 0, nil
 	if last != nil {
 		f.head = last.Number
 		f.headHash = last.Hash
 		f.prevTs = uint64(last.TS.Unix())
+		if !same {
+			f.lastErrBips = db.ReplayErrorBips(*last)
+		}
 	}
 	return nil
 }

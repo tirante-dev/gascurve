@@ -1706,3 +1706,46 @@ func TestCarryRoundTrip(t *testing.T) {
 		t.Fatalf("an unreadable fee must decode to no prediction: %+v", got)
 	}
 }
+
+// TestReloadHeadKeepsCarryOnAFailedTick: a metered RPC fails ticks routinely and every failure
+// reloads the head. The committed result still describes an unmoved head, so the group it carries
+// into the next block must survive; a head that moved or forked drops it, and the published error
+// then comes from the stored row rather than a fresh zero.
+func TestReloadHeadKeepsCarryOnAFailedTick(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	f := &Follower{chainID: 4663, store: store, log: logger.Nop()}
+	row := db.Block{ChainID: 4663, Number: 100, Hash: "0x64", ParentHash: "0x63", TS: time.Unix(1000, 0).UTC(),
+		BaseFee: db.WeiFromUint64(100), PredictedBaseFee: db.NullWeiFromUint64(90), Backlogs: db.Uint64Array{1},
+		MinBaseFee: db.NullWeiFromUint64(20), PricingVersion: db.PricingFull}
+	if err := store.UpsertBlocks(ctx, []db.Block{row}); err != nil {
+		t.Fatal(err)
+	}
+	f.head, f.headHash = 100, "0x64"
+	f.lastResult = &pricer.Result{Number: 100, Predicted: big.NewInt(7), Exponent: 5}
+	f.lastErrBips = 42
+	if err := f.reloadHeadLocked(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.lastResult == nil || f.lastErrBips != 42 {
+		t.Fatalf("an unmoved head keeps its carry: result=%+v err=%d", f.lastResult, f.lastErrBips)
+	}
+	if got := f.carryLocked(101); !got.known || got.fee.Int64() != 7 {
+		t.Fatalf("the carry must still reach the next block: %+v", got)
+	}
+
+	// A head on another fork invalidates it, and the error comes from the stored row: |90-100|/100.
+	f.headHash = "0xdead"
+	if err := f.reloadHeadLocked(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.lastResult != nil {
+		t.Fatalf("a forked head must drop the carry: %+v", f.lastResult)
+	}
+	if f.lastErrBips != 1000 {
+		t.Fatalf("the published error must come from the stored head, got %d", f.lastErrBips)
+	}
+	if got := f.carryLocked(101); got.known {
+		t.Fatalf("no carry after a fork: %+v", got)
+	}
+}

@@ -483,6 +483,11 @@ func (f *Follower) startSegment(ctx context.Context, c *backfillCursor, gen uint
 	c.PrevTs = 0
 	c.PrevHash = ""
 	c.LastAnchor, c.LastAnchorErrorBips, c.AnchorMinFee = 0, 0, ""
+	// The finished segment's last output prices the first block of the segment above it, which was
+	// written by an earlier step and keeps no prediction. Carrying it across would be wrong (the walk
+	// is backwards, so the two are not adjacent in replay order), and writing it back would mean
+	// updating a row whose bucket may already have been folded additively, where a rebuild loses the
+	// fold. So one block per segment boundary stays unpredicted until the ranges are replayed as one.
 	c.setCarry(prediction{})
 	f.log.Info("backfill segment", "from", c.SegStart, "to", c.End, "setId", c.SetID)
 	return BackfillProgressed, f.withGeneration(ctx, gen, func(s db.Store) error { return f.saveCursor(ctx, s, c) })
