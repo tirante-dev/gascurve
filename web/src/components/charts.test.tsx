@@ -14,7 +14,7 @@ vi.mock("@/lib/api/batches", () => ({ getBatches: (...args: unknown[]) => getBat
 vi.mock("@/lib/api/l1", () => ({ getL1: (...args: unknown[]) => getL1Mock(...args) }));
 
 import { applicableRows, ChartTooltip } from "./ChartTooltip";
-import { HATCH_SPACING, HATCH_STROKE, HatchPattern } from "./primitives";
+import { ChartFrame, HATCH_SPACING, HATCH_STROKE, HatchPattern } from "./primitives";
 import { targetValues } from "@/lib/smoothing";
 import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
@@ -87,6 +87,45 @@ const snapshot: LiveSnapshot = {
   replayErrorBips: 2,
   ethUsd: null,
 };
+
+/**
+ * jsdom lays nothing out, so these read the rule the frame emits rather than a
+ * measured width: the layout itself was checked in a browser at 375 CSS px.
+ * What they are here to catch is a chart pinned to a width its card cannot give
+ * it, which is what made the contribution chart scroll sideways on a phone.
+ */
+describe("ChartFrame", () => {
+  it("clamps the width a chart asks for to the frame it is drawn in", () => {
+    const { rerender } = render(
+      <ChartFrame height={200} minWidth={420} label="a chart">
+        <div />
+      </ChartFrame>,
+    );
+    const frame = () => screen.getByRole("figure").firstElementChild as HTMLElement;
+    expect(frame().style.minWidth).toBe("min(420px, 100%)");
+    rerender(
+      <ChartFrame height={200} label="a chart">
+        <div />
+      </ChartFrame>,
+    );
+    expect(frame().style.minWidth).toBe("min(560px, 100%)");
+  });
+
+  it("draws every chart in a frame that yields to the card, not one that widens it", () => {
+    render(
+      <>
+        <SeriesCharts network="robinhood" range="24h" series={series} loading={false} model="constraints" />
+        <FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={series} model="constraints" nowMs={NOW_MS} />
+        <ConstraintCardsView network="robinhood" snapshot={snapshot} values={null} blocks={[]} />
+      </>,
+    );
+    const frames = screen.getAllByRole("figure");
+    expect(frames.length).toBeGreaterThan(3);
+    for (const figure of frames) {
+      expect((figure.firstElementChild as HTMLElement).style.minWidth).toMatch(/^min\(\d+px, 100%\)$/);
+    }
+  });
+});
 
 describe("SeriesCharts", () => {
   it("draws one series per constraint set with set-aware legends and an explicit unknown-split series", () => {
