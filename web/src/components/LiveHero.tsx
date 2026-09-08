@@ -40,7 +40,6 @@ import {
   formatGwei,
   formatGweiFixed,
   formatInteger,
-  formatPercent,
   formatSignificant,
   formatTick,
   formatTime,
@@ -409,50 +408,7 @@ export const HERO_TERMS = {
   load60: { label: "Network load (60 s)", lines: ["compute gas per second, averaged over the last 60 s", "the same rate over a longer window, so a burst and a trend read apart"] },
   send: { label: "Send", lines: ["a 21,000 gas transfer at the base fee now", "the gas a plain ETH transfer uses, so the smallest transaction there is"] },
   swap: { label: "Swap", lines: ["a 150,000 gas swap at the base fee now", "about what a token swap on a DEX uses"] },
-  split: { label: "Who gets the fee", lines: ["where each unit of compute gas's fee goes", "receipt poster gas is paid separately, to the L1 pricer pool"] },
-  floor: { label: "to infrastructure", lines: ["floor to infra", "the minimum base fee in force goes to the infra fee account"] },
-  congestion: { label: "to the network", lines: ["congestion to network", "everything the pricer charges above the floor goes to the network fee account"] },
 } as const;
-
-/** Where a unit of compute gas's fee goes. Poster gas is paid separately to the L1 pricer. */
-export const FeeSplitBar = memo(function FeeSplitBar({ snapshot }: { snapshot: LiveSnapshot }) {
-  const base = BigInt(snapshot.prices.perArbGasBase);
-  const congestion = BigInt(snapshot.prices.perArbGasCongestion);
-  const total = base + congestion;
-  const floorShare = total > 0n ? Number((base * 10_000n) / total) / 10_000 : 1;
-  const congestionShare = 1 - floorShare;
-  return (
-    <div>
-      <Label>
-        <Term lines={HERO_TERMS.split.lines}>{HERO_TERMS.split.label}</Term>
-      </Label>
-      <div className="mt-2 flex h-3 w-full gap-[2px] overflow-hidden rounded-sm" role="img" aria-label={`Floor ${formatPercent(floorShare)} to the infra account, congestion ${formatPercent(congestionShare)} to the network account`}>
-        <div style={{ width: `${Math.max(1, floorShare * 100)}%`, background: "var(--seq-2)" }} />
-        <div style={{ width: `${Math.max(0, congestionShare * 100)}%`, background: "var(--seq-8)" }} />
-      </div>
-      <dl className="mt-2 grid grid-cols-2 gap-x-3 text-xs text-ink-2">
-        <div>
-          <dt className="flex items-center gap-1.5">
-            <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-[2px]" style={{ background: "var(--seq-2)" }} aria-hidden="true" />
-            <Term lines={HERO_TERMS.floor.lines}>{HERO_TERMS.floor.label}</Term>
-          </dt>
-          <dd className="num mt-0.5 text-ink">
-            {formatGwei(snapshot.prices.perArbGasBase)} gwei · {formatPercent(floorShare, 0)}
-          </dd>
-        </div>
-        <div>
-          <dt className="flex items-center gap-1.5">
-            <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-[2px]" style={{ background: "var(--seq-8)" }} aria-hidden="true" />
-            <Term lines={HERO_TERMS.congestion.lines} align="end">{HERO_TERMS.congestion.label}</Term>
-          </dt>
-          <dd className="num mt-0.5 text-ink">
-            {formatGwei(snapshot.prices.perArbGasCongestion)} gwei · {formatPercent(congestionShare, 0)}
-          </dd>
-        </div>
-      </dl>
-    </div>
-  );
-});
 
 /**
  * "Since last block" is the chain's own cadence. Once the sample itself is
@@ -739,8 +695,6 @@ export function LiveHeroView({
             <CostTile label={<Term lines={HERO_TERMS.send.lines}>{HERO_TERMS.send.label}</Term>} eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} />
             <CostTile label={<Term lines={HERO_TERMS.swap.lines} align="end">{HERO_TERMS.swap.label}</Term>} eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} align="end" />
           </div>
-
-          <FeeSplitBar snapshot={snapshot} />
         </div>
 
         <div className="flex flex-col gap-3 lg:col-span-8">
