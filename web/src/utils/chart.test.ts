@@ -495,9 +495,10 @@ describe("L1 cost join", () => {
     const fees = resamplePosterFees(
       [
         point({ t: 60, posterFeesWei: "1000000000000000000" }),
-        point({ t: 72, posterFeesWei: "500000000000000000" }),
+        point({ t: 90, posterFeesWei: "500000000000000000" }),
       ],
       60,
+      30,
     );
     expect([...fees.entries()]).toEqual([[60, { t: 60, posterEth: 1.5, coverage: 1, completeness: "complete" }]]);
     const buckets = resampleBatches(
@@ -520,8 +521,38 @@ describe("L1 cost join", () => {
         point({ t: 5, posterFeesWei: null, coverage: 0.5, completeness: "partial" }),
       ],
       15,
+      5,
     );
     expect(fees.get(0)).toEqual({ t: 0, posterEth: null, coverage: 0.5, completeness: "partial" });
+  });
+  it("marks a target bucket partial when a source interval is absent", () => {
+    const fees = resamplePosterFees(
+      [point({ t: 0, posterFeesWei: "100000000000000000" }), point({ t: 10, posterFeesWei: "100000000000000000" })],
+      15,
+      5,
+    );
+    expect(fees.get(0)).toEqual({ t: 0, posterEth: 0.2, coverage: 2 / 3, completeness: "partial" });
+  });
+  it("weights coverage by source duration and lets unknown completeness dominate partial", () => {
+    const weighted = resamplePosterFees(
+      [
+        point({ t: 0 }),
+        point({ t: 5 }),
+        point({ t: 10, coverage: 0.5, completeness: "partial" }),
+      ],
+      15,
+      5,
+    );
+    expect(weighted.get(0)).toMatchObject({ coverage: 5 / 6, completeness: "partial" });
+    const unknown = resamplePosterFees(
+      [
+        point({ t: 0, coverage: 0.5, completeness: "partial" }),
+        point({ t: 5, coverage: null, completeness: "unknown" }),
+      ],
+      10,
+      5,
+    );
+    expect(unknown.get(0)).toMatchObject({ coverage: null, completeness: "unknown" });
   });
   it("keeps the union of poster-fee and cost buckets without inventing poster-fee zeroes", () => {
     // Two reports at seconds 0 and 12 of the same 15 s bucket, users paid 0.25 ETH in it.
@@ -530,6 +561,7 @@ describe("L1 cost join", () => {
         point({ t: 3, posterFeesWei: "250000000000000000" }),
         point({ t: 18, posterFeesWei: "500000000000000000" }),
       ],
+      15,
       15,
     );
     const rows = joinCosts(
