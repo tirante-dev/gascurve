@@ -21,7 +21,8 @@ import { emptyRangeNote } from "@/lib/gaps";
 import type { HeroRange } from "@/lib/hero";
 import type { ApiState } from "@/hooks/useApi";
 import type { LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
-import { seriesCount, slotLabel } from "@/utils/chart";
+import { seriesCount, seriesResolutionLabel, slotLabel } from "@/utils/chart";
+import { formatInteger } from "@/utils/format";
 import { findNetwork } from "@/utils/network";
 import { MinimizeIcon } from "./ChartActions";
 import { SawtoothPanel, shortWindowIndices } from "./ConstraintCards";
@@ -30,9 +31,10 @@ import { HISTORY_OPTIONS } from "./HistoryTabs";
 import { L1CostChart, l1CostLegend, useL1Costs } from "./L1Section";
 import { HERO_RANGE_OPTIONS, HeroChartPanel, HeroThroughputPanel, RESYNC_COPY, WAITING_COPY } from "./LiveHero";
 import { PageHeader } from "./PageHeader";
+import { ChartReadout } from "./ChartReadout";
 import { Legend, Section, StatusPill } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
-import { BacklogChart, buildSeriesModel, ContributionChart } from "./SeriesCharts";
+import { BacklogChart, bucketRowTitle, buildSeriesModel, ContributionChart } from "./SeriesCharts";
 import { TaylorChart } from "./TaylorChart";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -100,6 +102,7 @@ function ThroughputBody({ live, range, series, model }: { live: SmoothedLive; ra
       blocks={frame.blocks}
       places={frame.places}
       nowMs={frame.nowMs}
+      constraints={live.display?.constraints}
       range={range}
       series={series.data}
       seriesLoading={series.loading}
@@ -216,16 +219,48 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
       case "taylor":
         return { chart: <TaylorChart snapshot={snapshot} height={DETAIL_FRAME_CLASS} heading={false} /> };
       case "contribution":
-        return { legend: m ? <Legend items={m.contributionLegend} /> : null, chart: m && note === null ? <ContributionChart m={m} height={DETAIL_FRAME_CLASS} /> : <ChartNote>{note}</ChartNote> };
+        return {
+          legend: m ? <Legend items={m.contributionLegend} /> : null,
+          chart:
+            m && note === null ? (
+              <div className="flex flex-col gap-3">
+                <ContributionChart m={m} height={DETAIL_FRAME_CLASS} />
+                <ChartReadout
+                  points={m.points}
+                  groups={[{ title: "contribution", rows: m.contributionRows }]}
+                  note={m.note}
+                  title={bucketRowTitle}
+                  heading="Bucket inspector"
+                  selectLabel="Select a bucket to read its contribution values"
+                  caption="Every bucket of the contribution chart with its per-constraint contribution and total x"
+                  summary="Contribution to x, as a table"
+                  timeLabel="bucket"
+                />
+              </div>
+            ) : (
+              <ChartNote>{note}</ChartNote>
+            ),
+        };
       case "gas-per-second":
-        // On Live the chart is the block ring, which has no constraint
-        // targets on it and so nothing for a legend to name.
         return { legend: m && range !== "live" ? <Legend items={m.gasLegend} /> : null, chart: <ThroughputBody live={smooth} range={(range ?? "live") as HeroRange} series={series} model={model} /> };
       case "backlogs":
         return {
           chart:
             m && note === null && constraint !== null && series.data ? (
-              <BacklogChart m={m} index={constraint} label={slotLabel(series.data, constraint, model)} height={DETAIL_FRAME_CLASS} />
+              <div className="flex flex-col gap-3">
+                <BacklogChart m={m} index={constraint} label={slotLabel(series.data, constraint, model)} height={DETAIL_FRAME_CLASS} />
+                <ChartReadout
+                  points={m.points}
+                  groups={[{ title: "backlog", rows: m.backlogRowsFor(constraint) }]}
+                  note={m.backlogNoteFor(constraint)}
+                  title={bucketRowTitle}
+                  heading="Bucket inspector"
+                  selectLabel="Select a bucket to read its backlog values"
+                  caption={`Every bucket of the C${constraint + 1} backlog chart with its bucket-end and peak values`}
+                  summary={`C${constraint + 1} backlog, as a table`}
+                  timeLabel="bucket"
+                />
+              </div>
             ) : (
               <ChartNote>{note ?? "This range has no constraint slots to draw."}</ChartNote>
             ),
@@ -240,7 +275,7 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
           legend: <Legend items={l1CostLegend(l1.totals)} />,
           chart:
             l1.rows.length > 0 ? (
-              <L1CostChart rows={l1.rows} span={l1.span} domain={l1.domain} gaps={l1.gaps} height={DETAIL_FRAME_CLASS} />
+              <L1CostChart rows={l1.rows} bucket={l1.bucket} span={l1.span} domain={l1.domain} gaps={l1.gaps} height={DETAIL_FRAME_CLASS} />
             ) : (
               <ChartNote>{l1.batches.error !== null ? `Could not load batches: ${l1.batches.error}` : l1.batches.loading || series.loading ? "Loading batch reports." : "No batch reports in this range."}</ChartNote>
             ),
@@ -299,6 +334,11 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
                   )}
                   {body?.legend}
                 </div>
+              ) : null}
+              {seriesRange !== null && series.data !== null && series.data.points.length > 0 ? (
+                <p className="mb-3 text-xs text-ink-3">
+                  Resolution: <span className="font-medium text-ink-2">{seriesResolutionLabel(series.data.resolution)}</span> · {formatInteger(series.data.points.length)} points. Hover the chart or use its inspector for exact values.
+                </p>
               ) : null}
               {body?.chart}
             </div>

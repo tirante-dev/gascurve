@@ -28,8 +28,8 @@ import {
   type ThroughputPoint,
 } from "@/lib/hero";
 import { assignPlaces, NO_PLACES, SWAP_GAS, targetValues, TRANSFER_GAS, type BlockPlaces, type LiveValues } from "@/lib/smoothing";
-import type { BlockPoint, EthUsd, LiveSnapshot, LiveStatus, OwnerAction, PricerModel, Series } from "@/types";
-import { FLOOR_COLOR, MARKER_COLOR } from "@/utils/chart";
+import type { BlockPoint, Constraint, EthUsd, LiveSnapshot, LiveStatus, OwnerAction, PricerModel, Series } from "@/types";
+import { FLOOR_COLOR, MARKER_COLOR, seriesColor } from "@/utils/chart";
 import {
   FIXED_WIDTH_CH,
   formatDateTime,
@@ -54,7 +54,7 @@ import { EnlargeLink } from "./ChartActions";
 import { GapBands, GapNote } from "./ChartGaps";
 import { buildSeriesModel, bucketRowTitle, GasPerSecondChart } from "./SeriesCharts";
 import { FeeGauge } from "./FeeGauge";
-import { Figure, HoverNote, Label, type NoteAlign, Stat, type StatTone, StatusPill, Term, TIME_AXIS_RIGHT } from "./primitives";
+import { Figure, HoverNote, Label, Legend, type NoteAlign, Stat, type StatTone, StatusPill, Term, TIME_AXIS_RIGHT } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
 
 export { SWAP_GAS, TRANSFER_GAS };
@@ -220,6 +220,10 @@ export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabe
 /** The throughput line: the first series colour, the same one the bucketed view draws its rate in. */
 const THROUGHPUT_COLOR = "var(--series-1)";
 
+type ThroughputConstraint = Pick<Constraint, "target">;
+
+const NO_THROUGHPUT_CONSTRAINTS: readonly ThroughputConstraint[] = [];
+
 /**
  * The height the throughput chart stands at under the hero's base fee chart; the enlarged view passes
  * its own. It is measured against the gauge and the rail of figures beside it, which the two columns
@@ -230,19 +234,30 @@ const THROUGHPUT_COLOR = "var(--series-1)";
 export const HERO_THROUGHPUT_HEIGHT = "h-[120px] lg:h-[240px] page:h-[252px]";
 
 /** What a hovered second on the live throughput chart says: the gas that second carried, in how many blocks, and when it was. */
-export function throughputTooltipRows(): TooltipRow[] {
+export function throughputTooltipRows(constraints: readonly ThroughputConstraint[] = NO_THROUGHPUT_CONSTRAINTS): TooltipRow[] {
   return [
     // A second the ring has a hole across carries no measurement at all, and
     // "0 gas/s" is a different claim from "nobody can say".
     { label: "compute gas in the second", color: THROUGHPUT_COLOR, value: (r) => (typeof r.gas === "number" ? formatGasPerSecond(r.gas) : "n/a") },
     { label: "blocks", value: (r) => (typeof r.blocks === "number" ? formatInteger(r.blocks) : "n/a") },
     { label: "time", value: (r) => formatTime(Number(r.ts)) },
+    ...constraints.map((constraint, i) => ({ label: `target C${i + 1} in force`, color: seriesColor(i), value: () => formatGasPerSecond(constraint.target) })),
   ];
+}
+
+/** The active targets named beside the live chart, with the same dashed marks the chart uses. */
+export function liveThroughputLegend(constraints: readonly ThroughputConstraint[]) {
+  return constraints.map((constraint, i) => ({ label: `target C${i + 1} · ${formatGasPerSecond(constraint.target)}`, color: seriesColor(i), kind: "dash" as const }));
 }
 
 /** The peak of a live throughput series, treating an unmeasured second as nothing. */
 export function throughputPeak(points: readonly ThroughputPoint[]): number {
   return Math.max(0, ...points.map((p) => p.gas ?? 0));
+}
+
+/** The highest live mark the axis must include, whether it is observed load or an active target. */
+export function liveThroughputPeak(points: readonly ThroughputPoint[], constraints: readonly ThroughputConstraint[]): number {
+  return Math.max(throughputPeak(points), ...constraints.map((constraint) => constraint.target));
 }
 
 /** What names a second on the live charts, for the inspector and the data table. */
@@ -256,10 +271,12 @@ const livePointTitle = (row: Record<string, unknown>) => heroPointTitle(Number(r
  * never shifts sideways. Memoised on the points, which move with the frame
  * clock.
  */
-export const HeroThroughputChart = memo(function HeroThroughputChart({ points, height = HERO_THROUGHPUT_HEIGHT }: { points: ThroughputPoint[]; height?: string }) {
+export const HeroThroughputChart = memo(function HeroThroughputChart({ points, constraints = NO_THROUGHPUT_CONSTRAINTS, height = HERO_THROUGHPUT_HEIGHT }: { points: ThroughputPoint[]; constraints?: readonly ThroughputConstraint[]; height?: string }) {
   const span = heroSpan();
   const ticks = useMemo(() => heroTicks(span), [span]);
-  const axis = useMemo(() => throughputAxis(throughputPeak(points)), [points]);
+  const peak = useMemo(() => liveThroughputPeak(points, constraints), [points, constraints]);
+  const axis = useMemo(() => throughputAxis(peak), [peak]);
+  const rows = useMemo(() => throughputTooltipRows(constraints), [constraints]);
   // Seconds the ring can speak for. A null second is drawn as a break, so it
   // is not one of the seconds the description counts.
   const measured = points.filter((p) => p.gas !== null).length;
@@ -268,7 +285,7 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, h
     ? "Compute gas per second, waiting for blocks"
     : measured < 2
       ? "Compute gas per second, receipt data unavailable"
-      : `Compute gas carried per second over the last ${span} seconds, ${measured} seconds of blocks, up to ${formatGasPerSecond(throughputPeak(points))}`;
+      : `Compute gas carried per second over the last ${span} seconds, ${measured} seconds of blocks, up to ${formatGasPerSecond(throughputPeak(points))}${constraints.length > 0 ? `, with ${constraints.length} constraint targets` : ""}`;
   return (
     <ChartBox label={label} busy={waitingForBlocks} height={height}>
       {measured < 2 ? (
@@ -279,8 +296,11 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, h
             <CartesianGrid vertical={false} />
             <XAxis dataKey="x" type="number" domain={[-span, 0]} allowDataOverflow ticks={ticks} tickFormatter={heroTimeLabel} tickLine axisLine={false} height={18} />
             <YAxis domain={[0, axis.top]} ticks={axis.ticks} tickFormatter={(v: number) => throughputTick(v, axis)} tickLine={false} axisLine={false} width={HERO_AXIS_WIDTH} />
-            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={heroPointTitle} rows={throughputTooltipRows()} />} />
+            <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={heroPointTitle} rows={rows} />} />
             <Area type="monotone" dataKey="gas" stroke={THROUGHPUT_COLOR} strokeWidth={1.5} fill={THROUGHPUT_COLOR} fillOpacity={0.12} dot={false} activeDot={{ r: 2.5 }} isAnimationActive={false} />
+            {constraints.map((constraint, i) => (
+              <ReferenceLine key={`${i}-${constraint.target}`} y={constraint.target} stroke={seriesColor(i)} strokeWidth={1} strokeDasharray="4 3" />
+            ))}
           </AreaChart>
         </ResponsiveContainer>
       )}
@@ -303,6 +323,7 @@ export const HeroThroughputPanel = memo(function HeroThroughputPanel({
   seriesLoading = false,
   seriesError = null,
   model = "unknown",
+  constraints = NO_THROUGHPUT_CONSTRAINTS,
   height = HERO_THROUGHPUT_HEIGHT,
   minWidth = 280,
   readout = false,
@@ -317,6 +338,7 @@ export const HeroThroughputPanel = memo(function HeroThroughputPanel({
   seriesLoading?: boolean;
   seriesError?: string | null;
   model?: PricerModel;
+  constraints?: readonly ThroughputConstraint[];
   height?: string;
   minWidth?: number;
   /**
@@ -332,8 +354,13 @@ export const HeroThroughputPanel = memo(function HeroThroughputPanel({
   const placed = usePlaces(blocks, places);
   const points = useMemo(() => (live ? heroThroughputData(blocks, placed, nowMs) : []), [live, blocks, placed, nowMs]);
   const m = useMemo(() => (!live && series ? buildSeriesModel(series, model) : null), [live, series, model]);
+  const liveConstraints = live ? constraints : NO_THROUGHPUT_CONSTRAINTS;
+  const liveRows = useMemo(() => throughputTooltipRows(liveConstraints), [liveConstraints]);
+  const liveLegend = useMemo(() => liveThroughputLegend(liveConstraints), [liveConstraints]);
+  const liveReadout = useMemo<ReadoutGroup[]>(() => [{ title: "second", rows: liveRows }], [liveRows]);
   const rangeLabel = HERO_RANGE_LABELS[range];
-  const liveUnit = useMemo(() => throughputAxis(throughputPeak(points)).unit, [points]);
+  const livePeak = useMemo(() => liveThroughputPeak(points, liveConstraints), [points, liveConstraints]);
+  const liveUnit = useMemo(() => throughputAxis(livePeak).unit, [livePeak]);
   const unit = live ? liveUnit : (m?.gasAxis.unit ?? "Mgas/s");
   // The plain reading first, the measurement after it: what the chart shows a
   // reader who has never met the pricer, then the unit and the span for one who has.
@@ -344,10 +371,13 @@ export const HeroThroughputPanel = memo(function HeroThroughputPanel({
     <>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Caption lead={caption.lead} detail={caption.detail} />
-          {action}
+          <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-2">
+            {liveLegend.length > 0 ? <Legend items={liveLegend} /> : null}
+            {action}
+          </div>
         </div>
         {live ? (
-          <HeroThroughputChart points={points} height={height} />
+          <HeroThroughputChart points={points} constraints={liveConstraints} height={height} />
         ) : seriesError !== null && series === null ? (
           <ChartBox label={`Compute gas per second over ${rangeLabel}, unavailable`} height={height}>
             <ChartNote>Could not load {rangeLabel}: {seriesError}</ChartNote>
@@ -366,7 +396,7 @@ export const HeroThroughputPanel = memo(function HeroThroughputPanel({
         {!readout ? null : live ? (
           <ChartReadout
             points={points}
-            groups={THROUGHPUT_READOUT}
+            groups={liveReadout}
             title={livePointTitle}
             heading="Second inspector"
             selectLabel="Select a second to read its values"
@@ -404,9 +434,6 @@ function RailBand({ children }: { children: ReactNode }) {
     </div>
   );
 }
-
-/** What the live throughput chart reads out without a pointer. */
-const THROUGHPUT_READOUT: ReadoutGroup[] = [{ title: "second", rows: throughputTooltipRows() }];
 
 /**
  * A chart's caption: the plain reading, then the measurement behind it in
@@ -732,6 +759,7 @@ export function LiveHeroView({
             seriesLoading={seriesLoading}
             seriesError={seriesError}
             model={model}
+            constraints={snapshot.constraints}
             action={throughputAction}
           />
         </div>

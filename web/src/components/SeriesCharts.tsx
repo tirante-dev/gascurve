@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useMemo, useState, type ReactNode } from "react";
+import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
 import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { PricerModel, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
@@ -16,6 +16,7 @@ import {
   segmentsFor,
   seriesColor,
   seriesCount,
+  seriesResolutionLabel,
   slotLabel,
   targetKey,
   UNKNOWN_COLOR,
@@ -23,6 +24,7 @@ import {
   UNKNOWN_LABEL,
   spreadUnitLabel,
   unknownBacklogKey,
+  unknownBacklogMaxKey,
   type ChartPoint,
   type Segment,
 } from "@/utils/chart";
@@ -31,7 +33,7 @@ import { EnlargeLink } from "./ChartActions";
 import { GapBands, GapNote, MissingBands, MissingDots, MissingNote } from "./ChartGaps";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { PointInspector } from "./ChartReadout";
-import { ChartFrame, Legend, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
+import { ChartFrame, Legend, TIME_AXIS_RIGHT, type ChartHeight, type SwatchKind } from "./primitives";
 
 const SYNC_ID = "history";
 
@@ -49,6 +51,9 @@ const GAS_AXIS_WIDTH = 74;
  */
 const BAND_FILL_OPACITY = 0.22;
 const BAND_EDGE_OPACITY = 0.55;
+
+/** A neutral envelope behind the coloured end-of-bucket backlog line. */
+const BACKLOG_PEAK_COLOR = "var(--ink-3)";
 
 /** The heights the history charts stand at on the network page; the enlarged views pass their own. */
 export const SERIES_CHART_HEIGHT = 220;
@@ -134,8 +139,8 @@ export type SeriesModel = {
   gasRows: TooltipRow[];
   backlogRows: TooltipRow[];
   backlogRowsFor: (index: number) => TooltipRow[];
-  contributionLegend: { label: string; color: string; kind?: "rect" | "line" }[];
-  gasLegend: { label: string; color: string; kind?: "rect" | "line" }[];
+  contributionLegend: { label: string; color: string; kind?: SwatchKind }[];
+  gasLegend: { label: string; color: string; kind?: SwatchKind }[];
 };
 
 export function buildSeriesModel(series: Series, model: PricerModel): SeriesModel {
@@ -220,19 +225,37 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   const backlogRowsFor = (i: number): TooltipRow[] => [
     ...segments
       .filter((s) => s.index === i)
-      .map((s): TooltipRow => ({
-        label: `backlog ${s.label}`,
-        color: s.color,
-        value: (r) => known(r[s.backlogKey], (v) => formatGas(v)),
-        when: (r) => inForce(s)(r) && typeof r[s.backlogKey] === "number",
-      })),
+      .flatMap(
+        (s): TooltipRow[] => [
+          {
+            label: `backlog at bucket end, ${s.label}`,
+            color: s.color,
+            value: (r) => known(r[s.backlogKey], (v) => formatGas(v)),
+            when: (r) => inForce(s)(r) && typeof r[s.backlogKey] === "number",
+          },
+          {
+            label: `peak backlog in bucket, ${s.label}`,
+            color: BACKLOG_PEAK_COLOR,
+            kind: "rect",
+            value: (r) => known(r[s.backlogMaxKey], (v) => formatGas(v)),
+            when: (r) => inForce(s)(r) && typeof r[s.backlogMaxKey] === "number",
+          },
+        ],
+      ),
     ...(unknown
       ? [
           {
-            label: `backlog C${i + 1} (set unknown)`,
+            label: `backlog at bucket end, C${i + 1} (set unknown)`,
             color: UNKNOWN_COLOR,
             value: (r: Record<string, unknown>) => known(r[unknownBacklogKey(i)], (v) => formatGas(v)),
             when: (r: Record<string, unknown>) => r.setKnown === false && typeof r[unknownBacklogKey(i)] === "number",
+          },
+          {
+            label: `peak backlog in bucket, C${i + 1} (set unknown)`,
+            color: BACKLOG_PEAK_COLOR,
+            kind: "rect" as const,
+            value: (r: Record<string, unknown>) => known(r[unknownBacklogMaxKey(i)], (v) => formatGas(v)),
+            when: (r: Record<string, unknown>) => r.setKnown === false && typeof r[unknownBacklogMaxKey(i)] === "number",
           },
         ]
       : []),
@@ -253,7 +276,7 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   const gasLegend = [
     { label: `compute gas per second (${gasAxis.unit})`, color: "var(--series-1)", kind: "line" as const },
     ...(hasSpread ? [{ label: `min to max per ${spreadUnit}`, color: "var(--series-1)", kind: "rect" as const }] : []),
-    ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "line" as const })) : []),
+    ...(hasTargets ? indices.map((i) => ({ label: `target C${i + 1} (stepped, per set)`, color: seriesColor(i), kind: "dash" as const })) : []),
   ];
 
   return {
@@ -389,7 +412,7 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
 export const BacklogChart = memo(function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }: { m: SeriesModel; index: number; label: string; height?: ChartHeight }) {
   return (
     <>
-      <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
+      <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time, with the backlog at each bucket end and the peak reached inside each bucket`}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             {m.backlogMissingFor(index).length > 0 ? (
@@ -406,10 +429,24 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
             {m.segments
               .filter((s) => s.index === index)
               .map((s) => (
+                <Fragment key={s.backlogMaxKey}>
+                  <Area type="monotone" dataKey={s.backlogMaxKey} connectNulls={false} stroke="none" fill={BACKLOG_PEAK_COLOR} fillOpacity={0.14} isAnimationActive={false} activeDot={false} />
+                  <Area type="monotone" dataKey={s.backlogKey} connectNulls={false} stroke="none" fill="var(--chart)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
+                  <Line type="monotone" dataKey={s.backlogMaxKey} connectNulls={false} stroke={BACKLOG_PEAK_COLOR} strokeWidth={1} strokeDasharray="2 3" dot={false} isAnimationActive={false} activeDot={false} />
+                </Fragment>
+              ))}
+            {m.segments
+              .filter((s) => s.index === index)
+              .map((s) => (
                 <Area key={s.backlogKey} type="monotone" dataKey={s.backlogKey} connectNulls={false} stroke={s.color} strokeWidth={2} fill={s.color} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
               ))}
             {m.unknown ? (
-              <Area type="monotone" dataKey={unknownBacklogKey(index)} connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={2} strokeDasharray="4 3" fill={UNKNOWN_COLOR} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+              <>
+                <Area type="monotone" dataKey={unknownBacklogMaxKey(index)} connectNulls={false} stroke="none" fill={BACKLOG_PEAK_COLOR} fillOpacity={0.14} isAnimationActive={false} activeDot={false} />
+                <Area type="monotone" dataKey={unknownBacklogKey(index)} connectNulls={false} stroke="none" fill="var(--chart)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
+                <Line type="monotone" dataKey={unknownBacklogMaxKey(index)} connectNulls={false} stroke={BACKLOG_PEAK_COLOR} strokeWidth={1} strokeDasharray="2 3" dot={false} isAnimationActive={false} activeDot={false} />
+                <Area type="monotone" dataKey={unknownBacklogKey(index)} connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={2} strokeDasharray="4 3" fill={UNKNOWN_COLOR} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
+              </>
             ) : null}
           </AreaChart>
         </ResponsiveContainer>
@@ -421,7 +458,7 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
 });
 
 /** The card a history chart sits in: its name, its legend and the control that enlarges it. */
-function ChartBlock({ title, legend, action, children }: { title: string; legend?: { label: string; color: string; kind?: "rect" | "line" }[]; action?: ReactNode; children: ReactNode }) {
+function ChartBlock({ title, legend, action, children }: { title: string; legend?: { label: string; color: string; kind?: SwatchKind }[]; action?: ReactNode; children: ReactNode }) {
   return (
     <div className="vw-card p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
@@ -459,6 +496,9 @@ export const SeriesCharts = memo(function SeriesCharts({ network, range, series,
 
   return (
     <div className="flex flex-col gap-4" style={{ opacity: loading ? 0.7 : 1, transition: "opacity 200ms" }}>
+      <p className="text-xs text-ink-3">
+        Resolution: <span className="font-medium text-ink-2">{seriesResolutionLabel(series.resolution)}</span>. Hover any chart for a bucket, or use the inspector and table below. Backlog envelopes retain peaks reached between bucket endpoints.
+      </p>
       <ChartBlock
         title="Contribution to x per constraint"
         legend={m.contributionLegend}
@@ -470,7 +510,7 @@ export const SeriesCharts = memo(function SeriesCharts({ network, range, series,
       <div className="vw-card p-3">
         <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
           <h3 className="text-sm font-semibold text-ink">Backlog per constraint (gas)</h3>
-          <span className="text-xs text-ink-3">one panel per slot, each on its own scale; a replaced constraint starts a new series</span>
+          <span className="text-xs text-ink-3">solid color: bucket end · dotted envelope: peak in bucket · each panel has its own scale</span>
         </div>
         <div className={`grid gap-3 ${m.count > 2 ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
           {m.indices.map((i) => (
@@ -542,7 +582,7 @@ export const SeriesCharts = memo(function SeriesCharts({ network, range, series,
                   ) : null}
                   {m.indices.map((i) => (
                     <th key={i} scope="col" className="py-1 pr-3 font-medium">
-                      backlog C{i + 1}
+                      backlog C{i + 1} (end · peak)
                     </th>
                   ))}
                   <th scope="col" className="py-1 pr-3 font-medium">fees (ETH)</th>
@@ -573,10 +613,12 @@ export const SeriesCharts = memo(function SeriesCharts({ network, range, series,
                     ) : null}
                     {m.indices.map((i) => {
                       const s = p.setKnown ? m.segments.find((seg) => seg.setId === p.constraintSetId && seg.index === i) : undefined;
-                      const v = s ? p[s.backlogKey] : p.setKnown ? null : p[unknownBacklogKey(i)];
+                      const end = s ? p[s.backlogKey] : p.setKnown ? null : p[unknownBacklogKey(i)];
+                      const peak = s ? p[s.backlogMaxKey] : p.setKnown ? null : p[unknownBacklogMaxKey(i)];
                       return (
                         <td key={i} className="py-1 pr-3">
-                          {typeof v === "number" ? formatGas(v) : "n/a"}
+                          <span>{typeof end === "number" ? formatGas(end) : "n/a"}</span>
+                          <span className="text-ink-3"> · peak {typeof peak === "number" ? formatGas(peak) : "n/a"}</span>
                         </td>
                       );
                     })}

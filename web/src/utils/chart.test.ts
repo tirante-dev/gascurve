@@ -3,6 +3,7 @@ import { constraintExponentBips, legacyExponentBips, naturalToBips, saturatingCa
 import type { Series, SeriesPoint } from "@/types";
 import {
   backlogKey,
+  backlogMaxKey,
   buildChartPoints,
   constraintGauge,
   constraintGaugeSpanLabel,
@@ -26,12 +27,13 @@ import {
   FLOOR_COLOR,
   MARKER_COLOR,
   resampleBatches,
-  resampleFees,
+  resamplePosterFees,
   spreadUnitLabel,
   bigFraction,
   segmentsFor,
   seriesColor,
   seriesCount,
+  seriesResolutionLabel,
   setLabel,
   shapeMatches,
   sharesOf,
@@ -45,6 +47,7 @@ import {
   targetKey,
   UNKNOWN_KEY,
   unknownBacklogKey,
+  unknownBacklogMaxKey,
   unknownSlotLabel,
   withSetBoundaries,
 } from "./chart";
@@ -174,6 +177,8 @@ describe("labels", () => {
     expect(constraintLabel({ target: 60_000_000, window: 15 })).toBe("60 Mgas/s over 15 s");
     expect(shortConstraintLabel({ target: 40_000_000, window: 86_400 })).toBe("40 Mgas/s · 24 h");
     expect(setLabel({ id: 6, effectiveBlock: 53_578_754 })).toBe("set 6 (from block 53,578,754)");
+    expect(seriesResolutionLabel("block")).toBe("one point per block");
+    expect(seriesResolutionLabel("1m")).toBe("1-minute buckets");
   });
   it("labels backlog slots with every definition the slot had, oldest first", () => {
     expect(slotLabel(series, 1, "constraints")).toBe("C2 · 30 Mgas/s · 24 h (set 5) then 40 Mgas/s · 24 h (set 6)");
@@ -183,6 +188,7 @@ describe("labels", () => {
     expect(slotLabel({ constraintSets: [], points: [point({ backlogs: [1] })] }, 0, "constraints")).toBe("C1 · definition unknown");
     expect(slotLabel({ constraintSets: [], points: [point({ backlogs: [1] })] }, 0, "unknown")).toBe(unknownSlotLabel(0));
     expect(unknownBacklogKey(2)).toBe("bu2");
+    expect(unknownBacklogMaxKey(2)).toBe("bmu2");
   });
   it("names the unit a load band was measured over, so a band read at one range is not read as another", () => {
     expect(spreadUnitLabel(1)).toBe("second");
@@ -205,6 +211,7 @@ describe("segments", () => {
     expect(segments[3].constraint?.target).toBe(40_000_000);
     expect(contributionKey(6, 1)).toBe("c6_1");
     expect(backlogKey(6, 1)).toBe("b6_1");
+    expect(backlogMaxKey(6, 1)).toBe("bm6_1");
     expect(targetKey(0)).toBe("tgt0");
   });
   it("gives legacy networks a single pseudo segment and nothing for empty series", () => {
@@ -261,12 +268,13 @@ describe("chart points", () => {
     expect(rows[0].c5_1).toBeNull();
     expect(rows[0].b5_1).toBeNull();
     expect(rows[0].b6_1).toBe(11_194_391_810_886);
+    expect(rows[0].bm6_1).toBe(11_194_391_810_886);
     expect(rows[2].c6_1).toBeNull();
     expect(rows[2].b6_1).toBeNull();
     expect(rows[0].setKnown).toBe(true);
     expect(rows[0].cUnknown).toBeNull();
     expect(rows[0].bu0).toBeNull();
-    expect(Object.keys(rows[0]).filter((k) => k.startsWith("c") || k.startsWith("b"))).toEqual(["blocks", "coverage", "completeness", "constraintSetId", "cUnknown", "c5_0", "b5_0", "c5_1", "b5_1", "c6_0", "b6_0", "c6_1", "b6_1", "bu0", "bu1"]);
+    expect(Object.keys(rows[0]).filter((k) => k.startsWith("c") || k.startsWith("b"))).toEqual(["blocks", "coverage", "completeness", "constraintSetId", "cUnknown", "c5_0", "b5_0", "bm5_0", "c5_1", "b5_1", "bm5_1", "c6_0", "b6_0", "bm6_0", "c6_1", "b6_1", "bm6_1", "bu0", "bmu0", "bu1", "bmu1"]);
   });
   it("closes a set with a duplicated boundary row where its successor starts, so the replacement is a vertical edge", () => {
     const drawn = withSetBoundaries(rows);
@@ -279,7 +287,7 @@ describe("chart points", () => {
     ]);
     // Set 6 to unknown: the edge carries set 6's split and backlogs at the new bucket's time, and the new bucket's fee, gas and x.
     const edge = drawn[1];
-    expect(edge).toMatchObject({ t: 105, boundary: true, constraintSetId: 6, setKnown: true, c6_0: 0.0034, c6_1: 3.2391, b6_1: 11_194_391_810_886, tgt1: 40_000_000, cUnknown: null, c5_0: null, bu0: null, x: 1, feeAvg: rows[1].feeAvg, gps: rows[1].gps, blocks: rows[1].blocks });
+    expect(edge).toMatchObject({ t: 105, boundary: true, constraintSetId: 6, setKnown: true, c6_0: 0.0034, c6_1: 3.2391, b6_1: 11_194_391_810_886, bm6_1: 11_194_391_810_886, tgt1: 40_000_000, cUnknown: null, c5_0: null, bu0: null, bmu0: null, x: 1, feeAvg: rows[1].feeAvg, gps: rows[1].gps, blocks: rows[1].blocks });
     expect(drawn[2].c6_1).toBeNull();
     expect(drawn[2].cUnknown).toBe(1);
     // Unknown to set 5: the edge is the unknown split with its slot backlogs, and no target since none was known.
@@ -458,6 +466,9 @@ describe("history from before the split migration", () => {
     expect(half.floorFeesEth).toBeNull();
     expect(half.surplusFeesEth).toBeNull();
     expect(half.unsplitFeesEth).toBeCloseTo(1);
+    const [posterKnown] = buildChartPoints({ ...series, points: [point({ feesWei: "1000000000000000000", floorFeesWei: null, surplusFeesWei: null, posterFeesWei: "250000000000000000" })] }, "constraints");
+    expect(posterKnown.posterFeesEth).toBeCloseTo(0.25);
+    expect(posterKnown.unsplitFeesEth).toBeCloseTo(0.75);
     expect(sumKnownWeiEth(mixed.points, "floorFeesWei")).toEqual({ eth: expect.closeTo(0.004, 6), unknown: 1 });
     expect(sumKnownWeiEth(mixed.points, "surplusFeesWei")).toEqual({ eth: expect.closeTo(0.996, 6), unknown: 1 });
     expect(sumKnownWeiEth([], "surplusFeesWei")).toEqual({ eth: 0, unknown: 0 });
@@ -480,9 +491,15 @@ describe("history from before the split migration", () => {
 });
 
 describe("L1 cost join", () => {
-  it("resamples fees and batches into the same buckets, summing wei before converting", () => {
-    const fees = resampleFees(series.points, 60);
-    expect([...fees.entries()]).toEqual([[60, 1.5]]);
+  it("resamples poster fees and batches into the same buckets, summing wei before converting", () => {
+    const fees = resamplePosterFees(
+      [
+        point({ t: 60, posterFeesWei: "1000000000000000000" }),
+        point({ t: 72, posterFeesWei: "500000000000000000" }),
+      ],
+      60,
+    );
+    expect([...fees.entries()]).toEqual([[60, { t: 60, posterEth: 1.5, coverage: 1, completeness: "complete" }]]);
     const buckets = resampleBatches(
       [
         { t: 60, batches: 1, weiSpent: "500000000000" },
@@ -496,9 +513,25 @@ describe("L1 cost join", () => {
       { t: 120, batches: 0, weiSpent: 0n },
     ]);
   });
-  it("attaches each L2 bucket exactly once however many reports fall into it", () => {
+  it("keeps a resampled poster bucket unavailable when any source value is unavailable", () => {
+    const fees = resamplePosterFees(
+      [
+        point({ t: 0, posterFeesWei: "100000000000000000", coverage: 1, completeness: "complete" }),
+        point({ t: 5, posterFeesWei: null, coverage: 0.5, completeness: "partial" }),
+      ],
+      15,
+    );
+    expect(fees.get(0)).toEqual({ t: 0, posterEth: null, coverage: 0.5, completeness: "partial" });
+  });
+  it("keeps the union of poster-fee and cost buckets without inventing poster-fee zeroes", () => {
     // Two reports at seconds 0 and 12 of the same 15 s bucket, users paid 0.25 ETH in it.
-    const fees = resampleFees([point({ t: 3, feesWei: "250000000000000000" })], 15);
+    const fees = resamplePosterFees(
+      [
+        point({ t: 3, posterFeesWei: "250000000000000000" }),
+        point({ t: 18, posterFeesWei: "500000000000000000" }),
+      ],
+      15,
+    );
     const rows = joinCosts(
       [
         { t: 0, batches: 1, weiSpent: "6000000000000" },
@@ -509,14 +542,16 @@ describe("L1 cost join", () => {
       15,
     );
     expect(rows).toEqual([
-      { t: 0, l1Eth: 0.00001, l2Eth: 0.25, batches: 2 },
-      { t: 30, l1Eth: 0, l2Eth: 0, batches: 1 },
+      { t: 0, attributedCostEth: 0.00001, posterFeesEth: 0.25, batches: 2, coverage: 1, completeness: "complete" },
+      { t: 15, attributedCostEth: 0, posterFeesEth: 0.5, batches: 0, coverage: 1, completeness: "complete" },
+      { t: 30, attributedCostEth: 0, posterFeesEth: null, batches: 1, coverage: null, completeness: "unknown" },
     ]);
-    expect(rows.reduce((s, r) => s + r.l2Eth, 0)).toBe(0.25);
+    expect(rows.reduce((s, r) => s + (r.posterFeesEth ?? 0), 0)).toBe(0.75);
   });
   it("keeps sub-microether batch costs", () => {
     const rows = joinCosts([{ t: 0, batches: 1, weiSpent: "500000000000" }], new Map(), 1);
-    expect(rows[0].l1Eth).toBeCloseTo(5e-7, 12);
+    expect(rows[0].attributedCostEth).toBeCloseTo(5e-7, 12);
+    expect(rows[0].posterFeesEth).toBeNull();
   });
 });
 
