@@ -240,7 +240,7 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
           legend: <Legend items={l1CostLegend(l1.totals)} />,
           chart:
             l1.rows.length > 0 ? (
-              <L1CostChart rows={l1.rows} span={l1.span} domain={l1.domain} gaps={l1.gaps} height={DETAIL_FRAME_CLASS} />
+              <L1CostChart rows={l1.rows} bucket={l1.bucket} span={l1.span} domain={l1.domain} gaps={l1.gaps} height={DETAIL_FRAME_CLASS} />
             ) : (
               <ChartNote>{l1.batches.error !== null ? `Could not load batches: ${l1.batches.error}` : l1.batches.loading || series.loading ? "Loading batch reports." : "No batch reports in this range."}</ChartNote>
             ),

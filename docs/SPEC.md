@@ -126,7 +126,7 @@ What the report and its effective ArbOS state give:
 
 The collector takes the ArbOS version from each block header and persists the report version, effective per-batch charge, parent floor, and calculation version with the raw report fields. That is enough to recompute an attributed cost after future calculation fixes. A truncated owner scan uses an archive state snapshot at its origin when available. Without one, it uses a current pinned snapshot only across ranges with no intervening parameter setter and refuses to guess across a setter.
 
-Page use: an "L2 fees vs. ArbOS-attributed batch-posting cost" panel, batch cadence sparkline, and the L1 base fee series. Backfill cost: all headers (already planned) plus ~5,700 full-block fetches per day of history.
+Page use: a "poster fees vs. ArbOS-attributed batch-posting cost" panel, batch cadence sparkline, and the L1 base fee series. Poster fees are the user-fee stream collected into the L1 pricer pool; infrastructure and network compute fees are outside this comparison. Backfill cost: all headers (already planned) plus ~5,700 full-block fetches per day of history.
 
 ---
 

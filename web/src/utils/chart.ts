@@ -62,8 +62,8 @@ export const UNKNOWN_KEY = "cUnknown";
 export const UNKNOWN_LABEL = "unknown split (total x, constraint set unknown)";
 /** The same series for points whose set is known but whose per-constraint split predates the record (a null `constraintBips`). */
 export const NULL_SPLIT_LABEL = "unknown split (total x, split not recorded)";
-/** Legend and tooltip label of the fee destination series for buckets whose floor and surplus predate the record. */
-export const UNSPLIT_FEES_LABEL = "destination split unavailable";
+/** Legend and tooltip label for the part of a bucket whose destination is not recorded. */
+export const UNSPLIT_FEES_LABEL = "destination unavailable";
 
 export function unknownBacklogKey(index: number): `bu${number}` {
   return `bu${index}`;
@@ -224,11 +224,11 @@ export type ChartPoint = {
   gpsMin: number | null;
   gpsMax: number | null;
   feesEth: number;
-  /** The compute-floor, compute-congestion, and poster parts of `feesEth`. */
+  /** The independently known compute-floor, compute-congestion, and poster parts of `feesEth`. */
   floorFeesEth: number | null;
   surplusFeesEth: number | null;
   posterFeesEth: number | null;
-  /** `feesEth` for buckets whose destination split is unknown, null otherwise. */
+  /** The part of `feesEth` whose destination is unknown, null when every part is known. */
   unsplitFeesEth: number | null;
   blocks: number;
   /** The share of the bucket the collector indexed, null when it cannot be measured. */
@@ -264,7 +264,8 @@ export type ChartPoint = {
  * Flattens a Series into chart rows with numbers the axes can scale. Contributions come from the api's
  * start-of-block `constraintBips`, never from end-of-block backlogs, and are divided by 10,000 only for
  * display. A point with a null split keeps its set for backlogs and targets but puts its whole x under
- * `cUnknown`; null floor and surplus fees put the bucket's fees under `unsplitFeesEth`, never zero.
+ * `cUnknown`. Poster fees remain visible when only the compute split is unavailable; whatever cannot be
+ * assigned to a recorded destination sits under `unsplitFeesEth`, never zero.
  */
 export function buildChartPoints(series: Series, model: PricerModel): ChartPoint[] {
   const segments = segmentsFor(series, model);
@@ -282,7 +283,12 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
     const floorWei = p.floorFeesWei;
     const surplusWei = p.surplusFeesWei;
     const posterWei = p.posterFeesWei;
-    const feeSplitKnown = typeof floorWei === "string" && typeof surplusWei === "string" && typeof posterWei === "string";
+    const computeSplitKnown = typeof floorWei === "string" && typeof surplusWei === "string";
+    const posterKnown = typeof posterWei === "string";
+    const feesWei = BigInt(p.feesWei);
+    const assignedWei = (computeSplitKnown ? BigInt(floorWei) + BigInt(surplusWei) : 0n) + (posterKnown ? BigInt(posterWei) : 0n);
+    const destinationsKnown = computeSplitKnown && posterKnown;
+    const unassignedWei = assignedWei >= 0n && assignedWei <= feesWei ? feesWei - assignedWei : feesWei;
     const pointCoverage = coverageOf(p);
     const row: ChartPoint = {
       t: p.t,
@@ -297,10 +303,10 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
       gpsMin: p.computeGasPerSecondMin ?? null,
       gpsMax: p.computeGasPerSecondMax ?? null,
       feesEth,
-      floorFeesEth: feeSplitKnown ? weiToEthNumber(floorWei) : null,
-      surplusFeesEth: feeSplitKnown ? weiToEthNumber(surplusWei) : null,
-      posterFeesEth: feeSplitKnown ? weiToEthNumber(posterWei) : null,
-      unsplitFeesEth: feeSplitKnown ? null : feesEth,
+      floorFeesEth: computeSplitKnown ? weiToEthNumber(floorWei) : null,
+      surplusFeesEth: computeSplitKnown ? weiToEthNumber(surplusWei) : null,
+      posterFeesEth: posterKnown ? weiToEthNumber(posterWei) : null,
+      unsplitFeesEth: destinationsKnown ? null : weiToEthNumber(unassignedWei),
       blocks: p.blocks,
       coverage: pointCoverage,
       completeness: completenessOf(p),
@@ -578,14 +584,30 @@ export function bucketStart(t: number, bucketSeconds: number): number {
   return Math.floor(t / bucketSeconds) * bucketSeconds;
 }
 
-/** Aggregates L2 fees into buckets of `bucketSeconds`, keyed by bucket start, wei summed before one conversion. */
-export function resampleFees(points: readonly Pick<SeriesPoint, "t" | "feesWei">[], bucketSeconds: number): Map<number, number> {
-  const out = new Map<number, bigint>();
+export type PosterFeeBucket = { t: number; posterEth: number | null; coverage: number | null; completeness: SeriesCompleteness };
+
+type PosterFeeAccumulator = { t: number; posterWei: bigint; known: boolean; coverage: number | null; completeness: SeriesCompleteness };
+
+function mergeCompleteness(left: SeriesCompleteness, right: SeriesCompleteness): SeriesCompleteness {
+  if (left === "partial" || right === "partial") return "partial";
+  return left === "unknown" || right === "unknown" ? "unknown" : "complete";
+}
+
+/** Aggregates poster fees without turning an unavailable or incomplete source value into zero. */
+export function resamplePosterFees(points: readonly Pick<SeriesPoint, "t" | "posterFeesWei" | "coverage" | "completeness">[], bucketSeconds: number): Map<number, PosterFeeBucket> {
+  const out = new Map<number, PosterFeeAccumulator>();
   for (const p of points) {
     const start = bucketStart(p.t, bucketSeconds);
-    out.set(start, (out.get(start) ?? 0n) + BigInt(p.feesWei));
+    const completeness = completenessOf(p);
+    const coverage = coverageOf(p);
+    const acc = out.get(start) ?? { t: start, posterWei: 0n, known: true, coverage, completeness };
+    if (typeof p.posterFeesWei === "string") acc.posterWei += BigInt(p.posterFeesWei);
+    else acc.known = false;
+    acc.completeness = mergeCompleteness(acc.completeness, completeness);
+    acc.coverage = acc.coverage === null || coverage === null ? null : Math.min(acc.coverage, coverage);
+    out.set(start, acc);
   }
-  return new Map([...out.entries()].map(([t, wei]) => [t, weiToEthNumber(wei)]));
+  return new Map([...out.entries()].map(([t, acc]) => [t, { t, posterEth: acc.known ? weiToEthNumber(acc.posterWei) : null, coverage: acc.coverage, completeness: acc.completeness }]));
 }
 
 export type BatchBucket = { t: number; weiSpent: bigint; batches: number };
@@ -603,15 +625,28 @@ export function resampleBatches(batches: readonly Pick<BatchPoint, "t" | "weiSpe
   return [...out.values()].sort((a, b) => a.t - b.t);
 }
 
-export type CostRow = { t: number; l1Eth: number; l2Eth: number; batches: number };
+export type CostRow = { t: number; attributedCostEth: number | null; posterFeesEth: number | null; batches: number; coverage: number | null; completeness: SeriesCompleteness };
 
 /**
- * Joins batch spend with resampled L2 fees on shared buckets. Both sides are
- * grouped first, so each L2 bucket is attached exactly once however many
- * reports fall into it.
+ * Joins batch spend with poster fees over the union of their buckets. A bucket
+ * with no report has zero attributed spend; a bucket with no fee observation
+ * keeps that side null.
  */
-export function joinCosts(batches: readonly Pick<BatchPoint, "t" | "weiSpent" | "batches">[], fees: Map<number, number>, bucketSeconds = 1): CostRow[] {
-  return resampleBatches(batches, bucketSeconds).map((b) => ({ t: b.t, l1Eth: weiToEthNumber(b.weiSpent), l2Eth: fees.get(b.t) ?? 0, batches: b.batches }));
+export function joinCosts(batches: readonly Pick<BatchPoint, "t" | "weiSpent" | "batches">[], fees: Map<number, PosterFeeBucket>, bucketSeconds = 1): CostRow[] {
+  const costs = new Map(resampleBatches(batches, bucketSeconds).map((b) => [b.t, b]));
+  const times = [...new Set([...costs.keys(), ...fees.keys()])].sort((a, b) => a - b);
+  return times.map((t) => {
+    const cost = costs.get(t);
+    const fee = fees.get(t);
+    return {
+      t,
+      attributedCostEth: cost ? weiToEthNumber(cost.weiSpent) : 0,
+      posterFeesEth: fee?.posterEth ?? null,
+      batches: cost?.batches ?? 0,
+      coverage: fee?.coverage ?? null,
+      completeness: fee?.completeness ?? "unknown",
+    };
+  });
 }
 
 /** Points for the P4 versus e^x comparison, x in [0, max]. */
