@@ -140,6 +140,7 @@ describe("averageBacklog and sawtoothSamples", () => {
     expect(chart[chart.length - 1]).toMatchObject({ number: 200, gasUsed: 4_000_000, backlog: 40_000_000 });
     // A single block sits at the start of its second.
     expect(sawtoothChart([{ number: 1, ts: 1000, gasUsed: 5, backlog: 7 }], 1_001_000)).toEqual([{ x: -1, number: 1, ts: 1000, gasUsed: 5, backlog: 7 }]);
+    expect(sawtoothChart([{ number: 1, ts: 980, gasUsed: 5, backlog: 7 }, { number: 2, ts: 1000, gasUsed: 5, backlog: 8 }], 1_001_000)).toEqual([{ x: -1, number: 2, ts: 1000, gasUsed: 5, backlog: 8 }]);
     expect(sawtoothChart([], 1000)).toEqual([]);
   });
 

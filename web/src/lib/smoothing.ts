@@ -272,7 +272,10 @@ export function liveNow(nowMs: number, newestPlace: number | undefined): number 
 export function sawtoothChart(samples: readonly SawtoothSample[], nowMs: number, places?: BlockPlaces): SawtoothPoint[] {
   const own = places === undefined ? placeBlocks(samples) : samples.map((s) => placeOf(places, s));
   const now = liveNow(nowMs, own[own.length - 1]);
-  return samples.map((s, i) => ({ x: own[i] - now, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog }));
+  return samples.flatMap((s, i) => {
+    const x = own[i] - now;
+    return x < -SAWTOOTH_WINDOW_S || x > 0 ? [] : [{ x, number: s.number, ts: s.ts, gasUsed: s.gasUsed, backlog: s.backlog }];
+  });
 }
 
 /** A backlog paid down at `rate` gas per second for `seconds`, floored at zero. */
