@@ -4,7 +4,7 @@ import { bucketSeconds as bucketWidth } from "@/lib/gaps";
 import { unvouchedKind, versionRange, type UnvouchedKind } from "@/lib/fidelity";
 import { completenessOf, coverageOf, partialKinds, type PartialKind } from "@/lib/partial";
 import { saturatingCastToBips, saturatingUMul, toUint64 } from "@/lib/pricer";
-import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesCompleteness, SeriesPoint } from "@/types";
+import type { BatchPoint, ConstraintSet, ConstraintSetEntry, PricerModel, Series, SeriesCompleteness, SeriesPoint, SeriesResolution } from "@/types";
 import { formatDuration, formatGas, formatGasPerSecond, formatInteger, weiToEthNumber, weiToGweiNumber } from "./format";
 
 export const MAX_SERIES = 6;
@@ -33,6 +33,17 @@ export function shortConstraintLabel(c: Pick<ConstraintSetEntry, "target" | "win
   return `${formatGasPerSecond(c.target)} · ${formatDuration(c.window)}`;
 }
 
+export function seriesResolutionLabel(resolution: SeriesResolution): string {
+  const labels: Record<SeriesResolution, string> = {
+    block: "one point per block",
+    "5s": "5-second buckets",
+    "1m": "1-minute buckets",
+    "15m": "15-minute buckets",
+    "1h": "1-hour buckets",
+  };
+  return labels[resolution];
+}
+
 export function bipsToXValue(bips: number): number {
   return bips / 10_000;
 }
@@ -52,6 +63,7 @@ export function sharesOf(bips: readonly number[]): number[] {
 export type Segment = {
   key: `c${number}_${number}`;
   backlogKey: `b${number}_${number}`;
+  backlogMaxKey: `bm${number}_${number}`;
   setId: number;
   index: number;
   label: string;
@@ -63,11 +75,15 @@ export const UNKNOWN_KEY = "cUnknown";
 export const UNKNOWN_LABEL = "unknown split (total x, constraint set unknown)";
 /** The same series for points whose set is known but whose per-constraint split predates the record (a null `constraintBips`). */
 export const NULL_SPLIT_LABEL = "unknown split (total x, split not recorded)";
-/** Legend and tooltip label of the fee destination series for buckets whose floor and surplus predate the record. */
-export const UNSPLIT_FEES_LABEL = "destination split unavailable";
+/** Legend and tooltip label for the part of a bucket whose destination is not recorded. */
+export const UNSPLIT_FEES_LABEL = "destination unavailable";
 
 export function unknownBacklogKey(index: number): `bu${number}` {
   return `bu${index}`;
+}
+
+export function unknownBacklogMaxKey(index: number): `bmu${number}` {
+  return `bmu${index}`;
 }
 
 export function unknownSlotLabel(index: number): string {
@@ -80,6 +96,10 @@ export function contributionKey(setId: number, index: number): `c${number}_${num
 
 export function backlogKey(setId: number, index: number): `b${number}_${number}` {
   return `b${setId}_${index}`;
+}
+
+export function backlogMaxKey(setId: number, index: number): `bm${number}_${number}` {
+  return `bm${setId}_${index}`;
 }
 
 export function targetKey(index: number): `tgt${number}` {
@@ -122,7 +142,7 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">, m
   const sets = sortedSets(series);
   if (sets.length === 0) {
     if (model !== "legacy" || !series.points.some(hasConstraintData)) return [];
-    return [{ key: contributionKey(0, 0), backlogKey: backlogKey(0, 0), setId: 0, index: 0, label: "legacy backlog", color: seriesColor(0), constraint: null }];
+    return [{ key: contributionKey(0, 0), backlogKey: backlogKey(0, 0), backlogMaxKey: backlogMaxKey(0, 0), setId: 0, index: 0, label: "legacy backlog", color: seriesColor(0), constraint: null }];
   }
   // A set is only usable for a point when its constraint count matches the point's data: the collector can
   // tag blocks with the latest known set while the owner-action scan is still catching up. Such sets are
@@ -133,7 +153,7 @@ export function segmentsFor(series: Pick<Series, "constraintSets" | "points">, m
   const out: Segment[] = [];
   for (const set of series.points.length === 0 ? sets : usable) {
     set.constraints.slice(0, MAX_SERIES).forEach((c, i) => {
-      out.push({ key: contributionKey(set.id, i), backlogKey: backlogKey(set.id, i), setId: set.id, index: i, label: segmentLabel(set, i, c), color: seriesColor(i), constraint: c });
+      out.push({ key: contributionKey(set.id, i), backlogKey: backlogKey(set.id, i), backlogMaxKey: backlogMaxKey(set.id, i), setId: set.id, index: i, label: segmentLabel(set, i, c), color: seriesColor(i), constraint: c });
     });
   }
   return out;
@@ -225,11 +245,11 @@ export type ChartPoint = {
   gpsMin: number | null;
   gpsMax: number | null;
   feesEth: number;
-  /** The compute-floor, compute-congestion, and poster parts of `feesEth`. */
+  /** The independently known compute-floor, compute-congestion, and poster parts of `feesEth`. */
   floorFeesEth: number | null;
   surplusFeesEth: number | null;
   posterFeesEth: number | null;
-  /** `feesEth` for buckets whose destination split is unknown, null otherwise. */
+  /** The part of `feesEth` whose destination is unknown, null when every part is known. */
   unsplitFeesEth: number | null;
   blocks: number;
   /** The share of the bucket the collector indexed, null when it cannot be measured. */
@@ -259,8 +279,12 @@ export type ChartPoint = {
   [key: `c${number}_${number}`]: number | null;
   /** Backlog of constraint i of set s in gas, keyed bS_I; null while another set is in force. */
   [key: `b${number}_${number}`]: number | null;
+  /** Highest backlog reached inside the bucket for constraint i of set s, keyed bmS_I. */
+  [key: `bm${number}_${number}`]: number | null;
   /** Backlog of slot i for points whose set is unknown, keyed buI; null otherwise. */
   [key: `bu${number}`]: number | null;
+  /** Highest backlog reached inside the bucket for an unknown-set slot, keyed bmuI. */
+  [key: `bmu${number}`]: number | null;
   /** Target of constraint slot i under the point's set, keyed tgtI; absent when unknown. */
   [key: `tgt${number}`]: number | undefined;
 };
@@ -269,7 +293,8 @@ export type ChartPoint = {
  * Flattens a Series into chart rows with numbers the axes can scale. Contributions come from the api's
  * start-of-block `constraintBips`, never from end-of-block backlogs, and are divided by 10,000 only for
  * display. A point with a null split keeps its set for backlogs and targets but puts its whole x under
- * `cUnknown`; null floor and surplus fees put the bucket's fees under `unsplitFeesEth`, never zero.
+ * `cUnknown`. Poster fees remain visible when only the compute split is unavailable; whatever cannot be
+ * assigned to a recorded destination sits under `unsplitFeesEth`, never zero.
  */
 export function buildChartPoints(series: Series, model: PricerModel): ChartPoint[] {
   const segments = segmentsFor(series, model);
@@ -287,7 +312,12 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
     const floorWei = p.floorFeesWei;
     const surplusWei = p.surplusFeesWei;
     const posterWei = p.posterFeesWei;
-    const feeSplitKnown = typeof floorWei === "string" && typeof surplusWei === "string" && typeof posterWei === "string";
+    const computeSplitKnown = typeof floorWei === "string" && typeof surplusWei === "string";
+    const posterKnown = typeof posterWei === "string";
+    const feesWei = BigInt(p.feesWei);
+    const assignedWei = (computeSplitKnown ? BigInt(floorWei) + BigInt(surplusWei) : 0n) + (posterKnown ? BigInt(posterWei) : 0n);
+    const destinationsKnown = computeSplitKnown && posterKnown;
+    const unassignedWei = assignedWei >= 0n && assignedWei <= feesWei ? feesWei - assignedWei : feesWei;
     const pointCoverage = coverageOf(p);
     const row: ChartPoint = {
       t: p.t,
@@ -302,10 +332,10 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
       gpsMin: p.computeGasPerSecondMin ?? null,
       gpsMax: p.computeGasPerSecondMax ?? null,
       feesEth,
-      floorFeesEth: feeSplitKnown ? weiToEthNumber(floorWei) : null,
-      surplusFeesEth: feeSplitKnown ? weiToEthNumber(surplusWei) : null,
-      posterFeesEth: feeSplitKnown ? weiToEthNumber(posterWei) : null,
-      unsplitFeesEth: feeSplitKnown ? null : feesEth,
+      floorFeesEth: computeSplitKnown ? weiToEthNumber(floorWei) : null,
+      surplusFeesEth: computeSplitKnown ? weiToEthNumber(surplusWei) : null,
+      posterFeesEth: posterKnown ? weiToEthNumber(posterWei) : null,
+      unsplitFeesEth: destinationsKnown ? null : weiToEthNumber(unassignedWei),
       blocks: p.blocks,
       coverage: pointCoverage,
       completeness: completenessOf(p),
@@ -321,8 +351,12 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
     for (const s of segments) {
       row[s.key] = null;
       row[s.backlogKey] = null;
+      row[s.backlogMaxKey] = null;
     }
-    for (let i = 0; i < slots; i++) row[unknownBacklogKey(i)] = null;
+    for (let i = 0; i < slots; i++) {
+      row[unknownBacklogKey(i)] = null;
+      row[unknownBacklogMaxKey(i)] = null;
+    }
     if (own) {
       for (const s of own) {
         // A split that was never recorded stays null: zero would read as a
@@ -330,10 +364,14 @@ export function buildChartPoints(series: Series, model: PricerModel): ChartPoint
         const contribution = split ? split[s.index] : undefined;
         row[s.key] = contribution === undefined ? null : bipsToXValue(contribution);
         row[s.backlogKey] = p.backlogs[s.index] ?? null;
+        row[s.backlogMaxKey] = p.backlogsMax[s.index] ?? null;
         if (s.constraint) row[targetKey(s.index)] = s.constraint.target;
       }
     } else {
-      for (let i = 0; i < slots; i++) row[unknownBacklogKey(i)] = p.backlogs[i] ?? null;
+      for (let i = 0; i < slots; i++) {
+        row[unknownBacklogKey(i)] = p.backlogs[i] ?? null;
+        row[unknownBacklogMaxKey(i)] = p.backlogsMax[i] ?? null;
+      }
     }
     if (!row.splitKnown) row.cUnknown = bipsToXValue(p.exponentBips);
     return row;
@@ -359,7 +397,7 @@ export function withSetBoundaries(rows: readonly ChartPoint[]): ChartPoint[] {
     if (prev && drawnSeriesOf(prev) !== drawnSeriesOf(row)) {
       const edge: ChartPoint = { ...row, boundary: true, constraintSetId: prev.constraintSetId, setKnown: prev.setKnown, splitKnown: prev.splitKnown, cUnknown: prev.cUnknown };
       for (const key of Object.keys(prev)) {
-        if (/^(c\d+_\d+|b\d+_\d+|bu\d+|tgt\d+)$/.test(key)) {
+        if (/^(c\d+_\d+|b\d+_\d+|bm\d+_\d+|bu\d+|bmu\d+|tgt\d+)$/.test(key)) {
           const k = key as `c${number}_${number}`;
           edge[k] = prev[k];
         }
@@ -585,14 +623,30 @@ export function bucketStart(t: number, bucketSeconds: number): number {
   return Math.floor(t / bucketSeconds) * bucketSeconds;
 }
 
-/** Aggregates L2 fees into buckets of `bucketSeconds`, keyed by bucket start, wei summed before one conversion. */
-export function resampleFees(points: readonly Pick<SeriesPoint, "t" | "feesWei">[], bucketSeconds: number): Map<number, number> {
-  const out = new Map<number, bigint>();
+export type PosterFeeBucket = { t: number; posterEth: number | null; coverage: number | null; completeness: SeriesCompleteness };
+
+type PosterFeeAccumulator = { t: number; posterWei: bigint; known: boolean; coverage: number | null; completeness: SeriesCompleteness };
+
+function mergeCompleteness(left: SeriesCompleteness, right: SeriesCompleteness): SeriesCompleteness {
+  if (left === "partial" || right === "partial") return "partial";
+  return left === "unknown" || right === "unknown" ? "unknown" : "complete";
+}
+
+/** Aggregates poster fees without turning an unavailable or incomplete source value into zero. */
+export function resamplePosterFees(points: readonly Pick<SeriesPoint, "t" | "posterFeesWei" | "coverage" | "completeness">[], bucketSeconds: number): Map<number, PosterFeeBucket> {
+  const out = new Map<number, PosterFeeAccumulator>();
   for (const p of points) {
     const start = bucketStart(p.t, bucketSeconds);
-    out.set(start, (out.get(start) ?? 0n) + BigInt(p.feesWei));
+    const completeness = completenessOf(p);
+    const coverage = coverageOf(p);
+    const acc = out.get(start) ?? { t: start, posterWei: 0n, known: true, coverage, completeness };
+    if (typeof p.posterFeesWei === "string") acc.posterWei += BigInt(p.posterFeesWei);
+    else acc.known = false;
+    acc.completeness = mergeCompleteness(acc.completeness, completeness);
+    acc.coverage = acc.coverage === null || coverage === null ? null : Math.min(acc.coverage, coverage);
+    out.set(start, acc);
   }
-  return new Map([...out.entries()].map(([t, wei]) => [t, weiToEthNumber(wei)]));
+  return new Map([...out.entries()].map(([t, acc]) => [t, { t, posterEth: acc.known ? weiToEthNumber(acc.posterWei) : null, coverage: acc.coverage, completeness: acc.completeness }]));
 }
 
 export type BatchBucket = { t: number; weiSpent: bigint; batches: number };
@@ -610,15 +664,28 @@ export function resampleBatches(batches: readonly Pick<BatchPoint, "t" | "weiSpe
   return [...out.values()].sort((a, b) => a.t - b.t);
 }
 
-export type CostRow = { t: number; l1Eth: number; l2Eth: number; batches: number };
+export type CostRow = { t: number; attributedCostEth: number | null; posterFeesEth: number | null; batches: number; coverage: number | null; completeness: SeriesCompleteness };
 
 /**
- * Joins batch spend with resampled L2 fees on shared buckets. Both sides are
- * grouped first, so each L2 bucket is attached exactly once however many
- * reports fall into it.
+ * Joins batch spend with poster fees over the union of their buckets. A bucket
+ * with no report has zero attributed spend; a bucket with no fee observation
+ * keeps that side null.
  */
-export function joinCosts(batches: readonly Pick<BatchPoint, "t" | "weiSpent" | "batches">[], fees: Map<number, number>, bucketSeconds = 1): CostRow[] {
-  return resampleBatches(batches, bucketSeconds).map((b) => ({ t: b.t, l1Eth: weiToEthNumber(b.weiSpent), l2Eth: fees.get(b.t) ?? 0, batches: b.batches }));
+export function joinCosts(batches: readonly Pick<BatchPoint, "t" | "weiSpent" | "batches">[], fees: Map<number, PosterFeeBucket>, bucketSeconds = 1): CostRow[] {
+  const costs = new Map(resampleBatches(batches, bucketSeconds).map((b) => [b.t, b]));
+  const times = [...new Set([...costs.keys(), ...fees.keys()])].sort((a, b) => a - b);
+  return times.map((t) => {
+    const cost = costs.get(t);
+    const fee = fees.get(t);
+    return {
+      t,
+      attributedCostEth: cost ? weiToEthNumber(cost.weiSpent) : 0,
+      posterFeesEth: fee?.posterEth ?? null,
+      batches: cost?.batches ?? 0,
+      coverage: fee?.coverage ?? null,
+      completeness: fee?.completeness ?? "unknown",
+    };
+  });
 }
 
 /** Points for the P4 versus e^x comparison, x in [0, max]. */

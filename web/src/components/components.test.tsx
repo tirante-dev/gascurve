@@ -8,7 +8,7 @@ import { applyReorg } from "@/hooks/useLive";
 import { BACKLOG_TITLE, backlogAxis, ConstraintCards, ConstraintCardsView, drainLabel, Sawtooth, sawtoothTooltipRows, secondsAgoLabel } from "./ConstraintCards";
 import { ChartTooltip } from "./ChartTooltip";
 import { DataFooter } from "./DataFooter";
-import { COLLECTOR_LAG_S, CostTile, HeroChart, HeroChartPanel, heroTooltipRows, LiveHero, LiveHeroView, sampleAge } from "./LiveHero";
+import { COLLECTOR_LAG_S, CostTile, HeroChart, HeroChartPanel, heroTooltipRows, liveThroughputPeak, LiveHero, LiveHeroView, sampleAge, throughputTooltipRows } from "./LiveHero";
 import { HERO_RANGE_KEY, setHeroRange } from "@/lib/hero";
 import { HistoryTabs } from "./HistoryTabs";
 import { NetworkSwitcher } from "./NetworkSwitcher";
@@ -283,6 +283,16 @@ describe("LiveHero", () => {
     expect(screen.getByText("Network load, second by second, over the last 120 s")).toBeInTheDocument();
     expect(screen.getByText(/compute gas per second across the chain · Mgas\/s/)).toBeInTheDocument();
     expect(screen.getByText("Base fee, block by block, over the last 120 s")).toBeInTheDocument();
+    expect(screen.getByText("target C1 · 60 Mgas/s")).toBeInTheDocument();
+    expect(screen.getByText("target C2 · 40 Mgas/s")).toBeInTheDocument();
+    const targetLines = throughput.querySelectorAll("line.recharts-reference-line-line");
+    expect(targetLines).toHaveLength(2);
+    expect(Array.from(targetLines, (line) => line.getAttribute("stroke"))).toEqual(["var(--series-1)", "var(--series-2)"]);
+    expect(Array.from(targetLines, (line) => line.getAttribute("stroke-dasharray"))).toEqual(["4 3", "4 3"]);
+    expect(liveThroughputPeak([{ x: -1, ts: snapshot.block.ts - 1, gas: 40_000_000, blocks: 10 }], snapshot.constraints)).toBe(60_000_000);
+    const rows = throughputTooltipRows(snapshot.constraints);
+    expect(rows.slice(-2).map((row) => row.label)).toEqual(["target C1 in force", "target C2 in force"]);
+    expect(rows.slice(-2).map((row) => row.value({}))).toEqual(["60 Mgas/s", "40 Mgas/s"]);
     // Its own enlarge control, at the range on screen.
     expect(screen.getByRole("link", { name: "Open Gas throughput enlarged" })).toHaveAttribute("href", "/robinhood/charts/gas-per-second?range=live");
 

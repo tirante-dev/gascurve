@@ -228,7 +228,7 @@ export function StatusPill({ status }: { status: LiveStatus }) {
 export const HATCH_SPACING = 6;
 export const HATCH_STROKE = 2;
 
-export type SwatchKind = "rect" | "line" | "hatch";
+export type SwatchKind = "rect" | "line" | "dash" | "hatch";
 
 /**
  * The hatch a chart fills an unknown series with, drawn at full strength: a translucent hatch composites
@@ -246,6 +246,9 @@ export function HatchPattern({ id, color, angle = 45 }: { id: string; color: str
 export function Swatch({ color, kind = "rect" }: { color: string; kind?: SwatchKind }) {
   if (kind === "line") {
     return <span className="inline-block h-0.5 w-4 rounded-full align-middle" style={{ background: color }} aria-hidden="true" />;
+  }
+  if (kind === "dash") {
+    return <span className="inline-block h-0.5 w-4 align-middle" style={{ backgroundImage: `repeating-linear-gradient(to right, ${color} 0, ${color} 4px, transparent 4px, transparent 7px)` }} aria-hidden="true" />;
   }
   if (kind === "hatch") {
     // The same 45 degree hatch the chart fills with, so the legend carries the pattern and not only the
