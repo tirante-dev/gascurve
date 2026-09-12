@@ -34,7 +34,7 @@ import { GapBands, GapNote, MissingBands, MissingDots, MissingNote } from "./Cha
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { PointInspector } from "./ChartReadout";
 import { ChartFrame, Legend, TIME_AXIS_RIGHT, type ChartHeight, type SwatchKind } from "./primitives";
-import { TimeZoomSelection, useTimeZoomChart } from "./TimeZoom";
+import { TimeZoomSurface, useTimeZoomChart } from "./TimeZoom";
 
 const SYNC_ID = "history";
 
@@ -340,14 +340,14 @@ export const ContributionChart = memo(function ContributionChart({ m, height = S
   return (
     <>
       <ChartFrame height={height} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
+        <TimeZoomSurface zoom={zoom}>
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
             <GapBands gaps={m.gaps.gaps} />
             <TimeAxis span={m.span} window={m.gaps.window} />
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.contributionRows} note={m.note} />} />
-            <TimeZoomSelection zoom={zoom} />
             {m.segments.map((s) => (
               <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
             ))}
@@ -355,8 +355,9 @@ export const ContributionChart = memo(function ContributionChart({ m, height = S
               <Area type="monotone" dataKey={UNKNOWN_KEY} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={UNKNOWN_COLOR} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
             ) : null}
             {markerLines(m.markers)}
-          </AreaChart>
-        </ResponsiveContainer>
+            </AreaChart>
+          </ResponsiveContainer>
+        </TimeZoomSurface>
       </ChartFrame>
       <GapNote gaps={m.gaps} />
     </>
@@ -376,8 +377,9 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
   return (
     <>
       <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit}${m.hasSpread ? `, banded from the lowest to the highest ${m.spreadUnit} inside each bucket,` : ""} with each constraint target in force drawn as a stepped line`}>
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
+        <TimeZoomSurface zoom={zoom}>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             {m.gasMissing.length > 0 ? (
               <defs>
                 <MissingDots />
@@ -389,7 +391,6 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
             <TimeAxis span={m.span} window={m.gaps.window} />
             <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.gasNote} />} />
-            <TimeZoomSelection zoom={zoom} />
             {m.hasSpread ? (
               <>
                 {/* The band is the max filled to the floor of the axis with the min painted back out
@@ -405,8 +406,9 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
               <Area type="monotone" dataKey="gps" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} fill="var(--series-1)" fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
             )}
             {m.hasTargets ? m.indices.map((i) => <Line key={i} type="stepAfter" dataKey={targetKey(i)} connectNulls={false} stroke={seriesColor(i)} strokeDasharray="4 3" dot={false} isAnimationActive={false} />) : null}
-          </ComposedChart>
-        </ResponsiveContainer>
+            </ComposedChart>
+          </ResponsiveContainer>
+        </TimeZoomSurface>
       </ChartFrame>
       <GapNote gaps={m.gaps} />
       <MissingNote runs={m.gasMissing} />
@@ -420,8 +422,9 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
   return (
     <>
       <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time, with the backlog at each bucket end and the peak reached inside each bucket`}>
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
+        <TimeZoomSurface zoom={zoom}>
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             {m.backlogMissingFor(index).length > 0 ? (
               <defs>
                 <MissingDots />
@@ -433,7 +436,6 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
             <TimeAxis span={m.span} window={m.gaps.window} />
             <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.backlogNoteFor(index)} />} />
-            <TimeZoomSelection zoom={zoom} />
             {m.segments
               .filter((s) => s.index === index)
               .map((s) => (
@@ -456,8 +458,9 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
                 <Area type="monotone" dataKey={unknownBacklogKey(index)} connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={2} strokeDasharray="4 3" fill={UNKNOWN_COLOR} fillOpacity={0.1} isAnimationActive={false} activeDot={false} />
               </>
             ) : null}
-          </AreaChart>
-        </ResponsiveContainer>
+            </AreaChart>
+          </ResponsiveContainer>
+        </TimeZoomSurface>
       </ChartFrame>
       <GapNote gaps={m.gaps} />
       <MissingNote runs={m.backlogMissingFor(index)} />

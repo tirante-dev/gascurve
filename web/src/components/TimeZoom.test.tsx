@@ -1,38 +1,42 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import type { MouseEvent } from "react";
-import type { MouseHandlerDataParam } from "recharts";
 import { describe, expect, it, vi } from "vitest";
-import { TimeZoomControls, TimeZoomProvider, useTimeZoomChart } from "./TimeZoom";
+import { TimeZoomControls, TimeZoomProvider, TimeZoomSurface, useTimeZoomChart } from "./TimeZoom";
 
-function chartState(activeLabel: number): MouseHandlerDataParam {
-  return { activeTooltipIndex: 0, activeIndex: 0, activeLabel, activeDataKey: "t", activeCoordinate: { x: 0, y: 0 }, isTooltipActive: true };
-}
-
-function chartEvent(button = 0): MouseEvent<SVGGraphicsElement> {
-  return { button, preventDefault: vi.fn() } as unknown as MouseEvent<SVGGraphicsElement>;
-}
-
-function Driver() {
+function Driver({ renders, onChartMove }: { renders?: () => void; onChartMove?: () => void }) {
   const zoom = useTimeZoomChart();
+  renders?.();
   if (zoom === null) return <span>no zoom</span>;
   return (
     <>
       <output>{zoom.domain.join(":")}</output>
-      <button
-        type="button"
-        onClick={() => {
-          zoom.handlers.onMouseDown(chartState(-80), chartEvent());
-          zoom.handlers.onMouseMove(chartState(-20), chartEvent());
-          zoom.handlers.onMouseUp(chartState(-20), chartEvent());
-        }}
-      >
-        Select
-      </button>
-      <button type="button" onClick={() => zoom.handlers.onDoubleClick(chartState(0), chartEvent())}>
-        Double click
-      </button>
+      <TimeZoomSurface zoom={zoom}>
+        <div data-testid="chart" onMouseMove={onChartMove} />
+      </TimeZoomSurface>
     </>
   );
+}
+
+function chartSurface(): HTMLDivElement {
+  const surface = screen.getByTestId("chart").parentElement;
+  if (!(surface instanceof HTMLDivElement)) throw new Error("chart surface missing");
+  vi.spyOn(surface, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 100,
+    bottom: 100,
+    width: 100,
+    height: 100,
+    toJSON: () => ({}),
+  });
+  return surface;
+}
+
+function drag(surface: HTMLDivElement, from: number, to: number, button = 0) {
+  fireEvent.pointerDown(surface, { button, pointerId: 1, clientX: from, clientY: 50 });
+  fireEvent.pointerMove(surface, { pointerId: 1, clientX: to, clientY: 50 });
+  fireEvent.pointerUp(surface, { pointerId: 1, clientX: to, clientY: 50 });
 }
 
 describe("TimeZoom", () => {
@@ -46,7 +50,7 @@ describe("TimeZoom", () => {
     expect(screen.getByText("Drag across a time chart to zoom into a timeframe.")).toBeInTheDocument();
     expect(screen.getByText("-100:0")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    drag(chartSurface(), 20, 80);
     expect(screen.getByText("-80:-20")).toBeInTheDocument();
     expect(screen.getByText(/Viewing/)).toHaveTextContent("1.3 min ago to 20 s ago (1 min)");
 
@@ -56,88 +60,40 @@ describe("TimeZoom", () => {
   });
 
   it("ignores a non-primary drag and supports the chart's double-click reset", () => {
-    function Buttons() {
-      const zoom = useTimeZoomChart();
-      if (zoom === null) return null;
-      return (
-        <>
-          <output>{zoom.domain.join(":")}</output>
-          <button
-            type="button"
-            onClick={() => {
-              zoom.handlers.onMouseDown(chartState(10), chartEvent(1));
-              zoom.handlers.onMouseMove(chartState(90), chartEvent());
-              zoom.handlers.onMouseUp(chartState(90), chartEvent());
-            }}
-          >
-            Wrong button
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              zoom.handlers.onMouseDown(chartState(10), chartEvent());
-              zoom.handlers.onMouseUp(chartState(90), chartEvent());
-            }}
-          >
-            Zoom
-          </button>
-          <button type="button" onClick={() => zoom.handlers.onDoubleClick(chartState(0), chartEvent())}>
-            Reset gesture
-          </button>
-        </>
-      );
-    }
-
     render(
       <TimeZoomProvider domain={[0, 100]}>
-        <Buttons />
+        <Driver />
       </TimeZoomProvider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Wrong button" }));
+    const surface = chartSurface();
+    drag(surface, 10, 90, 1);
     expect(screen.getByText("0:100")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Zoom" }));
+    drag(surface, 10, 90);
     expect(screen.getByText("10:90")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Reset gesture" }));
+    fireEvent.doubleClick(surface);
     expect(screen.getByText("0:100")).toBeInTheDocument();
   });
 
-  it("keeps pointer-move previews out of shared chart state", () => {
+  it("keeps pointer-move previews out of chart state", () => {
     const renders = vi.fn();
-    function PerformanceDriver() {
-      const zoom = useTimeZoomChart();
-      renders();
-      if (zoom === null) return null;
-      return (
-        <>
-          <output>{zoom.domain.join(":")}</output>
-          <button
-            type="button"
-            onClick={() => {
-              zoom.handlers.onMouseDown(chartState(20), chartEvent());
-              zoom.handlers.onMouseMove(chartState(40), chartEvent());
-              zoom.handlers.onMouseMove(chartState(60), chartEvent());
-              zoom.handlers.onMouseMove(chartState(80), chartEvent());
-            }}
-          >
-            Preview
-          </button>
-          <button type="button" onClick={() => zoom.handlers.onMouseUp(chartState(80), chartEvent())}>
-            Finish
-          </button>
-        </>
-      );
-    }
-
+    const chartMoves = vi.fn();
     render(
       <TimeZoomProvider domain={[0, 100]}>
-        <PerformanceDriver />
+        <Driver renders={renders} onChartMove={chartMoves} />
       </TimeZoomProvider>,
     );
+    const surface = chartSurface();
     expect(renders).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    fireEvent.pointerDown(surface, { button: 0, pointerId: 1, clientX: 20, clientY: 50 });
+    fireEvent.pointerMove(surface, { pointerId: 1, clientX: 40, clientY: 50 });
+    fireEvent.pointerMove(surface, { pointerId: 1, clientX: 60, clientY: 50 });
+    fireEvent.pointerMove(surface, { pointerId: 1, clientX: 80, clientY: 50 });
+    fireEvent.mouseMove(screen.getByTestId("chart"), { clientX: 80, clientY: 50 });
     expect(renders).toHaveBeenCalledTimes(1);
+    expect(chartMoves).not.toHaveBeenCalled();
     expect(screen.getByText("0:100")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Finish" }));
+    expect(surface.querySelector("[aria-hidden=true]")).toHaveStyle({ left: "20px", width: "60px" });
+    fireEvent.pointerUp(surface, { pointerId: 1, clientX: 80, clientY: 50 });
     expect(renders).toHaveBeenCalledTimes(2);
     expect(screen.getByText("20:80")).toBeInTheDocument();
   });

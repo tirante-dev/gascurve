@@ -15,7 +15,7 @@ import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip } from "./ChartTooltip";
 import { GapBands, GapNote, PartialBands, PartialNote } from "./ChartGaps";
 import { Card, ChartFrame, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
-import { TimeZoomControls, TimeZoomSelection, useTimeZoomChart } from "./TimeZoom";
+import { TimeZoomControls, TimeZoomSurface, useTimeZoomChart } from "./TimeZoom";
 
 // "batch" is exactly one point per posting report (every 12 to 24 s on Robinhood).
 // Both reports and poster fees are grouped into 15 s buckets before the join,
@@ -97,14 +97,14 @@ export const L1CostChart = memo(function L1CostChart({ rows, bucket, span, domai
   return (
     <>
       <ChartFrame height={height} label="Poster fees collected for the L1 pricer and ArbOS-attributed batch-posting cost per bucket on a log scale">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
+        <TimeZoomSurface zoom={zoom}>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
             <GapBands gaps={gaps.gaps} />
             <PartialBands bands={bands} />
             <XAxis dataKey="t" type="number" domain={zoom?.domain ?? [window.from, window.to]} allowDataOverflow tickFormatter={(t: number) => formatTick(t, zoom?.span ?? span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
-            <TimeZoomSelection zoom={zoom} />
             <Tooltip
               isAnimationActive={false}
               content={(props) => (
@@ -122,8 +122,9 @@ export const L1CostChart = memo(function L1CostChart({ rows, bucket, span, domai
             />
             <Line type="monotone" dataKey="plottedPosterFeesEth" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
             <Line type="monotone" dataKey="attributedCostEth" stroke="var(--series-2)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
-          </LineChart>
-        </ResponsiveContainer>
+            </LineChart>
+          </ResponsiveContainer>
+        </TimeZoomSurface>
       </ChartFrame>
       <GapNote gaps={gaps} />
       <PartialNote bands={bands} />

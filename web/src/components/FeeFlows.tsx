@@ -14,7 +14,7 @@ import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { GapBands, GapNote, PartialBands, PartialHatch, PartialNote } from "./ChartGaps";
 import { Card, ChartFrame, HatchPattern, HoverNote, Label, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight, type NoteAlign } from "./primitives";
-import { TimeZoomSelection, useTimeZoomChart } from "./TimeZoom";
+import { TimeZoomSurface, useTimeZoomChart } from "./TimeZoom";
 
 const FLOOR_FILL = "var(--seq-2)";
 const SURPLUS_FILL = "var(--seq-8)";
@@ -211,8 +211,9 @@ export const FeeFlowChart = memo(function FeeFlowChart({ points, gaps = NO_GAPS,
   return (
     <>
       <ChartFrame height={height} minWidth={420} label="Fees collected per bucket in ETH, stacked as infrastructure, network, and L1 poster destinations, hatched where the split is unavailable or the bucket is incomplete">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={rows} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
+        <TimeZoomSurface zoom={zoom}>
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={rows} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <defs>
               <HatchPattern id={UNSPLIT_PATTERN_ID} color={UNKNOWN_COLOR} />
               <PartialHatch />
@@ -223,15 +224,15 @@ export const FeeFlowChart = memo(function FeeFlowChart({ points, gaps = NO_GAPS,
             <XAxis dataKey="t" type="number" domain={zoom?.domain ?? [window.from, window.to]} allowDataOverflow tickFormatter={(t: number) => formatTick(t, zoom?.span ?? span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={feeFlowRows(unsplit)} note={(r) => partialRowNote(r, true)} />} />
-            <TimeZoomSelection zoom={zoom} />
             <Area type="monotone" dataKey="stackFloorEth" stackId="fees" connectNulls={false} stroke={FLOOR_FILL} strokeWidth={1} fill={FLOOR_FILL} fillOpacity={0.6} isAnimationActive={false} activeDot={false} />
             <Area type="monotone" dataKey="stackSurplusEth" stackId="fees" connectNulls={false} stroke={SURPLUS_FILL} strokeWidth={1} fill={SURPLUS_FILL} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
             <Area type="monotone" dataKey="stackPosterEth" stackId="fees" connectNulls={false} stroke={POSTER_FILL} strokeWidth={1} fill={POSTER_FILL} fillOpacity={0.55} isAnimationActive={false} activeDot={false} />
             {unsplit ? (
               <Area type="monotone" dataKey="stackUnsplitEth" stackId="fees" connectNulls={false} stroke={UNKNOWN_COLOR} strokeWidth={1} strokeDasharray="4 3" fill={`url(#${UNSPLIT_PATTERN_ID})`} isAnimationActive={false} activeDot={false} />
             ) : null}
-          </AreaChart>
-        </ResponsiveContainer>
+            </AreaChart>
+          </ResponsiveContainer>
+        </TimeZoomSurface>
       </ChartFrame>
       <GapNote gaps={gaps} />
       <PartialNote bands={bands} />

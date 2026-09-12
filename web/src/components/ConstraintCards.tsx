@@ -13,7 +13,7 @@ import { RESYNC_COPY, WAITING_COPY } from "./LiveHero";
 import { chartView } from "@/lib/chartViews";
 import { EnlargeLink } from "./ChartActions";
 import { Bips, Card, ChartFrame, Figure, HoverNote, Label, Stat, Swatch, type ChartHeight } from "./primitives";
-import { TimeZoomSelection, useTimeZoomChart } from "./TimeZoom";
+import { TimeZoomSurface, useTimeZoomChart } from "./TimeZoom";
 
 /**
  * A meter whose fill carries magnitude on the sequential ramp; the track is an
@@ -101,8 +101,9 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
       minWidth={260}
       label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(axis.top)}, with a dashed threshold at ${formatGas(target)}: it ${drainLabel(target)} boundary`}
     >
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 12, right: 8, bottom: 2, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
+      <TimeZoomSurface zoom={zoom}>
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data} margin={{ top: 12, right: 8, bottom: 2, left: 0 }}>
           <CartesianGrid vertical={false} />
           <XAxis
             dataKey="x"
@@ -119,10 +120,10 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
           {/* One second of target: the gas the constraint sheds at every second boundary. */}
           <ReferenceLine y={target} stroke={THRESHOLD_COLOR} strokeDasharray="4 3" strokeWidth={1} label={{ value: drainLabel(target), position: "insideTopRight" }} />
           <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={secondsAgoLabel} rows={sawtoothTooltipRows(color)} />} />
-          <TimeZoomSelection zoom={zoom} />
           <Line type="linear" dataKey="backlog" stroke={color} strokeWidth={1.25} dot={false} isAnimationActive={false} activeDot={{ r: 2.5 }} />
-        </LineChart>
-      </ResponsiveContainer>
+          </LineChart>
+        </ResponsiveContainer>
+      </TimeZoomSurface>
     </ChartFrame>
   );
 });
