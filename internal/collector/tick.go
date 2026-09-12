@@ -324,6 +324,7 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 	boundary, hasBoundary := f.boundaryLocked()
 	f.mu.Unlock()
 	clearedStart := false
+	resetOwnerScan := false
 	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
 		// Every writer that fetched from the old fork compares this counter inside its own transaction.
 		if err := f.bumpGeneration(ctx, s); err != nil {
@@ -354,10 +355,12 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 		if _, err := s.DeleteStateSamplesAfter(ctx, f.chainID, ancestor); err != nil {
 			return fmt.Errorf("delete samples: %w", err)
 		}
-		for _, key := range []string{db.StateOwnerLogCursor, db.StateBatchScanCursor, db.StateOwnerScanThrough} {
-			if err := rewindCursor(ctx, s, f.chainID, key, ancestor); err != nil {
-				return err
-			}
+		resetOwnerScan, err = f.rewindOwnerScan(ctx, s, ancestor)
+		if err != nil {
+			return err
+		}
+		if err := rewindCursor(ctx, s, f.chainID, db.StateBatchScanCursor, ancestor); err != nil {
+			return err
 		}
 		cleared, err := f.rewindBackfill(ctx, s, ancestor, boundary, hasBoundary)
 		if err != nil {
@@ -390,7 +393,13 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 	if clearedStart {
 		f.liveStart = nil
 	}
-	f.ownerScanThrough = min(f.ownerScanThrough, ancestor)
+	if resetOwnerScan {
+		f.scanOrigin = nil
+		f.ownerScanThrough = 0
+		f.scanExtended = false
+	} else {
+		f.ownerScanThrough = min(f.ownerScanThrough, ancestor)
+	}
 	f.clearHeadStateLocked()
 	if err := f.reloadHeadLocked(ctx); err != nil {
 		return 0, err
@@ -399,6 +408,34 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 		return 0, err
 	}
 	return f.head, nil
+}
+
+func (f *Follower) rewindOwnerScan(ctx context.Context, s db.Store, ancestor uint64) (bool, error) {
+	raw, ok, err := s.GetState(ctx, f.chainID, db.StateOwnerScanOrigin)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		origin := &scanOrigin{}
+		if err := json.Unmarshal([]byte(raw), origin); err != nil {
+			return false, fmt.Errorf("owner scan origin: %w", err)
+		}
+		if origin.Block > ancestor {
+			f.log.Warn("reorg reaches below the owner scan origin, restarting the owner scan", "origin", origin.Block, "ancestor", ancestor)
+			for _, key := range []string{db.StateOwnerScanOrigin, db.StateOwnerLogCursor, db.StateOwnerScanThrough} {
+				if err := s.DeleteState(ctx, f.chainID, key); err != nil {
+					return false, fmt.Errorf("clear %s: %w", key, err)
+				}
+			}
+			return true, nil
+		}
+	}
+	for _, key := range []string{db.StateOwnerLogCursor, db.StateOwnerScanThrough} {
+		if err := rewindCursor(ctx, s, f.chainID, key, ancestor); err != nil {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // rewindNetworkHead moves networks.head_block and head_at down to the surviving ancestor inside the
