@@ -693,6 +693,26 @@ describe("ConstraintCards", () => {
     expect(backlogAxis(0).top).toBeGreaterThan(0);
     expect(drainLabel(60_000_000)).toBe("drains 60 Mgas/s at each second");
   });
+  it("clips expired samples without rescaling points still inside the live window", () => {
+    const current = [
+      { number: 2, ts: 1001, gasUsed: 4_000_000, backlog: 10_000_000 },
+      { number: 3, ts: 1002, gasUsed: 4_000_000, backlog: 20_000_000 },
+    ];
+    const expired = { number: 1, ts: 980, gasUsed: 4_000_000, backlog: 100_000_000 };
+    const places = new Map([
+      [1, 980],
+      [2, 1001],
+      [3, 1002],
+    ]);
+    const { container, rerender } = render(<Sawtooth samples={current} color="red" target={60_000_000} index={0} places={places} nowMs={1_003_000} />);
+    const coordinates = () => {
+      const path = container.querySelector("path.recharts-line-curve")?.getAttribute("d") ?? "";
+      return [...path.matchAll(/[ML](-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/g)].map((match) => [Number(match[1]), Number(match[2])]);
+    };
+    const before = coordinates();
+    rerender(<Sawtooth samples={[expired, ...current]} color="red" target={60_000_000} index={0} places={places} nowMs={1_003_000} />);
+    expect(coordinates().slice(-2)).toEqual(before);
+  });
   it("reads a hovered block out as its number, its gas and the backlog it left", () => {
     const row = { number: 55_812_345, gasUsed: 4_021_130, backlog: 22_000_000 };
     render(
