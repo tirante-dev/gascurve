@@ -625,28 +625,44 @@ export function bucketStart(t: number, bucketSeconds: number): number {
 
 export type PosterFeeBucket = { t: number; posterEth: number | null; coverage: number | null; completeness: SeriesCompleteness };
 
-type PosterFeeAccumulator = { t: number; posterWei: bigint; known: boolean; coverage: number | null; completeness: SeriesCompleteness };
+type PosterFeeSource = { t: number; posterWei: bigint; known: boolean; coverage: number | null; completeness: SeriesCompleteness };
+
+type PosterFeeAccumulator = { t: number; posterWei: bigint; known: boolean; coveredSeconds: number; coverageKnown: boolean; completeness: SeriesCompleteness };
 
 function mergeCompleteness(left: SeriesCompleteness, right: SeriesCompleteness): SeriesCompleteness {
-  if (left === "partial" || right === "partial") return "partial";
-  return left === "unknown" || right === "unknown" ? "unknown" : "complete";
+  if (left === "unknown" || right === "unknown") return "unknown";
+  return left === "partial" || right === "partial" ? "partial" : "complete";
 }
 
-/** Aggregates poster fees without turning an unavailable or incomplete source value into zero. */
-export function resamplePosterFees(points: readonly Pick<SeriesPoint, "t" | "posterFeesWei" | "coverage" | "completeness">[], bucketSeconds: number): Map<number, PosterFeeBucket> {
-  const out = new Map<number, PosterFeeAccumulator>();
+/** Aggregates poster fees without turning an unavailable or incomplete source interval into zero. */
+export function resamplePosterFees(points: readonly Pick<SeriesPoint, "t" | "posterFeesWei" | "coverage" | "completeness">[], bucketSeconds: number, sourceBucketSeconds: number): Map<number, PosterFeeBucket> {
+  const sources = new Map<number, PosterFeeSource>();
   for (const p of points) {
-    const start = bucketStart(p.t, bucketSeconds);
-    const completeness = completenessOf(p);
     const coverage = coverageOf(p);
-    const acc = out.get(start) ?? { t: start, posterWei: 0n, known: true, coverage, completeness };
-    if (typeof p.posterFeesWei === "string") acc.posterWei += BigInt(p.posterFeesWei);
-    else acc.known = false;
-    acc.completeness = mergeCompleteness(acc.completeness, completeness);
-    acc.coverage = acc.coverage === null || coverage === null ? null : Math.min(acc.coverage, coverage);
+    const completeness = completenessOf(p);
+    const source = sources.get(p.t) ?? { t: p.t, posterWei: 0n, known: true, coverage, completeness };
+    if (typeof p.posterFeesWei === "string") source.posterWei += BigInt(p.posterFeesWei);
+    else source.known = false;
+    source.completeness = mergeCompleteness(source.completeness, completeness);
+    source.coverage = source.coverage === null || coverage === null ? null : Math.min(source.coverage, coverage);
+    sources.set(p.t, source);
+  }
+  const out = new Map<number, PosterFeeAccumulator>();
+  for (const source of sources.values()) {
+    const start = bucketStart(source.t, bucketSeconds);
+    const acc = out.get(start) ?? { t: start, posterWei: 0n, known: true, coveredSeconds: 0, coverageKnown: true, completeness: "complete" as const };
+    acc.posterWei += source.posterWei;
+    acc.known &&= source.known;
+    acc.completeness = mergeCompleteness(acc.completeness, source.completeness);
+    if (source.coverage === null) acc.coverageKnown = false;
+    else acc.coveredSeconds += sourceBucketSeconds * source.coverage;
     out.set(start, acc);
   }
-  return new Map([...out.entries()].map(([t, acc]) => [t, { t, posterEth: acc.known ? weiToEthNumber(acc.posterWei) : null, coverage: acc.coverage, completeness: acc.completeness }]));
+  return new Map([...out.entries()].map(([t, acc]) => {
+    const coverage = acc.coverageKnown ? Math.min(1, acc.coveredSeconds / bucketSeconds) : null;
+    const completeness = coverage === null ? "unknown" : acc.completeness === "unknown" ? "unknown" : coverage < 1 || acc.completeness === "partial" ? "partial" : "complete";
+    return [t, { t, posterEth: acc.known ? weiToEthNumber(acc.posterWei) : null, coverage, completeness }];
+  }));
 }
 
 export type BatchBucket = { t: number; weiSpent: bigint; batches: number };
