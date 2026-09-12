@@ -339,6 +339,14 @@ func (o *scanOrigin) replayFrom() uint64 {
 	return o.Block + 1
 }
 
+// block is the origin's own block, 0 for a chain that has none recorded.
+func (o *scanOrigin) block() uint64 {
+	if o == nil {
+		return 0
+	}
+	return o.Block
+}
+
 // fullState reports whether the origin carries a complete pricer state, so history above it can be
 // replayed rather than guessed.
 func (o *scanOrigin) fullState() bool { return o != nil && o.Archive && o.MinBaseFee != "" }
