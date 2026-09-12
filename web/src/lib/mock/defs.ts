@@ -52,7 +52,7 @@ export type MockNetworkDef = {
   blocksPerSecond: number;
   minFeeHistory: { at: string; wei: bigint }[];
   /** ArbOS upgrades in the recorded history, oldest first. The version in force before the first entry
-   * is that entry's `from`, since the world does not model anything older. */
+   * is that entry's `version`, since the world does not model anything older. */
   arbosHistory: { at: string; version: number }[];
   constraintSets: MockConstraintSet[];
   legacy?: MockLegacyParams;

@@ -7,7 +7,7 @@ func TestAvailableModel(t *testing.T) {
 		version uint64
 		want    Model
 	}{
-		{0, ModelUnknown},
+		{0, ModelLegacy},
 		{1, ModelLegacy},
 		{49, ModelLegacy},
 		{FirstConstraintVersion, ModelConstraints},
@@ -30,7 +30,7 @@ func TestModelString(t *testing.T) {
 // Verified answers for the measured versions and for nothing else, which is what keeps an upgrade from
 // silently inheriting the standing of the version before it.
 func TestVerifiedCoversTheMeasuredVersionsOnly(t *testing.T) {
-	measured := VerifiedVersions()
+	measured := VerifiedVersions(ModelConstraints)
 	if len(measured) == 0 {
 		t.Fatal("no ArbOS version is recorded as measured")
 	}
@@ -40,36 +40,39 @@ func TestVerifiedCoversTheMeasuredVersionsOnly(t *testing.T) {
 		}
 	}
 	for _, v := range measured {
-		if !Verified(v) {
-			t.Errorf("Verified(%d) = false, want true", v)
+		if !Verified(ModelConstraints, v) {
+			t.Errorf("Verified(constraints, %d) = false, want true", v)
 		}
 	}
 	for _, v := range []uint64{0, measured[0] - 1, measured[len(measured)-1] + 1} {
-		if Verified(v) {
-			t.Errorf("Verified(%d) = true, want false", v)
+		if Verified(ModelConstraints, v) {
+			t.Errorf("Verified(constraints, %d) = true, want false", v)
 		}
+	}
+	if len(VerifiedVersions(ModelLegacy)) != 0 || Verified(ModelLegacy, 61) {
+		t.Fatal("the constraint-model measurement must not vouch for a legacy replay on the same version")
 	}
 }
 
 // A crossing is measured separately from either version it joins, because carrying backlogs from one
 // model into the next is the thing in question. Two measured versions are not enough on their own.
 func TestVerifiedRangeNeedsTheCrossingMeasuredToo(t *testing.T) {
-	measured := VerifiedVersions()
+	measured := VerifiedVersions(ModelConstraints)
 	for _, v := range measured {
-		if !VerifiedRange(v, v) {
+		if !VerifiedRange(ModelConstraints, v, v) {
 			t.Errorf("VerifiedRange(%d, %d) = false, want true", v, v)
 		}
 	}
 	unmeasured := measured[len(measured)-1] + 1
 	for _, tt := range [][2]uint64{{measured[0], unmeasured}, {unmeasured, unmeasured}, {0, 0}} {
-		if VerifiedRange(tt[0], tt[1]) {
+		if VerifiedRange(ModelConstraints, tt[0], tt[1]) {
 			t.Errorf("VerifiedRange(%d, %d) = true, want false", tt[0], tt[1])
 		}
 	}
 	crossings := 0
 	for _, low := range measured {
 		for _, high := range measured {
-			if low < high && VerifiedRange(low, high) {
+			if low < high && VerifiedRange(ModelConstraints, low, high) {
 				crossings++
 			}
 		}
@@ -79,11 +82,9 @@ func TestVerifiedRangeNeedsTheCrossingMeasuredToo(t *testing.T) {
 	}
 }
 
-// A header that recorded no version is no evidence against the constraint set the collector holds, so
-// it must not be read as a chain too old for the model.
-func TestSupportsConstraintsTreatsAnUnrecordedVersionAsOpen(t *testing.T) {
-	if !SupportsConstraints(0) {
-		t.Error("SupportsConstraints(0) = false, want true")
+func TestSupportsConstraintsStartsAtVersion50(t *testing.T) {
+	if SupportsConstraints(0) {
+		t.Error("SupportsConstraints(0) = true, want false")
 	}
 	if SupportsConstraints(FirstConstraintVersion - 1) {
 		t.Errorf("SupportsConstraints(%d) = true, want false", FirstConstraintVersion-1)

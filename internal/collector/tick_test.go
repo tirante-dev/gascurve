@@ -1212,7 +1212,7 @@ func TestSlowDataAttachedToNextSample(t *testing.T) {
 }
 
 func TestHelpers(t *testing.T) {
-	s := &nitro.Sample{Constraints: []nitro.Constraint{{Target: 1, Window: 2, Backlog: 3}}, MinBaseFee: big.NewInt(9)}
+	s := &nitro.Sample{Header: nitro.Header{ArbOSVersion: 61}, Constraints: []nitro.Constraint{{Target: 1, Window: 2, Backlog: 3}}, MinBaseFee: big.NewInt(9)}
 	st := stateFromSample(s)
 	if !sameShape(st, s) || sameShape(nil, s) || st.Backlogs()[0] != 3 {
 		t.Fatal("constraint shape")
@@ -1243,8 +1243,12 @@ func TestHelpers(t *testing.T) {
 		t.Fatal("weiString / bigOrZero")
 	}
 	snap := buildSnapshot(1, s, 3, model.GasPerSecond{}, model.NullableGasPerSecond{}, nil, nil, nil)
-	if snap.ReplayErrorBips != 3 || snap.MultiplierBips != 0 || snap.MinBaseFee != "9" {
+	if snap.ReplayErrorBips != 3 || snap.MultiplierBips != 0 || snap.MinBaseFee != "9" || snap.ReplayFidelity != model.FidelityVerified {
 		t.Fatalf("buildSnapshot: %+v", snap)
+	}
+	leg.Header = nitro.Header{ArbOSVersion: 61}
+	if snap := buildSnapshot(1, leg, 0, model.GasPerSecond{}, model.NullableGasPerSecond{}, nil, nil, nil); snap.ReplayFidelity != model.FidelityUnverified {
+		t.Fatalf("the constraint measurement must not vouch for a legacy replay: %+v", snap)
 	}
 	nilFee := &nitro.Sample{Constraints: []nitro.Constraint{{Target: 1, Window: 2, Backlog: 3}}}
 	if snap := buildSnapshot(1, nilFee, 0, model.GasPerSecond{}, model.NullableGasPerSecond{}, nil, nil, nil); snap.MinBaseFee != "0" {

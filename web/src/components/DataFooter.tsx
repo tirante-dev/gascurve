@@ -11,7 +11,6 @@ function estimatedNote(count: number): string {
   return ` (${formatInteger(count)} ${count === 1 ? "bucket" : "buckets"} above 2% ${count === 1 ? "is an estimate" : "are estimates"})`;
 }
 
-/** `now` is for a caller that fixes the clock; left out, the footer keeps its own so the page above it does not tick. */
 /** What the live head says the replay stands on: the version producing blocks now, and whether the
  * pricer has been measured against it. */
 function modelStanding(snapshot: LiveSnapshot | null): string {
@@ -21,6 +20,7 @@ function modelStanding(snapshot: LiveSnapshot | null): string {
   return fidelity === "unverified" ? `ArbOS ${formatInteger(version)}, not yet measured` : `ArbOS ${formatInteger(version)}`;
 }
 
+/** `now` is for a caller that fixes the clock; left out, the footer keeps its own so the page above it does not tick. */
 export function DataFooter({ snapshot, series, networkInfo, status, apiStatus, now }: { snapshot: LiveSnapshot | null; series: Series | null; networkInfo: Network | null; status: LiveStatus; apiStatus: StatusResponse | null; now?: number }) {
   const ticked = useTicker(now === undefined ? 1000 : 0);
   const clock = now ?? ticked;

@@ -79,6 +79,54 @@ func TestSpansArbOSUpgrade(t *testing.T) {
 	}
 }
 
+func TestKnownArbOSVersionZeroIsNotMissing(t *testing.T) {
+	headers := []nitro.Header{
+		{Number: 10, ArbOSVersion: 0, ArbOSVersionKnown: true},
+		{Number: 11, ArbOSVersion: 51},
+	}
+	if from, to, found := unsupportedModel(constraintState(), headers); !found || from != 10 || to != 10 {
+		t.Fatalf("known version zero must predate the constraint model: %d..%d %v", from, to, found)
+	}
+	if at, found := spansArbOSUpgrade(headers); !found || at != 11 {
+		t.Fatalf("known version zero must participate in upgrades: %d %v", at, found)
+	}
+	if stored := arbOSVersionOf(headers[0]); !stored.Valid || stored.Int64 != 0 {
+		t.Fatalf("known version zero must be stored: %+v", stored)
+	}
+	if live := liveArbOSVersion(headers[0]); live == nil || *live != 0 {
+		t.Fatalf("known version zero must be published: %v", live)
+	}
+}
+
+// A catch-up that encounters an unsupported prefix seeds the sampled head, but every skipped block is
+// covered by the blocked range. A supported suffix must not disappear between the narrow refusal and
+// the new seed.
+func TestCatchUpUnsupportedPrefixRecordsEverySkippedBlock(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.arbos = pricer.FirstConstraintVersion - 1
+	rpc.arbosFrom, rpc.arbosTo = 1002, 61
+	rpc.setHead(1003)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].From != 1001 || holes[0].To != 1002 || holes[0].Reason != reasonUnsupportedModel {
+		t.Fatalf("every skipped block must be accounted for: %+v", holes)
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 1002); b != nil {
+		t.Fatalf("a skipped supported suffix may not look indexed: %+v", b)
+	}
+	if b, _ := store.BlockByNumber(ctx, 4663, 1003); b == nil {
+		t.Fatal("the sampled head must still seed the new replay")
+	}
+}
+
 // A gap whose blocks predate the multi-constraint pricer is recorded as unfillable rather than priced
 // with a constraint set the chain did not have. It stays visible as blocked work, so an operator sees
 // the range rather than a plausible number over it.
@@ -90,9 +138,21 @@ func TestFillRefusesBlocksOlderThanTheConstraintModel(t *testing.T) {
 	f := newTestFollower(t, rpc, store)
 	skipGap(t, f, rpc)
 
+	rpc.hooks["HeadersByNumbers"] = rewound(t, f, store)
 	status, err := f.FillStep(context.Background())
 	if err != nil {
 		t.Fatalf("fill step: %v", err)
+	}
+	if status != FillIdle {
+		t.Fatalf("a rewind during the refusal must discard its mark: %v", status)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Reason != reasonCatchUpLimit || holes[0].Lifecycle != rangePending {
+		t.Fatalf("a stale refusal must leave the queued range unchanged: %+v", holes)
+	}
+	delete(rpc.hooks, "HeadersByNumbers")
+	status, err = f.FillStep(context.Background())
+	if err != nil {
+		t.Fatalf("fill retry: %v", err)
 	}
 	if status != FillNone {
 		t.Fatalf("a range on a model the pricer does not implement is not fillable work: %v", status)
@@ -103,6 +163,13 @@ func TestFillRefusesBlocksOlderThanTheConstraintModel(t *testing.T) {
 	}
 	if b, _ := store.BlockByNumber(context.Background(), 4663, 1001); b != nil {
 		t.Fatalf("no block of the refused range may be priced: %+v", b)
+	}
+	before := len(rpc.headerCalls)
+	if status, err := f.FillStep(context.Background()); err != nil || status != FillNone {
+		t.Fatalf("blocked range: %v %v", status, err)
+	}
+	if len(rpc.headerCalls) != before {
+		t.Fatalf("an unsupported range must not be fetched again: %v", rpc.headerCalls[before:])
 	}
 }
 

@@ -172,7 +172,7 @@ func (f *fakeRPC) header(n uint64) nitro.Header {
 	}
 	posterGas := f.posterGas(n)
 	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50,
-		ArbOSVersion: f.arbosOf(n), TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)], PosterGas: &posterGas}
+		ArbOSVersion: f.arbosOf(n), ArbOSVersionKnown: true, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)], PosterGas: &posterGas}
 }
 
 // arbosOf is the version in force at a block: the upgrade's version from arbosFrom on.

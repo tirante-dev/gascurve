@@ -5,7 +5,7 @@
 import type { OwnerAction, PricerModel, Series } from "@/types";
 import type { TooltipRow } from "@/components/ChartTooltip";
 import { bucketSeconds as bucketWidth, gapModel, withGapBreaks, NO_GAPS, type GapModel, type GapRow } from "@/lib/gaps";
-import { fidelityRowNote } from "@/lib/fidelity";
+import { fidelityBands, fidelityRowNote, type FidelityBand } from "@/lib/fidelity";
 import { parseConstraintArg, rawConstraintArg } from "@/lib/ownerActions";
 import { partialRowNote } from "@/lib/partial";
 import { buildChartPoints, FLOOR_COLOR, logDomain, shortConstraintLabel, spanSeconds, withSetBoundaries, type ChartPoint } from "@/utils/chart";
@@ -121,15 +121,17 @@ export type FeeChartData = {
   domain: [number, number];
   span: number;
   bucketSeconds: number;
+  fidelityBands: FidelityBand[];
   /** The window the range asked for, the spans of it with nothing in them, and the step they were judged at. */
   gaps: GapModel;
 };
 
 /** The rows, markers, domain and axis span of a range. An absent series draws nothing at all. */
 export function feeChartData(series: Series | null, model: PricerModel): FeeChartData {
-  if (!series) return { points: [], drawn: [], markers: [], domain: logDomain([]), span: 0, bucketSeconds: DEFAULT_BUCKET_SECONDS, gaps: NO_GAPS };
+  if (!series) return { points: [], drawn: [], markers: [], domain: logDomain([]), span: 0, bucketSeconds: DEFAULT_BUCKET_SECONDS, fidelityBands: [], gaps: NO_GAPS };
   const points = buildChartPoints(series, model);
   const gaps = gapModel(series, points);
+  const bucketSeconds = bucketWidth(series.resolution, points);
   return {
     points,
     // Empty rows inside the holes, so a missing bucket breaks the line rather than being bridged.
@@ -140,7 +142,8 @@ export function feeChartData(series: Series | null, model: PricerModel): FeeChar
     span: gaps.window.to > gaps.window.from ? gaps.window.to - gaps.window.from : spanSeconds(points),
     // The bucket width is the resolution's own, never the distance between the first two points: two
     // per-block points sharing a timestamp made a zero-width bucket, and one missing point inflated it.
-    bucketSeconds: bucketWidth(series.resolution, points),
+    bucketSeconds,
+    fidelityBands: fidelityBands(series.points, bucketSeconds),
     gaps,
   };
 }

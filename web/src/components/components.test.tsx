@@ -262,6 +262,13 @@ describe("LiveHero", () => {
     expect(screen.getAllByText("not indexed yet").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Shaded: not indexed yet, history before 2026-09-06 02:20 CDT").length).toBeGreaterThan(0);
   });
+  it("hatches unverified buckets in the historical hero chart", () => {
+    const marked = { ...history, points: [{ ...history.points[0], replayFidelity: "unverified" as const, arbosVersionMin: 62, arbosVersionMax: 62 }, history.points[1]] };
+    const { container } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" range="24h" series={marked} model="constraints" />);
+    expect(container.querySelector('rect[data-band="fidelity"]')).toHaveAttribute("fill", "url(#unverified-model-hatch)");
+    expect(container.querySelector("pattern#unverified-model-hatch")).not.toBeNull();
+    expect(screen.getAllByText("Marked, replay not verified: unverified pricing model for 1 bucket").length).toBeGreaterThanOrEqual(2);
+  });
   it("draws the chain's throughput under the fee, on the hero's own range", () => {
     // Six seconds of blocks: the newest second is still being delivered and is
     // left out, so a shorter ring has nothing complete to draw.

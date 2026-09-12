@@ -51,7 +51,7 @@ import { chartView } from "@/lib/chartViews";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { ChartReadout, type ReadoutGroup } from "./ChartReadout";
 import { EnlargeLink } from "./ChartActions";
-import { GapBands, GapNote } from "./ChartGaps";
+import { FidelityBands, FidelityHatch, FidelityNote, GapBands, GapNote } from "./ChartGaps";
 import { buildSeriesModel, bucketRowTitle, GasPerSecondChart } from "./SeriesCharts";
 import { FeeGauge } from "./FeeGauge";
 import { Figure, HoverNote, Label, type NoteAlign, Stat, type StatTone, StatusPill, Term, TIME_AXIS_RIGHT } from "./primitives";
@@ -194,8 +194,14 @@ export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabe
       <ChartBox label={feeChartLabel(rangeLabel, data.points)} height={height}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data.drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
+            {data.fidelityBands.length > 0 ? (
+              <defs>
+                <FidelityHatch />
+              </defs>
+            ) : null}
             <CartesianGrid vertical={false} />
             <GapBands gaps={data.gaps.gaps} />
+            <FidelityBands bands={data.fidelityBands} />
             {/* The axis is the window that was asked for, so the buckets that
                 exist sit where they happened rather than filling the frame. */}
             <XAxis dataKey="t" type="number" domain={[data.gaps.window.from, data.gaps.window.to]} tickFormatter={(t: number) => formatTick(t, data.span)} tickLine axisLine={false} height={18} minTickGap={48} />
@@ -212,6 +218,7 @@ export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabe
         </ResponsiveContainer>
       </ChartBox>
       <GapNote gaps={data.gaps} />
+      <FidelityNote bands={data.fidelityBands} />
     </>
   );
 });

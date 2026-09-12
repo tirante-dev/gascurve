@@ -14,12 +14,16 @@ const FirstConstraintVersion uint64 = 50
 // a claim that belongs with a new measurement rather than with the upgrade that produced it. One row
 // of the table in docs/SPEC.md section 7.1 backs each entry.
 var (
-	verifiedVersions = map[uint64]bool{
-		51: true,
-		61: true,
+	verifiedVersions = map[Model]map[uint64]bool{
+		ModelConstraints: {
+			51: true,
+			61: true,
+		},
 	}
-	verifiedCrossings = map[[2]uint64]bool{
-		{51, 61}: true,
+	verifiedCrossings = map[Model]map[[2]uint64]bool{
+		ModelConstraints: {
+			{51, 61}: true,
+		},
 	}
 )
 
@@ -34,7 +38,7 @@ const (
 type Model int
 
 const (
-	// ModelUnknown is a block whose ArbOS version was never recorded.
+	// ModelUnknown is a replay whose actual pricing model was not recorded.
 	ModelUnknown Model = iota
 	ModelLegacy
 	ModelConstraints
@@ -53,50 +57,46 @@ func (m Model) String() string {
 
 // Available is the newest model an ArbOS version can run. A chain on ArbOS 50 or later may still price
 // with the legacy model when no constraint set is configured, so this bounds the model rather than
-// naming it; ModelUnknown for version 0, which is what an unrecorded header decodes to.
+// naming it. Header presence is tracked separately because zero is a real ArbOS version.
 func Available(arbosVersion uint64) Model {
-	switch {
-	case arbosVersion == 0:
-		return ModelUnknown
-	case arbosVersion >= FirstConstraintVersion:
+	if arbosVersion >= FirstConstraintVersion {
 		return ModelConstraints
-	default:
-		return ModelLegacy
 	}
+	return ModelLegacy
 }
 
-// Verified reports whether a replay of a block on this ArbOS version is covered by the measurement.
-// Version 0 is unknown rather than unverified, so it answers false as well.
-func Verified(arbosVersion uint64) bool {
-	return verifiedVersions[arbosVersion]
+// Verified reports whether a replay using this model on this ArbOS version is covered by the
+// measurement. A version alone is insufficient because newer ArbOS releases can run either model.
+func Verified(pricingModel Model, arbosVersion uint64) bool {
+	return verifiedVersions[pricingModel][arbosVersion]
 }
 
 // VerifiedRange reports whether a replay over blocks running low through high is covered: both ends
 // measured, and, where they differ, the crossing between them measured by replaying through it. A
 // crossing is its own measurement because carrying backlogs from one model into the next is the thing
 // in question, not either model on its own.
-func VerifiedRange(low, high uint64) bool {
-	if !verifiedVersions[low] || !verifiedVersions[high] {
+func VerifiedRange(pricingModel Model, low, high uint64) bool {
+	versions := verifiedVersions[pricingModel]
+	if !versions[low] || !versions[high] {
 		return false
 	}
-	return low == high || verifiedCrossings[[2]uint64{low, high}]
+	return low == high || verifiedCrossings[pricingModel][[2]uint64{low, high}]
 }
 
 // VerifiedVersions lists the measured versions, ascending, for anything that reports what the replay
 // stands on.
-func VerifiedVersions() []uint64 {
-	out := make([]uint64, 0, len(verifiedVersions))
-	for v := range verifiedVersions {
+func VerifiedVersions(pricingModel Model) []uint64 {
+	versions := verifiedVersions[pricingModel]
+	out := make([]uint64, 0, len(versions))
+	for v := range versions {
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }
 
-// SupportsConstraints reports whether the constraint model existed at this ArbOS version. False is the
-// case a replay must refuse rather than guess: pricing a pre-50 block with a constraint set applies a
-// model the chain did not have. Version 0 leaves the question open and answers true, since a header
-// that recorded no version is no evidence against the set the collector holds.
+// SupportsConstraints reports whether the constraint model existed at this ArbOS version. Header
+// presence is checked by the caller, so version zero here means the real pre-constraint release.
 func SupportsConstraints(arbosVersion uint64) bool {
-	return arbosVersion == 0 || arbosVersion >= FirstConstraintVersion
+	return arbosVersion >= FirstConstraintVersion
 }

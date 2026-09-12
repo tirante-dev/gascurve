@@ -22,14 +22,22 @@ type Header struct {
 	BaseFee       *big.Int
 	L1BlockNumber uint64
 	ArbOSVersion  uint64
-	TxCount       int
-	TxHashes      []string
+	// ArbOSVersionKnown distinguishes a real version zero from a header lookup that omitted mixHash.
+	ArbOSVersionKnown bool
+	TxCount           int
+	TxHashes          []string
 	// PosterGas is the sum of gasUsedForL1 from the block's receipts. It is
 	// nil only for header-only lookups that do not need fee accounting.
 	PosterGas *uint64
 	// computeGasBefore holds the cumulative compute gas before each transaction, from the same validated
 	// receipt set as PosterGas, so replay can place owner actions at the right compute-gas boundary.
 	computeGasBefore []uint64
+}
+
+// HasArbOSVersion reports whether the header carried the version in its mix digest. The value check
+// keeps manually constructed nonzero headers useful without requiring every caller to set the flag.
+func (h Header) HasArbOSVersion() bool {
+	return h.ArbOSVersionKnown || h.ArbOSVersion != 0
 }
 
 // ComputeGas is the gas Nitro applies to the L2 pricer and splits between the infrastructure and network
@@ -173,6 +181,7 @@ func parseHeader(raw json.RawMessage) (*Block, error) {
 		}
 		// Nitro HeaderInfo stores ArbOSFormatVersion in bytes 16 through 23 of the mix digest.
 		b.ArbOSVersion = binary.BigEndian.Uint64(mixHash[16:24])
+		b.ArbOSVersionKnown = true
 	}
 	b.TxCount = len(rb.Transactions)
 	b.TxHashes = make([]string, 0, len(rb.Transactions))

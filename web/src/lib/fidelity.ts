@@ -97,7 +97,7 @@ const KINDS: readonly UnvouchedKind[] = ["boundary", "unverified"];
 function describe(kind: UnvouchedKind, bands: readonly FidelityBand[]): string {
   const runs = fidelityRuns(bands).length;
   const where = runs === 1 ? "" : ` in ${formatInteger(runs)} stretches`;
-  return `${fidelityBandLabel(kind)} for ${formatInteger(bands.length)} buckets${where}`;
+  return `${fidelityBandLabel(kind)} for ${formatInteger(bands.length)} ${bands.length === 1 ? "bucket" : "buckets"}${where}`;
 }
 
 /** The line under a chart that marks unvouched buckets. Null when none are marked. */

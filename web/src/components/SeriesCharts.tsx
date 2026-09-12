@@ -5,7 +5,7 @@ import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, Res
 import type { PricerModel, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
 import { bucketNote, describeAction, feeChartData, feeTooltipRows, formatFloor, type DrawnRow } from "@/lib/feeChart";
-import { fidelityBands, type FidelityBand } from "@/lib/fidelity";
+import type { FidelityBand } from "@/lib/fidelity";
 import { emptyRangeNote, type GapModel, type GapWindow } from "@/lib/gaps";
 import { throughputAxis, throughputTick, type ThroughputAxis } from "@/lib/hero";
 import { missingRuns, withMissingNote, withMissingNotes, type MissingRun, type MissingSeries, type Present } from "@/lib/missing";
@@ -147,7 +147,7 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   // across the bucket; `points` is one row per bucket, for the table and the
   // inspector. The base fee itself is drawn by the hero, at every range, so
   // it is not here.
-  const { points, drawn, markers, span, bucketSeconds, gaps } = feeChartData(series, model);
+  const { points, drawn, markers, span, bucketSeconds, gaps, fidelityBands: unvouched } = feeChartData(series, model);
   const segments = segmentsFor(series, model);
   // Two ways a point ends up in the unknown-split series: its set is not
   // known (backlogs then go under the unlabelled slots too), or its set is
@@ -183,9 +183,6 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   // Read from the buckets rather than from `drawn`: the duplicate a set
   // boundary inserts would otherwise count its bucket twice.
   const gasMissing = ratesReported ? missingRuns(points, gasPresent, bucketSeconds, "receipts") : [];
-  // Read from the buckets for the same reason: a set boundary duplicates a row, and a duplicate would
-  // open a second band over the same bucket.
-  const unvouched = fidelityBands(points, bucketSeconds);
   const backlogMissing = indices.map((i) => missingRuns(points, backlogPresent(i), bucketSeconds, "backlog"));
   const backlogNotes = indices.map((i) => withMissingNote(note, backlogPresent(i), "backlog"));
   // The inspector stands in for every chart at once, and it is how a reader
@@ -362,7 +359,7 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
       <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit}${m.hasSpread ? `, banded from the lowest to the highest ${m.spreadUnit} inside each bucket,` : ""} with each constraint target in force drawn as a stepped line`}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
-            {m.gasMissing.length > 0 ? (
+            {m.gasMissing.length > 0 || m.fidelityBands.length > 0 ? (
               <defs>
                 <FidelityHatch />
                 <MissingDots />
@@ -407,7 +404,7 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
       <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
-            {m.backlogMissingFor(index).length > 0 ? (
+            {m.backlogMissingFor(index).length > 0 || m.fidelityBands.length > 0 ? (
               <defs>
                 <FidelityHatch />
                 <MissingDots />

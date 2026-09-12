@@ -543,6 +543,23 @@ func setIDAt(sets []db.ConstraintSet, number uint64, backlogs int) int64 {
 	return id
 }
 
+func replayModel(setID int64) pricer.Model {
+	if setID > 0 {
+		return pricer.ModelConstraints
+	}
+	return pricer.ModelUnknown
+}
+
+func replayFidelity(setID int64, low, high *uint64) string {
+	return replayFidelityForModel(replayModel(setID), low, high)
+}
+
+func replayFidelityForModel(pricingModel pricer.Model, low, high *uint64) string {
+	return model.ReplayFidelity(low, high, func(from, to uint64) bool {
+		return pricer.VerifiedRange(pricingModel, from, to)
+	})
+}
+
 // setSize is the number of constraints in a set document, -1 when it cannot be read.
 func setSize(cs db.ConstraintSet) int {
 	var entries []json.RawMessage
@@ -636,7 +653,7 @@ func bucketPoint(b db.Bucket, width time.Duration, now, liveStart time.Time) (mo
 		MinBaseFee: b.MinBaseFee.StringPtr(), FloorFeesWei: floorFees, SurplusFeesWei: surplusFees, PosterFeesWei: posterFees,
 		ConstraintSetID: setID, ReplayErrorBips: b.ReplayErrorBips,
 		ArbOSVersionMin: arbosMin, ArbOSVersionMax: arbosMax,
-		ReplayFidelity: model.ReplayFidelity(arbosMin, arbosMax, pricer.VerifiedRange),
+		ReplayFidelity: replayFidelity(setID, arbosMin, arbosMax),
 	}, true
 }
 
@@ -666,14 +683,15 @@ func blockPoints(blocks []db.Block, sets []db.ConstraintSet) []model.SeriesPoint
 			computeGasPerSecond = uint64ValuePtr(computePerSecond[b.TS.Unix()])
 		}
 		arbos := uint64Ptr(b.ArbOSVersion)
+		setID := setIDAt(sets, b.Number, len(b.Backlogs))
 		p := model.SeriesPoint{
 			T: b.TS.Unix(), Blocks: 1, GasUsed: b.GasUsed, PosterGas: uint64Ptr(b.PosterGas), GasPerSecond: perSecond[b.TS.Unix()], Coverage: pointCoverage, Completeness: completeness,
 			ComputeGasPerSecond: computeGasPerSecond,
 			FeesWei:             fees.String(), BaseFeeMin: b.BaseFee.String(), BaseFeeAvg: b.BaseFee.String(), BaseFeeMax: b.BaseFee.String(),
 			ExponentBips: b.ExponentBips, ConstraintBips: int64s(b.ConstraintBips), Backlogs: b.Backlogs.Uint64s(), BacklogsMax: b.Backlogs.Uint64s(),
-			MinBaseFee: b.MinBaseFee.StringPtr(), ConstraintSetID: setIDAt(sets, b.Number, len(b.Backlogs)), ReplayErrorBips: replayError(b),
+			MinBaseFee: b.MinBaseFee.StringPtr(), ConstraintSetID: setID, ReplayErrorBips: replayError(b),
 			ArbOSVersionMin: arbos, ArbOSVersionMax: arbos,
-			ReplayFidelity: model.ReplayFidelity(arbos, arbos, pricer.VerifiedRange),
+			ReplayFidelity: replayFidelity(setID, arbos, arbos),
 		}
 		if b.DestinationsKnown() {
 			posterGas := new(big.Int).SetInt64(b.PosterGas.Int64)
@@ -759,9 +777,11 @@ type acc struct {
 	maxBacklog          []uint64
 	minBaseFee          *string
 	setID               int64
+	replayModel         pricer.Model
 	errBips             int64
 	// The ArbOS versions the step's blocks recorded, cleared as soon as one recorded none.
 	arbosMin, arbosMax uint64
+	haveArbOS          bool
 	unknownArbOS       bool
 	// The spread of the step, over the whole seconds of it: cutoff is the second the serving clock is
 	// inside, which is not one of them, second and secondGas the second being folded, and voided
@@ -815,6 +835,12 @@ func (a *acc) rate(b db.Block) {
 }
 
 func (a *acc) add(b db.Block, setID int64) {
+	observedModel := replayModel(setID)
+	if a.blocks == 0 {
+		a.replayModel = observedModel
+	} else if a.replayModel != observedModel {
+		a.replayModel = pricer.ModelUnknown
+	}
 	a.rate(b)
 	fee := b.BaseFee.BigInt()
 	if a.blocks == 0 || fee.Cmp(a.minFee) < 0 {
@@ -870,14 +896,14 @@ func (a *acc) addArbOS(v sql.NullInt64) {
 	if a.unknownArbOS {
 		return
 	}
-	// Version zero is what an unrecorded header decodes to, never a version a chain ran.
-	if !v.Valid || v.Int64 <= 0 {
+	if !v.Valid || v.Int64 < 0 {
 		a.arbosMin, a.arbosMax, a.unknownArbOS = 0, 0, true
 		return
 	}
 	version := uint64(v.Int64)
-	if a.arbosMax == 0 {
+	if !a.haveArbOS {
 		a.arbosMin, a.arbosMax = version, version
+		a.haveArbOS = true
 		return
 	}
 	a.arbosMin, a.arbosMax = min(a.arbosMin, version), max(a.arbosMax, version)
@@ -885,7 +911,7 @@ func (a *acc) addArbOS(v sql.NullInt64) {
 
 // arbosRange is the step's bounds as the wire carries them, both null when any block lacked one.
 func (a *acc) arbosRange() (low, high *uint64) {
-	if a.unknownArbOS || a.arbosMax == 0 {
+	if a.unknownArbOS || !a.haveArbOS {
 		return nil, nil
 	}
 	lo, hi := a.arbosMin, a.arbosMax
@@ -923,7 +949,7 @@ func (a *acc) point(width time.Duration, now time.Time) model.SeriesPoint {
 		ExponentBips: a.exponent, ConstraintBips: a.constraintBips, Backlogs: a.backlogs, BacklogsMax: a.maxBacklog,
 		MinBaseFee: a.minBaseFee, ConstraintSetID: a.setID, ReplayErrorBips: a.errBips,
 		ArbOSVersionMin: arbosMin, ArbOSVersionMax: arbosMax,
-		ReplayFidelity: model.ReplayFidelity(arbosMin, arbosMax, pricer.VerifiedRange),
+		ReplayFidelity: replayFidelityForModel(a.replayModel, arbosMin, arbosMax),
 	}
 	if !a.unknownPoster {
 		p.PosterGas = &a.posterGas

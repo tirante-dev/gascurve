@@ -15,7 +15,7 @@ func unsupportedModel(st *pricer.State, headers []nitro.Header) (from, to uint64
 		return 0, 0, false
 	}
 	for _, h := range headers {
-		if pricer.SupportsConstraints(h.ArbOSVersion) {
+		if !h.HasArbOSVersion() || pricer.SupportsConstraints(h.ArbOSVersion) {
 			continue
 		}
 		if !found {
@@ -30,15 +30,17 @@ func unsupportedModel(st *pricer.State, headers []nitro.Header) (from, to uint64
 // is where a replay carries backlogs from one pricing model into the next. Headers that recorded no
 // version are skipped rather than read as a change.
 func spansArbOSUpgrade(headers []nitro.Header) (uint64, bool) {
-	prev := uint64(0)
+	var prev uint64
+	havePrev := false
 	for _, h := range headers {
-		if h.ArbOSVersion == 0 {
+		if !h.HasArbOSVersion() {
 			continue
 		}
-		if prev != 0 && h.ArbOSVersion != prev {
+		if havePrev && h.ArbOSVersion != prev {
 			return h.Number, true
 		}
 		prev = h.ArbOSVersion
+		havePrev = true
 	}
 	return 0, false
 }

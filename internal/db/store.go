@@ -52,7 +52,7 @@ type Block struct {
 	MinBaseFee       NullWei       `db:"min_base_fee"`
 	Anchored         bool          `db:"anchored"`
 	PricingVersion   int16         `db:"pricing_version"`
-	// ArbOSVersion comes from the header mix digest; invalid means unrecorded, never version zero.
+	// ArbOSVersion comes from the header mix digest; invalid means unrecorded. Zero is a real version.
 	ArbOSVersion sql.NullInt64 `db:"arbos_version"`
 }
 

@@ -121,7 +121,7 @@ describe("fidelityCaption", () => {
       { from: 600, to: 660, kind: "unverified" },
       { from: 660, to: 720, kind: "unverified" },
     ]);
-    expect(caption).toBe(`Marked, replay not verified: ${fidelityBandLabel("boundary")} for 1 buckets · ${fidelityBandLabel("unverified")} for 2 buckets`);
+    expect(caption).toBe(`Marked, replay not verified: ${fidelityBandLabel("boundary")} for 1 bucket · ${fidelityBandLabel("unverified")} for 2 buckets`);
   });
 
   it("counts stretches when one kind falls in several", () => {

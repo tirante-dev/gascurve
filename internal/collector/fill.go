@@ -379,6 +379,9 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 			if (effectiveLifecycle(h) == rangeBlocked) != blocked {
 				continue
 			}
+			if h.Reason == reasonUnsupportedModel {
+				continue
+			}
 			if effectiveLifecycle(h) == rangeRetrying && h.NextRetryAt != "" {
 				next, err := requiredTime(h.NextRetryAt, "next retry at")
 				if err != nil {
@@ -749,7 +752,7 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	if lo, hi, bad := unsupportedModel(t.state, headers); bad {
 		f.log.Warn("a queued range predates the multi-constraint pricer, recording it as unfillable rather than pricing it with a model the chain did not run",
 			"from", lo, "to", hi, "arbosBelow", pricer.FirstConstraintVersion)
-		if err := f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
+		if err := f.withGeneration(ctx, gen, func(s db.Store) error {
 			return f.markHoles(ctx, s, map[uint64]string{h.From: reasonUnsupportedModel})
 		}); err != nil {
 			return FillNone, err

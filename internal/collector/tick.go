@@ -564,18 +564,21 @@ func (f *Follower) process(ctx context.Context, sample *nitro.Sample, headers []
 		f.log.Warn("no known replay state before the first missing block, restarting from the sampled head", "from", h.From, "to", h.To)
 		return f.seed(ctx, sample, &h, nil, capacity)
 	}
-	if from, to, ok := unsupportedModel(st, headers); ok {
-		h := hole{
-			From: from, To: min(to, head-1), Lifecycle: rangeBlocked, Reason: reasonUnsupportedModel,
-			SuccessorAt: timestampString(sample.Header.Timestamp),
-		}
-		f.log.Warn("blocks predate the multi-constraint pricer, leaving them unpriced rather than replaying a model the chain did not run",
-			"from", h.From, "to", h.To, "arbosBelow", pricer.FirstConstraintVersion)
-		return f.seed(ctx, sample, &h, nil, capacity)
-	}
 	pending, err := f.fetchOwnerActions(ctx, headers[0].Number, head)
 	if err != nil {
 		return f.fail(ctx, err)
+	}
+	if from, to, ok := unsupportedModel(st, headers); ok {
+		var h *hole
+		if headers[0].Number < head {
+			h = &hole{
+				From: headers[0].Number, To: head - 1, Lifecycle: rangeBlocked, Reason: reasonUnsupportedModel,
+				SuccessorAt: timestampString(sample.Header.Timestamp),
+			}
+		}
+		f.log.Warn("blocks predate the multi-constraint pricer, leaving them unpriced rather than replaying a model the chain did not run",
+			"from", from, "to", to, "arbosBelow", pricer.FirstConstraintVersion)
+		return f.seed(ctx, sample, h, pending, capacity)
 	}
 	f.mu.Lock()
 	tl := f.timelineLocked(pending)
@@ -1046,11 +1049,10 @@ func shiftPredictions(rows []db.Block, carry prediction) prediction {
 // blockRows joins headers with replay results. Rows written here always carry the full pricing
 // breakdown, so their fee split is exact. The pricing group each row receives here is the one the
 // replay produced at that block, which prices the next one; shiftPredictions moves it into place.
-// arbOSVersionOf reads the version Nitro wrote into the header mix digest. Zero means the header did
-// not carry one (a synthesized header, or a node that omits mixHash), which is unknown, not version
-// zero, so it is stored as NULL.
+// arbOSVersionOf reads the version Nitro wrote into the header mix digest. A synthesized header or a
+// node that omits mixHash is stored as NULL; a present version zero remains zero.
 func arbOSVersionOf(h nitro.Header) sql.NullInt64 {
-	if h.ArbOSVersion == 0 {
+	if !h.HasArbOSVersion() {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: int64(h.ArbOSVersion), Valid: true}
@@ -1097,16 +1099,18 @@ func blockRows(chainID uint64, headers []nitro.Header, results []pricer.Result, 
 // liveArbOSVersion and liveFidelity read the sampled head's own version. A header without one leaves
 // the fidelity unknown rather than claiming a verified replay.
 func liveArbOSVersion(h nitro.Header) *uint64 {
-	if h.ArbOSVersion == 0 {
+	if !h.HasArbOSVersion() {
 		return nil
 	}
 	v := h.ArbOSVersion
 	return &v
 }
 
-func liveFidelity(h nitro.Header) string {
+func liveFidelity(h nitro.Header, pricingModel pricer.Model) string {
 	v := liveArbOSVersion(h)
-	return model.ReplayFidelity(v, v, pricer.VerifiedRange)
+	return model.ReplayFidelity(v, v, func(low, high uint64) bool {
+		return pricer.VerifiedRange(pricingModel, low, high)
+	})
 }
 
 func buildSnapshot(chainID uint64, sample *nitro.Sample, replayErrorBips int64, gps model.GasPerSecond, computeGPS model.NullableGasPerSecond, l1 *model.L1, accounts *model.Accounts, ethUsd *model.EthUsd) model.LiveSnapshot {
@@ -1116,6 +1120,10 @@ func buildSnapshot(chainID uint64, sample *nitro.Sample, replayErrorBips int64, 
 	minFee := sample.MinBaseFee
 	if minFee == nil {
 		minFee = new(big.Int)
+	}
+	pricingModel := pricer.ModelConstraints
+	if sample.IsLegacy() {
+		pricingModel = pricer.ModelLegacy
 	}
 	snap := model.LiveSnapshot{
 		ChainID:   chainID,
@@ -1140,7 +1148,7 @@ func buildSnapshot(chainID uint64, sample *nitro.Sample, replayErrorBips int64, 
 		Accounts:            accounts,
 		ReplayErrorBips:     replayErrorBips,
 		ArbOSVersion:        liveArbOSVersion(h),
-		ReplayFidelity:      liveFidelity(h),
+		ReplayFidelity:      liveFidelity(h, pricingModel),
 		EthUsd:              ethUsd,
 	}
 	for i, c := range sample.Constraints {
