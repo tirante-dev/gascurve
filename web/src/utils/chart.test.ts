@@ -26,7 +26,7 @@ import {
   FLOOR_COLOR,
   MARKER_COLOR,
   resampleBatches,
-  resampleFees,
+  resamplePosterFees,
   spreadUnitLabel,
   bigFraction,
   segmentsFor,
@@ -458,6 +458,9 @@ describe("history from before the split migration", () => {
     expect(half.floorFeesEth).toBeNull();
     expect(half.surplusFeesEth).toBeNull();
     expect(half.unsplitFeesEth).toBeCloseTo(1);
+    const [posterKnown] = buildChartPoints({ ...series, points: [point({ feesWei: "1000000000000000000", floorFeesWei: null, surplusFeesWei: null, posterFeesWei: "250000000000000000" })] }, "constraints");
+    expect(posterKnown.posterFeesEth).toBeCloseTo(0.25);
+    expect(posterKnown.unsplitFeesEth).toBeCloseTo(0.75);
     expect(sumKnownWeiEth(mixed.points, "floorFeesWei")).toEqual({ eth: expect.closeTo(0.004, 6), unknown: 1 });
     expect(sumKnownWeiEth(mixed.points, "surplusFeesWei")).toEqual({ eth: expect.closeTo(0.996, 6), unknown: 1 });
     expect(sumKnownWeiEth([], "surplusFeesWei")).toEqual({ eth: 0, unknown: 0 });
@@ -480,9 +483,15 @@ describe("history from before the split migration", () => {
 });
 
 describe("L1 cost join", () => {
-  it("resamples fees and batches into the same buckets, summing wei before converting", () => {
-    const fees = resampleFees(series.points, 60);
-    expect([...fees.entries()]).toEqual([[60, 1.5]]);
+  it("resamples poster fees and batches into the same buckets, summing wei before converting", () => {
+    const fees = resamplePosterFees(
+      [
+        point({ t: 60, posterFeesWei: "1000000000000000000" }),
+        point({ t: 72, posterFeesWei: "500000000000000000" }),
+      ],
+      60,
+    );
+    expect([...fees.entries()]).toEqual([[60, { t: 60, posterEth: 1.5, coverage: 1, completeness: "complete" }]]);
     const buckets = resampleBatches(
       [
         { t: 60, batches: 1, weiSpent: "500000000000" },
@@ -496,9 +505,25 @@ describe("L1 cost join", () => {
       { t: 120, batches: 0, weiSpent: 0n },
     ]);
   });
-  it("attaches each L2 bucket exactly once however many reports fall into it", () => {
+  it("keeps a resampled poster bucket unavailable when any source value is unavailable", () => {
+    const fees = resamplePosterFees(
+      [
+        point({ t: 0, posterFeesWei: "100000000000000000", coverage: 1, completeness: "complete" }),
+        point({ t: 5, posterFeesWei: null, coverage: 0.5, completeness: "partial" }),
+      ],
+      15,
+    );
+    expect(fees.get(0)).toEqual({ t: 0, posterEth: null, coverage: 0.5, completeness: "partial" });
+  });
+  it("keeps the union of poster-fee and cost buckets without inventing poster-fee zeroes", () => {
     // Two reports at seconds 0 and 12 of the same 15 s bucket, users paid 0.25 ETH in it.
-    const fees = resampleFees([point({ t: 3, feesWei: "250000000000000000" })], 15);
+    const fees = resamplePosterFees(
+      [
+        point({ t: 3, posterFeesWei: "250000000000000000" }),
+        point({ t: 18, posterFeesWei: "500000000000000000" }),
+      ],
+      15,
+    );
     const rows = joinCosts(
       [
         { t: 0, batches: 1, weiSpent: "6000000000000" },
@@ -509,14 +534,16 @@ describe("L1 cost join", () => {
       15,
     );
     expect(rows).toEqual([
-      { t: 0, l1Eth: 0.00001, l2Eth: 0.25, batches: 2 },
-      { t: 30, l1Eth: 0, l2Eth: 0, batches: 1 },
+      { t: 0, attributedCostEth: 0.00001, posterFeesEth: 0.25, batches: 2, coverage: 1, completeness: "complete" },
+      { t: 15, attributedCostEth: 0, posterFeesEth: 0.5, batches: 0, coverage: 1, completeness: "complete" },
+      { t: 30, attributedCostEth: 0, posterFeesEth: null, batches: 1, coverage: null, completeness: "unknown" },
     ]);
-    expect(rows.reduce((s, r) => s + r.l2Eth, 0)).toBe(0.25);
+    expect(rows.reduce((s, r) => s + (r.posterFeesEth ?? 0), 0)).toBe(0.75);
   });
   it("keeps sub-microether batch costs", () => {
     const rows = joinCosts([{ t: 0, batches: 1, weiSpent: "500000000000" }], new Map(), 1);
-    expect(rows[0].l1Eth).toBeCloseTo(5e-7, 12);
+    expect(rows[0].attributedCostEth).toBeCloseTo(5e-7, 12);
+    expect(rows[0].posterFeesEth).toBeNull();
   });
 });
 

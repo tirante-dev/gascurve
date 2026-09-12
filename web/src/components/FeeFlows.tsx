@@ -5,9 +5,9 @@ import { useTicker } from "@/hooks/useTicker";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { EthUsd, LiveSnapshot, PricerModel, Series, SeriesCompleteness, SeriesRange } from "@/types";
 import { buildChartPoints, spanSeconds, sumKnownWeiEth, sumWeiEth, UNKNOWN_COLOR, UNSPLIT_FEES_LABEL, type ChartPoint } from "@/utils/chart";
-import { emptyRangeNote, gapModel, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
-import { completenessOf, isPartialRow, partialBands, partialRowNote, withFeeStack } from "@/lib/partial";
-import { formatDateTime, formatEth, formatInteger, formatSignificant, formatTick, shortAddress, usdMath } from "@/utils/format";
+import { bucketSeconds, emptyRangeNote, gapModel, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
+import { completenessOf, isPartialRow, partialBands, partialKinds, partialRowNote, withFeeStack } from "@/lib/partial";
+import { formatDateTime, formatEth, formatInteger, formatPercent, formatSignificant, formatTick, shortAddress, usdMath } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
 import { formatFloor } from "@/lib/feeChart";
 import { EnlargeLink } from "./ChartActions";
@@ -35,9 +35,9 @@ function ethCell(value: unknown): string {
   return typeof value === "number" ? `${formatSignificant(value, 4)} ETH` : "n/a";
 }
 
-/** "3 buckets have no destination split", singular when it is one. */
+/** "3 buckets have fees without a recorded destination", singular when it is one. */
 export function unsplitNote(count: number): string {
-  return `${formatInteger(count)} ${count === 1 ? "bucket has" : "buckets have"} no recorded destination split`;
+  return `${formatInteger(count)} ${count === 1 ? "bucket has" : "buckets have"} fees without a recorded destination`;
 }
 
 function AccountRow({ name, role, address, balance, explorerUrl }: { name: string; role: string; address: string; balance: string; explorerUrl?: string }) {
@@ -62,10 +62,9 @@ function AccountRow({ name, role, address, balance, explorerUrl }: { name: strin
 
 /**
  * Fee sums over every indexed block in the range. The values remain useful as
- * lower bounds when coverage is partial, but the per-day estimate is emitted
- * only when every bucket and interval is complete. A bucket contributes to
- * destination totals only when all three parts are known; `unsplit` counts
- * the buckets left out of every destination total.
+ * lower bounds when coverage is partial. The daily rate uses complete buckets
+ * and tolerates only the current bucket being in progress. Poster fees are
+ * totaled independently from the historical compute split.
  */
 export type FeeTotals = {
   total: number;
@@ -73,7 +72,10 @@ export type FeeTotals = {
   surplusEth: number;
   posterEth: number;
   perDay: number | null;
-  known: number;
+  rateCoverage: number | null;
+  splitKnown: number;
+  posterKnown: number;
+  posterUnknown: number;
   unsplit: number;
   completeness: SeriesCompleteness;
   partialBuckets: number;
@@ -83,23 +85,33 @@ export type FeeTotals = {
 
 export function feeTotals(series: Pick<Series, "from" | "to" | "resolution" | "points">): FeeTotals {
   const total = sumWeiEth(series.points, "feesWei");
-  const known = series.points.filter((p) => typeof p.floorFeesWei === "string" && typeof p.surplusFeesWei === "string" && typeof p.posterFeesWei === "string");
-  const floor = sumKnownWeiEth(known, "floorFeesWei");
-  const surplus = sumKnownWeiEth(known, "surplusFeesWei");
-  const poster = sumKnownWeiEth(known, "posterFeesWei");
-  const span = spanSeconds(series.points);
+  const split = series.points.filter((p) => typeof p.floorFeesWei === "string" && typeof p.surplusFeesWei === "string");
+  const floor = sumKnownWeiEth(split, "floorFeesWei");
+  const surplus = sumKnownWeiEth(split, "surplusFeesWei");
+  const poster = sumKnownWeiEth(series.points, "posterFeesWei");
+  const gaps = gapModel(series, series.points);
+  const width = bucketSeconds(series.resolution, series.points);
+  const kinds = partialKinds(series.points, { to: series.to, step: width });
+  const complete = series.points.filter((point) => completenessOf(point) === "complete");
+  const completeSpan = series.resolution === "block" && complete.length > 0 ? complete[complete.length - 1].t - complete[0].t + 1 : complete.length * width;
+  const requestedSpan = Math.max(0, series.to - series.from);
   const partialBuckets = series.points.filter((point) => completenessOf(point) === "partial").length;
   const unknownBuckets = series.points.filter((point) => completenessOf(point) === "unknown").length;
-  const emptyIntervals = gapModel(series, series.points).gaps.length;
+  const emptyIntervals = gaps.gaps.length;
   const completeness: SeriesCompleteness = partialBuckets > 0 || emptyIntervals > 0 ? "partial" : unknownBuckets > 0 ? "unknown" : "complete";
+  const rateBlocked = emptyIntervals > 0 || unknownBuckets > 0 || kinds.some((kind) => kind === "leading" || kind === "unknown");
+  const rateCoverage = requestedSpan > 0 && completeSpan > 0 ? Math.min(1, completeSpan / requestedSpan) : null;
   return {
     total,
     floorEth: floor.eth,
     surplusEth: surplus.eth,
     posterEth: poster.eth,
-    perDay: completeness === "complete" && span > 0 ? (total / span) * 86_400 : null,
-    known: known.length,
-    unsplit: series.points.length - known.length,
+    perDay: !rateBlocked && completeSpan > 0 ? (sumWeiEth(complete, "feesWei") / completeSpan) * 86_400 : null,
+    rateCoverage,
+    splitKnown: split.length,
+    posterKnown: series.points.length - poster.unknown,
+    posterUnknown: poster.unknown,
+    unsplit: series.points.length - split.length,
     completeness,
     partialBuckets,
     unknownBuckets,
@@ -114,7 +126,8 @@ export function incompleteTotalsNote(totals: FeeTotals): string | null {
   if (totals.partialBuckets > 0) reasons.push(`${formatInteger(totals.partialBuckets)} partially indexed ${totals.partialBuckets === 1 ? "bucket" : "buckets"}`);
   if (totals.unknownBuckets > 0) reasons.push(`${formatInteger(totals.unknownBuckets)} ${totals.unknownBuckets === 1 ? "bucket has" : "buckets have"} unknown completeness`);
   if (totals.emptyIntervals > 0) reasons.push(`${formatInteger(totals.emptyIntervals)} ${totals.emptyIntervals === 1 ? "interval has" : "intervals have"} no indexed buckets`);
-  return `Indexed-block sums are lower bounds: ${reasons.join("; ")}. The per-day estimate waits for complete coverage.`;
+  const rate = totals.perDay === null ? "The daily run rate waits for a gap-free set of complete buckets." : `The daily run rate uses complete buckets only (${formatPercent(totals.rateCoverage ?? 0)} of the requested window).`;
+  return `Indexed-block sums are lower bounds: ${reasons.join("; ")}. ${rate}`;
 }
 
 /** Which edge a stat's note opens from, at each of the two column counts the stats grid has. */
@@ -161,9 +174,9 @@ export function feeFlowRows(unsplit: boolean): TooltipRow[] {
     // A bucket the collector has not finished holds what it has collected so
     // far, which is a different fact from what the bucket will hold.
     { label: "fees so far", value: (r) => `${formatSignificant(Number(r.feesEth), 4)} ETH`, when: isPartialRow },
-    { label: "floor to infra", color: FLOOR_FILL, kind: "rect", value: (r) => ethCell(r.floorFeesEth), when: (r) => r.unsplitFeesEth === null },
-    { label: "congestion to network", color: SURPLUS_FILL, kind: "rect", value: (r) => ethCell(r.surplusFeesEth), when: (r) => r.unsplitFeesEth === null },
-    { label: "poster fee to L1 pricer", color: POSTER_FILL, kind: "rect", value: (r) => ethCell(r.posterFeesEth), when: (r) => r.unsplitFeesEth === null },
+    { label: "floor to infra", color: FLOOR_FILL, kind: "rect", value: (r) => ethCell(r.floorFeesEth), when: (r) => typeof r.floorFeesEth === "number" },
+    { label: "congestion to network", color: SURPLUS_FILL, kind: "rect", value: (r) => ethCell(r.surplusFeesEth), when: (r) => typeof r.surplusFeesEth === "number" },
+    { label: "poster fee to L1 pricer", color: POSTER_FILL, kind: "rect", value: (r) => ethCell(r.posterFeesEth), when: (r) => typeof r.posterFeesEth === "number" },
     ...(unsplit ? [{ label: UNSPLIT_FEES_LABEL, color: UNKNOWN_COLOR, kind: "hatch" as const, value: (r: Record<string, unknown>) => ethCell(r.unsplitFeesEth), when: (r: Record<string, unknown>) => r.unsplitFeesEth !== null }] : []),
     { label: "floor in force", value: (r) => (typeof r.floor === "number" ? `${formatFloor(r.floor)} gwei` : "n/a") },
   ];
@@ -261,7 +274,7 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
           <div className="mt-2">
             <AccountRow name="Infra fee account" role="receives the compute-gas floor" address={accounts.infra.address} balance={accounts.infra.balance} explorerUrl={explorerUrl} />
             <AccountRow name="Network fee account" role="receives compute-gas congestion fees" address={accounts.network.address} balance={accounts.network.balance} explorerUrl={explorerUrl} />
-            <AccountRow name="L1 reward recipient" role="10 wei per L1 unit" address={accounts.l1Reward.address} balance={accounts.l1Reward.balance} explorerUrl={explorerUrl} />
+            <AccountRow name="L1 reward recipient" role={snapshot?.l1 ? `${formatInteger(snapshot.l1.rewardRate)} wei per L1 unit, paid from the L1 pricer pool` : "paid downstream from the L1 pricer pool"} address={accounts.l1Reward.address} balance={accounts.l1Reward.balance} explorerUrl={explorerUrl} />
           </div>
         ) : (
           <p className="mt-2 text-sm text-ink-2">Balances are sampled once a minute; none yet.</p>
@@ -277,13 +290,20 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
           <>
             <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-5">
               <Stat label={`${incomplete ? "Indexed fees" : "Fees"} in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, clock, 4, USD_PLACEMENT[0])} />
-              <Stat label="Per day (est.)" value={totals.perDay === null ? "n/a" : formatSignificant(totals.perDay, 4)} unit={totals.perDay === null ? undefined : "ETH"} size="sm" hint={totals.perDay === null ? undefined : usdLine(totals.perDay, ethUsd, clock, 4, USD_PLACEMENT[1])} />
-              <Stat label={incomplete ? "Indexed floor to infra" : "Floor to infra"} value={totals.known > 0 ? formatSignificant(totals.floorEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.floorEth, ethUsd, clock, 3, USD_PLACEMENT[2]) : undefined} />
-              <Stat label={incomplete ? "Indexed congestion" : "Congestion to network"} value={totals.known > 0 ? formatSignificant(totals.surplusEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.surplusEth, ethUsd, clock, 3, USD_PLACEMENT[3]) : undefined} />
-              <Stat label={incomplete ? "Indexed poster fee" : "Poster fee to L1 pricer"} value={totals.known > 0 ? formatSignificant(totals.posterEth, 3) : "n/a"} unit={totals.known > 0 ? "ETH" : undefined} size="sm" hint={totals.known > 0 ? usdLine(totals.posterEth, ethUsd, clock, 3, USD_PLACEMENT[4]) : undefined} />
+              <Stat
+                label="Daily run rate"
+                value={totals.perDay === null ? "n/a" : formatSignificant(totals.perDay, 4)}
+                unit={totals.perDay === null ? undefined : "ETH"}
+                size="sm"
+                hint={totals.perDay === null ? undefined : <>{totals.rateCoverage === null ? null : <span className="block">{formatPercent(totals.rateCoverage)} complete coverage</span>}{usdLine(totals.perDay, ethUsd, clock, 4, USD_PLACEMENT[1])}</>}
+              />
+              <Stat label={incomplete ? "Indexed floor to infra" : "Floor to infra"} value={totals.splitKnown > 0 ? formatSignificant(totals.floorEth, 3) : "n/a"} unit={totals.splitKnown > 0 ? "ETH" : undefined} size="sm" hint={totals.splitKnown > 0 ? usdLine(totals.floorEth, ethUsd, clock, 3, USD_PLACEMENT[2]) : undefined} />
+              <Stat label={incomplete ? "Indexed congestion" : "Congestion to network"} value={totals.splitKnown > 0 ? formatSignificant(totals.surplusEth, 3) : "n/a"} unit={totals.splitKnown > 0 ? "ETH" : undefined} size="sm" hint={totals.splitKnown > 0 ? usdLine(totals.surplusEth, ethUsd, clock, 3, USD_PLACEMENT[3]) : undefined} />
+              <Stat label={incomplete ? "Indexed poster fee" : "Poster fee to L1 pricer"} value={totals.posterKnown > 0 ? formatSignificant(totals.posterEth, 3) : "n/a"} unit={totals.posterKnown > 0 ? "ETH" : undefined} size="sm" hint={totals.posterKnown > 0 ? usdLine(totals.posterEth, ethUsd, clock, 3, USD_PLACEMENT[4]) : undefined} />
             </div>
             {totalsNote ? <p className="mt-2 text-xs text-ink-3">{totalsNote}</p> : null}
-            {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}; all three destination totals leave them out.</p> : null}
+            {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}. Poster fees remain included when independently recorded; floor and congestion totals leave these buckets out.</p> : null}
+            {totals.posterUnknown > 0 ? <p className="mt-2 text-xs text-ink-3">{formatInteger(totals.posterUnknown)} {totals.posterUnknown === 1 ? "bucket has" : "buckets have"} no recorded poster fee and is left out of the poster total.</p> : null}
           </>
         ) : null}
         <div className="mt-4">
@@ -301,7 +321,7 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
                 <summary className="cursor-pointer select-none">Data table ({formatInteger(points.length)} buckets)</summary>
                 {tableOpen ? (
                   <div className="mt-2 max-h-[320px] overflow-auto">
-                    <table className="num w-full min-w-[520px] text-left">
+                    <table className="num w-full min-w-[720px] text-left">
                       <caption className="sr-only">Fees per bucket split among infrastructure, network, and the L1 pricer</caption>
                       <thead className="sticky top-0 bg-surface text-ink-3">
                         <tr>
@@ -310,6 +330,8 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
                           <th scope="col" className="py-1 pr-3 font-medium">floor to infra</th>
                           <th scope="col" className="py-1 pr-3 font-medium">congestion to network</th>
                           <th scope="col" className="py-1 pr-3 font-medium">poster fee to L1 pricer</th>
+                          <th scope="col" className="py-1 pr-3 font-medium">destination unavailable</th>
+                          <th scope="col" className="py-1 pr-3 font-medium">coverage</th>
                           <th scope="col" className="py-1 pr-3 font-medium">floor (gwei)</th>
                         </tr>
                       </thead>
@@ -321,6 +343,8 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
                             <td className="py-1 pr-3">{formatPart(p.floorFeesEth)}</td>
                             <td className="py-1 pr-3">{formatPart(p.surplusFeesEth)}</td>
                             <td className="py-1 pr-3">{formatPart(p.posterFeesEth)}</td>
+                            <td className="py-1 pr-3">{p.unsplitFeesEth === null ? "0" : formatPart(p.unsplitFeesEth)}</td>
+                            <td className="py-1 pr-3">{p.coverage === null ? "unknown" : `${p.completeness}, ${formatPercent(p.coverage)}`}</td>
                             <td className="py-1 pr-3">{formatFloor(p.floor)}</td>
                           </tr>
                         ))}

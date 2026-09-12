@@ -141,7 +141,7 @@ describe("the enlarge control on every chart card", () => {
     expect(enlarge(/^Open the C2 .* backlog enlarged$/)).toHaveAttribute("href", "/robinhood/charts/backlogs?range=24h&constraint=1");
     expect(enlarge("Fees collected per bucket")).toHaveAttribute("href", "/robinhood/charts/fee-flows?range=24h");
 
-    expect(enlarge("L2 fees against ArbOS-attributed batch cost")).toHaveAttribute("href", "/robinhood/charts/l1?range=24h");
+    expect(enlarge("Poster fees against ArbOS-attributed batch cost")).toHaveAttribute("href", "/robinhood/charts/l1?range=24h");
 
     // Every control says what it does on hover as well as to a screen reader.
     for (const link of screen.getAllByRole("link", { name: /enlarged$/ })) expect(link).toHaveAttribute("title", "Enlarge chart");
