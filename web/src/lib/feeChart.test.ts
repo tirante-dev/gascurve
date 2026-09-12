@@ -75,6 +75,7 @@ describe("feeChartData", () => {
     expect(data.span).toBe(120);
     expect(data.markers.map((m) => m.label)).toEqual(["setMinimumL2BaseFee"]);
     expect(data.markers[0].t).toBe(Math.floor(Date.parse("2026-09-06T07:21:00Z") / 1000));
+    expect(data.fidelityBands).toEqual([]);
     // The set in force changes between the two buckets, so the drawn rows
     // carry the extra edge that keeps the replacement vertical.
     expect(data.drawn).toHaveLength(3);
@@ -83,9 +84,15 @@ describe("feeChartData", () => {
     expect(data.domain).toEqual([0.01, 1]);
   });
 
+  it("carries fidelity bands for every chart built from the fee data", () => {
+    const marked = { ...series, points: [{ ...series.points[0], replayFidelity: "unverified" as const }, series.points[1]] };
+    const data = feeChartData(marked, "constraints");
+    expect(data.fidelityBands).toEqual([{ from: series.points[0].t, to: series.points[0].t + 60, kind: "unverified" }]);
+  });
+
   it("draws nothing at all without a series, and still names a bucket width", () => {
     const data = feeChartData(null, "constraints");
-    expect(data).toEqual({ points: [], drawn: [], markers: [], domain: [0.001, 1], span: 0, bucketSeconds: DEFAULT_BUCKET_SECONDS, gaps: NO_GAPS });
+    expect(data).toEqual({ points: [], drawn: [], markers: [], domain: [0.001, 1], span: 0, bucketSeconds: DEFAULT_BUCKET_SECONDS, fidelityBands: [], gaps: NO_GAPS });
   });
 
   it("measures a single bucket by the fallback width rather than by nothing", () => {

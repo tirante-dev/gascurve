@@ -548,12 +548,16 @@ func TestParseHeaderErrors(t *testing.T) {
 		}
 	}
 	b, err := parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1"}`))
-	if err != nil || b.BaseFee.Sign() != 0 || b.TxCount != 0 {
+	if err != nil || b.BaseFee.Sign() != 0 || b.TxCount != 0 || b.HasArbOSVersion() {
 		t.Fatalf("minimal header: %+v %v", b, err)
 	}
 	b, err = parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1","mixHash":"0x00000000000000000000000000000000000000000000003d0000000000000000"}`))
-	if err != nil || b.ArbOSVersion != 61 {
+	if err != nil || b.ArbOSVersion != 61 || !b.HasArbOSVersion() {
 		t.Fatalf("ArbOS version from mixHash: %+v %v", b, err)
+	}
+	b, err = parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1","mixHash":"0x0000000000000000000000000000000000000000000000000000000000000000"}`))
+	if err != nil || b.ArbOSVersion != 0 || !b.HasArbOSVersion() {
+		t.Fatalf("ArbOS version zero from mixHash: %+v %v", b, err)
 	}
 	if _, err := parseHeader(json.RawMessage(`{"number":"0x1","timestamp":"0x1","gasUsed":"0x1","mixHash":"0x01"}`)); err == nil {
 		t.Fatal("short mixHash")

@@ -3,6 +3,7 @@
 import { DefaultZIndexes, Text, usePlotArea, useXAxisScale, ZIndexLayer } from "recharts";
 import { gapBandLabel, gapCaption, type Gap, type GapModel } from "@/lib/gaps";
 import { missingBandLabel, missingCaption, type MissingRun } from "@/lib/missing";
+import { fidelityBandLabel, fidelityCaption, fidelityRuns, type FidelityBand } from "@/lib/fidelity";
 import { partialBandLabel, partialCaption, partialRuns, type PartialBand } from "@/lib/partial";
 import { HatchPattern } from "./primitives";
 
@@ -19,7 +20,7 @@ export const GAP_LABEL_MIN_SHARE = 0.09;
 export const BAND_CLASS = "gascurve-band";
 export const BAND_LABEL_OFFSET = 5;
 
-type BandKind = "gap" | "partial" | "missing";
+type BandKind = "gap" | "partial" | "missing" | "fidelity";
 
 type BandStyle = { kind: BandKind; fill: string; fillOpacity: number; stroke?: string; strokeOpacity?: number; strokeDasharray?: string };
 
@@ -176,6 +177,43 @@ export function MissingBands({ runs }: { runs: readonly MissingRun[] }) {
 /** The line under a chart that dots the runs a series had nothing to draw from. */
 export function MissingNote({ runs, className = "" }: { runs: readonly MissingRun[]; className?: string }) {
   const text = missingCaption(runs);
+  if (text === null) return null;
+  return <p className={`mt-1 text-[11px] text-ink-3 ${className}`}>{text}</p>;
+}
+
+/**
+ * The counter-hatch a bucket the replay cannot vouch for stands under. It leans the other way from the
+ * partial hatch and wears the dashed edge, because a bucket still filling and a bucket whose pricing
+ * model nobody has checked are different claims and a chart may carry both at once. Its marks are drawn
+ * normally: the numbers exist, it is their standing that is in question.
+ */
+export const FIDELITY_FILL = "var(--ink-3)";
+export const FIDELITY_FILL_OPACITY = 0.35;
+export const FIDELITY_PATTERN_ID = "unverified-model-hatch";
+export const FIDELITY_HATCH_ANGLE = -45;
+
+/** The pattern the fidelity bands are filled from. Put it in the chart's own `defs`. */
+export function FidelityHatch() {
+  return <HatchPattern id={FIDELITY_PATTERN_ID} color={FIDELITY_FILL} angle={FIDELITY_HATCH_ANGLE} />;
+}
+
+const FIDELITY_STYLE: BandStyle = {
+  kind: "fidelity",
+  fill: `url(#${FIDELITY_PATTERN_ID})`,
+  fillOpacity: FIDELITY_FILL_OPACITY,
+  stroke: FIDELITY_FILL,
+  strokeOpacity: MISSING_STROKE_OPACITY,
+  strokeDasharray: MISSING_DASH,
+};
+
+/** The buckets whose replay is unverified, coalesced into runs so a stretch of them is one rect. */
+export function FidelityBands({ bands }: { bands: readonly FidelityBand[] }) {
+  return <BandLayer bands={fidelityRuns(bands).map((run) => ({ from: run.from, to: run.to, label: fidelityBandLabel(run.kind) }))} style={FIDELITY_STYLE} />;
+}
+
+/** The line under a chart that marks unverified buckets. */
+export function FidelityNote({ bands, className = "" }: { bands: readonly FidelityBand[]; className?: string }) {
+  const text = fidelityCaption(bands);
   if (text === null) return null;
   return <p className={`mt-1 text-[11px] text-ink-3 ${className}`}>{text}</p>;
 }

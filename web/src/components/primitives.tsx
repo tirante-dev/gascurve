@@ -235,9 +235,9 @@ export type SwatchKind = "rect" | "line" | "hatch";
  * to about 2.2:1 on the light chart surface, under the 3:1 a non-text mark needs. Its legend swatch
  * repeats the geometry, so the association does not rest on colour alone.
  */
-export function HatchPattern({ id, color }: { id: string; color: string }) {
+export function HatchPattern({ id, color, angle = 45 }: { id: string; color: string; angle?: number }) {
   return (
-    <pattern id={id} width={HATCH_SPACING} height={HATCH_SPACING} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <pattern id={id} width={HATCH_SPACING} height={HATCH_SPACING} patternUnits="userSpaceOnUse" patternTransform={`rotate(${angle})`}>
       <line x1={0} y1={0} x2={0} y2={HATCH_SPACING} stroke={color} strokeWidth={HATCH_STROKE} />
     </pattern>
   );

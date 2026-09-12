@@ -30,6 +30,7 @@ import type {
   Network,
   NetworkStatus,
   OwnerAction,
+  ReplayFidelity,
   Series,
   SeriesPoint,
   SeriesRange,
@@ -60,7 +61,21 @@ export type WorldRecord = {
   posterFeesWei: bigint;
   setId: number;
   replayErrorBips: number;
+  /** The ArbOS versions the record's blocks ran, which differ when an upgrade lands inside it. */
+  arbosMin: number;
+  arbosMax: number;
 };
+
+/** The ArbOS versions and the upgrades the pricer is measured against, mirroring internal/pricer so the
+ * mock reports the fidelity a real api would. */
+export const MOCK_VERIFIED_VERSIONS: readonly number[] = [51, 61];
+export const MOCK_VERIFIED_CROSSINGS: readonly (readonly [number, number])[] = [[51, 61]];
+
+export function mockFidelity(min: number, max: number): ReplayFidelity {
+  const ends = MOCK_VERIFIED_VERSIONS.includes(min) && MOCK_VERIFIED_VERSIONS.includes(max);
+  if (ends && (min === max || MOCK_VERIFIED_CROSSINGS.some(([a, b]) => a === min && b === max))) return "verified";
+  return min === max ? "unverified" : "boundary";
+}
 
 export function isoToUnix(iso: string): number {
   return Math.floor(new Date(iso).getTime() / 1000);
@@ -301,6 +316,17 @@ export class MockWorld {
     return this.legacy ? 0 : this.setIndex + 1;
   }
 
+  /** The ArbOS version in force at t. The oldest entry stands for everything before it, since the
+   * world models no history older than its own start. */
+  arbosAt(t: number): number {
+    const history = this.def.arbosHistory;
+    let version = history[0].version;
+    for (const entry of history) {
+      if (isoToUnix(entry.at) <= t) version = entry.version;
+    }
+    return version;
+  }
+
   /** The fee, exponent and per-constraint split implied by the current backlogs, without draining (the Go legacy model reports one element). */
   private priceCurrent(): { fee: bigint; exponent: number; contributions: number[] } {
     if (this.legacy) {
@@ -375,6 +401,10 @@ export class MockWorld {
       posterFeesWei,
       setId: this.currentSetId(),
       replayErrorBips: 0,
+      // A coarse step covers dt seconds at once, so an upgrade inside it makes the step itself span
+      // one, exactly as a real bucket folded over the boundary does.
+      arbosMin: Math.min(this.arbosAt(t), this.arbosAt(t + dt)),
+      arbosMax: Math.max(this.arbosAt(t), this.arbosAt(t + dt)),
     });
     this.lastFee = fee;
     this.lastExponent = exponent;
@@ -406,6 +436,7 @@ export class MockWorld {
       exponentBips: exponent,
       minBaseFee: this.minFee.toString(),
       anchored,
+      arbosVersion: this.arbosAt(ts),
     };
     this.blocks.push(block);
     this.lastFee = fee;
@@ -478,6 +509,8 @@ export class MockWorld {
       posterFeesWei,
       setId: this.currentSetId(),
       replayErrorBips: this.replayError(last.number),
+      arbosMin: this.arbosAt(t),
+      arbosMax: this.arbosAt(t),
     };
   }
 
@@ -747,6 +780,8 @@ export class MockWorld {
       minBaseFee: minFee.toString(),
       multiplierBips: Number((fee * ONE_IN_BIPS) / minFee),
       exponentBips: exponent,
+      arbosVersion: this.arbosAt(block.ts),
+      replayFidelity: mockFidelity(this.arbosAt(block.ts), this.arbosAt(block.ts)),
       model: this.def.model,
       constraints,
       ...(this.legacy
@@ -906,6 +941,8 @@ export class MockWorld {
       acc.posterFeesWei += r.posterFeesWei;
       acc.backlogsMax = acc.backlogsMax.map((v, j) => Math.max(v, r.backlogsMax[j] ?? 0));
       acc.replayErrorBips = Math.max(acc.replayErrorBips, r.replayErrorBips);
+      acc.arbosMin = Math.min(acc.arbosMin, r.arbosMin);
+      acc.arbosMax = Math.max(acc.arbosMax, r.arbosMax);
     }
     // The load band, over the unit the api measures this resolution's spread with. A unit's rate is
     // over the span the world actually covers of it, so a coarse step of deeper history stands for
@@ -965,6 +1002,9 @@ export class MockWorld {
           posterFeesWei: b.posterFeesWei.toString(),
           constraintSetId: b.setId,
           replayErrorBips: b.replayErrorBips,
+          arbosVersionMin: b.arbosMin,
+          arbosVersionMax: b.arbosMax,
+          replayFidelity: mockFidelity(b.arbosMin, b.arbosMax),
         };
       });
     return {

@@ -5,6 +5,7 @@ import { Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, Res
 import type { PricerModel, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
 import { bucketNote, describeAction, feeChartData, feeTooltipRows, formatFloor, type DrawnRow } from "@/lib/feeChart";
+import type { FidelityBand } from "@/lib/fidelity";
 import { emptyRangeNote, type GapModel, type GapWindow } from "@/lib/gaps";
 import { throughputAxis, throughputTick, type ThroughputAxis } from "@/lib/hero";
 import { missingRuns, withMissingNote, withMissingNotes, type MissingRun, type MissingSeries, type Present } from "@/lib/missing";
@@ -28,7 +29,7 @@ import {
 } from "@/utils/chart";
 import { formatDateTime, formatGas, formatGasPerSecond, formatInteger, formatSignificant, formatTick, unbroken } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
-import { GapBands, GapNote, MissingBands, MissingDots, MissingNote } from "./ChartGaps";
+import { FidelityBands, FidelityHatch, FidelityNote, GapBands, GapNote, MissingBands, MissingDots, MissingNote } from "./ChartGaps";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { PointInspector } from "./ChartReadout";
 import { ChartFrame, Legend, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
@@ -100,6 +101,8 @@ export type SeriesModel = {
   span: number;
   /** The window the range asked for and the spans of it with nothing indexed. */
   gaps: GapModel;
+  /** The buckets whose replay crossed, or sits outside, a pricing model the measurement covers. */
+  fidelityBands: FidelityBand[];
   /** The gas-per-second axis: one unit for every label, shared by the live and the bucketed view. */
   gasAxis: ThroughputAxis;
   /**
@@ -144,7 +147,7 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
   // across the bucket; `points` is one row per bucket, for the table and the
   // inspector. The base fee itself is drawn by the hero, at every range, so
   // it is not here.
-  const { points, drawn, markers, span, bucketSeconds, gaps } = feeChartData(series, model);
+  const { points, drawn, markers, span, bucketSeconds, gaps, fidelityBands: unvouched } = feeChartData(series, model);
   const segments = segmentsFor(series, model);
   // Two ways a point ends up in the unknown-split series: its set is not
   // known (backlogs then go under the unlabelled slots too), or its set is
@@ -262,6 +265,7 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
     markers,
     span,
     gaps,
+    fidelityBands: unvouched,
     gasAxis,
     spreadUnit,
     hasSpread,
@@ -316,8 +320,12 @@ export const ContributionChart = memo(function ContributionChart({ m, height = S
       <ChartFrame height={height} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+            <defs>
+              <FidelityHatch />
+            </defs>
             <CartesianGrid vertical={false} />
             <GapBands gaps={m.gaps.gaps} />
+            <FidelityBands bands={m.fidelityBands} />
             {timeAxis(m.span, m.gaps.window)}
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.contributionRows} note={m.note} />} />
@@ -332,6 +340,7 @@ export const ContributionChart = memo(function ContributionChart({ m, height = S
         </ResponsiveContainer>
       </ChartFrame>
       <GapNote gaps={m.gaps} />
+      <FidelityNote bands={m.fidelityBands} />
     </>
   );
 });
@@ -350,13 +359,15 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
       <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit}${m.hasSpread ? `, banded from the lowest to the highest ${m.spreadUnit} inside each bucket,` : ""} with each constraint target in force drawn as a stepped line`}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
-            {m.gasMissing.length > 0 ? (
+            {m.gasMissing.length > 0 || m.fidelityBands.length > 0 ? (
               <defs>
+                <FidelityHatch />
                 <MissingDots />
               </defs>
             ) : null}
             <CartesianGrid vertical={false} />
             <GapBands gaps={m.gaps.gaps} />
+            <FidelityBands bands={m.fidelityBands} />
             <MissingBands runs={m.gasMissing} />
             {timeAxis(m.span, m.gaps.window)}
             <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
@@ -380,6 +391,7 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
         </ResponsiveContainer>
       </ChartFrame>
       <GapNote gaps={m.gaps} />
+      <FidelityNote bands={m.fidelityBands} />
       <MissingNote runs={m.gasMissing} />
     </>
   );
@@ -392,13 +404,15 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
       <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time`}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
-            {m.backlogMissingFor(index).length > 0 ? (
+            {m.backlogMissingFor(index).length > 0 || m.fidelityBands.length > 0 ? (
               <defs>
+                <FidelityHatch />
                 <MissingDots />
               </defs>
             ) : null}
             <CartesianGrid vertical={false} />
             <GapBands gaps={m.gaps.gaps} />
+            <FidelityBands bands={m.fidelityBands} />
             <MissingBands runs={m.backlogMissingFor(index)} />
             {timeAxis(m.span, m.gaps.window)}
             <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
@@ -415,6 +429,7 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
         </ResponsiveContainer>
       </ChartFrame>
       <GapNote gaps={m.gaps} />
+      <FidelityNote bands={m.fidelityBands} />
       <MissingNote runs={m.backlogMissingFor(index)} />
     </>
   );

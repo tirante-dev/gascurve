@@ -295,7 +295,7 @@ func (p *Postgres) SetNetworkError(ctx context.Context, chainID uint64, msg stri
 	return err
 }
 
-const blockColumns = `chain_id, number, hash, parent_hash, ts, gas_used, poster_gas, base_fee, l1_block, tx_count, backlogs, constraint_bips, exponent_bips, predicted_base_fee, min_base_fee, anchored, pricing_version`
+const blockColumns = `chain_id, number, hash, parent_hash, ts, gas_used, poster_gas, base_fee, l1_block, tx_count, backlogs, constraint_bips, exponent_bips, predicted_base_fee, min_base_fee, anchored, pricing_version, arbos_version`
 
 // PostgreSQL accepts at most 65,535 bind parameters; a little room below that also keeps statements
 // reasonable when a caller supplies more rows than the configured batch size.
@@ -364,7 +364,7 @@ func bucketSpan(batch []Bucket) (first, last time.Time) {
 }
 
 func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
-	const columns = 17
+	const columns = 18
 	for _, layer := range uniqueLayers(blocks, func(b Block) struct{ chainID, number uint64 } {
 		return struct{ chainID, number uint64 }{b.ChainID, b.Number}
 	}) {
@@ -373,7 +373,7 @@ func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
 			args := make([]any, 0, len(batch)*columns)
 			for _, b := range batch {
 				args = append(args, b.ChainID, b.Number, b.Hash, b.ParentHash, b.TS, b.GasUsed, b.PosterGas, b.BaseFee, b.L1Block, b.TxCount, b.Backlogs, b.ConstraintBips,
-					b.ExponentBips, b.PredictedBaseFee, b.MinBaseFee, b.Anchored, b.PricingVersion)
+					b.ExponentBips, b.PredictedBaseFee, b.MinBaseFee, b.Anchored, b.PricingVersion, b.ArbOSVersion)
 			}
 			if _, err := p.exec(ctx, `
 			INSERT INTO blocks (`+blockColumns+`)
@@ -384,7 +384,8 @@ func (p *Postgres) UpsertBlocks(ctx context.Context, blocks []Block) error {
 				l1_block = EXCLUDED.l1_block, tx_count = EXCLUDED.tx_count, backlogs = EXCLUDED.backlogs,
 				constraint_bips = EXCLUDED.constraint_bips, exponent_bips = EXCLUDED.exponent_bips,
 				predicted_base_fee = EXCLUDED.predicted_base_fee, min_base_fee = EXCLUDED.min_base_fee,
-				anchored = EXCLUDED.anchored, pricing_version = EXCLUDED.pricing_version`, args...); err != nil {
+				anchored = EXCLUDED.anchored, pricing_version = EXCLUDED.pricing_version,
+				arbos_version = COALESCE(EXCLUDED.arbos_version, blocks.arbos_version)`, args...); err != nil {
 				lo, hi := blockSpan(batch)
 				return fmt.Errorf("upsert %d blocks %d..%d: %w", len(batch), lo, hi, err)
 			}
@@ -505,7 +506,7 @@ func (p *Postgres) PruneBlocks(ctx context.Context, chainID uint64, before time.
 	return res.RowsAffected()
 }
 
-const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, poster_gas, fees_wei, poster_fees_wei, base_fee_min, base_fee_avg, base_fee_max, base_fee_sum, exponent_end_bips, backlogs_end, backlogs_max, constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, constraint_set_id, replay_error_bips, last_block, pricing_version`
+const bucketColumns = `chain_id, resolution, bucket_start, blocks, gas_used, poster_gas, fees_wei, poster_fees_wei, base_fee_min, base_fee_avg, base_fee_max, base_fee_sum, exponent_end_bips, backlogs_end, backlogs_max, constraint_bips_end, min_base_fee, floor_fees_wei, surplus_fees_wei, constraint_set_id, replay_error_bips, last_block, pricing_version, arbos_version_min, arbos_version_max`
 
 // FoldBuckets adds partial buckets into the stored rows (the backfill's path for windows without block
 // rows). A sum or fee split that is unknown on either side stays unknown; the average then uses the
@@ -516,7 +517,7 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 		resolution  string
 		bucketStart time.Time
 	}
-	const columns = 23
+	const columns = 25
 	for _, layer := range uniqueLayers(buckets, func(b Bucket) bucketKey {
 		return bucketKey{b.ChainID, b.Resolution, b.BucketStart.UTC()}
 	}) {
@@ -526,7 +527,7 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 			for _, b := range batch {
 				args = append(args, b.ChainID, b.Resolution, b.BucketStart, b.Blocks, b.GasUsed, b.PosterGas, b.FeesWei, b.PosterFeesWei, b.BaseFeeMin, b.BaseFeeAvg, b.BaseFeeMax, b.BaseFeeSum,
 					b.ExponentEndBips, b.BacklogsEnd, b.BacklogsMax, b.ConstraintBipsEnd, b.MinBaseFee, b.FloorFeesWei, b.SurplusFeesWei,
-					b.ConstraintSetID, b.ReplayErrorBips, b.LastBlock, b.PricingVersion)
+					b.ConstraintSetID, b.ReplayErrorBips, b.LastBlock, b.PricingVersion, b.ArbOSVersionMin, b.ArbOSVersionMax)
 			}
 			if _, err := p.exec(ctx, `
 			INSERT INTO buckets (`+bucketColumns+`)
@@ -559,6 +560,12 @@ func (p *Postgres) FoldBuckets(ctx context.Context, buckets []Bucket) error {
 				backlogs_max = ARRAY(SELECT GREATEST(a, b) FROM unnest(buckets.backlogs_max, EXCLUDED.backlogs_max) AS u(a, b)),
 				constraint_set_id = CASE WHEN EXCLUDED.last_block >= buckets.last_block THEN COALESCE(EXCLUDED.constraint_set_id, buckets.constraint_set_id) ELSE buckets.constraint_set_id END,
 				replay_error_bips = GREATEST(buckets.replay_error_bips, EXCLUDED.replay_error_bips),
+				arbos_version_min = CASE WHEN buckets.blocks = 0 THEN EXCLUDED.arbos_version_min
+					WHEN buckets.arbos_version_min IS NULL OR EXCLUDED.arbos_version_min IS NULL THEN NULL
+					ELSE LEAST(buckets.arbos_version_min, EXCLUDED.arbos_version_min) END,
+				arbos_version_max = CASE WHEN buckets.blocks = 0 THEN EXCLUDED.arbos_version_max
+					WHEN buckets.arbos_version_max IS NULL OR EXCLUDED.arbos_version_max IS NULL THEN NULL
+					ELSE GREATEST(buckets.arbos_version_max, EXCLUDED.arbos_version_max) END,
 				last_block = GREATEST(buckets.last_block, EXCLUDED.last_block)`, args...); err != nil {
 				first, last := bucketSpan(batch)
 				return fmt.Errorf("fold %d buckets %s..%s: %w", len(batch), first.UTC().Format(time.RFC3339), last.UTC().Format(time.RFC3339), err)
@@ -654,7 +661,9 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 						THEN sum((base_fee - LEAST(base_fee, min_base_fee)) * (gas_used - poster_gas)) END AS surplus_fees_wei,
 					COALESCE(max(CASE WHEN base_fee > 0
 						THEN LEAST(floor(abs(predicted_base_fee - base_fee) * 10000 / base_fee), $5::NUMERIC)
-						ELSE 0 END), 0)::BIGINT AS replay_error_bips
+						ELSE 0 END), 0)::BIGINT AS replay_error_bips,
+					CASE WHEN count(arbos_version) = count(*) THEN min(arbos_version) END AS arbos_version_min,
+					CASE WHEN count(arbos_version) = count(*) THEN max(arbos_version) END AS arbos_version_max
 				FROM w
 				GROUP BY bucket_start
 			), backlog_values AS (
@@ -676,7 +685,7 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 				(SELECT cs.id FROM constraint_sets cs WHERE cs.chain_id = $1 AND cs.effective_block <= lastb.number
 					AND jsonb_array_length(cs.constraints) = COALESCE(array_length(lastb.backlogs, 1), 0)
 					ORDER BY cs.effective_block DESC, cs.id DESC LIMIT 1),
-				agg.replay_error_bips, lastb.number, agg.pricing_version
+				agg.replay_error_bips, lastb.number, agg.pricing_version, agg.arbos_version_min, agg.arbos_version_max
 			FROM agg JOIN bmax USING (bucket_start) JOIN lastb USING (bucket_start)
 			ON CONFLICT (chain_id, resolution, bucket_start) DO UPDATE SET
 				blocks = EXCLUDED.blocks, gas_used = EXCLUDED.gas_used, poster_gas = EXCLUDED.poster_gas,
@@ -687,7 +696,8 @@ func (p *Postgres) RebuildBuckets(ctx context.Context, chainID uint64, resolutio
 				constraint_bips_end = EXCLUDED.constraint_bips_end, min_base_fee = EXCLUDED.min_base_fee,
 				floor_fees_wei = EXCLUDED.floor_fees_wei, surplus_fees_wei = EXCLUDED.surplus_fees_wei,
 				constraint_set_id = EXCLUDED.constraint_set_id, replay_error_bips = EXCLUDED.replay_error_bips,
-				last_block = EXCLUDED.last_block, pricing_version = EXCLUDED.pricing_version
+				last_block = EXCLUDED.last_block, pricing_version = EXCLUDED.pricing_version,
+				arbos_version_min = EXCLUDED.arbos_version_min, arbos_version_max = EXCLUDED.arbos_version_max
 			RETURNING bucket_start
 			)
 			DELETE FROM buckets
