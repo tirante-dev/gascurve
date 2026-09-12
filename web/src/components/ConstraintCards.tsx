@@ -13,6 +13,7 @@ import { RESYNC_COPY, WAITING_COPY } from "./LiveHero";
 import { chartView } from "@/lib/chartViews";
 import { EnlargeLink } from "./ChartActions";
 import { Bips, Card, ChartFrame, Figure, HoverNote, Label, Stat, Swatch, type ChartHeight } from "./primitives";
+import { TimeZoomSelection, useTimeZoomChart } from "./TimeZoom";
 
 /**
  * A meter whose fill carries magnitude on the sequential ramp; the track is an
@@ -86,6 +87,7 @@ const SAWTOOTH_TICKS = [-SAWTOOTH_WINDOW_S, -10, -5, 0];
  * re-renders every frame.
  */
 export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, places, nowMs = 0, height = SAWTOOTH_HEIGHT }: { samples: SawtoothSample[]; color: string; target: number; index: number; places?: BlockPlaces; nowMs?: number; height?: ChartHeight }) {
+  const zoom = useTimeZoomChart();
   // Without the ring's placement (a caller that has none) the samples are placed on their own.
   const data = useMemo(() => sawtoothChart(samples, nowMs, places), [samples, nowMs, places]);
   const sized = typeof height === "string";
@@ -100,14 +102,14 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
       label={`Constraint ${index + 1} backlog per block over the last ${SAWTOOTH_WINDOW_S} s, ${data.length} blocks, 0 to ${formatGas(axis.top)}, with a dashed threshold at ${formatGas(target)}: it ${drainLabel(target)} boundary`}
     >
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 12, right: 8, bottom: 2, left: 0 }}>
+        <LineChart data={data} margin={{ top: 12, right: 8, bottom: 2, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
           <CartesianGrid vertical={false} />
           <XAxis
             dataKey="x"
             type="number"
-            domain={[-SAWTOOTH_WINDOW_S, 0]}
+            domain={zoom?.domain ?? [-SAWTOOTH_WINDOW_S, 0]}
             allowDataOverflow
-            ticks={SAWTOOTH_TICKS}
+            ticks={zoom?.zoomed ? undefined : SAWTOOTH_TICKS}
             tickFormatter={(v: number) => (v === 0 ? "now" : `${v}s`)}
             tickLine
             axisLine={false}
@@ -117,6 +119,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
           {/* One second of target: the gas the constraint sheds at every second boundary. */}
           <ReferenceLine y={target} stroke={THRESHOLD_COLOR} strokeDasharray="4 3" strokeWidth={1} label={{ value: drainLabel(target), position: "insideTopRight" }} />
           <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={secondsAgoLabel} rows={sawtoothTooltipRows(color)} />} />
+          <TimeZoomSelection />
           <Line type="linear" dataKey="backlog" stroke={color} strokeWidth={1.25} dot={false} isAnimationActive={false} activeDot={{ r: 2.5 }} />
         </LineChart>
       </ResponsiveContainer>

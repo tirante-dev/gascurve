@@ -56,6 +56,7 @@ import { buildSeriesModel, bucketRowTitle, GasPerSecondChart } from "./SeriesCha
 import { FeeGauge } from "./FeeGauge";
 import { Figure, HoverNote, Label, Legend, type NoteAlign, Stat, type StatTone, StatusPill, Term, TIME_AXIS_RIGHT } from "./primitives";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
+import { TimeZoomControls, TimeZoomProvider, TimeZoomSelection, useTimeZoomChart, type TimeDomain } from "./TimeZoom";
 
 export { SWAP_GAS, TRANSFER_GAS };
 
@@ -130,6 +131,7 @@ const HERO_AXIS_WIDTH = 56;
  * not. Memoised on its points, which move with the frame clock.
  */
 export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText, height }: { points: HeroPoint[]; floorGwei: number; floorText: string; height?: string }) {
+  const zoom = useTimeZoomChart();
   const span = heroSpan();
   const ticks = useMemo(() => heroTicks(span), [span]);
   // The axis from the previous render stands while the data still fits it
@@ -149,15 +151,15 @@ export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText,
         <ChartNote>Waiting for blocks.</ChartNote>
       ) : (
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={points} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
+          <AreaChart data={points} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
             {/* Horizontal only: the time axis has its own ticks and a vertical grid would compete with the marks. */}
             <CartesianGrid vertical={false} />
             <XAxis
               dataKey="x"
               type="number"
-              domain={[-span, 0]}
+              domain={zoom?.domain ?? [-span, 0]}
               allowDataOverflow
-              ticks={ticks}
+              ticks={zoom?.zoomed ? undefined : ticks}
               tickFormatter={heroTimeLabel}
               tickLine
               axisLine={false}
@@ -173,6 +175,7 @@ export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText,
               label={{ value: `floor ${floorText} gwei`, position: "insideBottomRight" }}
             />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={heroPointTitle} rows={heroTooltipRows()} />} />
+            <TimeZoomSelection />
             <Area type="monotone" dataKey="fee" stroke={FEE_COLOR} strokeWidth={1.5} fill={FEE_COLOR} fillOpacity={0.12} dot={false} activeDot={{ r: 2.5 }} isAnimationActive={false} />
           </AreaChart>
         </ResponsiveContainer>
@@ -188,20 +191,22 @@ export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText,
  * that spans a congestion event spans two orders of magnitude.
  */
 export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabel, height }: { data: FeeChartData; rangeLabel: string; height?: string }) {
+  const zoom = useTimeZoomChart();
   const rows = useMemo(() => feeTooltipRows(), []);
   const note = useMemo(() => bucketNote(data.markers, data.bucketSeconds), [data.markers, data.bucketSeconds]);
   return (
     <>
       <ChartBox label={feeChartLabel(rangeLabel, data.points)} height={height}>
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data.drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
+          <ComposedChart data={data.drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
             <CartesianGrid vertical={false} />
             <GapBands gaps={data.gaps.gaps} />
             {/* The axis is the window that was asked for, so the buckets that
                 exist sit where they happened rather than filling the frame. */}
-            <XAxis dataKey="t" type="number" domain={[data.gaps.window.from, data.gaps.window.to]} tickFormatter={(t: number) => formatTick(t, data.span)} tickLine axisLine={false} height={18} minTickGap={48} />
+            <XAxis dataKey="t" type="number" domain={zoom?.domain ?? [data.gaps.window.from, data.gaps.window.to]} allowDataOverflow tickFormatter={(t: number) => formatTick(t, zoom?.span ?? data.span)} tickLine axisLine={false} height={18} minTickGap={48} />
             <YAxis scale="log" domain={data.domain} tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={HERO_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={rows} note={note} />} />
+            <TimeZoomSelection />
             <Area type="monotone" dataKey="feeMax" connectNulls={false} stroke="none" fill="var(--series-1)" fillOpacity={0.12} isAnimationActive={false} activeDot={false} />
             <Area type="monotone" dataKey="feeMin" connectNulls={false} stroke="none" fill="var(--chart)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
             <Line type="monotone" dataKey="feeAvg" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} />
@@ -272,6 +277,7 @@ const livePointTitle = (row: Record<string, unknown>) => heroPointTitle(Number(r
  * clock.
  */
 export const HeroThroughputChart = memo(function HeroThroughputChart({ points, constraints = NO_THROUGHPUT_CONSTRAINTS, height = HERO_THROUGHPUT_HEIGHT }: { points: ThroughputPoint[]; constraints?: readonly ThroughputConstraint[]; height?: string }) {
+  const zoom = useTimeZoomChart();
   const span = heroSpan();
   const ticks = useMemo(() => heroTicks(span), [span]);
   const peak = useMemo(() => liveThroughputPeak(points, constraints), [points, constraints]);
@@ -292,11 +298,12 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, c
         <ChartNote>{waitingForBlocks ? "Waiting for blocks." : "Receipt data unavailable."}</ChartNote>
       ) : (
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={points} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
+          <AreaChart data={points} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
             <CartesianGrid vertical={false} />
-            <XAxis dataKey="x" type="number" domain={[-span, 0]} allowDataOverflow ticks={ticks} tickFormatter={heroTimeLabel} tickLine axisLine={false} height={18} />
+            <XAxis dataKey="x" type="number" domain={zoom?.domain ?? [-span, 0]} allowDataOverflow ticks={zoom?.zoomed ? undefined : ticks} tickFormatter={heroTimeLabel} tickLine axisLine={false} height={18} />
             <YAxis domain={[0, axis.top]} ticks={axis.ticks} tickFormatter={(v: number) => throughputTick(v, axis)} tickLine={false} axisLine={false} width={HERO_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={heroPointTitle} rows={rows} />} />
+            <TimeZoomSelection />
             <Area type="monotone" dataKey="gas" stroke={THROUGHPUT_COLOR} strokeWidth={1.5} fill={THROUGHPUT_COLOR} fillOpacity={0.12} dot={false} activeDot={{ r: 2.5 }} isAnimationActive={false} />
             {constraints.map((constraint, i) => (
               <ReferenceLine key={`${i}-${constraint.target}`} y={constraint.target} stroke={seriesColor(i)} strokeWidth={1} strokeDasharray="4 3" />
@@ -715,6 +722,7 @@ export function LiveHeroView({
   const sinceBlock = Math.max(0, nowMs / 1000 - snapshot.block.ts);
   const age = sampleAge(snapshot.sampledAt, nowMs);
   const floorText = formatGwei(snapshot.minBaseFee);
+  const zoomDomain: TimeDomain | null = range === "live" ? (blocks.length >= 2 ? [-heroSpan(), 0] : null) : series && series.points.length >= 2 ? [series.from, series.to] : null;
   return (
     <div className="vw-card vw-lit p-5">
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -740,28 +748,31 @@ export function LiveHeroView({
         </div>
 
         <div className="flex flex-col gap-3 lg:col-span-8">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <RangeTabs options={HERO_RANGE_OPTIONS} value={range} onChange={onRangeChange ?? (() => undefined)} label="Base fee chart range" loading={range !== "live" && seriesLoading && series !== null} />
-            <div className="flex items-center gap-2">
-              <StatusPill status={status} />
-              <EnlargeLink network={network} view={chartView("base-fee")} range={range} size="hero" />
+          <TimeZoomProvider key={`${network}:${range}`} domain={zoomDomain} mode={range === "live" ? "relative" : "timestamp"}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <RangeTabs options={HERO_RANGE_OPTIONS} value={range} onChange={onRangeChange ?? (() => undefined)} label="Base fee chart range" loading={range !== "live" && seriesLoading && series !== null} />
+              <div className="flex items-center gap-2">
+                <StatusPill status={status} />
+                <EnlargeLink network={network} view={chartView("base-fee")} range={range} size="hero" />
+              </div>
             </div>
-          </div>
-          <HeroChartPanel snapshot={snapshot} blocks={blocks} places={places} nowMs={nowMs} range={range} series={series} seriesLoading={seriesLoading} seriesError={seriesError} model={model} />
-          {/* What the chain carried, under what it charged for it, on the same
-              range and the same axis: the two questions are one question. */}
-          <HeroThroughputPanel
-            blocks={blocks}
-            places={places}
-            nowMs={nowMs}
-            range={range}
-            series={series}
-            seriesLoading={seriesLoading}
-            seriesError={seriesError}
-            model={model}
-            constraints={snapshot.constraints}
-            action={throughputAction}
-          />
+            <TimeZoomControls />
+            <HeroChartPanel snapshot={snapshot} blocks={blocks} places={places} nowMs={nowMs} range={range} series={series} seriesLoading={seriesLoading} seriesError={seriesError} model={model} />
+            {/* What the chain carried, under what it charged for it, on the same
+                range and the same axis: the two questions are one question. */}
+            <HeroThroughputPanel
+              blocks={blocks}
+              places={places}
+              nowMs={nowMs}
+              range={range}
+              series={series}
+              seriesLoading={seriesLoading}
+              seriesError={seriesError}
+              model={model}
+              constraints={snapshot.constraints}
+              action={throughputAction}
+            />
+          </TimeZoomProvider>
         </div>
       </div>
     </div>

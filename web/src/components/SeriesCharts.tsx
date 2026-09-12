@@ -34,6 +34,7 @@ import { GapBands, GapNote, MissingBands, MissingDots, MissingNote } from "./Cha
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { PointInspector } from "./ChartReadout";
 import { ChartFrame, Legend, TIME_AXIS_RIGHT, type ChartHeight, type SwatchKind } from "./primitives";
+import { TimeZoomSelection, useTimeZoomChart } from "./TimeZoom";
 
 const SYNC_ID = "history";
 
@@ -316,8 +317,9 @@ export function buildSeriesModel(series: Series, model: PricerModel): SeriesMode
  * buckets that happen to exist: two hours of history on a 24h range draw over
  * the last twelfth of the axis, which is where they happened.
  */
-function timeAxis(span: number, window: GapWindow) {
-  return <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />;
+function TimeAxis({ span, window }: { span: number; window: GapWindow }) {
+  const zoom = useTimeZoomChart();
+  return <XAxis dataKey="t" type="number" domain={zoom?.domain ?? [window.from, window.to]} allowDataOverflow tickFormatter={(t: number) => formatTick(t, zoom?.span ?? span)} tickLine={false} axisLine={false} minTickGap={48} />;
 }
 
 /** Owner actions as dashed rules, numbered chronologically; the list under the charts decodes them. */
@@ -334,16 +336,18 @@ export const bucketRowTitle = (row: Record<string, unknown>) => formatDateTime(N
 
 /** Each constraint's share of the exponent, stacked, one series per constraint set. */
 export const ContributionChart = memo(function ContributionChart({ m, height = SERIES_CHART_HEIGHT }: { m: SeriesModel; height?: ChartHeight }) {
+  const zoom = useTimeZoomChart();
   return (
     <>
       <ChartFrame height={height} label="Stacked per-constraint contribution to the exponent, one series per constraint set">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+          <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
             <CartesianGrid vertical={false} />
             <GapBands gaps={m.gaps.gaps} />
-            {timeAxis(m.span, m.gaps.window)}
+            <TimeAxis span={m.span} window={m.gaps.window} />
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.contributionRows} note={m.note} />} />
+            <TimeZoomSelection />
             {m.segments.map((s) => (
               <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
             ))}
@@ -368,11 +372,12 @@ export const ContributionChart = memo(function ContributionChart({ m, height = S
  * a line through the band of it, as the base fee chart is drawn.
  */
 export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = SERIES_CHART_HEIGHT, axisWidth = GAS_AXIS_WIDTH, minWidth }: { m: SeriesModel; height?: ChartHeight; axisWidth?: number; minWidth?: number }) {
+  const zoom = useTimeZoomChart();
   return (
     <>
       <ChartFrame height={height} minWidth={minWidth} label={`Compute gas used per second in ${m.gasAxis.unit}${m.hasSpread ? `, banded from the lowest to the highest ${m.spreadUnit} inside each bucket,` : ""} with each constraint target in force drawn as a stepped line`}>
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+          <ComposedChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 12, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
             {m.gasMissing.length > 0 ? (
               <defs>
                 <MissingDots />
@@ -381,9 +386,10 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
             <CartesianGrid vertical={false} />
             <GapBands gaps={m.gaps.gaps} />
             <MissingBands runs={m.gasMissing} />
-            {timeAxis(m.span, m.gaps.window)}
+            <TimeAxis span={m.span} window={m.gaps.window} />
             <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.gasNote} />} />
+            <TimeZoomSelection />
             {m.hasSpread ? (
               <>
                 {/* The band is the max filled to the floor of the axis with the min painted back out
@@ -410,11 +416,12 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
 
 /** One slot's backlog over time, on its own scale. A replaced constraint starts a new series. */
 export const BacklogChart = memo(function BacklogChart({ m, index, label, height = BACKLOG_CHART_HEIGHT }: { m: SeriesModel; index: number; label: string; height?: ChartHeight }) {
+  const zoom = useTimeZoomChart();
   return (
     <>
       <ChartFrame height={height} minWidth={260} label={`Backlog of ${label} over time, with the backlog at each bucket end and the peak reached inside each bucket`}>
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+          <AreaChart data={m.drawn} syncId={SYNC_ID} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }} className={zoom ? "cursor-crosshair select-none" : undefined} {...zoom?.handlers}>
             {m.backlogMissingFor(index).length > 0 ? (
               <defs>
                 <MissingDots />
@@ -423,9 +430,10 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
             <CartesianGrid vertical={false} />
             <GapBands gaps={m.gaps.gaps} />
             <MissingBands runs={m.backlogMissingFor(index)} />
-            {timeAxis(m.span, m.gaps.window)}
+            <TimeAxis span={m.span} window={m.gaps.window} />
             <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.backlogNoteFor(index)} />} />
+            <TimeZoomSelection />
             {m.segments
               .filter((s) => s.index === index)
               .map((s) => (

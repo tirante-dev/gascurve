@@ -18,7 +18,8 @@ import {
   resolveConstraint,
 } from "@/lib/chartViews";
 import { emptyRangeNote } from "@/lib/gaps";
-import type { HeroRange } from "@/lib/hero";
+import { heroSpan, type HeroRange } from "@/lib/hero";
+import { SAWTOOTH_WINDOW_S } from "@/lib/smoothing";
 import type { ApiState } from "@/hooks/useApi";
 import type { LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
 import { seriesCount, seriesResolutionLabel, slotLabel } from "@/utils/chart";
@@ -37,6 +38,7 @@ import { RangeTabs, type RangeOption } from "./RangeTabs";
 import { BacklogChart, bucketRowTitle, buildSeriesModel, ContributionChart } from "./SeriesCharts";
 import { TaylorChart } from "./TaylorChart";
 import { ThemeToggle } from "./ThemeToggle";
+import { TimeZoomControls, TimeZoomProvider, type TimeDomain } from "./TimeZoom";
 
 /** A word inside the chart card: what there is to say when there is no chart to draw. */
 function ChartNote({ children }: { children: ReactNode }) {
@@ -191,6 +193,14 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
   const constraint = resolveConstraint(rawConstraint, choices);
 
   const l1 = useL1Costs(network, seriesRange ?? "24h", series.data, viewId === "l1");
+  const zoomDomain = ((): TimeDomain | null => {
+    if (viewId === "backlog-sawtooth") return snapshot === null ? null : [-SAWTOOTH_WINDOW_S, 0];
+    if ((viewId === "base-fee" || viewId === "gas-per-second") && range === "live") return snapshot === null ? null : [-heroSpan(), 0];
+    if (series.data !== null && series.data.points.length >= 2) return [series.data.from, series.data.to];
+    if (viewId === "l1" && l1.rows.length >= 2) return [l1.gaps.window.from, l1.gaps.window.to];
+    return null;
+  })();
+  const relativeZoom = viewId === "backlog-sawtooth" || ((viewId === "base-fee" || viewId === "gas-per-second") && range === "live");
 
   /** The URL is the source of truth: a control writes to it and the page follows. */
   const setParam = useCallback(
@@ -321,27 +331,30 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
           >
             <p className="mb-4 max-w-[65ch] text-sm text-ink-2">{view.description}</p>
             <ChartTabs network={network} current={view.id} range={rawRange} />
-            <div className="vw-card mt-4 p-4">
-              {constraintOptions.length > 1 || body?.legend ? (
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                  {constraintOptions.length > 1 ? (
-                    <div className="flex flex-wrap items-center gap-3">
-                      <RangeTabs options={constraintOptions} value={String(constraint)} onChange={(next) => setParam("constraint", next)} label="Constraint" />
-                      {constraintNote ? <span className="num text-xs text-ink-3">{constraintNote}</span> : null}
-                    </div>
-                  ) : (
-                    <span />
-                  )}
-                  {body?.legend}
-                </div>
-              ) : null}
-              {seriesRange !== null && series.data !== null && series.data.points.length > 0 ? (
-                <p className="mb-3 text-xs text-ink-3">
-                  Resolution: <span className="font-medium text-ink-2">{seriesResolutionLabel(series.data.resolution)}</span> · {formatInteger(series.data.points.length)} points. Hover the chart or use its inspector for exact values.
-                </p>
-              ) : null}
-              {body?.chart}
-            </div>
+            <TimeZoomProvider key={`${view.id}:${range ?? "none"}:${constraint ?? "none"}`} domain={zoomDomain} mode={relativeZoom ? "relative" : "timestamp"}>
+              <div className="vw-card mt-4 p-4">
+                {constraintOptions.length > 1 || body?.legend ? (
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                    {constraintOptions.length > 1 ? (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <RangeTabs options={constraintOptions} value={String(constraint)} onChange={(next) => setParam("constraint", next)} label="Constraint" />
+                        {constraintNote ? <span className="num text-xs text-ink-3">{constraintNote}</span> : null}
+                      </div>
+                    ) : (
+                      <span />
+                    )}
+                    {body?.legend}
+                  </div>
+                ) : null}
+                <TimeZoomControls className="mb-3" />
+                {seriesRange !== null && series.data !== null && series.data.points.length > 0 ? (
+                  <p className="mb-3 text-xs text-ink-3">
+                    Resolution: <span className="font-medium text-ink-2">{seriesResolutionLabel(series.data.resolution)}</span> · {formatInteger(series.data.points.length)} points. Hover the chart or use its inspector for exact values.
+                  </p>
+                ) : null}
+                {body?.chart}
+              </div>
+            </TimeZoomProvider>
           </Section>
         )}
       </main>
