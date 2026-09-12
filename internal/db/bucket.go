@@ -105,6 +105,23 @@ func (a *BucketBuilder) Add(blk Block, setID sql.NullInt64) {
 	if e := ReplayErrorBips(blk); e > a.b.ReplayErrorBips {
 		a.b.ReplayErrorBips = e
 	}
+	a.b.ArbOSVersionMin, a.b.ArbOSVersionMax = extendArbOSRange(a.b, blk.ArbOSVersion, a.b.Blocks == 1)
+}
+
+// extendArbOSRange widens a bucket's ArbOS bounds with one block's version. A block that recorded none
+// clears them: a range over some of the blocks would read as a range over all of them. `first` starts
+// the range rather than widening the zero value.
+func extendArbOSRange(b Bucket, v sql.NullInt64, first bool) (low, high sql.NullInt64) {
+	if !v.Valid || (!first && !b.ArbOSVersionMin.Valid) {
+		return sql.NullInt64{}, sql.NullInt64{}
+	}
+	if first {
+		return v, v
+	}
+	lo, hi := b.ArbOSVersionMin, b.ArbOSVersionMax
+	lo.Int64 = min(lo.Int64, v.Int64)
+	hi.Int64 = max(hi.Int64, v.Int64)
+	return lo, hi
 }
 
 // Bucket returns the aggregate; the average is derived from the exact sum. A window holding any block
@@ -244,5 +261,23 @@ func MergeBuckets(old, b Bucket) Bucket {
 	}
 	merged.BacklogsMax = mx
 	merged.ReplayErrorBips = max(old.ReplayErrorBips, b.ReplayErrorBips)
+	merged.ArbOSVersionMin, merged.ArbOSVersionMax = mergeArbOSRange(old, b)
 	return merged
+}
+
+// mergeArbOSRange combines two ArbOS bounds the way the SQL fold does: an empty stored bucket takes the
+// incoming range whole, and a side that recorded no version leaves the merged range unknown.
+func mergeArbOSRange(old, b Bucket) (low, high sql.NullInt64) {
+	if old.Blocks == 0 {
+		return b.ArbOSVersionMin, b.ArbOSVersionMax
+	}
+	if b.Blocks == 0 {
+		return old.ArbOSVersionMin, old.ArbOSVersionMax
+	}
+	if !old.ArbOSVersionMin.Valid || !b.ArbOSVersionMin.Valid {
+		return sql.NullInt64{}, sql.NullInt64{}
+	}
+	lo := sql.NullInt64{Int64: min(old.ArbOSVersionMin.Int64, b.ArbOSVersionMin.Int64), Valid: true}
+	hi := sql.NullInt64{Int64: max(old.ArbOSVersionMax.Int64, b.ArbOSVersionMax.Int64), Valid: true}
+	return lo, hi
 }
