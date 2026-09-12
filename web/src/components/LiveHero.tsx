@@ -156,6 +156,7 @@ export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText,
               dataKey="x"
               type="number"
               domain={[-span, 0]}
+              allowDataOverflow
               ticks={ticks}
               tickFormatter={heroTimeLabel}
               tickLine
@@ -276,7 +277,7 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, h
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={points} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 2, left: 0 }}>
             <CartesianGrid vertical={false} />
-            <XAxis dataKey="x" type="number" domain={[-span, 0]} ticks={ticks} tickFormatter={heroTimeLabel} tickLine axisLine={false} height={18} />
+            <XAxis dataKey="x" type="number" domain={[-span, 0]} allowDataOverflow ticks={ticks} tickFormatter={heroTimeLabel} tickLine axisLine={false} height={18} />
             <YAxis domain={[0, axis.top]} ticks={axis.ticks} tickFormatter={(v: number) => throughputTick(v, axis)} tickLine={false} axisLine={false} width={HERO_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={heroPointTitle} rows={throughputTooltipRows()} />} />
             <Area type="monotone" dataKey="gas" stroke={THROUGHPUT_COLOR} strokeWidth={1.5} fill={THROUGHPUT_COLOR} fillOpacity={0.12} dot={false} activeDot={{ r: 2.5 }} isAnimationActive={false} />

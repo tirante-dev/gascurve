@@ -106,6 +106,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
             dataKey="x"
             type="number"
             domain={[-SAWTOOTH_WINDOW_S, 0]}
+            allowDataOverflow
             ticks={SAWTOOTH_TICKS}
             tickFormatter={(v: number) => (v === 0 ? "now" : `${v}s`)}
             tickLine
