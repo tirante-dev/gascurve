@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/tirante-dev/gascurve/compare/v1.4.0...v1.4.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **web:** keep live chart axes stable ([#89](https://github.com/tirante-dev/gascurve/issues/89)) ([8baaa26](https://github.com/tirante-dev/gascurve/commit/8baaa264de4ee82a80ea6e9473d1877f6e2ba3f5))
+
 ## [1.4.0](https://github.com/tirante-dev/gascurve/compare/v1.3.0...v1.4.0) (2026-09-08)
 
 
