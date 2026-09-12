@@ -1,4 +1,4 @@
-.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration migration-check lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify tools tools-check tool-goimports tool-golangci-lint tool-staticcheck tool-govulncheck check-goimports check-golangci-lint check-staticcheck check-govulncheck test-tooling ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
+.PHONY: all build build-collector build-api build-migrate build-matrix run-collector run-api test test-coverage test-race test-integration test-fidelity migration-check lint lint-fix vet fmt fmt-check staticcheck govulncheck mod-verify tools tools-check tool-goimports tool-golangci-lint tool-staticcheck tool-govulncheck check-goimports check-golangci-lint check-staticcheck check-govulncheck test-tooling ci ci-integration ci-docker ci-chart clean db-up db-down db-migrate db-rollback docker-build docker-scan chart-lint chart-template web-install web-dev web-lint web-typecheck web-test web-test-coverage web-build web-ci
 
 GOCMD=go
 GOBUILD=$(GOCMD) build
@@ -78,6 +78,21 @@ test-race:
 # `integration` build tag so they never run by accident.
 test-integration:
 	$(GOTEST) -tags integration -count=1 -v ./internal/db/... ./internal/collector/... ./internal/api/...
+
+# The replay fidelity measurement (docs/SPEC.md section 7.1). It calls a public RPC, so it is gated by
+# the `fidelity` build tag and never runs in CI. Override FIDELITY_URL, FIDELITY_CPS and
+# FIDELITY_WINDOWS to measure another chain or another stretch of one.
+FIDELITY_URL ?= https://rpc.mainnet.chain.robinhood.com
+FIDELITY_CPS ?= 4
+FIDELITY_WINDOWS ?=
+FIDELITY_OUT ?=
+
+test-fidelity:
+	@test -n "$(FIDELITY_WINDOWS)" || { echo "set FIDELITY_WINDOWS (see docs/SPEC.md section 7.1)"; exit 1; }
+	$(GOTEST) -tags fidelity -count=1 -v -timeout 240m ./internal/collector \
+		-run '^TestReplayFidelity$$' \
+		-fidelity.url='$(FIDELITY_URL)' -fidelity.cps=$(FIDELITY_CPS) \
+		-fidelity.windows='$(FIDELITY_WINDOWS)' -fidelity.out='$(FIDELITY_OUT)'
 
 migration-check:
 	$(GOTEST) -count=1 -run '^TestReleasedMigrationsImmutable$$' ./internal/db

@@ -5,6 +5,7 @@
 import type { OwnerAction, PricerModel, Series } from "@/types";
 import type { TooltipRow } from "@/components/ChartTooltip";
 import { bucketSeconds as bucketWidth, gapModel, withGapBreaks, NO_GAPS, type GapModel, type GapRow } from "@/lib/gaps";
+import { fidelityBands, fidelityRowNote, type FidelityBand } from "@/lib/fidelity";
 import { parseConstraintArg, rawConstraintArg } from "@/lib/ownerActions";
 import { partialRowNote } from "@/lib/partial";
 import { buildChartPoints, FLOOR_COLOR, logDomain, shortConstraintLabel, spanSeconds, withSetBoundaries, type ChartPoint } from "@/utils/chart";
@@ -56,14 +57,14 @@ export function ownerActionNote(markers: readonly Marker[], bucketSeconds: numbe
 }
 
 /**
- * The whole tooltip footnote for a hovered bucket: that the collector has only part of it, then every
- * owner action inside it. `sums` is true for a chart drawing sums per bucket, which leaves a partial
+ * The whole tooltip footnote for a hovered bucket: that the collector has only part of it, that the
+ * replay behind it is not vouched for, then every owner action inside it. `sums` is true for a chart drawing sums per bucket, which leaves a partial
  * bucket out of its marks rather than drawing it short.
  */
 export function bucketNote(markers: readonly Marker[], bucketSeconds: number, sums = false): (row: Record<string, unknown>) => string | null {
   const actions = ownerActionNote(markers, bucketSeconds);
   return (row) => {
-    const parts = [partialRowNote(row, sums), actions(row)].filter((part): part is string => part !== null);
+    const parts = [partialRowNote(row, sums), fidelityRowNote(row), actions(row)].filter((part): part is string => part !== null);
     return parts.length > 0 ? parts.join(" \u00b7 ") : null;
   };
 }
@@ -120,15 +121,17 @@ export type FeeChartData = {
   domain: [number, number];
   span: number;
   bucketSeconds: number;
+  fidelityBands: FidelityBand[];
   /** The window the range asked for, the spans of it with nothing in them, and the step they were judged at. */
   gaps: GapModel;
 };
 
 /** The rows, markers, domain and axis span of a range. An absent series draws nothing at all. */
 export function feeChartData(series: Series | null, model: PricerModel): FeeChartData {
-  if (!series) return { points: [], drawn: [], markers: [], domain: logDomain([]), span: 0, bucketSeconds: DEFAULT_BUCKET_SECONDS, gaps: NO_GAPS };
+  if (!series) return { points: [], drawn: [], markers: [], domain: logDomain([]), span: 0, bucketSeconds: DEFAULT_BUCKET_SECONDS, fidelityBands: [], gaps: NO_GAPS };
   const points = buildChartPoints(series, model);
   const gaps = gapModel(series, points);
+  const bucketSeconds = bucketWidth(series.resolution, points);
   return {
     points,
     // Empty rows inside the holes, so a missing bucket breaks the line rather than being bridged.
@@ -139,7 +142,8 @@ export function feeChartData(series: Series | null, model: PricerModel): FeeChar
     span: gaps.window.to > gaps.window.from ? gaps.window.to - gaps.window.from : spanSeconds(points),
     // The bucket width is the resolution's own, never the distance between the first two points: two
     // per-block points sharing a timestamp made a zero-width bucket, and one missing point inflated it.
-    bucketSeconds: bucketWidth(series.resolution, points),
+    bucketSeconds,
+    fidelityBands: fidelityBands(series.points, bucketSeconds),
     gaps,
   };
 }

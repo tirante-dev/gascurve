@@ -99,7 +99,7 @@ export function feeTotals(series: Pick<Series, "from" | "to" | "resolution" | "p
   const partialBuckets = series.points.filter((point) => completenessOf(point) === "partial").length;
   const unknownBuckets = series.points.filter((point) => completenessOf(point) === "unknown").length;
   const emptyIntervals = gaps.gaps.length;
-  const completeness: SeriesCompleteness = partialBuckets > 0 || emptyIntervals > 0 ? "partial" : unknownBuckets > 0 ? "unknown" : "complete";
+  const completeness: SeriesCompleteness = unknownBuckets > 0 ? "unknown" : partialBuckets > 0 || emptyIntervals > 0 ? "partial" : "complete";
   const rateBlocked = emptyIntervals > 0 || unknownBuckets > 0 || kinds.some((kind) => kind === "leading" || kind === "unknown");
   const rateCoverage = requestedSpan > 0 && completeSpan > 0 ? Math.min(1, completeSpan / requestedSpan) : null;
   return {
@@ -267,6 +267,8 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
   const accounts = snapshot?.accounts;
   const unsplit = (totals?.unsplit ?? 0) > 0;
   const incomplete = totals?.completeness !== "complete";
+  const splitIncomplete = incomplete || unsplit;
+  const posterIncomplete = incomplete || (totals?.posterUnknown ?? 0) > 0;
   const totalsNote = totals === null ? null : incompleteTotalsNote(totals);
   const legend = feeFlowLegend(unsplit);
 
@@ -301,9 +303,9 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
                 size="sm"
                 hint={totals.perDay === null ? undefined : <>{totals.rateCoverage === null ? null : <span className="block">{formatPercent(totals.rateCoverage)} complete coverage</span>}{usdLine(totals.perDay, ethUsd, clock, 4, USD_PLACEMENT[1])}</>}
               />
-              <Stat label={incomplete ? "Indexed floor to infra" : "Floor to infra"} value={totals.splitKnown > 0 ? formatSignificant(totals.floorEth, 3) : "n/a"} unit={totals.splitKnown > 0 ? "ETH" : undefined} size="sm" hint={totals.splitKnown > 0 ? usdLine(totals.floorEth, ethUsd, clock, 3, USD_PLACEMENT[2]) : undefined} />
-              <Stat label={incomplete ? "Indexed congestion" : "Congestion to network"} value={totals.splitKnown > 0 ? formatSignificant(totals.surplusEth, 3) : "n/a"} unit={totals.splitKnown > 0 ? "ETH" : undefined} size="sm" hint={totals.splitKnown > 0 ? usdLine(totals.surplusEth, ethUsd, clock, 3, USD_PLACEMENT[3]) : undefined} />
-              <Stat label={incomplete ? "Indexed poster fee" : "Poster fee to L1 pricer"} value={totals.posterKnown > 0 ? formatSignificant(totals.posterEth, 3) : "n/a"} unit={totals.posterKnown > 0 ? "ETH" : undefined} size="sm" hint={totals.posterKnown > 0 ? usdLine(totals.posterEth, ethUsd, clock, 3, USD_PLACEMENT[4]) : undefined} />
+              <Stat label={splitIncomplete ? "Indexed floor to infra" : "Floor to infra"} value={totals.splitKnown > 0 ? formatSignificant(totals.floorEth, 3) : "n/a"} unit={totals.splitKnown > 0 ? "ETH" : undefined} size="sm" hint={totals.splitKnown > 0 ? usdLine(totals.floorEth, ethUsd, clock, 3, USD_PLACEMENT[2]) : undefined} />
+              <Stat label={splitIncomplete ? "Indexed congestion" : "Congestion to network"} value={totals.splitKnown > 0 ? formatSignificant(totals.surplusEth, 3) : "n/a"} unit={totals.splitKnown > 0 ? "ETH" : undefined} size="sm" hint={totals.splitKnown > 0 ? usdLine(totals.surplusEth, ethUsd, clock, 3, USD_PLACEMENT[3]) : undefined} />
+              <Stat label={posterIncomplete ? "Indexed poster fee" : "Poster fee to L1 pricer"} value={totals.posterKnown > 0 ? formatSignificant(totals.posterEth, 3) : "n/a"} unit={totals.posterKnown > 0 ? "ETH" : undefined} size="sm" hint={totals.posterKnown > 0 ? usdLine(totals.posterEth, ethUsd, clock, 3, USD_PLACEMENT[4]) : undefined} />
             </div>
             {totalsNote ? <p className="mt-2 text-xs text-ink-3">{totalsNote}</p> : null}
             {unsplit ? <p className="mt-2 text-xs text-ink-3">{unsplitNote(totals.unsplit)}. Poster fees remain included when independently recorded; floor and congestion totals leave these buckets out.</p> : null}
