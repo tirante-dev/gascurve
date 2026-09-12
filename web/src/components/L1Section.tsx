@@ -8,12 +8,12 @@ import { getL1 } from "@/lib/api/l1";
 import type { BatchSeries, L1Series, LiveSnapshot, Series, SeriesRange } from "@/types";
 import { chartView } from "@/lib/chartViews";
 import { joinCosts, logDomain, resamplePosterFees, spanSeconds, type CostRow } from "@/utils/chart";
-import { gapModel, irregularStep, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
+import { bucketSeconds as seriesBucketSeconds, gapModel, irregularStep, withGapBreaks, NO_GAPS, type GapModel } from "@/lib/gaps";
 import { partialBands } from "@/lib/partial";
 import { formatDateTime, formatDuration, formatEth, formatGas, formatGwei, formatInteger, formatPercent, formatSignificant, formatTick } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip } from "./ChartTooltip";
-import { GapBands, GapNote, PartialBands, PartialNote } from "./ChartGaps";
+import { GapBands, GapNote, PartialBands, PartialHatch, PartialNote } from "./ChartGaps";
 import { Card, ChartFrame, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
 
 // "batch" is exactly one point per posting report (every 12 to 24 s on Robinhood).
@@ -51,7 +51,7 @@ export function useL1Costs(network: string, range: SeriesRange, series: Series |
   const joined = useMemo(() => {
     if (!batches.data || !series) return [];
     const bucket = RESOLUTION_SECONDS[batches.data.resolution] ?? 3600;
-    return joinCosts(batches.data.points, resamplePosterFees(series.points, bucket), bucket);
+    return joinCosts(batches.data.points, resamplePosterFees(series.points, bucket, seriesBucketSeconds(series.resolution, series.points)), bucket);
   }, [batches.data, series]);
   const bucket = batches.data ? (RESOLUTION_SECONDS[batches.data.resolution] ?? 3600) : 3600;
   // Reports arrive on their own cadence, so an empty bucket between two of
@@ -60,6 +60,7 @@ export function useL1Costs(network: string, range: SeriesRange, series: Series |
     if (!batches.data) return NO_GAPS;
     return gapModel(batches.data, batches.data.points, irregularStep(batches.data.points, bucket));
   }, [batches.data, bucket]);
+  const feeGaps = useMemo(() => (series ? gapModel(series, series.points) : NO_GAPS), [series]);
   const rows = useMemo(
     () => joined.map((row) => (gaps.gaps.some((gap) => row.t >= gap.from && row.t < gap.to) ? { ...row, attributedCostEth: null } : row)),
     [joined, gaps.gaps],
@@ -67,14 +68,19 @@ export function useL1Costs(network: string, range: SeriesRange, series: Series |
   const span = gaps.window.to > gaps.window.from ? gaps.window.to - gaps.window.from : spanSeconds(rows);
   const totals = useMemo(() => {
     const attributedCostEth = rows.reduce((s, r) => s + (r.attributedCostEth ?? 0), 0);
-    const costIncomplete = rows.some((r) => r.attributedCostEth === null);
+    const costIncomplete = gaps.gaps.length > 0 || rows.some((r) => r.attributedCostEth === null);
     const posterFeesEth = rows.reduce((s, r) => s + (r.posterFeesEth ?? 0), 0);
-    const posterIncomplete = rows.some((r) => r.posterFeesEth === null || r.completeness !== "complete");
+    const posterIncomplete = feeGaps.gaps.length > 0 || rows.some((r) => r.posterFeesEth === null || r.completeness !== "complete");
     const count = rows.reduce((s, r) => s + r.batches, 0);
     return { attributedCostEth, costIncomplete, posterFeesEth, posterIncomplete, count, interval: count > 0 && span > 0 ? span / count : 0 };
-  }, [rows, span]);
-  const domain = useMemo(() => logDomain(rows.flatMap((r) => [r.attributedCostEth ?? 0, r.posterFeesEth ?? 0])), [rows]);
+  }, [rows, span, gaps.gaps, feeGaps.gaps]);
+  const domain = useMemo(() => l1CostDomain(rows), [rows]);
   return { rows, bucket, span, domain, gaps, totals, batches, l1 };
+}
+
+/** The values the chart actually draws, excluding incomplete poster buckets. */
+export function l1CostDomain(rows: readonly CostRow[]): [number, number] {
+  return logDomain(rows.flatMap((row) => [row.attributedCostEth ?? 0, row.completeness === "complete" ? (row.posterFeesEth ?? 0) : 0]));
 }
 
 /** The legend the cost chart carries: each line with what it came to over the range. */
@@ -95,6 +101,11 @@ export const L1CostChart = memo(function L1CostChart({ rows, bucket, span, domai
   return (
     <>
       <ChartFrame height={height} label="Poster fees collected for the L1 pricer and ArbOS-attributed batch-posting cost per bucket on a log scale">
+        <svg className="absolute h-0 w-0" width={0} height={0} aria-hidden="true">
+          <defs>
+            <PartialHatch />
+          </defs>
+        </svg>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />

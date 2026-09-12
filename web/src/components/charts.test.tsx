@@ -19,7 +19,7 @@ import { targetValues } from "@/lib/smoothing";
 import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
 import { FeeFlows, feeFlowRows, feeTotals, incompleteTotalsNote, unsplitNote } from "./FeeFlows";
-import { L1Section } from "./L1Section";
+import { L1Section, l1CostDomain } from "./L1Section";
 import { PricerEquation } from "./PricerEquation";
 import { BacklogChart, buildSeriesModel, describeSplit, GasPerSecondChart, SeriesCharts } from "./SeriesCharts";
 import { LineChart, XAxis, YAxis } from "recharts";
@@ -541,6 +541,9 @@ describe("FeeFlows", () => {
     render(<FeeFlows network="robinhood" range="24h" snapshot={snapshot} series={mixed} model="constraints" nowMs={NOW_MS} />);
     expect(screen.getByText(/^2 buckets have fees without a recorded destination/)).toBeInTheDocument();
     expect(screen.getByText(/1 bucket has no recorded poster fee/)).toBeInTheDocument();
+    expect(screen.getByText("Indexed floor to infra")).toBeInTheDocument();
+    expect(screen.getByText("Indexed congestion")).toBeInTheDocument();
+    expect(screen.getByText("Indexed poster fee")).toBeInTheDocument();
     expect(screen.getByText("destination unavailable")).toBeInTheDocument();
     expect(screen.getByRole("figure", { name: /hatched where the split is unavailable/ })).toBeInTheDocument();
     const details = screen.getByText(/Data table \(5 buckets\)/).closest("details") as HTMLDetailsElement;
@@ -616,6 +619,8 @@ describe("FeeFlows", () => {
     const totals = feeTotals(unknown);
     expect(totals).toMatchObject({ completeness: "unknown", partialBuckets: 0, unknownBuckets: 1, perDay: null });
     expect(incompleteTotalsNote(totals)).toContain("1 bucket has unknown completeness");
+    const mixed = feeTotals({ ...series, points: [{ ...series.points[0], coverage: 0.5, completeness: "partial" }, ...unknown.points.slice(1)] });
+    expect(mixed).toMatchObject({ completeness: "unknown", partialBuckets: 1, unknownBuckets: 1 });
   });
 
   it("reads a bucket in progress out as what it has collected so far, not as what the bucket holds", () => {
@@ -812,7 +817,16 @@ describe("L1Section", () => {
     l1: { baseFeeEstimate: "2369608", surplus: "190000000000000", feesAvailable: "1240000000000000", unitsSinceUpdate: 100, lastUpdateAt: "2026-09-06T07:20:00Z", equilibrationUnits: 160_000_000, perBatchGasCharge: 210_000, rewardRate: 10 },
   };
 
-  it("counts each L2 bucket once for the batch resolution and lists every row in a table", async () => {
+  it("scales the chart from values it draws", () => {
+    expect(
+      l1CostDomain([
+        { t: 0, attributedCostEth: 0.01, posterFeesEth: 0.1, batches: 1, coverage: 1, completeness: "complete" },
+        { t: 15, attributedCostEth: 0.02, posterFeesEth: 1_000, batches: 0, coverage: 0.5, completeness: "partial" },
+      ]),
+    ).toEqual([0.01, 1]);
+  });
+
+  it("counts each poster-fee bucket once for the batch resolution and lists every row in a table", async () => {
     getBatchesMock.mockResolvedValue(batches);
     getL1Mock.mockResolvedValue(l1);
     render(<L1Section network="robinhood" range="1h" snapshot={l1Snapshot} series={costSeries} />);
@@ -834,8 +848,27 @@ describe("L1Section", () => {
     expect(within(rows[1]).getByText("2")).toBeInTheDocument();
     expect(within(rows[2]).getByText("0.0000005")).toBeInTheDocument();
     expect(within(rows[2]).getByText("n/a")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("partial, 66.7%")).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /Poster fees collected/ }).querySelector("#partial-bucket-hatch")).toBeInTheDocument();
     expect(screen.getByText(/1 L1 pricer samples in range/)).toBeInTheDocument();
     expect(getBatchesMock).toHaveBeenCalledWith("robinhood", "1h", expect.anything());
+  });
+
+  it("marks attributed cost as indexed when the batch range has an empty edge", async () => {
+    getBatchesMock.mockResolvedValue({
+      range: "1h",
+      resolution: "batch",
+      from: 0,
+      to: 120,
+      points: [{ t: 60, batches: 1, gasSpent: 1, weiSpent: "1000000000000", l1BaseFeeAvg: "1", calldataBytes: 1 }],
+    });
+    getL1Mock.mockResolvedValue({ range: "1h", from: 0, to: 120, points: [] });
+    const gapped: Series = { ...costSeries, from: 0, to: 120, points: [costPoint(60, "1")] };
+    render(<L1Section network="gap-test" range="1h" snapshot={l1Snapshot} series={gapped} />);
+    const details = screen.getByText(/L1 pricer and attributed batch costs/).closest("details") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    expect(await screen.findByText(/Indexed ArbOS batch cost/)).toBeInTheDocument();
   });
 
   it("shows the waiting copy before the slow sample and the empty state", () => {
