@@ -223,7 +223,7 @@ export const FeeFlowChart = memo(function FeeFlowChart({ points, gaps = NO_GAPS,
             <XAxis dataKey="t" type="number" domain={zoom?.domain ?? [window.from, window.to]} allowDataOverflow tickFormatter={(t: number) => formatTick(t, zoom?.span ?? span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={feeFlowRows(unsplit)} note={(r) => partialRowNote(r, true)} />} />
-            <TimeZoomSelection />
+            <TimeZoomSelection zoom={zoom} />
             <Area type="monotone" dataKey="stackFloorEth" stackId="fees" connectNulls={false} stroke={FLOOR_FILL} strokeWidth={1} fill={FLOOR_FILL} fillOpacity={0.6} isAnimationActive={false} activeDot={false} />
             <Area type="monotone" dataKey="stackSurplusEth" stackId="fees" connectNulls={false} stroke={SURPLUS_FILL} strokeWidth={1} fill={SURPLUS_FILL} fillOpacity={0.5} isAnimationActive={false} activeDot={false} />
             <Area type="monotone" dataKey="stackPosterEth" stackId="fees" connectNulls={false} stroke={POSTER_FILL} strokeWidth={1} fill={POSTER_FILL} fillOpacity={0.55} isAnimationActive={false} activeDot={false} />

@@ -119,7 +119,7 @@ export const Sawtooth = memo(function Sawtooth({ samples, color, target, index, 
           {/* One second of target: the gas the constraint sheds at every second boundary. */}
           <ReferenceLine y={target} stroke={THRESHOLD_COLOR} strokeDasharray="4 3" strokeWidth={1} label={{ value: drainLabel(target), position: "insideTopRight" }} />
           <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={secondsAgoLabel} rows={sawtoothTooltipRows(color)} />} />
-          <TimeZoomSelection />
+          <TimeZoomSelection zoom={zoom} />
           <Line type="linear" dataKey="backlog" stroke={color} strokeWidth={1.25} dot={false} isAnimationActive={false} activeDot={{ r: 2.5 }} />
         </LineChart>
       </ResponsiveContainer>

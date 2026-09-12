@@ -104,7 +104,7 @@ export const L1CostChart = memo(function L1CostChart({ rows, bucket, span, domai
             <PartialBands bands={bands} />
             <XAxis dataKey="t" type="number" domain={zoom?.domain ?? [window.from, window.to]} allowDataOverflow tickFormatter={(t: number) => formatTick(t, zoom?.span ?? span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
-            <TimeZoomSelection />
+            <TimeZoomSelection zoom={zoom} />
             <Tooltip
               isAnimationActive={false}
               content={(props) => (

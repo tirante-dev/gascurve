@@ -175,7 +175,7 @@ export const HeroChart = memo(function HeroChart({ points, floorGwei, floorText,
               label={{ value: `floor ${floorText} gwei`, position: "insideBottomRight" }}
             />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={heroPointTitle} rows={heroTooltipRows()} />} />
-            <TimeZoomSelection />
+            <TimeZoomSelection zoom={zoom} />
             <Area type="monotone" dataKey="fee" stroke={FEE_COLOR} strokeWidth={1.5} fill={FEE_COLOR} fillOpacity={0.12} dot={false} activeDot={{ r: 2.5 }} isAnimationActive={false} />
           </AreaChart>
         </ResponsiveContainer>
@@ -206,7 +206,7 @@ export const HeroHistoryChart = memo(function HeroHistoryChart({ data, rangeLabe
             <XAxis dataKey="t" type="number" domain={zoom?.domain ?? [data.gaps.window.from, data.gaps.window.to]} allowDataOverflow tickFormatter={(t: number) => formatTick(t, zoom?.span ?? data.span)} tickLine axisLine={false} height={18} minTickGap={48} />
             <YAxis scale="log" domain={data.domain} tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={HERO_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={(t) => formatDateTime(t)} rows={rows} note={note} />} />
-            <TimeZoomSelection />
+            <TimeZoomSelection zoom={zoom} />
             <Area type="monotone" dataKey="feeMax" connectNulls={false} stroke="none" fill="var(--series-1)" fillOpacity={0.12} isAnimationActive={false} activeDot={false} />
             <Area type="monotone" dataKey="feeMin" connectNulls={false} stroke="none" fill="var(--chart)" fillOpacity={1} isAnimationActive={false} activeDot={false} />
             <Line type="monotone" dataKey="feeAvg" connectNulls={false} stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} />
@@ -303,7 +303,7 @@ export const HeroThroughputChart = memo(function HeroThroughputChart({ points, c
             <XAxis dataKey="x" type="number" domain={zoom?.domain ?? [-span, 0]} allowDataOverflow ticks={zoom?.zoomed ? undefined : ticks} tickFormatter={heroTimeLabel} tickLine axisLine={false} height={18} />
             <YAxis domain={[0, axis.top]} ticks={axis.ticks} tickFormatter={(v: number) => throughputTick(v, axis)} tickLine={false} axisLine={false} width={HERO_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={heroPointTitle} rows={rows} />} />
-            <TimeZoomSelection />
+            <TimeZoomSelection zoom={zoom} />
             <Area type="monotone" dataKey="gas" stroke={THROUGHPUT_COLOR} strokeWidth={1.5} fill={THROUGHPUT_COLOR} fillOpacity={0.12} dot={false} activeDot={{ r: 2.5 }} isAnimationActive={false} />
             {constraints.map((constraint, i) => (
               <ReferenceLine key={`${i}-${constraint.target}`} y={constraint.target} stroke={seriesColor(i)} strokeWidth={1} strokeDasharray="4 3" />

@@ -101,6 +101,47 @@ describe("TimeZoom", () => {
     expect(screen.getByText("0:100")).toBeInTheDocument();
   });
 
+  it("keeps pointer-move previews out of shared chart state", () => {
+    const renders = vi.fn();
+    function PerformanceDriver() {
+      const zoom = useTimeZoomChart();
+      renders();
+      if (zoom === null) return null;
+      return (
+        <>
+          <output>{zoom.domain.join(":")}</output>
+          <button
+            type="button"
+            onClick={() => {
+              zoom.handlers.onMouseDown(chartState(20), chartEvent());
+              zoom.handlers.onMouseMove(chartState(40), chartEvent());
+              zoom.handlers.onMouseMove(chartState(60), chartEvent());
+              zoom.handlers.onMouseMove(chartState(80), chartEvent());
+            }}
+          >
+            Preview
+          </button>
+          <button type="button" onClick={() => zoom.handlers.onMouseUp(chartState(80), chartEvent())}>
+            Finish
+          </button>
+        </>
+      );
+    }
+
+    render(
+      <TimeZoomProvider domain={[0, 100]}>
+        <PerformanceDriver />
+      </TimeZoomProvider>,
+    );
+    expect(renders).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    expect(renders).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("0:100")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Finish" }));
+    expect(renders).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("20:80")).toBeInTheDocument();
+  });
+
   it("does not offer zoom for an empty domain", () => {
     render(
       <TimeZoomProvider domain={null}>

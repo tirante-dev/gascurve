@@ -347,7 +347,7 @@ export const ContributionChart = memo(function ContributionChart({ m, height = S
             <TimeAxis span={m.span} window={m.gaps.window} />
             <YAxis tickFormatter={(v: number) => formatSignificant(v, 2)} tickLine={false} axisLine={false} width={48} />
             <Tooltip isAnimationActive={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.contributionRows} note={m.note} />} />
-            <TimeZoomSelection />
+            <TimeZoomSelection zoom={zoom} />
             {m.segments.map((s) => (
               <Area key={s.key} type="monotone" dataKey={s.key} stackId="x" connectNulls={false} stroke="var(--chart)" strokeWidth={1} fill={s.color} fillOpacity={0.85} isAnimationActive={false} activeDot={false} />
             ))}
@@ -389,7 +389,7 @@ export const GasPerSecondChart = memo(function GasPerSecondChart({ m, height = S
             <TimeAxis span={m.span} window={m.gaps.window} />
             <YAxis domain={[0, m.gasAxis.top]} ticks={m.gasAxis.ticks} tickFormatter={(v: number) => throughputTick(v, m.gasAxis)} tickLine={false} axisLine={false} width={axisWidth} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.gasRows} note={m.gasNote} />} />
-            <TimeZoomSelection />
+            <TimeZoomSelection zoom={zoom} />
             {m.hasSpread ? (
               <>
                 {/* The band is the max filled to the floor of the axis with the min painted back out
@@ -433,7 +433,7 @@ export const BacklogChart = memo(function BacklogChart({ m, index, label, height
             <TimeAxis span={m.span} window={m.gaps.window} />
             <YAxis tickFormatter={(v: number) => unbroken(formatGas(v))} tickLine={false} axisLine={false} width={GAS_AXIS_WIDTH} />
             <Tooltip isAnimationActive={false} filterNull={false} content={(props) => <ChartTooltip {...props} title={bucketTitle} rows={m.backlogRowsFor(index)} note={m.backlogNoteFor(index)} />} />
-            <TimeZoomSelection />
+            <TimeZoomSelection zoom={zoom} />
             {m.segments
               .filter((s) => s.index === index)
               .map((s) => (
