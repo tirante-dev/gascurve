@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.5.0](https://github.com/tirante-dev/gascurve/compare/v1.4.0...v1.5.0) (2026-09-13)
+
+
+### Features
+
+* **collector:** stop the backfill descent with backfill_depth: hold ([#87](https://github.com/tirante-dev/gascurve/issues/87)) ([25eada9](https://github.com/tirante-dev/gascurve/commit/25eada9753fe34bb9a9442dbe2f6069ee862eed8))
+* measure replay fidelity across ArbOS versions and record the version behind every block ([#88](https://github.com/tirante-dev/gascurve/issues/88)) ([96d3748](https://github.com/tirante-dev/gascurve/commit/96d3748b3859b1574a2acf7b412980b7e0c5bcc4))
+* **web:** add chart timeframe zoom ([#93](https://github.com/tirante-dev/gascurve/issues/93)) ([7420dbf](https://github.com/tirante-dev/gascurve/commit/7420dbf7b0c31da675b575c8e02f68f0a4fa2336))
+* **web:** preserve chart detail and live targets ([#92](https://github.com/tirante-dev/gascurve/issues/92)) ([92bc6b0](https://github.com/tirante-dev/gascurve/commit/92bc6b078d93c025d6b92e4d4dd31f8adf3d62f9))
+
+
+### Bug Fixes
+
+* **web:** keep live chart axes stable ([#89](https://github.com/tirante-dev/gascurve/issues/89)) ([8baaa26](https://github.com/tirante-dev/gascurve/commit/8baaa264de4ee82a80ea6e9473d1877f6e2ba3f5))
+* **web:** preserve fee coverage semantics ([#91](https://github.com/tirante-dev/gascurve/issues/91)) ([5506dc2](https://github.com/tirante-dev/gascurve/commit/5506dc28c776230218f2ae788a333cdc4e89c5ec))
+
 ## [1.4.0](https://github.com/tirante-dev/gascurve/compare/v1.3.0...v1.4.0) (2026-09-08)
 
 
