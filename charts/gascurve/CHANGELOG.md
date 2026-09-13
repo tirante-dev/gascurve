@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.5.0...gascurve-chart-v0.6.0) (2026-09-13)
+
+
+### Features
+
+* **collector:** stop the backfill descent with backfill_depth: hold ([#87](https://github.com/tirante-dev/gascurve/issues/87)) ([25eada9](https://github.com/tirante-dev/gascurve/commit/25eada9753fe34bb9a9442dbe2f6069ee862eed8))
+* measure replay fidelity across ArbOS versions and record the version behind every block ([#88](https://github.com/tirante-dev/gascurve/issues/88)) ([96d3748](https://github.com/tirante-dev/gascurve/commit/96d3748b3859b1574a2acf7b412980b7e0c5bcc4))
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 1.5.0 ([#96](https://github.com/tirante-dev/gascurve/issues/96)) ([b8da8f1](https://github.com/tirante-dev/gascurve/commit/b8da8f1eac6278f7b11bf4881b2644ea256d885f))
+
 ## [0.5.0](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.4.0...gascurve-chart-v0.5.0) (2026-09-08)
 
 
