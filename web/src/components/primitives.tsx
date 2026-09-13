@@ -200,25 +200,23 @@ export function Bips({ value, align = "end" }: { value: number; align?: NoteAlig
   );
 }
 
-export const STATUS_COPY: Record<LiveStatus, { label: string; tone: "good" | "warning" | "critical" | "neutral"; detail: string }> = {
-  open: { label: "live", tone: "good", detail: "WebSocket connected, one update per collector tick" },
-  connecting: { label: "connecting", tone: "neutral", detail: "Opening the WebSocket" },
-  reconnecting: { label: "reconnecting", tone: "warning", detail: "Socket dropped, retrying with backoff and polling /live every 2 s" },
-  polling: { label: "polling", tone: "warning", detail: "Socket unavailable, polling /live every 2 s while retrying" },
+export const STATUS_COPY: Record<LiveStatus, { label: string; detail: string }> = {
+  open: { label: "WebSocket", detail: "Browser transport: WebSocket connected, one update per collector tick" },
+  connecting: { label: "Connecting transport", detail: "Browser transport: opening the WebSocket" },
+  reconnecting: { label: "Reconnecting transport", detail: "Browser transport: WebSocket dropped, retrying with backoff and polling /live every 2 s" },
+  polling: { label: "REST fallback", detail: "Browser transport: WebSocket unavailable, polling /live every 2 s while retrying" },
 };
 
-export function StatusPill({ status }: { status: LiveStatus }) {
+export function StatusPill({ status, announce = true }: { status: LiveStatus; announce?: boolean }) {
   const copy = STATUS_COPY[status];
-  const tone =
-    copy.tone === "good" ? "bg-good vw-dot-glow" : copy.tone === "warning" ? "bg-warning" : copy.tone === "critical" ? "bg-critical" : "bg-ink-3";
   return (
     <span
       className="vw-control inline-flex items-center gap-2 px-2.5 py-1 text-xs font-medium"
       title={copy.detail}
-      role="status"
-      aria-live="polite"
+      role={announce ? "status" : undefined}
+      aria-live={announce ? "polite" : undefined}
     >
-      <span className={`inline-block h-2 w-2 rounded-full ${tone}`} aria-hidden="true" />
+      <span className="inline-block h-2 w-2 rounded-full bg-accent-2" aria-hidden="true" />
       {copy.label}
     </span>
   );

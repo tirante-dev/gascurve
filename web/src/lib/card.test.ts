@@ -1,14 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { CARD_DIAL_H, CARD_DIAL_W, CARD_TONE_COLORS, FEE_SIZES, FEE_UNIT_W, MAX_FIGURE_CHARS, MULTIPLIER_SIZES, MULTIPLIER_UNIT_W, OFF_SCALE, cardDialSvg, cardNumerals, cardReading, figureFits, fit, svgDataUri } from "@/lib/card";
-import { AMBER_TO, DIAL_CY, DIAL_MAX, DIAL_VIEW_H, DIAL_VIEW_W, GREEN_TO, dialPoint, dialPosition, needlePoints, R_NUMERAL } from "@/lib/dial";
+import { CARD_DIAL_H, CARD_DIAL_W, CARD_PRESSURE_COLORS, FEE_SIZES, FEE_UNIT_W, MAX_FIGURE_CHARS, MULTIPLIER_SIZES, MULTIPLIER_UNIT_W, OFF_SCALE, cardDialSvg, cardNumerals, cardReading, figureFits, fit, svgDataUri } from "@/lib/card";
+import { DIAL_CY, DIAL_MAX, DIAL_VIEW_H, DIAL_VIEW_W, dialArc, dialPoint, dialPosition, needlePoints, R_NUMERAL } from "@/lib/dial";
 import type { LiveSnapshot } from "@/types";
 
-/** The tones lit inside the glow group, in the order they are drawn. The dimmed ring outside it carries
- * every tone whatever the reading, so counting colours across the whole document proves nothing. */
-function litToneNames(svg: string): string[] {
-  const group = /<g filter="url\(#neon\)">(.*?)<\/g>/.exec(svg);
-  if (group === null) return [];
-  return (["good", "warning", "critical"] as const).filter((tone) => group[1].includes(CARD_TONE_COLORS[tone]));
+function pressurePosition(svg: string): string | null {
+  return /data-pressure="reading" data-position="([\d.]+)"/.exec(svg)?.[1] ?? null;
 }
 
 const snapshot = {
@@ -33,18 +29,25 @@ describe("cardDialSvg", () => {
     expect(cardDialSvg(1.5)).toContain(`<polygon points="${needle}"`);
   });
 
+  it("uses one stylesheet-free sequential pressure ramp", () => {
+    const svg = cardDialSvg(20);
+    for (const color of Object.values(CARD_PRESSURE_COLORS)) expect(svg).toContain(`stop-color="${color}"`);
+    expect(svg).toContain('data-pressure="track"');
+    expect(svg).not.toMatch(/good|warning|critical/);
+  });
+
   it.each([
-    [0.5, []],
-    [1.5, ["good"]],
-    [GREEN_TO, ["good"]],
-    [GREEN_TO + 0.01, ["good", "warning"]],
-    [AMBER_TO, ["good", "warning"]],
-    [AMBER_TO + 1, ["good", "warning", "critical"]],
-    [DIAL_MAX * 10, ["good", "warning", "critical"]],
-    [Number.POSITIVE_INFINITY, ["good", "warning", "critical"]],
-    [Number.NaN, []],
-  ])("lights exactly the bands %p has passed", (multiplier, expected) => {
-    expect(litToneNames(cardDialSvg(multiplier))).toEqual(expected);
+    [0.5, null],
+    [1, null],
+    [1.5, dialPosition(1.5).toFixed(4)],
+    [10, "0.5000"],
+    [DIAL_MAX * 10, "1.0000"],
+    [Number.POSITIVE_INFINITY, "1.0000"],
+    [Number.NaN, null],
+  ])("lights the ramp from the floor to %p and no further", (multiplier, expected) => {
+    const svg = cardDialSvg(multiplier);
+    expect(pressurePosition(svg)).toBe(expected);
+    if (expected !== null) expect(svg).toContain(`d="${dialArc(0, dialPosition(multiplier))}"`);
   });
 
   it("measures the glow in user space, where the horizon's flat box cannot collapse it", () => {
@@ -61,7 +64,7 @@ describe("cardDialSvg", () => {
   it("draws the instrument unlit and without a needle when there is no reading", () => {
     const svg = cardDialSvg(null);
     expect(svg).not.toContain("<polygon");
-    expect(litToneNames(svg)).toEqual([]);
+    expect(pressurePosition(svg)).toBeNull();
   });
 
   it("carries no text, which the card's rasteriser would draw in the wrong face", () => {
@@ -70,11 +73,13 @@ describe("cardDialSvg", () => {
 });
 
 describe("cardNumerals", () => {
-  it("places the two ring numerals on the numeral ring, scaled to the card", () => {
+  it("places the scale endpoints and decade midpoint on the numeral ring", () => {
     const numerals = cardNumerals(2);
-    expect(numerals.map((n) => n.text)).toEqual(["2×", "10×"]);
-    const first = dialPoint(dialPosition(GREEN_TO), R_NUMERAL);
-    expect(numerals[0]).toEqual({ text: "2×", x: first.x * 2, y: first.y * 2 });
+    expect(numerals.map((n) => n.text)).toEqual(["1×", "10×", "100×"]);
+    const first = dialPoint(dialPosition(1), R_NUMERAL);
+    expect(numerals[0]).toEqual({ text: "1×", x: first.x * 2, y: first.y * 2 });
+    const last = dialPoint(dialPosition(DIAL_MAX), R_NUMERAL);
+    expect(numerals[2]).toEqual({ text: "100×", x: last.x * 2, y: last.y * 2 });
   });
 });
 
@@ -123,7 +128,6 @@ describe("cardReading", () => {
       feeUnit: true,
       multiplier: { text: "20.45×", size: 44 },
       value: 20.45,
-      tone: "critical",
       floor: "0.02",
       block: "62,912,450",
     });
@@ -132,7 +136,7 @@ describe("cardReading", () => {
   it("says off scale past 2^53, where the digits are no longer the ones the api sent", () => {
     // The api's own int64 ceiling lands here: 9223372036854775807 parses back as 9223372036854776000.
     const saturated = { ...snapshot, multiplierBips: 9_223_372_036_854_775_807 } as LiveSnapshot;
-    expect(cardReading(saturated)).toMatchObject({ multiplier: { text: OFF_SCALE }, tone: "critical" });
+    expect(cardReading(saturated)).toMatchObject({ multiplier: { text: OFF_SCALE } });
     const under = { ...snapshot, multiplierBips: Number.MAX_SAFE_INTEGER } as LiveSnapshot;
     expect(cardReading(under)).toMatchObject({ multiplier: { text: "900,719,925,474.10×" } });
   });
@@ -170,22 +174,20 @@ describe("cardReading", () => {
     }
   });
 
-  it("has no reading at all for a figure the pricer cannot produce, rather than a red n/a", () => {
-    // A fee cannot sit below its own floor, so a negative multiplier is a broken reading, not a low one:
-    // drawn as a figure it would be a green needle pinned left under a minus sign.
+  it("has no reading at all for a figure the pricer cannot produce", () => {
+    // A fee cannot sit below its own floor, so a negative multiplier is a broken reading.
     for (const bips of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, -50_000]) {
       expect(cardReading({ ...snapshot, multiplierBips: bips } as LiveSnapshot)).toBeNull();
     }
   });
 
-  it("bands a figure past a thousand, where its printed form carries a separator", () => {
+  it("formats a figure past a thousand, where its printed form carries a separator", () => {
     const thousand = { ...snapshot, multiplierBips: 12_340_000 } as LiveSnapshot;
-    expect(cardReading(thousand)).toMatchObject({ multiplier: { text: "1,234.00×" }, tone: "critical" });
+    expect(cardReading(thousand)).toMatchObject({ multiplier: { text: "1,234.00×" }, value: 1234 });
   });
 
-  it("takes the tone from the figure as printed, so a rounded reading matches its band", () => {
-    // 2.0049x prints as 2.00x, which is the top of the good band; the raw multiplier is above it.
+  it("rounds the printed multiplier without changing the pressure reading", () => {
     const rounded = { ...snapshot, multiplierBips: 20_049 } as LiveSnapshot;
-    expect(cardReading(rounded)).toMatchObject({ multiplier: { text: "2.00×" }, tone: "good" });
+    expect(cardReading(rounded)).toMatchObject({ multiplier: { text: "2.00×" }, value: 2.0049 });
   });
 });

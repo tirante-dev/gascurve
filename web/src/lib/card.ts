@@ -3,27 +3,25 @@
 // palette, geometry-only markup, and numerals handed out as positions. See docs/ARCHITECTURE.md.
 
 import {
-  BAND_WIDTH,
-  DIAL_BANDS,
   DIAL_CX,
   DIAL_CY,
   DIAL_MAJOR_TICKS,
+  DIAL_MAX,
   DIAL_MINOR_TICKS,
+  DIAL_RADIUS,
   DIAL_VIEW_H,
   DIAL_VIEW_W,
   dialArc,
   dialPoint,
   dialPosition,
-  dialTone,
-  litBands,
   needlePoints,
+  PRESSURE_WIDTH,
   R_BEZEL,
   R_HUB,
   R_NUMERAL,
   R_TICK_MAJOR,
   R_TICK_MINOR,
   R_TICK_OUT,
-  type DialTone,
 } from "@/lib/dial";
 import { CARD_SIZE } from "@/lib/seo";
 import type { LiveSnapshot } from "@/types";
@@ -43,11 +41,8 @@ export const CARD_COLORS = {
   chromeMid: "#b07cff",
 } as const;
 
-export const CARD_TONE_COLORS: Record<DialTone, string> = {
-  good: "#3ddc97",
-  warning: "#ffb020",
-  critical: "#ff5c7a",
-};
+/** The dark sequential ramp frozen from globals.css for a card with no stylesheet. */
+export const CARD_PRESSURE_COLORS = { start: "#e24bac", middle: "#ff6295", end: "#ff8f8e" } as const;
 
 /** How far the unlit ring is turned down, matching the gauge on the page. */
 const DIM = 0.22;
@@ -59,7 +54,7 @@ export const CARD_DIAL_SCALE = 2.4;
 export const CARD_DIAL_W = DIAL_VIEW_W * CARD_DIAL_SCALE;
 export const CARD_DIAL_H = DIAL_VIEW_H * CARD_DIAL_SCALE;
 
-const NUMERAL_TEXT: Record<number, string> = { 2: "2×", 10: "10×" };
+const NUMERAL_TEXT: Record<number, string> = { 1: "1×", 10: "10×", [DIAL_MAX]: `${DIAL_MAX}×` };
 
 /** A ring numeral and the point it is centred on, in card pixels. Placed by the renderer rather than the
  * SVG so it comes out in the card's own face; see the note at the top of this file. */
@@ -84,12 +79,10 @@ const GLOW_FILTERS =
   `<filter id="neon" ${FILTER_REGION}><feGaussianBlur stdDeviation="2.8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` +
   `<filter id="soft" ${FILTER_REGION}><feGaussianBlur stdDeviation="1.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`;
 
+const PRESSURE_GRADIENT = `<linearGradient id="pressure" gradientUnits="userSpaceOnUse" x1="${DIAL_CX - DIAL_RADIUS}" y1="0" x2="${DIAL_CX + DIAL_RADIUS}" y2="0"><stop offset="0%" stop-color="${CARD_PRESSURE_COLORS.start}"/><stop offset="50%" stop-color="${CARD_PRESSURE_COLORS.middle}"/><stop offset="100%" stop-color="${CARD_PRESSURE_COLORS.end}"/></linearGradient>`;
+
 function line(from: { x: number; y: number }, to: { x: number; y: number }, stroke: string, width: number): string {
   return `<line x1="${from.x.toFixed(2)}" y1="${from.y.toFixed(2)}" x2="${to.x.toFixed(2)}" y2="${to.y.toFixed(2)}" stroke="${stroke}" stroke-width="${width}" stroke-linecap="round"/>`;
-}
-
-function arc(from: number, to: number, stroke: string, width: number, opacity = 1): string {
-  return `<path d="${dialArc(from, to)}" fill="none" stroke="${stroke}" stroke-width="${width}" opacity="${opacity}"/>`;
 }
 
 /**
@@ -99,7 +92,7 @@ function arc(from: number, to: number, stroke: string, width: number, opacity = 
  */
 export function cardDialSvg(multiplier: number | null): string {
   const parts: string[] = [
-    `<defs>${GLOW_FILTERS}<linearGradient id="chrome" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="${CARD_COLORS.accent}"/><stop offset="50%" stop-color="${CARD_COLORS.chromeMid}"/><stop offset="100%" stop-color="${CARD_COLORS.accent2}"/></linearGradient></defs>`,
+    `<defs>${GLOW_FILTERS}<linearGradient id="chrome" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="${CARD_COLORS.accent}"/><stop offset="50%" stop-color="${CARD_COLORS.chromeMid}"/><stop offset="100%" stop-color="${CARD_COLORS.accent2}"/></linearGradient>${PRESSURE_GRADIENT}</defs>`,
     `<path d="${dialArc(0, 1, R_BEZEL)}" fill="none" stroke="url(#chrome)" stroke-width="1.6" opacity="0.9"/>`,
   ];
   for (const m of DIAL_MINOR_TICKS) {
@@ -108,12 +101,10 @@ export function cardDialSvg(multiplier: number | null): string {
   for (const m of DIAL_MAJOR_TICKS) {
     parts.push(line(dialPoint(dialPosition(m), R_TICK_MAJOR), dialPoint(dialPosition(m), R_TICK_OUT), CARD_COLORS.ink2, 1.8));
   }
-  for (const band of DIAL_BANDS) {
-    parts.push(arc(band.from, band.to, CARD_TONE_COLORS[band.tone], BAND_WIDTH, DIM));
-  }
+  parts.push(`<path d="${dialArc(0, 1)}" fill="none" stroke="url(#pressure)" stroke-width="${PRESSURE_WIDTH}" opacity="${DIM}" data-pressure="track"/>`);
   if (multiplier !== null) {
-    const lit = litBands(multiplier).map((band) => arc(band.from, band.to, CARD_TONE_COLORS[band.tone], BAND_WIDTH));
-    parts.push(`<g filter="url(#neon)">${lit.join("")}</g>`);
+    const position = dialPosition(multiplier);
+    if (position > 0) parts.push(`<path d="${dialArc(0, position)}" fill="none" stroke="url(#pressure)" stroke-width="${PRESSURE_WIDTH}" filter="url(#neon)" data-pressure="reading" data-position="${position.toFixed(4)}"/>`);
   }
   parts.push(`<g filter="url(#soft)">${line({ x: 6, y: DIAL_CY }, { x: DIAL_VIEW_W - 6, y: DIAL_CY }, CARD_COLORS.accent2, 1.1)}</g>`);
   if (multiplier !== null) {
@@ -150,7 +141,6 @@ export type CardReading = {
   multiplier: CardLine;
   /** Where the needle is set, which is the reading itself rather than anything printed. */
   value: number;
-  tone: DialTone;
   floor: string;
   block: string;
 } | null;
@@ -217,10 +207,6 @@ export function cardReading(snapshot: LiveSnapshot): CardReading {
   const offScale = pastExact(bips);
   const feeOffScale = pastExact(gwei);
   const value = bips / 10_000;
-  // The tone follows the figure as printed rather than the raw multiplier, as it does on the page: a
-  // "2.004x" prints as "2.00x", and amber would put it a band away from where a reader can see it rounds
-  // to. Rounded as a number, not read back from the text, which carries separators Number cannot parse.
-  const rounded = Math.round(value * 100) / 100;
   // The sign is part of the line, so it is part of what the line is sized to fit. Nothing follows
   // "off scale": there is no figure for a sign to belong to.
   const multiplier = offScale ? OFF_SCALE : `${formatMultiplierFixed(value)}×`;
@@ -229,8 +215,6 @@ export function cardReading(snapshot: LiveSnapshot): CardReading {
     feeUnit: !feeOffScale,
     multiplier: fit(multiplier, MULTIPLIER_SIZES),
     value,
-    // A reading with no digits left is still one the pricer saturated to reach, the top of the scale.
-    tone: offScale ? "critical" : dialTone(rounded),
     floor: formatGwei(snapshot.minBaseFee),
     block: formatInteger(snapshot.block.number),
   };

@@ -112,6 +112,7 @@ describe("LiveHero", () => {
   it("shows the fee, multiplier, floor, stats and costs at fixed widths", () => {
     render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     const hero = screen.getByText("0.3997");
+    expect(screen.getByTestId("fee-gauge")).toHaveClass("max-w-[220px]", "sm:max-w-[280px]", "lg:max-w-none");
     expect(hero).toHaveClass("tabular-nums");
     expect(reservedWidth(hero)).toBe("6ch");
     expect(hero.nextSibling).toHaveTextContent("gwei");
@@ -127,7 +128,7 @@ describe("LiveHero", () => {
     expect(reservedWidth(screen.getByText("0.00000839"))).toBe("10ch");
     expect(screen.getByText("0.0000600")).toBeInTheDocument();
     expect(screen.getByText(/4.02 Mgas in block 55,812,345/)).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("live");
+    expect(screen.getByText("WebSocket")).not.toHaveAttribute("role");
   });
   it("does not relabel total throughput as compute throughput against an old api", () => {
     render(<LiveHeroView network="robinhood" snapshot={{ ...snapshot, computeGasPerSecond: undefined }} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
@@ -139,8 +140,6 @@ describe("LiveHero", () => {
     for (const [label, term] of [
       ["Base fee now", "the price of one unit of gas right now, in gwei"],
       ["Network load (10 s)", "compute gas per second, averaged over the last 10 s"],
-      ["Send", "a 21,000 gas transfer at the base fee now"],
-      ["Swap", "a 150,000 gas swap at the base fee now"],
     ]) {
       const word = screen.getByText(label);
       // The term is in the note, set as text rather than as a figure, and in the description a screen reader gets instead.
@@ -151,51 +150,49 @@ describe("LiveHero", () => {
       expect(word.nextSibling).toHaveTextContent(new RegExp(`^${literal(label)}: ${literal(term)}`));
     }
     // The old labels went into the notes, not away.
-    expect(screen.queryByText("21k transfer")).toBeNull();
-    expect(screen.queryByText("150k swap")).toBeNull();
     expect(screen.queryByText("Compute gas/s (10 s)")).toBeNull();
   });
-  it("draws the multiplier over the floor as a lit gauge, coloured by which of three bands it falls in", () => {
+  it("draws the multiplier over the floor on one neutral logarithmic pressure ramp", () => {
     const at = (multiplier: number) => ({ ...targetValues(snapshot, [], 0), multiplier });
     const position = (gauge: HTMLElement) => within(gauge).getByTestId("fee-gauge-needle").getAttribute("data-position");
-    // The sample is 19.99 times its floor: on the red band, and the needle two thirds round (a decade per half turn).
+    const pressure = (gauge: HTMLElement) => gauge.querySelector("[data-pressure='reading']");
+    // The sample is 19.99 times its floor, with the needle two thirds round because each half turn is a decade.
     const { rerender } = render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     const gauge = screen.getByTestId("fee-gauge");
     expect(reservedWidth(within(gauge).getByText("19.99"))).toBe("5ch");
-    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-critical");
+    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-ink");
     expect(within(gauge).getByText("over floor")).toBeInTheDocument();
-    expect(gauge.querySelectorAll("[data-band]")).toHaveLength(3);
-    expect(gauge.querySelector("[data-band='warning']")).toHaveAttribute("stroke", "var(--dial-band-warning)");
-    // Past the last threshold every band is lit, and the reading cuts the last one short.
-    expect(gauge.querySelectorAll("[data-lit]")).toHaveLength(3);
+    expect(within(gauge).getByText("Pressure scale · logarithmic 1× to 100×")).toBeInTheDocument();
+    expect([...gauge.querySelectorAll("text")].map((node) => node.textContent)).toEqual(["1×", "10×", "100×"]);
+    const gradient = within(gauge).getByTestId("fee-gauge-pressure-gradient");
+    expect([...gradient.querySelectorAll("stop")].map((stop) => stop.getAttribute("stop-color"))).toEqual(["var(--seq-5)", "var(--seq-6)", "var(--seq-7)"]);
+    expect(gauge.querySelector("[data-pressure='track']")).toHaveAttribute("stroke", expect.stringMatching(/pressure/));
+    expect(pressure(gauge)).toHaveAttribute("data-position", "0.6504");
+    expect(gauge.querySelector("[data-band]")).toBeNull();
     expect(position(gauge)).toBe("0.6504");
     // The base fee itself is inside the gauge now, and nothing but the needle is drawn inside the arc.
     expect(within(gauge).getByText("0.3997")).toBeInTheDocument();
-    // The working is the hover note, and the description says the same to a screen reader.
+    // The working is the hover note, and the description names the neutral scale for a screen reader.
     expect(within(gauge).getByText("19.99× the 0.02 gwei floor")).toBeInTheDocument();
     expect(within(gauge).getByText("0.3997 gwei ≈ 19.99 × 0.02 gwei")).toBeInTheDocument();
-    expect(within(gauge).getByText("19.99 times the 0.02 gwei floor, far above the floor.")).toBeInTheDocument();
+    expect(within(gauge).getByText("19.99 times the 0.02 gwei floor, on a logarithmic scale from 1 to 100 times the floor.")).toBeInTheDocument();
     // The arc is decoration: everything it shows is in the readout below it, so it is not announced twice.
     expect(gauge.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
-    // At the floor the needle rests at the left end, in the green, and no stretch of the ring is lit.
+    // At the floor the needle rests at the left end and no stretch of the ramp is lit.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(1)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-good");
+    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-ink");
     expect(position(gauge)).toBe("0.0000");
-    expect(gauge.querySelectorAll("[data-lit]")).toHaveLength(0);
-    // Ten times the floor is the top of the arc, still amber, with the green and amber bands lit.
+    expect(pressure(gauge)).toBeNull();
+    // Ten times the floor is the midpoint of the logarithmic arc.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-warning");
+    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-ink");
     expect(position(gauge)).toBe("0.5000");
-    expect(gauge.querySelectorAll("[data-lit]")).toHaveLength(2);
-    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10.01)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-critical");
-    // The tone follows the printed figure: 10.004 prints as "10.00×", which is still amber.
-    rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(10.004)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
-    expect(within(gauge).getByText("10.00")).toBeInTheDocument();
-    expect(within(gauge).getByTestId("fee-gauge-multiplier")).toHaveClass("text-dial-warning");
+    expect(pressure(gauge)).toHaveAttribute("data-position", "0.5000");
     // A thousandfold spike pins the needle at the right end rather than swinging it off the dial.
     rerender(<LiveHeroView network="robinhood" snapshot={snapshot} values={at(1000)} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(position(gauge)).toBe("1.0000");
+    expect(pressure(gauge)).toHaveAttribute("data-position", "1.0000");
+    expect(within(gauge).getByText(/above the displayed logarithmic scale/)).toBeInTheDocument();
     // The floor and x moved into the readout with the figure they qualify.
     expect(within(gauge).getByText(/floor 0.02 gwei/)).toHaveTextContent("floor 0.02 gwei · x 3.2425");
   });
@@ -208,7 +205,11 @@ describe("LiveHero", () => {
   it("bands the rail into what the chain is doing and what it costs", () => {
     render(<LiveHeroView network="robinhood" snapshot={snapshot} values={null} blocks={[]} nowMs={Date.parse(snapshot.sampledAt)} status="open" />);
     expect(screen.getByText("Chain")).toBeInTheDocument();
-    expect(screen.getByText("What it costs")).toBeInTheDocument();
+    expect(screen.getByText("Base-fee illustrations")).toBeInTheDocument();
+    expect(screen.getByText("21k gas send")).toBeInTheDocument();
+    expect(screen.getByText("150k gas swap")).toBeInTheDocument();
+    expect(screen.getByText(/Fixed child-chain execution gas/)).toHaveTextContent("Nitro parent-chain posting cost is not included. These are illustrations, not transaction quotes.");
+    expect(screen.queryByText(/smallest transaction/)).toBeNull();
   });
   it("renders the eased figures rather than the sample when a frame has them", () => {
     const values = { ...targetValues(snapshot, [], 0), baseFeeGwei: 0.5, multiplier: 25, gasPerSecond10: 41_000_000, transferEth: 1.05e-5, exponent: 3.3 };
@@ -467,7 +468,7 @@ describe("LiveHero", () => {
   it("waits for the first sample, and says so differently while a reorg is being repaired", () => {
     const { rerender } = render(<LiveHero network="robinhood" live={{ display: null, frame: createFrameStore(), resyncing: false }} status="connecting" model="constraints" />);
     expect(screen.getByText("Waiting for the first sample.")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("connecting");
+    expect(screen.getByText("Connecting transport")).not.toHaveAttribute("role");
     // A reorg took the last canonical state away: the hero must not claim it
     // is waiting for a first sample, and must show no orphaned figures.
     rerender(<LiveHero network="robinhood" live={{ display: null, frame: createFrameStore(), resyncing: true }} status="open" model="constraints" />);
@@ -535,6 +536,18 @@ describe("LiveHero", () => {
     expect(trigger).not.toBeNull();
     expect(trigger).toHaveAttribute("tabindex", "0");
   });
+  it("renders a positive sub-cent cost as less than one cent and keeps true zero at zero", () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    const quote = { price: "1", at: "2026-09-06T07:20:00Z", source: "test" };
+    const { rerender } = render(<CostTile label="example" eth={0.0042} ethUsd={quote} nowMs={now} />);
+    expect(screen.getByText("0.01").previousSibling).toHaveTextContent("<$");
+    expect(screen.getByText("0.00420 ETH × $1.00/ETH = <$0.01")).toBeInTheDocument();
+    expect(screen.getByText(/less than 0.01 US dollars/)).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("$0.00");
+    rerender(<CostTile label="example" eth={0} ethUsd={quote} nowMs={now} />);
+    expect(screen.getByText("0.00").previousSibling).toHaveTextContent("$");
+    expect(screen.getByText("0.00 ETH × $1.00/ETH = $0.00")).toBeInTheDocument();
+  });
   it("closes the note on Escape and offers it again the next time the reader asks for it", async () => {
     const now = Date.parse("2026-09-06T07:20:00Z");
     render(<CostTile label="21k transfer" eth={0.0000084} ethUsd={{ price: "4200.00", at: "2026-09-06T07:19:26Z", source: "coinbase" }} nowMs={now} />);
@@ -573,7 +586,13 @@ describe("LiveHero", () => {
     expect(COLLECTOR_LAG_S).toBe(5);
     expect(sampleAge("2026-09-06T07:20:00Z", Date.parse("2026-09-06T07:20:07.9Z"))).toBeCloseTo(7.9);
     expect(sampleAge("2026-09-06T07:20:00Z", Date.parse("2026-09-06T07:19:00Z"))).toBe(0);
-    expect(sampleAge("not a date", 1)).toBe(0);
+    expect(sampleAge("not a date", 1)).toBeNull();
+    expect(sampleAge("2026-09-06T07:20:00Z", Number.NaN)).toBeNull();
+  });
+  it("shows unreadable sample time as unknown rather than fresh", () => {
+    render(<LiveHeroView network="robinhood" snapshot={{ ...snapshot, sampledAt: "not a date" }} values={null} blocks={[]} nowMs={Date.parse("2026-09-06T07:20:03Z")} status="open" />);
+    expect(screen.getByText("sample time unavailable")).toHaveClass("text-warning");
+    expect(screen.queryByText("3.0")).toBeNull();
   });
 });
 
@@ -585,13 +604,12 @@ describe("ConstraintCards", () => {
     expect(screen.getByText("99.9%").parentElement).toHaveTextContent("99.9% of x");
     expect(screen.getByText("0.1%").parentElement).toHaveTextContent("0.1% of x");
     expect(screen.getAllByRole("meter")).toHaveLength(2);
-    // The unit is always on the figure, and under it what the figure means:
-    // how long the chain must run at exactly the target to drain it.
+    // The unit is always on the figure, followed by a labeled zero-load scenario.
     const backlog = screen.getByText("11.2").closest("dd");
     expect(backlog).toHaveTextContent("11.2 Tgas");
     expect(backlog?.parentElement).toHaveAttribute("title", BACKLOG_TITLE);
-    expect(screen.getByText("= 77.7 h at 40 Mgas/s")).toBeInTheDocument();
-    expect(screen.getByText("= 0.05 s at 60 Mgas/s")).toBeInTheDocument();
+    expect(screen.getByText("Deterministic scenario: 77.7 h to drain at 40 Mgas/s with zero new load. Not a forecast.")).toBeInTheDocument();
+    expect(screen.getByText("Deterministic scenario: 0.05 s to drain at 60 Mgas/s with zero new load. Not a forecast.")).toBeInTheDocument();
     // The 15 s window is short: averaged, with its note, but no sparkline until blocks arrive.
     expect(screen.getByText("Backlog (avg 2 s)")).toBeInTheDocument();
     expect(screen.getAllByText("Backlog")).toHaveLength(1);
@@ -680,6 +698,13 @@ describe("ConstraintCards", () => {
     expect(screen.getByText(/x = 0.0280/)).toBeInTheDocument();
     expect(screen.getByText("90.0")).toBeInTheDocument();
     expect(screen.queryByText(/2 s average/)).toBeNull();
+    expect(screen.getByText(/legacy backlog keeps draining at the speed limit/)).toHaveTextContent("changes a legacy parameter");
+    expect(screen.queryByText(/Long windows keep draining/)).toBeNull();
+  });
+  it("does not turn a legacy sample with missing parameters into constraint data", () => {
+    render(<ConstraintCardsView network="robinhood" snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: undefined }} values={null} blocks={[]} />);
+    expect(screen.getByText(/Legacy speed limit, inertia, tolerance, and backlog are unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText(/Long windows keep draining/)).toBeNull();
   });
   it("handles a missing snapshot, and names a reorg repair as one", () => {
     const { rerender } = render(<ConstraintCardsView network="robinhood" snapshot={null} values={null} blocks={[]} />);
@@ -755,7 +780,8 @@ describe("DataFooter", () => {
     const live = screen.getByText(/update on new heads when a WebSocket head feed is configured/);
     expect(live).toHaveTextContent("every 3 s by default on public RPC networks");
     expect(live).toHaveTextContent("separate slow sample every 60 s");
-    expect(live).toHaveTextContent("pushed over a WebSocket (live)");
+    expect(live).toHaveTextContent("Browser transport: WebSocket connected");
+    expect(live).toHaveTextContent("not collector data health");
     expect(live).not.toHaveTextContent("one-second sample");
   });
 
@@ -781,7 +807,7 @@ describe("DataFooter", () => {
     expect(screen.getByText("off scale")).toBeInTheDocument();
     expect(screen.getByText("past 2^53, where a browser's numbers stop being exact, so these are not the digits the api sent. The pricer's int64 ceiling saturates into this range.")).toBeInTheDocument();
     expect(screen.getByText("off scale: past 2^53, where a browser's numbers stop being exact, so these are not the digits the api sent. The pricer's int64 ceiling saturates into this range. basis points: 1 bip is 1/10,000. The pricer holds these as integers, never as floats.")).toBeInTheDocument();
-    expect(screen.getByText("max in range").nextElementSibling).toHaveTextContent("(1 bucket above 2% is an estimate)");
+    expect(screen.getByText("max indexed in range").nextElementSibling).toHaveTextContent("(1 bucket above 2% is an estimate)");
   });
 
   it("says off scale below int64 too, wherever the digits stopped being the ones sent", () => {
@@ -798,7 +824,7 @@ describe("DataFooter", () => {
     const estimated: Series = { ...history, points: history.points.map((p) => ({ ...p, replayErrorBips: 7_093 })) };
     render(<DataFooter snapshot={null} series={estimated} networkInfo={null} status="open" apiStatus={null} now={0} />);
     expect(screen.getByText("7,093 bips = 0.7093")).toBeInTheDocument();
-    expect(screen.getByText("max in range").nextElementSibling).toHaveTextContent("(2 buckets above 2% are estimates)");
+    expect(screen.getByText("max indexed in range").nextElementSibling).toHaveTextContent("(2 buckets above 2% are estimates)");
   });
 });
 
@@ -808,7 +834,7 @@ describe("HistoryTabs", () => {
     render(<HistoryTabs range="24h" onChange={onChange} loading />);
     expect(screen.getByRole("button", { name: "24h" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("updating")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "All" }));
+    await userEvent.click(screen.getByRole("button", { name: "All indexed" }));
     expect(onChange).toHaveBeenCalledWith("all");
   });
 
@@ -940,6 +966,12 @@ describe("StatusPill", () => {
         <StatusPill status="reconnecting" />
       </>,
     );
-    expect(screen.getAllByRole("status").map((el) => el.textContent)).toEqual(["polling", "reconnecting"]);
+    expect(screen.getAllByRole("status").map((el) => el.textContent)).toEqual(["REST fallback", "Reconnecting transport"]);
+  });
+
+  it("can show transport state without duplicating a live-region announcement", () => {
+    render(<StatusPill status="open" announce={false} />);
+    expect(screen.getByText("WebSocket")).not.toHaveAttribute("role");
+    expect(screen.getByText("WebSocket")).not.toHaveAttribute("aria-live");
   });
 });

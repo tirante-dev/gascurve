@@ -79,7 +79,9 @@ describe("HowItWorks", () => {
     expect(screen.getByRole("heading", { name: "How the fee works", level: 2 })).toBeInTheDocument();
     // The prose, with this chain's floor filled into it.
     expect(screen.getByRole("heading", { name: "Three destinations, one fee" })).toBeInTheDocument();
-    expect(screen.getByText(/the floor \(0.02 gwei\) multiplied by/)).toBeInTheDocument();
+    expect(screen.getByText(/The sampled minimum is 0.02 gwei/)).toBeInTheDocument();
+    expect(screen.getByText(/Whenever demand averages above 40 Mgas\/s, the backlog grows/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "One backlog, one speed limit" })).toBeNull();
     // The quoted floor and the set in force, from the api.
     expect(screen.getByText("0.02 gwei")).toBeInTheDocument();
     expect(screen.getByText("60 Mgas/s · 15 s")).toBeInTheDocument();
@@ -97,10 +99,13 @@ describe("HowItWorks", () => {
     answers = {};
     failures = { "robinhood:live-quote": "boom" };
     render(<HowItWorks network="robinhood" />);
-    // The generic form of the prose, and no invented floor or set.
-    expect(screen.getByRole("heading", { name: "Long windows ratchet, short windows spike" })).toBeInTheDocument();
-    expect(screen.getAllByText("unavailable right now")).toHaveLength(2);
-    expect(screen.getByText(/did not answer for the live values/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Pricing model unavailable" })).toBeInTheDocument();
+    expect(screen.getByText("model unavailable right now")).toBeInTheDocument();
+    expect(screen.getByText("unavailable right now")).toBeInTheDocument();
+    expect(screen.getByText(/unavailable current values are not inferred/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Constraints are backlogs" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "One backlog, one speed limit" })).toBeNull();
+    expect(screen.queryByText("0.02 gwei")).toBeNull();
     expect(screen.queryByText(/The dot marks the live x/)).toBeNull();
     expect(screen.getByRole("figure", { name: /Degree-4 Taylor polynomial/ })).toBeInTheDocument();
     // The header falls back to the route's name for a network the api has not described.
@@ -122,7 +127,25 @@ describe("HowItWorks", () => {
     answers = { "robinhood:live-quote": { ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 90_000_000 } }, networks };
     render(<HowItWorks network="robinhood" />);
     expect(screen.getByText(/legacy speed-limit pricer/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "One backlog, one speed limit" })).toBeInTheDocument();
+    expect(screen.getByText(/sampled speed limit is 7 Mgas\/s, and the current legacy backlog is 90 Mgas/)).toBeInTheDocument();
+    expect(screen.getByText(/sampled tolerance is 10, which puts that threshold at 70 Mgas/)).toBeInTheDocument();
+    expect(screen.getByText(/sampled inertia is 102, so 714 Mgas of excess backlog adds 1 to x/)).toBeInTheDocument();
     expect(screen.queryByText("Constraint set in force")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Constraints are backlogs" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: /window is a ratchet/ })).toBeNull();
+    expect(screen.queryByText("setGasPricingConstraints")).toBeNull();
+  });
+
+  it("keeps a known legacy model when its live values are missing", () => {
+    answers = { networks: networks.map((network) => ({ ...network, model: "legacy" as const })) };
+    failures = { "robinhood:live-quote": "boom" };
+    render(<HowItWorks network="robinhood" />);
+    expect(screen.getByRole("heading", { name: "One backlog, one speed limit" })).toBeInTheDocument();
+    expect(screen.getByText(/current speed limit, inertia, tolerance and legacy backlog are unavailable right now/)).toBeInTheDocument();
+    expect(screen.getByText(/legacy speed-limit pricer/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Constraints are backlogs" })).toBeNull();
+    expect(screen.queryByText("0.02 gwei")).toBeNull();
   });
 });
 
@@ -135,6 +158,7 @@ describe("the /[network]/how-it-works route", () => {
   it("renders the explainer for the network in the path and titles the tab with it", async () => {
     await expect(generateMetadata({ params: Promise.resolve({ network: "robinhood" }) })).resolves.toMatchObject({
       title: "How the Robinhood Chain gas fee works",
+      description: expect.stringContaining("Nitro base fee pricer"),
       alternates: { canonical: "/robinhood/how-it-works" },
     });
     render(await HowItWorksRoute({ params: Promise.resolve({ network: "robinhood" }) }));

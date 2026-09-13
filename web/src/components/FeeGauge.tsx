@@ -2,54 +2,38 @@
 
 import { useId } from "react";
 import {
-  BAND_WIDTH,
-  DIAL_BANDS,
   DIAL_CX,
   DIAL_CY,
   DIAL_MAJOR_TICKS,
+  DIAL_MAX,
   DIAL_MINOR_TICKS,
+  DIAL_RADIUS,
+  DIAL_SCALE_LABEL,
   DIAL_VIEW_H,
   DIAL_VIEW_W,
   dialArc,
   dialPoint,
   dialPosition,
-  dialTone,
   GRID_H,
   GRID_VANISH_X,
   GRID_W,
   gridLines,
-  litBands,
   needlePoints,
+  PRESSURE_WIDTH,
   R_BEZEL,
   R_HUB,
   R_NUMERAL,
   R_TICK_MAJOR,
   R_TICK_MINOR,
   R_TICK_OUT,
-  TONE_SENTENCE,
-  type DialTone,
 } from "@/lib/dial";
 import { FIXED_WIDTH_CH, formatGweiFixed, formatMultiplierFixed } from "@/utils/format";
 import { Figure, HoverNote, Term } from "./primitives";
 
-/** The stroke of each band, and the text colour of the figure under it: two tokens per tone, because a
- * 6 px band and 15 px text need different contrast (see globals.css). */
-const TONE_COLOR: Record<DialTone, string> = {
-  good: "var(--dial-band-good)",
-  warning: "var(--dial-band-warning)",
-  critical: "var(--dial-band-critical)",
-};
-
-const TONE_TEXT: Record<DialTone, string> = {
-  good: "text-dial-good",
-  warning: "text-dial-warning",
-  critical: "text-dial-critical",
-};
-
 /** How far the unlit ring is turned down. It has to read as the same tube as the lit stretch, unpowered. */
 const DIM = 0.22;
 
-const NUMERAL_TEXT: Record<number, string> = { 2: "2×", 10: "10×" };
+const NUMERAL_TEXT: Record<number, string> = { 1: "1×", 10: "10×", [DIAL_MAX]: `${DIAL_MAX}×` };
 
 function Ticks() {
   return (
@@ -63,10 +47,11 @@ function Ticks() {
         const a = dialPoint(dialPosition(m), R_TICK_MAJOR);
         const b = dialPoint(dialPosition(m), R_TICK_OUT);
         const n = dialPoint(dialPosition(m), R_NUMERAL);
+        const anchor = m === 1 ? "start" : m === DIAL_MAX ? "end" : "middle";
         return (
           <g key={`maj-${m}`}>
             <line x1={a.x.toFixed(2)} y1={a.y.toFixed(2)} x2={b.x.toFixed(2)} y2={b.y.toFixed(2)} stroke="var(--ink-2)" strokeWidth={1.8} strokeLinecap="round" />
-            <text x={n.x.toFixed(1)} y={n.y.toFixed(1)} textAnchor="middle" dominantBaseline="middle" fontFamily="var(--font-display)" fontWeight={500} fontSize={10} fill="var(--ink-2)">
+            <text x={n.x.toFixed(1)} y={n.y.toFixed(1)} textAnchor={anchor} dominantBaseline="middle" fontFamily="var(--font-display)" fontWeight={500} fontSize={10} fill="var(--ink-2)">
               {NUMERAL_TEXT[m]}
             </text>
           </g>
@@ -116,14 +101,13 @@ function Grid({ maskId }: { maskId: string }) {
 export function FeeGauge({ baseFeeGwei, floorGwei, multiplier, exponent }: { baseFeeGwei: number; floorGwei: string; multiplier: number; exponent: number }) {
   const uid = useId();
   const figure = formatMultiplierFixed(multiplier);
-  // The tone follows the figure as printed, not the raw multiplier: 2.004x prints as "2.00x", and a
-  // "2.00x" in amber would put the figure a band away from where a reader can see it rounds to.
-  const tone = dialTone(Number(figure));
+  const position = dialPosition(multiplier);
   // Each side is rounded on its own, so the product is only ever about equal.
   const lines = [`${figure}× the ${floorGwei} gwei floor`, `${formatGweiFixed(baseFeeGwei)} gwei ≈ ${figure} × ${floorGwei} gwei`];
-  const description = `${figure} times the ${floorGwei} gwei floor, ${TONE_SENTENCE[tone]}.`;
+  const scale = multiplier > DIAL_MAX ? `above the displayed logarithmic scale, which runs from 1 to ${DIAL_MAX} times the floor` : `on a logarithmic scale from 1 to ${DIAL_MAX} times the floor`;
+  const description = `${figure} times the ${floorGwei} gwei floor, ${scale}.`;
   return (
-    <div className="vw-gauge rounded-md" data-testid="fee-gauge">
+    <div className="vw-gauge mx-auto w-full max-w-[220px] rounded-md sm:max-w-[280px] lg:max-w-none" data-testid="fee-gauge">
       <svg viewBox={`0 0 ${DIAL_VIEW_W} ${DIAL_VIEW_H}`} className="block h-auto w-full" aria-hidden="true" focusable="false">
         <defs>
           <filter id={`${uid}-neon`} x="-60%" y="-60%" width="220%" height="220%">
@@ -146,17 +130,16 @@ export function FeeGauge({ baseFeeGwei, floorGwei, multiplier, exponent }: { bas
             <stop offset="50%" stopColor="var(--gauge-chrome-mid)" />
             <stop offset="100%" stopColor="var(--accent-2)" />
           </linearGradient>
+          <linearGradient id={`${uid}-pressure`} gradientUnits="userSpaceOnUse" x1={DIAL_CX - DIAL_RADIUS} y1={0} x2={DIAL_CX + DIAL_RADIUS} y2={0} data-testid="fee-gauge-pressure-gradient">
+            <stop offset="0%" stopColor="var(--seq-5)" />
+            <stop offset="50%" stopColor="var(--seq-6)" />
+            <stop offset="100%" stopColor="var(--seq-7)" />
+          </linearGradient>
         </defs>
         <path d={dialArc(0, 1, R_BEZEL)} fill="none" stroke={`url(#${uid}-chrome)`} strokeWidth={1.6} opacity={0.9} />
         <Ticks />
-        {DIAL_BANDS.map((band) => (
-          <path key={band.tone} d={dialArc(band.from, band.to)} fill="none" stroke={TONE_COLOR[band.tone]} strokeWidth={BAND_WIDTH} strokeLinecap="butt" opacity={DIM} data-band={band.tone} />
-        ))}
-        <g filter={`url(#${uid}-neon)`}>
-          {litBands(multiplier).map((band) => (
-            <path key={band.tone} d={dialArc(band.from, band.to)} fill="none" stroke={TONE_COLOR[band.tone]} strokeWidth={BAND_WIDTH} strokeLinecap="butt" data-lit={band.tone} />
-          ))}
-        </g>
+        <path d={dialArc(0, 1)} fill="none" stroke={`url(#${uid}-pressure)`} strokeWidth={PRESSURE_WIDTH} strokeLinecap="butt" opacity={DIM} data-pressure="track" />
+        {position > 0 ? <path d={dialArc(0, position)} fill="none" stroke={`url(#${uid}-pressure)`} strokeWidth={PRESSURE_WIDTH} strokeLinecap="butt" filter={`url(#${uid}-neon)`} data-pressure="reading" data-position={position.toFixed(4)} /> : null}
         <line x1={6} y1={DIAL_CY} x2={DIAL_VIEW_W - 6} y2={DIAL_CY} stroke="var(--gauge-horizon)" strokeWidth={1.1} filter={`url(#${uid}-soft)`} />
         <polygon
           points={needlePoints(multiplier)
@@ -182,7 +165,7 @@ export function FeeGauge({ baseFeeGwei, floorGwei, multiplier, exponent }: { bas
             </Figure>
             <span className="ml-1.5 text-lg font-normal text-ink-2">gwei</span>
           </div>
-          <div className={`num mt-2 text-sm ${TONE_TEXT[tone]}`} data-testid="fee-gauge-multiplier">
+          <div className="num mt-2 text-sm text-ink" data-testid="fee-gauge-multiplier">
             <HoverNote lines={lines} description={description} flow="inline">
               <Figure ch={FIXED_WIDTH_CH.multiplier}>{figure}</Figure>&#215;
             </HoverNote>
@@ -191,6 +174,7 @@ export function FeeGauge({ baseFeeGwei, floorGwei, multiplier, exponent }: { bas
           <div className="num mt-1.5 text-xs text-ink-3">
             floor {floorGwei} gwei &middot; x <Figure ch={FIXED_WIDTH_CH.x}>{exponent.toFixed(4)}</Figure>
           </div>
+          <div className="mt-1 text-[10px] font-medium uppercase tracking-[0.08em] text-ink-3">Pressure scale &middot; {DIAL_SCALE_LABEL}</div>
         </div>
       </div>
     </div>

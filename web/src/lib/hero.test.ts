@@ -206,7 +206,7 @@ describe("the hero range", () => {
 
   it("offers the live view first and then every range the api serves", () => {
     expect(HERO_RANGES).toEqual(["live", "1h", "24h", "30d", "all"]);
-    expect(HERO_RANGES.map((r) => HERO_RANGE_LABELS[r])).toEqual(["Live", "1h", "24h", "30d", "All"]);
+    expect(HERO_RANGES.map((r) => HERO_RANGE_LABELS[r])).toEqual(["Live", "1h", "24h", "30d", "All indexed"]);
   });
 
   it("recognises the live view and the api's ranges, and nothing else", () => {

@@ -153,10 +153,10 @@ describe("formatDuration and seconds of target", () => {
   });
   it("says what a backlog means as time at the target rate", () => {
     // The long window: 11.2 Tgas is more than three days of running at 40 Mgas/s.
-    expect(formatDrainEquivalence(11_200_000_000_000, 40_000_000)).toBe("= 77.8 h at 40 Mgas/s");
+    expect(formatDrainEquivalence(11_200_000_000_000, 40_000_000)).toBe("Deterministic scenario: 77.8 h to drain at 40 Mgas/s with zero new load. Not a forecast.");
     // The short one: a fraction of a second, which is why it drains between blocks.
-    expect(formatDrainEquivalence(21_000_000, 60_000_000)).toBe("= 0.35 s at 60 Mgas/s");
-    expect(formatDrainEquivalence(0, 60_000_000)).toBe("= 0.00 s at 60 Mgas/s");
+    expect(formatDrainEquivalence(21_000_000, 60_000_000)).toBe("Deterministic scenario: 0.35 s to drain at 60 Mgas/s with zero new load. Not a forecast.");
+    expect(formatDrainEquivalence(0, 60_000_000)).toBe("Deterministic scenario: 0.00 s to drain at 60 Mgas/s with zero new load. Not a forecast.");
     // Without a rate there is nothing to drain at and nothing to say.
     expect(formatDrainEquivalence(21_000_000, 0)).toBe("n/a");
     expect(formatDrainEquivalence(Number.NaN, 60_000_000)).toBe("n/a");
@@ -441,6 +441,7 @@ describe("fixed-width formatters", () => {
     const quote = { price: "4182.31", at: "2026-09-06T07:19:26Z", source: "coinbase" };
     const math = usdMath(0.0000084, quote, now);
     expect(math).not.toBeNull();
+    expect(math?.prefix).toBe("$");
     expect(math?.line).toBe("0.00000840 ETH × $4,182.3/ETH = $0.04");
     expect(math?.provenance).toBe("coinbase, 34 s ago");
     expect(math?.description).toBe("0.04 US dollars, 0.00000840 ETH at 4,182.3 dollars per ETH, quoted by coinbase 34 s ago");
@@ -452,5 +453,18 @@ describe("fixed-width formatters", () => {
     // No figure to explain without a usable quote: the caller falls back to ETH on the same null.
     expect(usdMath(1, null, now)).toBeNull();
     expect(usdMath(1, { ...quote, at: "2026-09-06T07:09:59Z" }, now)).toBeNull();
+  });
+
+  it("keeps true zero distinct from every positive sub-cent cost", () => {
+    const now = Date.parse("2026-09-06T07:20:00Z");
+    const quote = { price: "1", at: "2026-09-06T07:20:00Z", source: "test" };
+    for (const amount of [Number.MIN_VALUE, 0.004999, 0.005, 0.009999]) {
+      expect(usdMath(amount, quote, now)).toMatchObject({ prefix: "<$", usd: "0.01" });
+    }
+    expect(usdMath(0.01, quote, now)).toMatchObject({ prefix: "$", usd: "0.01" });
+    expect(usdMath(0, quote, now)).toMatchObject({ prefix: "$", usd: "0.00" });
+    const tiny = usdMath(0.0042, quote, now);
+    expect(tiny?.line).toBe("0.00420 ETH × $1.00/ETH = <$0.01");
+    expect(tiny?.description).toBe("less than 0.01 US dollars, 0.00420 ETH at 1.00 dollars per ETH, quoted by test 0 s ago");
   });
 });

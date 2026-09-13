@@ -20,7 +20,7 @@ import { ConstraintCardsView } from "./ConstraintCards";
 import { DataFooter } from "./DataFooter";
 import { FeeFlows, feeFlowRows, feeTotals, incompleteTotalsNote, unsplitNote } from "./FeeFlows";
 import { L1Section, l1CostDomain } from "./L1Section";
-import { PricerEquation } from "./PricerEquation";
+import { livePricing, PricerEquation } from "./PricerEquation";
 import { BacklogChart, buildSeriesModel, describeSplit, GasPerSecondChart, SeriesCharts } from "./SeriesCharts";
 import { LineChart, XAxis, YAxis } from "recharts";
 import { BAND_CLASS, GAP_LABEL_MIN_SHARE, GapBands, MISSING_DASH, MISSING_FILL_OPACITY, MISSING_PATTERN_ID, MissingBands, PartialBands, PartialNote } from "./ChartGaps";
@@ -141,8 +141,8 @@ describe("SeriesCharts", () => {
     // range, so the history section no longer repeats it.
     expect(screen.queryByText("Gas per second against each target")).toBeNull();
     expect(screen.getByText("C2 · 30 Mgas/s · 24 h (set 5) then 40 Mgas/s · 24 h (set 6)")).toBeInTheDocument();
-    // The owner action is listed with a zoned timestamp.
-    expect(screen.getByText("2026-09-06 02:21 CDT")).toBeInTheDocument();
+    // Protocol-effective owner actions stay in UTC even though the chart axis is local.
+    expect(screen.getByText("2026-09-06 07:21 UTC")).toBeInTheDocument();
   });
 
   it("draws the window that was asked for and shades what was never indexed", () => {
@@ -521,6 +521,22 @@ describe("FeeFlows", () => {
     expect(screen.getByText(/none yet/)).toBeInTheDocument();
     expect(screen.queryByText(/predate the fee split/)).toBeNull();
   });
+  it("does not turn an empty All indexed response into a zero-fee claim", () => {
+    const empty: Series = { ...series, range: "all", from: series.to, points: [] };
+    expect(feeTotals(empty)).toMatchObject({ completeness: "unknown", perDay: null, rateCoverage: null });
+    render(<FeeFlows network="robinhood" range="all" snapshot={snapshot} series={empty} model="constraints" nowMs={NOW_MS} />);
+    expect(screen.getByText("Nothing indexed for this range yet.")).toBeInTheDocument();
+    expect(screen.queryByText(/Fees since|Indexed fees since/)).toBeNull();
+  });
+  it("dates a populated All indexed total and keeps its positive sub-cent USD value visible", () => {
+    const tiny = point({ t: 1788679200, feesWei: "4200000000000000", floorFeesWei: "4200000000000000", surplusFeesWei: "0", posterFeesWei: "0" });
+    const all: Series = { ...series, range: "all", from: tiny.t, to: tiny.t + 60, points: [tiny] };
+    const priced = { ...snapshot, ethUsd: { price: "1", at: snapshot.sampledAt, source: "test" } };
+    render(<FeeFlows network="robinhood" range="all" snapshot={priced} series={all} model="constraints" nowMs={NOW_MS} />);
+    const total = screen.getByText("Fees since 2026-09-06 02:20 CDT").closest(".min-w-0");
+    expect(total).toHaveTextContent("<$0.01");
+    expect(total).not.toHaveTextContent("$0.00");
+  });
   it("treats buckets that predate the fee split as unknown: hatched rather than zero, left out of the totals, footnoted", () => {
     const early = [
       point({ t: 1788679080, feesWei: "4000000000000000000", floorFeesWei: null, surplusFeesWei: null, posterFeesWei: "500000000000000000", minBaseFee: "100000000" }),
@@ -726,13 +742,29 @@ describe("PricerEquation", () => {
   it("renders the legacy form and the empty state", () => {
     const { rerender } = render(<PricerEquation snapshot={{ ...snapshot, model: "legacy", constraints: [], legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 160_000_000 } }} />);
     expect(screen.getByText("legacy exponent")).toBeInTheDocument();
-    rerender(<PricerEquation snapshot={null} />);
+    expect(screen.getByText(/max\(0, \(backlog/)).toBeInTheDocument();
+    expect(screen.getByText(/sampled legacy backlog/)).toHaveTextContent("dt × speed limit");
+    expect(screen.getByText(/sampled legacy backlog/)).not.toHaveTextContent("dt × target");
+    rerender(<PricerEquation snapshot={null} model="legacy" />);
+    expect(screen.getByText("legacy exponent")).toBeInTheDocument();
     expect(screen.queryByText("implied, dt = 0")).toBeNull();
+    rerender(<PricerEquation snapshot={null} model="unknown" />);
+    expect(screen.getByText("model unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("sum over constraints")).toBeNull();
+  });
+
+  it("does not price a legacy snapshot whose legacy parameters are missing", () => {
+    expect(livePricing({ ...snapshot, model: "legacy", constraints: [], legacy: undefined })).toBeNull();
   });
 });
 
 describe("DataFooter", () => {
-  it("handles a network without a head yet and shows zoned timestamps", () => {
+  it("keeps an empty indexed range distinct from a measured zero replay error", () => {
+    render(<DataFooter snapshot={snapshot} series={{ ...series, range: "all", from: series.to, points: [] }} networkInfo={null} status="open" apiStatus={null} now={Date.parse(snapshot.sampledAt)} />);
+    expect(screen.getByText("max indexed in range").nextElementSibling).toHaveTextContent("n/a");
+  });
+
+  it("uses the displayed snapshot for the indexed head and preserves unknown status detail", () => {
     render(
       <DataFooter
         snapshot={snapshot}
@@ -789,9 +821,109 @@ describe("DataFooter", () => {
         now={Date.parse("2026-09-06T07:20:03Z")}
       />,
     );
-    expect(screen.getByText("0, no head yet")).toBeInTheDocument();
+    expect(screen.getByText("displayed live block").nextElementSibling).toHaveTextContent("55,812,345");
+    expect(screen.queryByText("0, no head yet")).toBeNull();
+    expect(screen.getByText("status indexed head").nextElementSibling).toHaveTextContent("unknown");
+    expect(screen.getByText("status observed head").nextElementSibling).toHaveTextContent("unknown");
+    expect(screen.getByText("status head lag").nextElementSibling).toHaveTextContent("unknown");
+    expect(screen.getByText("status telemetry").nextElementSibling).toHaveTextContent("unknown");
+    expect(screen.getByText("missing history").nextElementSibling).toHaveTextContent("0 missing blocks recorded");
+    expect(screen.getByText("RPC capacity").nextElementSibling).toHaveTextContent("unknown (not sampled)");
+    expect(screen.getByText("collector RPC route").nextElementSibling).toHaveTextContent("unknown");
+    expect(screen.getByText("notification listener").nextElementSibling).toHaveTextContent("unknown");
+    expect(screen.getByText("degraded reasons").nextElementSibling).toHaveTextContent("collector heartbeat missing");
     expect(screen.getByText("2026-09-06 02:20 CDT (3 s ago)")).toBeInTheDocument();
     expect(screen.getByText("none")).toBeInTheDocument();
+  });
+
+  it("separates collector health, history, routing, capacity, and listener facts", () => {
+    const loop = { lastSuccessAt: "2026-09-06T07:20:00Z", lastErrorAt: null, lastError: null, lastDurationMs: 12, staleAfterSeconds: 30 };
+    render(
+      <DataFooter
+        snapshot={snapshot}
+        series={series}
+        networkInfo={{ name: "robinhood", displayName: "Robinhood Chain", chainId: 4663, explorerUrl: "", model: "constraints", headBlock: 55_000_000, headAt: "2026-09-06T07:19:00Z", lagSeconds: 60, enabled: true }}
+        status="polling"
+        apiStatus={{
+          version: "1",
+          status: "degraded",
+          listener: { ready: false, reconnects: 2, lastError: "notification connection lost" },
+          networks: [
+            {
+              name: "robinhood",
+              chainId: 4663,
+              enabled: true,
+              headBlock: 55_700_000,
+              headAt: "2026-09-06T07:20:00Z",
+              lagSeconds: 0,
+              lastSampleAt: "2026-09-06T07:20:00Z",
+              lastError: "history retry delayed",
+              rateLimitEvents: 4,
+              last429At: "2026-09-06T07:19:58Z",
+              backfillCursor: null,
+              arbosVersion: "31",
+              degraded: true,
+              capacity: {
+                configuredCallsPerSecond: 4,
+                requiredCallsPerSecond: 6,
+                observedCallsPerSecond: 4,
+                headroomCallsPerSecond: -2,
+                saturated: true,
+                at: "2026-09-06T07:20:00Z",
+                checkpointError: false,
+              },
+              holes: {
+                pending: 2,
+                blocks: 120,
+                unfillable: 1,
+                retrying: 1,
+                oldestAgeSeconds: 90,
+                checkpointError: false,
+                pendingBlocks: 80,
+                oldestPendingAt: "2026-09-06T07:18:30Z",
+                oldestPendingAgeSeconds: 90,
+              },
+              status: "degraded",
+              degradedReasons: ["collector behind observed head", "blocks missing from history", "RPC capacity saturated"],
+              collector: {
+                heartbeatAt: "2026-09-06T07:20:00Z",
+                heartbeatAgeSeconds: 3,
+                heartbeatStaleAfterSeconds: 30,
+                observedHead: 55_812_350,
+                indexedHead: 55_812_348,
+                headLagBlocks: 2,
+                loops: { fast: loop, slow: loop, history: loop },
+                rpc: { calls: 100, requests: 90, errors: 1, callsLast10Seconds: 40, rateLimitEvents: 4, last429At: "2026-09-06T07:19:58Z", averageLatencyMs: 20 },
+                database: { operations: 50, errors: 0, averageLatencyMs: 2, lastLatencyMs: 1 },
+              },
+              activeEndpoint: 1,
+              failovers: 3,
+              endpoints: [
+                { index: 0, ws: true, archive: false, disabled: true, error: "temporarily disabled", wsCooling: false, wsError: null },
+                { index: 1, ws: true, archive: true, disabled: false, error: null, wsCooling: true, wsError: "head feed cooling down" },
+              ],
+            },
+          ],
+        }}
+        now={Date.parse("2026-09-06T07:20:03Z")}
+      />,
+    );
+    const live = screen.getByText(/Browser transport:/);
+    expect(live).toHaveTextContent("HTTP polling fallback active");
+    expect(live).toHaveTextContent("not collector data health");
+    expect(screen.getByText("network data health").nextElementSibling).toHaveTextContent("degraded");
+    expect(screen.getByText("degraded reasons").nextElementSibling).toHaveTextContent("collector behind observed head; blocks missing from history; RPC capacity saturated");
+    expect(screen.getByText("displayed live block").nextElementSibling).toHaveTextContent("55,812,345");
+    expect(screen.getByText("status indexed head").nextElementSibling).toHaveTextContent("55,812,348");
+    expect(screen.getByText("status observed head").nextElementSibling).toHaveTextContent("55,812,350");
+    expect(screen.getByText("status head lag").nextElementSibling).toHaveTextContent("2 blocks");
+    expect(screen.getByText("status telemetry").nextElementSibling).toHaveTextContent("2026-09-06 02:20 CDT (3 s ago)");
+    expect(screen.getByText("missing history").nextElementSibling).toHaveTextContent("120 missing blocks; 2 queued ranges (1 retrying range), 1 unfillable range");
+    expect(screen.getByText("RPC capacity").nextElementSibling).toHaveTextContent("saturated");
+    expect(screen.getByText("collector RPC route").nextElementSibling).toHaveTextContent("fallback endpoint 2 (JSON-RPC/HTTP, archive, available, WebSocket configured, WebSocket cooling, WebSocket error: head feed cooling down); 2 configured endpoints; 3 failovers");
+    expect(screen.getByText("notification listener").nextElementSibling).toHaveTextContent("not ready; 2 reconnects; last error: notification connection lost");
+    expect(screen.getByText("rate limits").nextElementSibling).toHaveTextContent("4 events");
+    expect(screen.getByText("last error").nextElementSibling).toHaveTextContent("history retry delayed");
   });
 });
 

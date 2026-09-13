@@ -1,7 +1,8 @@
 import { ImageResponse } from "next/og";
 import { serverApiBase } from "@/lib/api/core";
 import { getLive } from "@/lib/api/live";
-import { CARD_COLORS, CARD_DIAL_H, CARD_DIAL_W, CARD_PAD_X, CARD_TONE_COLORS, READOUT_GAP, cardDialSvg, cardNumerals, cardReading, svgDataUri, type CardReading } from "@/lib/card";
+import { CARD_COLORS, CARD_DIAL_H, CARD_DIAL_W, CARD_PAD_X, CARD_PRESSURE_COLORS, READOUT_GAP, cardDialSvg, cardNumerals, cardReading, svgDataUri, type CardReading } from "@/lib/card";
+import { DIAL_SCALE_LABEL } from "@/lib/dial";
 import { CARD_SIZE, networkDisplayName, SITE_NAME, SITE_URL } from "@/lib/seo";
 
 /** The line under the wordmark on the static card too, so the two read as one set. */
@@ -88,10 +89,11 @@ function Readout({ reading }: { reading: CardReading }) {
         <div style={{ display: "flex", marginTop: 22, fontSize: 24, color: CARD_COLORS.ink3 }}>no reading right now</div>
       ) : (
         <div style={{ display: "flex", alignItems: "baseline", marginTop: 22 }}>
-          <div style={{ display: "flex", fontSize: reading.multiplier.size, color: CARD_TONE_COLORS[reading.tone] }}>{reading.multiplier.text}</div>
+          <div style={{ display: "flex", fontSize: reading.multiplier.size, color: CARD_PRESSURE_COLORS.middle }}>{reading.multiplier.text}</div>
           <div style={{ display: "flex", fontSize: 19, letterSpacing: 2, marginLeft: 12, color: CARD_COLORS.ink3 }}>OVER FLOOR</div>
         </div>
       )}
+      <div style={{ display: "flex", marginTop: 10, fontSize: 14, letterSpacing: 2, color: CARD_COLORS.ink3 }}>PRESSURE SCALE · {DIAL_SCALE_LABEL.toUpperCase()}</div>
     </div>
   );
 }

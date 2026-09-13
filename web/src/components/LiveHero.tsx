@@ -48,6 +48,7 @@ import {
   weiToGweiNumber,
 } from "@/utils/format";
 import { chartView } from "@/lib/chartViews";
+import { LIVE_STALE_AFTER_SECONDS } from "@/lib/diagnosis";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
 import { ChartReadout, type ReadoutGroup } from "./ChartReadout";
 import { EnlargeLink } from "./ChartActions";
@@ -64,12 +65,12 @@ export { SWAP_GAS, TRANSFER_GAS };
  * chain: "since last block" would otherwise keep counting up and read as a
  * stall on the chain's side.
  */
-export const COLLECTOR_LAG_S = 5;
+export const COLLECTOR_LAG_S = LIVE_STALE_AFTER_SECONDS;
 
-/** Seconds between the collector's sample and the wall clock `nowMs`; zero for an unparseable timestamp. */
-export function sampleAge(sampledAt: string, nowMs: number): number {
+/** Seconds between the collector's sample and the wall clock `nowMs`; null when either time is unreadable. */
+export function sampleAge(sampledAt: string, nowMs: number): number | null {
   const at = Date.parse(sampledAt);
-  return Number.isNaN(at) ? 0 : Math.max(0, (nowMs - at) / 1000);
+  return Number.isNaN(at) || !Number.isFinite(nowMs) ? null : Math.max(0, (nowMs - at) / 1000);
 }
 
 /** The fee line: the magenta accent, the one series the live hero chart draws. */
@@ -461,8 +462,8 @@ export const HERO_TERMS = {
   baseFee: { label: "Base fee now", lines: ["the price of one unit of gas right now, in gwei", "a gwei is a billionth of an ETH; every transaction pays this much per unit of gas it uses, and there are no tips"] },
   load10: { label: "Network load (10 s)", lines: ["compute gas per second, averaged over the last 10 s", "the gas the chain carried net of L1 poster gas, which is the rate the pricer meters"] },
   load60: { label: "Network load (60 s)", lines: ["compute gas per second, averaged over the last 60 s", "the same rate over a longer window, so a burst and a trend read apart"] },
-  send: { label: "Send", lines: ["a 21,000 gas transfer at the base fee now", "the gas a plain ETH transfer uses, so the smallest transaction there is"] },
-  swap: { label: "Swap", lines: ["a 150,000 gas swap at the base fee now", "about what a token swap on a DEX uses"] },
+  send: { label: "21k gas send", lines: ["21,000 units of child-chain execution gas at the current base fee", "Nitro parent-chain posting cost is not included, so this is not a transaction quote"] },
+  swap: { label: "150k gas swap", lines: ["150,000 units of child-chain execution gas at the current base fee", "Nitro parent-chain posting cost is not included, so this is not a transaction quote"] },
 } as const;
 
 /**
@@ -470,7 +471,20 @@ export const HERO_TERMS = {
  * older than COLLECTOR_LAG_S the number would mostly measure the collector,
  * so the stat becomes a warning pill that names the lag instead.
  */
-function Freshness({ sinceBlock, age, tone }: { sinceBlock: number; age: number; tone?: StatTone }) {
+function Freshness({ sinceBlock, age, tone }: { sinceBlock: number; age: number | null; tone?: StatTone }) {
+  if (age === null) {
+    return (
+      <div className={`min-w-0 ${tone === "readout" ? "vw-stat-panel" : ""}`} aria-live="polite">
+        <Label>Since last block</Label>
+        <div className="mt-1">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-warning px-2.5 py-1 text-xs font-medium text-warning" title="The collector sample time is unavailable, so freshness cannot be measured">
+            <span className="inline-block h-2 w-2 rounded-full bg-warning" aria-hidden="true" />
+            sample time unavailable
+          </span>
+        </div>
+      </div>
+    );
+  }
   if (age <= COLLECTOR_LAG_S) return <Stat label="Since last block" value={<Figure ch={4}>{sinceBlock.toFixed(1)}</Figure>} unit="s" tone={tone} />;
   return (
     <div className={`min-w-0 ${tone === "readout" ? "vw-stat-panel" : ""}`} aria-live="polite">
@@ -513,8 +527,8 @@ export function CostTile({ label, eth, ethUsd, nowMs, align, tone }: { label: Re
       tone={tone}
       value={
         <HoverNote lines={[math.line, math.provenance]} description={math.description} align={align}>
-          {/* The dollar sign sits outside the reserved box, so a changing digit never shifts it. */}
-          <span className="text-ink-2">$</span>
+          {/* The sign and a sub-cent bound sit outside the reserved box, so changing digits never shift them. */}
+          <span className="text-ink-2">{math.prefix}</span>
           <Figure ch={FIXED_WIDTH_CH.usd}>{math.usd}</Figure>
         </HoverNote>
       }
@@ -713,7 +727,7 @@ export function LiveHeroView({
       <div className="vw-card p-5 text-sm text-ink-2" aria-busy="true">
         <div className="flex items-center justify-between">
           <span>{resyncing ? RESYNC_COPY : WAITING_COPY}</span>
-          <StatusPill status={status} />
+          <StatusPill status={status} announce={false} />
         </div>
       </div>
     );
@@ -738,19 +752,21 @@ export function LiveHeroView({
             <GasRateTile label={<Term lines={HERO_TERMS.load60.lines} align="end">{HERO_TERMS.load60.label}</Term>} gasPerSecond={v.gasPerSecond60} tone={STAT_TONE} />
           </div>
 
-          <RailBand>What it costs</RailBand>
+          <RailBand>Base-fee illustrations</RailBand>
           <div className="grid grid-cols-2 gap-x-4 gap-y-5">
             {/* No quote, or one older than ten minutes: the tiles read in ETH, as they did before there was a price at all. */}
-            <CostTile label={<Term lines={HERO_TERMS.send.lines}>{HERO_TERMS.send.label}</Term>} eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} tone={STAT_TONE} />
-            <CostTile label={<Term lines={HERO_TERMS.swap.lines} align="end">{HERO_TERMS.swap.label}</Term>} eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} align="end" tone={STAT_TONE} />
+            <CostTile label={HERO_TERMS.send.label} eth={v.transferEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} tone={STAT_TONE} />
+            <CostTile label={HERO_TERMS.swap.label} eth={v.swapEth} ethUsd={snapshot.ethUsd} nowMs={nowMs} align="end" tone={STAT_TONE} />
           </div>
+          <p className="text-xs leading-relaxed text-ink-3">Fixed child-chain execution gas at the current base fee. Nitro parent-chain posting cost is not included. These are illustrations, not transaction quotes.</p>
         </div>
 
         <div className="flex flex-col gap-3 lg:col-span-8">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <RangeTabs options={HERO_RANGE_OPTIONS} value={range} onChange={onRangeChange ?? (() => undefined)} label="Base fee chart range" loading={range !== "live" && seriesLoading && series !== null} />
             <div className="flex items-center gap-2">
-              <StatusPill status={status} />
+              <span className="text-xs text-ink-3">Times: Local</span>
+              <StatusPill status={status} announce={false} />
               <EnlargeLink network={network} view={chartView("base-fee")} range={range} size="hero" />
             </div>
           </div>

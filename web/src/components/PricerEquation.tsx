@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { approxExpBips, baseFeeFromExponent, contributionsBips, legacyExponentBips, toLegacyState } from "@/lib/pricer";
-import type { LiveSnapshot } from "@/types";
+import type { LiveSnapshot, PricerModel } from "@/types";
 import { seriesColor } from "@/utils/chart";
 import { formatGwei, formatInteger } from "@/utils/format";
 
@@ -13,7 +13,8 @@ export type LivePricing = { contributions: number[]; exponent: number; predicted
 export function livePricing(snapshot: LiveSnapshot | null): LivePricing | null {
   if (!snapshot) return null;
   const minFee = BigInt(snapshot.minBaseFee);
-  if (snapshot.model === "legacy" && snapshot.legacy) {
+  if (snapshot.model === "legacy") {
+    if (!snapshot.legacy) return null;
     const exponent = legacyExponentBips(toLegacyState(snapshot.legacy));
     return { contributions: [Number(exponent)], exponent: Number(exponent), predicted: baseFeeFromExponent(minFee, exponent), multiplier: Number(approxExpBips(exponent)) / 10_000 };
   }
@@ -37,10 +38,11 @@ function Op({ children }: { children: React.ReactNode }) {
 }
 
 /** The live pricer equation with the sampled numbers. P4 against e^x lives on the explainer page. */
-export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) {
+export function PricerEquation({ snapshot, model: suppliedModel }: { snapshot: LiveSnapshot | null; model?: PricerModel }) {
   const live = useMemo(() => livePricing(snapshot), [snapshot]);
   const x = live ? live.exponent / 10_000 : 0;
-  const legacy = snapshot?.model === "legacy";
+  const model = snapshot?.model ?? suppliedModel ?? "unknown";
+  const legacy = model === "legacy";
 
   return (
     <div>
@@ -48,20 +50,26 @@ export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) 
         <div className="num flex flex-wrap items-start gap-x-2 gap-y-3 text-base text-ink-2 sm:text-lg">
           <Term label="base fee">baseFee</Term>
           <Op>=</Op>
-          <Term label="floor">minBaseFee</Term>
-          <Op>×</Op>
-          <Term label="degree-4 Taylor">P4(</Term>
-          {legacy ? (
-            <Term label="legacy exponent">(backlog − tolerance·speedLimit) / (inertia·speedLimit)</Term>
+          {model === "unknown" ? (
+            <Term label="pricing model">model unavailable</Term>
           ) : (
             <>
-              <Term label="sum over constraints">Σ</Term>
-              <Term label="backlog over target × window">
-                backlog<sub>i</sub> / (T<sub>i</sub> × W<sub>i</sub>)
-              </Term>
+              <Term label="floor">minBaseFee</Term>
+              <Op>×</Op>
+              <Term label="degree-4 Taylor">P4(</Term>
+              {legacy ? (
+                <Term label="legacy exponent">max(0, (backlog − tolerance·speedLimit) / (inertia·speedLimit))</Term>
+              ) : (
+                <>
+                  <Term label="sum over constraints">Σ</Term>
+                  <Term label="backlog over target × window">
+                    backlog<sub>i</sub> / (T<sub>i</sub> × W<sub>i</sub>)
+                  </Term>
+                </>
+              )}
+              <Term label="">)</Term>
             </>
           )}
-          <Term label="">)</Term>
         </div>
         {snapshot && live ? (
           <div className="num mt-4 flex flex-wrap items-start gap-x-2 gap-y-3 border-t border-hairline pt-4 text-base text-ink-2 sm:text-lg">
@@ -89,11 +97,13 @@ export function PricerEquation({ snapshot }: { snapshot: LiveSnapshot | null }) 
           </div>
         ) : null}
       </div>
-      {snapshot ? (
+      {snapshot && live ? (
         <p className="mt-3 max-w-[65ch] text-sm text-ink-2">
-          The chain priced block {formatInteger(snapshot.block.number)} at <span className="num text-ink">{formatGwei(snapshot.baseFee)} gwei</span>. The sampled backlogs already include that block&apos;s gas; the
-          value above is the fee they imply with dt = 0, that is if the next block carried the same timestamp. When the next header&apos;s timestamp advances, every backlog is first paid down by
-          dt × target, so the fee the next block actually opens with can be lower and is not known until that timestamp is.
+          The chain priced block {formatInteger(snapshot.block.number)} at <span className="num text-ink">{formatGwei(snapshot.baseFee)} gwei</span>. {legacy ? (
+            <>The sampled legacy backlog already includes that block&apos;s compute gas; the value above is the fee it implies with dt = 0, that is if the next block carried the same timestamp. When the next header&apos;s timestamp advances, the backlog is first paid down by dt × speed limit, so the fee the next block actually opens with can be lower and is not known until that timestamp is.</>
+          ) : (
+            <>The sampled backlogs already include that block&apos;s compute gas; the value above is the fee they imply with dt = 0, that is if the next block carried the same timestamp. When the next header&apos;s timestamp advances, every backlog is first paid down by dt × target, so the fee the next block actually opens with can be lower and is not known until that timestamp is.</>
+          )}
         </p>
       ) : null}
     </div>

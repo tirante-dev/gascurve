@@ -224,7 +224,7 @@ export type HeroRange = "live" | SeriesRange;
 
 export const HERO_RANGES: readonly HeroRange[] = ["live", ...SERIES_RANGES];
 
-export const HERO_RANGE_LABELS: Record<HeroRange, string> = { live: "Live", "1h": "1h", "24h": "24h", "30d": "30d", all: "All" };
+export const HERO_RANGE_LABELS: Record<HeroRange, string> = { live: "Live", "1h": "1h", "24h": "24h", "30d": "30d", all: "All indexed" };
 
 /** Where the chosen range is kept, so a reload comes back to the same view. */
 export const HERO_RANGE_KEY = "gascurve:hero-range";

@@ -2,10 +2,15 @@
 // (docs/ARCHITECTURE.md section 6), so the web app must treat `/4663` as
 // Robinhood, not as an unknown network.
 
-import type { Network } from "@/types";
+import type { LiveSnapshot, Network, PricerModel } from "@/types";
 
 export function findNetwork<T extends Pick<Network, "name" | "chainId">>(networks: readonly T[], param: string): T | undefined {
   return networks.find((n) => n.name === param || String(n.chainId) === param);
+}
+
+/** A live sample names the model that priced it; network metadata is only the fallback before a sample arrives. */
+export function networkPricerModel(snapshot: Pick<LiveSnapshot, "model"> | null, network: Pick<Network, "model"> | null): PricerModel {
+  return snapshot?.model ?? network?.model ?? "unknown";
 }
 
 /** True when the api's network list is loaded and does not contain `param` under either form. */

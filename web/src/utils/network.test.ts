@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canonicalNetworkName, findNetwork, isChainIdParam, isUnknownNetwork, networkLabel } from "./network";
+import { canonicalNetworkName, findNetwork, isChainIdParam, isUnknownNetwork, networkLabel, networkPricerModel } from "./network";
 
 const networks = [
   { name: "robinhood", chainId: 4663 },
@@ -12,6 +12,11 @@ describe("network route helpers", () => {
     expect(findNetwork(networks, "4663")?.name).toBe("robinhood");
     expect(findNetwork(networks, "42161")?.name).toBe("arbitrum-one");
     expect(findNetwork(networks, "nope")).toBeUndefined();
+  });
+  it("takes the model from a live sample before network metadata", () => {
+    expect(networkPricerModel({ model: "legacy" }, { model: "constraints" })).toBe("legacy");
+    expect(networkPricerModel(null, { model: "constraints" })).toBe("constraints");
+    expect(networkPricerModel(null, null)).toBe("unknown");
   });
   it("treats a chain-id route as known, and an unlisted name as unknown only once the list is loaded", () => {
     expect(isUnknownNetwork(networks, "4663")).toBe(false);

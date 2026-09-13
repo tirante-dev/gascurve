@@ -23,7 +23,7 @@ import type { ApiState } from "@/hooks/useApi";
 import type { LiveSnapshot, PricerModel, Series, SeriesRange } from "@/types";
 import { seriesCount, seriesResolutionLabel, slotLabel } from "@/utils/chart";
 import { formatInteger } from "@/utils/format";
-import { findNetwork } from "@/utils/network";
+import { findNetwork, networkPricerModel } from "@/utils/network";
 import { MinimizeIcon } from "./ChartActions";
 import { SawtoothPanel, shortWindowIndices } from "./ConstraintCards";
 import { FeeFlowChart, feeFlowLegend } from "./FeeFlows";
@@ -175,7 +175,7 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
   const info = live.networkInfo ?? (networks.data ? findNetwork(networks.data, network) : undefined) ?? null;
   // Which pricer the history belongs to. The series carries no model of its
   // own; an empty constraint-set list must not be read as legacy.
-  const model: PricerModel = info?.model ?? snapshot?.model ?? "unknown";
+  const model: PricerModel = networkPricerModel(snapshot, info);
 
   // Live is not a range the api serves buckets for, so the base fee on Live
   // asks for none at all.
@@ -309,6 +309,7 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
             title={view.title}
             aside={
               <div className="flex flex-wrap items-center gap-3">
+                {view.id !== "taylor" ? <span className="text-xs text-ink-3">Times: Local</span> : null}
                 {view.range === "hero" ? (
                   <RangeTabs options={HERO_RANGE_OPTIONS} value={(range ?? "live") as HeroRange} onChange={(next) => setParam("range", next)} label="Base fee chart range" loading={series.loading && series.data !== null} />
                 ) : null}

@@ -199,6 +199,8 @@ describe("a chart on a page of its own", () => {
       const { container, unmount } = render(<ChartDetail network="robinhood" chart={view.id} />);
       expect(screen.getByRole("heading", { name: view.title, level: 2 })).toBeInTheDocument();
       expect(screen.getByText(view.description)).toBeInTheDocument();
+      if (view.id === "taylor") expect(screen.queryByText("Times: Local")).toBeNull();
+      else expect(screen.getByText("Times: Local")).toBeInTheDocument();
       expect(enlargedFrame(container)).not.toBeNull();
       // The way back is to the section the chart was lifted out of.
       expect(screen.getByRole("link", { name: /Back to the dashboard/ })).toHaveAttribute("href", `/robinhood#${view.section}`);

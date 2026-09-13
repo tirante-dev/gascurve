@@ -29,7 +29,7 @@ import {
   type ChartPoint,
   type Segment,
 } from "@/utils/chart";
-import { formatDateTime, formatGas, formatGasPerSecond, formatInteger, formatSignificant, formatTick, unbroken } from "@/utils/format";
+import { formatDateTime, formatGas, formatGasPerSecond, formatInteger, formatSignificant, formatTick, formatUtc, unbroken } from "@/utils/format";
 import { EnlargeLink } from "./ChartActions";
 import { FidelityBands, FidelityHatch, FidelityNote, GapBands, GapNote, MissingBands, MissingDots, MissingNote } from "./ChartGaps";
 import { ChartTooltip, type TooltipRow } from "./ChartTooltip";
@@ -554,7 +554,7 @@ export const SeriesCharts = memo(function SeriesCharts({ network, range, series,
           {m.markers.map((mk, i) => (
             <li key={`${mk.t}-${mk.action.txHash}`}>
               <span className="num mr-1 rounded bg-surface-2 px-1 text-ink">{i + 1}</span>
-              <span className="num text-ink">{formatDateTime(mk.t)}</span> · {describeAction(mk.action)}
+              <span className="num text-ink">{formatUtc(mk.t)}</span> · {describeAction(mk.action)}
             </li>
           ))}
         </ol>

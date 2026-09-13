@@ -34,3 +34,10 @@ describe("a stat panel", () => {
     expect(css).not.toContain("--readout-pad");
   });
 });
+
+describe("reduced motion", () => {
+  it("runs decorative drift only by preference and collapses every animation and transition under reduce", () => {
+    expect(css).toMatch(/@media \(prefers-reduced-motion: no-preference\)[\s\S]*animation: vw-drift 24s linear infinite;/);
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*animation-duration: 0\.01ms !important;[\s\S]*transition-duration: 0\.01ms !important;/);
+  });
+});
