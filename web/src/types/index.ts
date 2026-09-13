@@ -97,6 +97,9 @@ export type LiveSnapshot = {
   l1?: L1State;
   accounts?: { infra: Account; network: Account; l1Reward: Account };
   replayErrorBips: number;
+  /** ArbOS version producing blocks now, and what it says the replay is worth. Absent only during a rolling api upgrade. */
+  arbosVersion?: number | null;
+  replayFidelity?: ReplayFidelity;
   /** Null when the collector has no price. A price older than ten minutes is stale and the UI falls back to ETH. */
   ethUsd: EthUsd | null;
 };
@@ -124,6 +127,8 @@ export type BlockPoint = {
   /** Floor in force at this block; null for pricing version 0 (history without the breakdown). */
   minBaseFee: string | null;
   anchored: boolean;
+  /** ArbOS version that produced the block, from its header. Null for history stored before it was recorded. */
+  arbosVersion?: number | null;
 };
 
 export type SeriesPoint = {
@@ -170,7 +175,24 @@ export type SeriesPoint = {
   posterFeesWei?: string | null;
   constraintSetId: number;
   replayErrorBips: number;
+  /**
+   * The ArbOS versions of the blocks in the bucket, null together when any of them did not record
+   * one. They differ exactly when the bucket spans an upgrade. Absent only during a rolling api
+   * upgrade.
+   */
+  arbosVersionMin?: number | null;
+  arbosVersionMax?: number | null;
+  /** What those versions say the replay behind the bucket is worth. Absent only during a rolling api upgrade. */
+  replayFidelity?: ReplayFidelity;
 };
+
+/**
+ * `verified`: the measurement covers the bucket, whether it ran one ArbOS version or spanned an upgrade
+ * someone replayed through. `boundary`: it spans an upgrade nobody has replayed through, so the replay
+ * carried backlogs from one pricing model into the next unchecked. `unverified`: one known version
+ * nobody has measured. `unknown`: a block recorded no version.
+ */
+export type ReplayFidelity = "verified" | "boundary" | "unverified" | "unknown";
 
 export type OwnerAction = {
   block: number;

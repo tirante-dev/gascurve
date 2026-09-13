@@ -24,6 +24,7 @@ import { PricerEquation } from "./PricerEquation";
 import { Prose, Section } from "./primitives";
 import { SeriesCharts } from "./SeriesCharts";
 import { ThemeToggle } from "./ThemeToggle";
+import { TimeZoomControls, TimeZoomProvider, type TimeDomain } from "./TimeZoom";
 
 /** How often the REST owner-action list is revalidated; the socket carries new ones in between. */
 export const OWNER_ACTION_REFETCH_MS = 300_000;
@@ -86,6 +87,7 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
   // Which pricer the history belongs to. The series carries no model of its
   // own; an empty constraint-set list must not be read as legacy.
   const model = info?.model ?? snapshot?.model ?? "unknown";
+  const historyDomain = useMemo<TimeDomain | null>(() => (series.data && series.data.points.length >= 2 ? [series.data.from, series.data.to] : null), [series.data]);
 
   // A chain-id route (/4663) is valid; once the server confirms the network, move to its name.
   const canonical = canonicalNetworkName(name, live.networkInfo);
@@ -135,22 +137,26 @@ export function NetworkPage({ network: routeNetwork }: { network: string }) {
           </Prose>
         </Section>
 
-        <Section
-          id="history"
-          title="History"
-          aside={<HistoryTabs range={range} onChange={setRange} loading={series.loading} />}
-        >
-          {series.error ? <p className="mb-3 text-sm text-critical">Could not load history: {series.error}</p> : null}
-          <SeriesCharts network={name} range={range} series={series.data} loading={series.loading} model={model} />
-        </Section>
+        <TimeZoomProvider key={`${name}:${range}`} domain={historyDomain}>
+          <Section
+            id="history"
+            title="History"
+            aside={<HistoryTabs range={range} onChange={setRange} loading={series.loading} />}
+          >
+            {series.error ? <p className="mb-3 text-sm text-critical">Could not load history: {series.error}</p> : null}
+            <TimeZoomControls className="mb-3" />
+            <SeriesCharts network={name} range={range} series={series.data} loading={series.loading} model={model} />
+          </Section>
 
-        <Section id="fees" title="Fee flows">
-          <FeeFlows network={name} range={range} snapshot={snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} />
-        </Section>
+          <Section id="fees" title="Fee flows">
+            <TimeZoomControls className="mb-3" />
+            <FeeFlows network={name} range={range} snapshot={snapshot} series={series.data} explorerUrl={info?.explorerUrl} model={model} />
+          </Section>
 
-        <Section id="l1" title="L1">
-          <L1Section network={name} range={range} snapshot={snapshot} series={series.data} />
-        </Section>
+          <Section id="l1" title="L1">
+            <L1Section network={name} range={range} snapshot={snapshot} series={series.data} />
+          </Section>
+        </TimeZoomProvider>
 
         <Section id="owner" title="Owner actions">
           <OwnerActionTimeline actions={actions} explorerUrl={info?.explorerUrl} loading={ownerActions.loading} error={ownerActions.error} />

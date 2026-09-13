@@ -69,12 +69,13 @@ const snapshot: LiveSnapshot = {
   ethUsd: null,
 };
 
-/** Two seconds of blocks, ten a second, so the sawtooth has something to draw. */
-const blocks: BlockPoint[] = [1788679198, 1788679199].flatMap((ts) =>
+/** Six seconds of blocks, ten a second, so both live charts have enough complete seconds to draw. */
+const blocks: BlockPoint[] = [1788679194, 1788679195, 1788679196, 1788679197, 1788679198, 1788679199].flatMap((ts) =>
   Array.from({ length: 10 }, (_, k) => ({
     number: ts * 10 + k,
     ts,
     gasUsed: 4_000_000,
+    posterGas: 0,
     baseFee: "399726000",
     predictedBaseFee: "399726000",
     backlogs: [(k + 1) * 4_000_000, 2_000_000, 11_194_391_810_886],
@@ -253,6 +254,19 @@ describe("a chart on a page of its own", () => {
     expect(screen.getByRole("figure", { name: /Base fee over 24h on a log scale/ })).toBeInTheDocument();
   });
 
+  it("draws every active constraint target on the enlarged live throughput chart", () => {
+    query = "range=live";
+    render(<ChartDetail network="robinhood" chart="gas-per-second" />);
+    const chart = screen.getByRole("figure", { name: /Compute gas carried per second over the last 120 seconds.*with 3 constraint targets/ });
+    const targetLines = chart.querySelectorAll("line.recharts-reference-line-line");
+    expect(targetLines).toHaveLength(3);
+    expect(Array.from(targetLines, (line) => line.getAttribute("stroke-dasharray"))).toEqual(["4 3", "4 3", "4 3"]);
+    expect(screen.getByText("target C1 · 60 Mgas/s")).toBeInTheDocument();
+    expect(screen.getByText("target C2 · 30 Mgas/s")).toBeInTheDocument();
+    expect(screen.getByText("target C3 · 40 Mgas/s")).toBeInTheDocument();
+    expect(screen.getAllByText("target C1 in force").length).toBeGreaterThan(0);
+  });
+
   it("switches between the short windows the sawtooth can draw, and defaults to the first", async () => {
     render(<ChartDetail network="robinhood" chart="backlog-sawtooth" />);
     const control = screen.getByRole("group", { name: "Constraint" });
@@ -282,6 +296,8 @@ describe("a chart on a page of its own", () => {
     expect(within(control).getByRole("button", { name: "C3" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("C3 · 40 Mgas/s · 24 h (set 6)")).toBeInTheDocument();
     expect(screen.getByRole("figure", { name: /^Backlog of C3 · 40 Mgas\/s · 24 h/ })).toBeInTheDocument();
+    expect(screen.getByRole("slider", { name: "Select a bucket to read its backlog values" })).toBeInTheDocument();
+    expect(screen.getByText(/C3 backlog, as a table/)).toBeInTheDocument();
   });
 
   it("draws the fee flows and the L1 costs from the same hooks the page uses", () => {
@@ -290,7 +306,7 @@ describe("a chart on a page of its own", () => {
     expect(screen.getByRole("figure", { name: /Fees collected per bucket in ETH/ })).toBeInTheDocument();
     unmount();
     render(<ChartDetail network="robinhood" chart="l1" />);
-    expect(screen.getByRole("figure", { name: /L2 fees and ArbOS-attributed batch-posting cost per bucket/ })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: /Poster fees collected for the L1 pricer and ArbOS-attributed batch-posting cost per bucket/ })).toBeInTheDocument();
     // Only the L1 page asks for batches, and it asks for the range on screen.
     expect(apiKeys).toContain("robinhood:1h:batches");
   });

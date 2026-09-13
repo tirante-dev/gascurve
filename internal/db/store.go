@@ -52,6 +52,8 @@ type Block struct {
 	MinBaseFee       NullWei       `db:"min_base_fee"`
 	Anchored         bool          `db:"anchored"`
 	PricingVersion   int16         `db:"pricing_version"`
+	// ArbOSVersion comes from the header mix digest; invalid means unrecorded. Zero is a real version.
+	ArbOSVersion sql.NullInt64 `db:"arbos_version"`
 }
 
 // Known reports whether the block carries the full pricing breakdown, so its floor and fee split are
@@ -110,6 +112,14 @@ type Bucket struct {
 	// PricingVersion is the lowest version of the blocks folded in:
 	// PricingUnknown as soon as one of them lacks the pricing breakdown.
 	PricingVersion int16 `db:"pricing_version"`
+	// The ArbOS versions folded in, invalid together as soon as one block recorded none.
+	ArbOSVersionMin sql.NullInt64 `db:"arbos_version_min"`
+	ArbOSVersionMax sql.NullInt64 `db:"arbos_version_max"`
+}
+
+// SpansArbOSUpgrade reports whether the replay behind the bucket crossed a pricing model change.
+func (b Bucket) SpansArbOSUpgrade() bool {
+	return b.ArbOSVersionMin.Valid && b.ArbOSVersionMax.Valid && b.ArbOSVersionMin.Int64 != b.ArbOSVersionMax.Int64
 }
 
 // RateSpread is the lowest and highest compute gas rate over the Units of a window that had blocks.
