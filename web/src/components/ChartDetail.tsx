@@ -331,7 +331,7 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
           >
             <p className="mb-4 max-w-[65ch] text-sm text-ink-2">{view.description}</p>
             <ChartTabs network={network} current={view.id} range={rawRange} />
-            <TimeZoomProvider key={`${view.id}:${range ?? "none"}:${constraint ?? "none"}`} domain={zoomDomain} mode={relativeZoom ? "relative" : "timestamp"}>
+            <TimeZoomProvider key={`${network}:${view.id}:${range ?? "none"}:${constraint ?? "none"}`} domain={zoomDomain} mode={relativeZoom ? "relative" : "timestamp"}>
               <div className="vw-card mt-4 p-4">
                 {constraintOptions.length > 1 || body?.legend ? (
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
