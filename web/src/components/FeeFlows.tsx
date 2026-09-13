@@ -98,7 +98,7 @@ export function feeTotals(series: Pick<Series, "from" | "to" | "resolution" | "p
   const partialBuckets = series.points.filter((point) => completenessOf(point) === "partial").length;
   const unknownBuckets = series.points.filter((point) => completenessOf(point) === "unknown").length;
   const emptyIntervals = gaps.gaps.length;
-  const completeness: SeriesCompleteness = unknownBuckets > 0 ? "unknown" : partialBuckets > 0 || emptyIntervals > 0 ? "partial" : "complete";
+  const completeness: SeriesCompleteness = series.points.length === 0 || unknownBuckets > 0 ? "unknown" : partialBuckets > 0 || emptyIntervals > 0 ? "partial" : "complete";
   const rateBlocked = emptyIntervals > 0 || unknownBuckets > 0 || kinds.some((kind) => kind === "leading" || kind === "unknown");
   const rateCoverage = requestedSpan > 0 && completeSpan > 0 ? Math.min(1, completeSpan / requestedSpan) : null;
   return {
@@ -159,7 +159,8 @@ function usdLine(eth: number, ethUsd: EthUsd | null | undefined, nowMs: number, 
   if (math === null) return undefined;
   return (
     <HoverNote lines={[math.line, math.provenance]} description={math.description} align={place.align} alignSm={place.alignSm}>
-      ${math.usd}
+      {math.prefix}
+      {math.usd}
     </HoverNote>
   );
 }
@@ -288,10 +289,10 @@ export function FeeFlows({ network, range, snapshot, series, explorerUrl, model 
       </Card>
 
       <Card>
-        {totals && series ? (
+        {totals && series && series.points.length > 0 ? (
           <>
             <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-5">
-              <Stat label={`${incomplete ? "Indexed fees" : "Fees"} in ${series.range === "all" ? "all time" : `last ${series.range}`}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, clock, 4, USD_PLACEMENT[0])} />
+              <Stat label={series.range === "all" ? `${incomplete ? "Indexed fees" : "Fees"} since ${formatDateTime(series.from)}` : `${incomplete ? "Indexed fees" : "Fees"} in last ${series.range}`} value={formatSignificant(totals.total, 4)} unit="ETH" size="sm" hint={usdLine(totals.total, ethUsd, clock, 4, USD_PLACEMENT[0])} />
               <Stat
                 label="Daily run rate"
                 value={totals.perDay === null ? "n/a" : formatSignificant(totals.perDay, 4)}

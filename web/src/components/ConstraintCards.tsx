@@ -168,7 +168,7 @@ function ConstraintCard({ network, c, index, backlog, bips, share, samples, plac
             <Figure ch={FIXED_WIDTH_CH.gas}>{gasParts(backlog, true).value}</Figure>{" "}
             <span className="text-xs text-ink-2">{gasParts(backlog, true).unit}</span>
           </dd>
-          {/* What the figure means: how long the chain must run at exactly the target to drain it. */}
+          {/* This is a zero-new-load scenario, not a forecast of future demand. */}
           <dd className="num text-xs text-ink-3">{formatDrainEquivalence(backlog, c.target)}</dd>
         </div>
         <div>
@@ -244,7 +244,7 @@ function LegacyCard({ legacy, backlog, bips }: { legacy: LegacyParams; backlog: 
             <Figure ch={FIXED_WIDTH_CH.gas}>{gasParts(backlog, true).value}</Figure>{" "}
             <span className="text-xs text-ink-2">{gasParts(backlog, true).unit}</span>
           </dd>
-          {/* The legacy pricer drains at the speed limit, so that is the rate the equivalence quotes. */}
+          {/* The legacy pricer drains at the speed limit when no new load arrives. */}
           <dd className="num text-xs text-ink-3">{formatDrainEquivalence(backlog, legacy.speedLimit)} · x = {x.toFixed(4)}</dd>
         </div>
       </dl>
@@ -268,6 +268,7 @@ function LegacyCard({ legacy, backlog, bips }: { legacy: LegacyParams; backlog: 
 }
 
 const MOTION_NOTE = "Figures ease toward each sample over about 300 ms. Long windows keep draining at their target rate between samples, and x and the shares are recomputed from each frame's backlogs, so the numbers, shares and gauges stay consistent. An owner action that changes the constraints snaps everything: the old figures no longer mean anything under the new definition.";
+const LEGACY_MOTION_NOTE = "Figures ease toward each sample over about 300 ms. The legacy backlog keeps draining at the speed limit between samples, and x is recomputed from that backlog. An owner action that changes a legacy parameter snaps the figures because the old backlog has a different meaning under the new definition.";
 const SAWTOOTH_NOTE = `Windows of ${formatDuration(SHORT_WINDOW_S)} or less are shown as a ${AVERAGE_WINDOW_S} s average: nitro pays a backlog down only when the block timestamp advances, so within one second every block adds gas and the whole second's drain lands at once. The raw sparkline shows that sawtooth.`;
 
 /** One card per constraint, subscribed to the frame store: the figures move every frame, the page around them does not. */
@@ -284,11 +285,12 @@ export function ConstraintCardsView({ network, snapshot, values, blocks, places,
   }, [snapshot, blocks]);
   if (!snapshot) return <p className="text-sm text-ink-2">{resyncing ? RESYNC_COPY : WAITING_COPY}</p>;
   const v = values ?? targetValues(snapshot, blocks, 0);
-  if (snapshot.model === "legacy" && snapshot.legacy) {
+  if (snapshot.model === "legacy") {
+    if (!snapshot.legacy) return <p className="text-sm text-ink-2">Legacy speed limit, inertia, tolerance, and backlog are unavailable for this sample.</p>;
     return (
       <div>
         <LegacyCard legacy={snapshot.legacy} backlog={v.backlogs[0] ?? snapshot.legacy.backlog} bips={v.bips[0] ?? 0} />
-        <p className="mt-2 text-xs text-ink-3">{MOTION_NOTE}</p>
+        <p className="mt-2 text-xs text-ink-3">{LEGACY_MOTION_NOTE}</p>
       </div>
     );
   }

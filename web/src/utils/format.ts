@@ -307,7 +307,9 @@ export function freshUsdPrice(ethUsd: EthUsd | null | undefined, nowMs: number):
 
 /** One USD figure and the working behind it, in the three forms a tile needs. */
 export type UsdMath = {
-  /** The dollar figure alone, sign outside: "0.04". */
+  /** The sign and any upper-bound marker that sit before the fixed-width figure. */
+  prefix: "$" | "<$";
+  /** The dollar figure alone: "0.04", or the "0.01" bound for a sub-cent amount. */
   usd: string;
   /** The multiplication on one line: "0.00000839 ETH × $4,182.3/ETH = $0.04". */
   line: string;
@@ -322,22 +324,25 @@ export type UsdMath = {
  * one quote, and neither should be something a reader has to take on trust. Null under exactly the
  * condition freshUsdPrice is null under. `formatEth` is how the caller renders the ETH amount elsewhere,
  * so the working quotes the figure the reader can see beside it rather than a second rounding.
- * second rounding of the same number.
  */
 export function usdMath(eth: number, ethUsd: EthUsd | null | undefined, nowMs: number, formatEth: (eth: number) => string = formatEthFixed): UsdMath | null {
   const price = freshUsdPrice(ethUsd, nowMs);
   if (price === null || !ethUsd) return null;
-  const usd = formatUsdFixed(eth * price);
+  const amount = eth * price;
+  const belowCent = amount > 0 && amount < 0.01;
+  const prefix = belowCent ? "<$" : "$";
+  const usd = belowCent ? "0.01" : formatUsdFixed(amount);
   const ethText = `${formatEth(eth)} ETH`;
   const rate = formatUsdFixed(price);
   const age = formatDuration(Math.max(0, (nowMs - Date.parse(ethUsd.at)) / 1000));
-  const line = `${ethText} × $${rate}/ETH = $${usd}`;
+  const line = `${ethText} × $${rate}/ETH = ${prefix}${usd}`;
   const provenance = `${ethUsd.source}, ${age} ago`;
   return {
+    prefix,
     usd,
     line,
     provenance,
-    description: `${usd} US dollars, ${ethText} at ${rate} dollars per ETH, quoted by ${ethUsd.source} ${age} ago`,
+    description: `${belowCent ? "less than 0.01" : usd} US dollars, ${ethText} at ${rate} dollars per ETH, quoted by ${ethUsd.source} ${age} ago`,
   };
 }
 
@@ -384,13 +389,12 @@ export function formatDrainTime(seconds: number): string {
 }
 
 /**
- * What a backlog figure means, as time: "= 77.8 h at 40 Mgas/s", the span the
- * chain would have to run at exactly the target for to drain it. Without a
- * positive target there is no rate to drain at and nothing to say.
+ * How long a backlog takes to drain at its target with no new compute gas.
+ * Without a positive target there is no rate to drain at and nothing to say.
  */
 export function formatDrainEquivalence(backlog: number, target: number): string {
   if (!Number.isFinite(backlog) || !Number.isFinite(target) || target <= 0) return "n/a";
-  return `= ${formatDrainTime(secondsOfTarget(backlog, target))} at ${formatGasPerSecond(target)}`;
+  return `Deterministic scenario: ${formatDrainTime(secondsOfTarget(backlog, target))} to drain at ${formatGasPerSecond(target)} with zero new load. Not a forecast.`;
 }
 
 /** Multiplier over the floor from basis points: 19.99x. */

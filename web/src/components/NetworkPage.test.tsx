@@ -1,4 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Network, OwnerAction, Series } from "@/types";
 
@@ -43,7 +44,7 @@ vi.mock("@/hooks/useLive", () => ({
   useLive: () => ({ snapshot: null, recentBlocks: [], status: "connecting", networkInfo: liveInfo, ownerActions: liveOwnerActions, reorgs: liveReorgs, resyncing: false, error: null }),
 }));
 
-import { NetworkPage, OWNER_ACTION_REFETCH_MS } from "./NetworkPage";
+import { ModelSummary, NetworkPage, OWNER_ACTION_REFETCH_MS } from "./NetworkPage";
 import { NetworkSwitcher } from "./NetworkSwitcher";
 
 describe("NetworkPage with a chain-id route", () => {
@@ -110,6 +111,9 @@ describe("NetworkPage with a chain-id route", () => {
     for (const title of ["Live", "The pricer, live", "How the fee works", "History", "Fee flows", "L1", "Owner actions"]) {
       expect(screen.getByRole("heading", { name: title, level: 2 })).toBeInTheDocument();
     }
+    expect(screen.getByRole("heading", { name: "Robinhood Chain gas pricing", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Skip to content" })).toHaveAttribute("href", "#main-content");
+    expect(screen.getByRole("navigation", { name: "Dashboard sections" })).toContainElement(screen.getByRole("link", { name: "Why now" }));
     expect(screen.queryByText(/The base fee right now, the floor it sits on/)).toBeNull();
     expect(screen.queryByText(/One card per constraint/)).toBeNull();
     expect(screen.queryByText(/Base fee, the split of x across constraints/)).toBeNull();
@@ -118,12 +122,26 @@ describe("NetworkPage with a chain-id route", () => {
     expect(screen.queryByText(/Parameter changes decoded from OwnerActs logs/)).toBeNull();
   });
 
+  it("skips the header and continues through the compact section navigator by keyboard", async () => {
+    routeParams = { network: "robinhood" };
+    const user = userEvent.setup();
+    render(<NetworkPage network="robinhood" />);
+    const skip = screen.getByRole("link", { name: "Skip to content" });
+    expect(skip).toHaveClass("motion-reduce:transition-none");
+    await user.tab();
+    expect(skip).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(document.getElementById("main-content")).toHaveFocus();
+    await user.tab();
+    expect(screen.getByRole("link", { name: "Why now" })).toHaveFocus();
+  });
+
   it("keeps a one-paragraph lead-in on the fee section and links to the network's explainer from it and from the header", () => {
     routeParams = { network: "robinhood" };
     render(<NetworkPage network="robinhood" />);
     // The prose itself moved to its own route; what stays is one paragraph and the link.
     expect(screen.queryByRole("heading", { name: "Two parts, one fee" })).toBeNull();
-    expect(screen.getByText(/The explainer walks through all of it with Robinhood Chain's own floor/)).toBeInTheDocument();
+    expect(screen.getByText(/The explainer uses Robinhood Chain's current floor and constraint set/)).toBeInTheDocument();
     const links = screen.getAllByRole("link", { name: "How the fee works →" });
     expect(links).toHaveLength(2);
     for (const link of links) expect(link).toHaveAttribute("href", "/robinhood/how-it-works");
@@ -138,7 +156,6 @@ describe("NetworkPage with a chain-id route", () => {
     expect(screen.getByText("Robinhood Chain · chain 4663")).toBeInTheDocument();
     // The line above the chain's name says what the page is in anyone's words.
     expect(screen.getByText("live gas prices")).toBeInTheDocument();
-    expect(screen.queryByText(/telemetry/)).toBeNull();
     expect(screen.getByRole("combobox", { name: "Network" })).toHaveValue("robinhood");
     expect(replaceMock).not.toHaveBeenCalled();
     liveInfo = networks[0];
@@ -174,6 +191,37 @@ describe("NetworkPage with a chain-id route", () => {
     render(<NetworkPage network="mystery" />);
     expect(screen.getByText(/does not know a network/)).toBeInTheDocument();
     expect(replaceMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("ModelSummary", () => {
+  it("describes only the constraint model on constraint networks", () => {
+    render(<ModelSummary model="constraints" snapshot={{ model: "constraints" }} network="robinhood" displayName="Robinhood Chain" />);
+    expect(screen.getByText(/x is the sum over the chain's constraints/)).toHaveTextContent("Robinhood Chain's current floor and constraint set");
+    expect(screen.queryByText(/legacy pricer keeps one compute-gas backlog/)).toBeNull();
+    expect(screen.getByRole("link", { name: "How the fee works →" })).toHaveAttribute("href", "/robinhood/how-it-works");
+  });
+
+  it("uses live speed limit, tolerance, inertia, and backlog on legacy networks", () => {
+    render(
+      <ModelSummary
+        model="legacy"
+        snapshot={{ model: "legacy", legacy: { speedLimit: 7_000_000, inertia: 102, tolerance: 10, backlog: 90_000_000 } }}
+        network="robinhood-testnet"
+        displayName="Robinhood Testnet"
+      />,
+    );
+    const summary = screen.getByText(/The legacy pricer keeps one compute-gas backlog/);
+    expect(summary).toHaveTextContent("speed limit is 7 Mgas/s");
+    expect(summary).toHaveTextContent("tolerance is 10");
+    expect(summary).toHaveTextContent("inertia is 102");
+    expect(summary).toHaveTextContent("legacy backlog is 90 Mgas");
+    expect(summary).not.toHaveTextContent("sum over the chain's constraints");
+  });
+
+  it("says when a legacy sample has no current parameters", () => {
+    render(<ModelSummary model="legacy" snapshot={{ model: "legacy" }} network="robinhood-testnet" displayName="Robinhood Testnet" />);
+    expect(screen.getByText(/The legacy pricer keeps one compute-gas backlog/)).toHaveTextContent("current speed limit, tolerance, inertia, and legacy backlog are unavailable");
   });
 });
 

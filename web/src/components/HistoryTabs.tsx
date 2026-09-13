@@ -4,7 +4,7 @@ import { SERIES_RANGES } from "@/lib/api/series";
 import type { SeriesRange } from "@/types";
 import { RangeTabs, type RangeOption } from "./RangeTabs";
 
-const LABELS: Record<SeriesRange, string> = { "1h": "1h", "24h": "24h", "30d": "30d", all: "All" };
+const LABELS: Record<SeriesRange, string> = { "1h": "1h", "24h": "24h", "30d": "30d", all: "All indexed" };
 
 /** The history section's ranges, in the order the api lists them. */
 export const HISTORY_OPTIONS: readonly RangeOption<SeriesRange>[] = SERIES_RANGES.map((range) => ({ value: range, label: LABELS[range] }));

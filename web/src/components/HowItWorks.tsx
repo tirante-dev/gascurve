@@ -46,8 +46,9 @@ export function HowItWorks({ network }: { network: string }) {
   const snapshot = live.data;
   const info = (networks.data ? findNetwork(networks.data, network) : undefined) ?? null;
   const set = constraints.data?.current ?? null;
-  const quoted = useMemo(() => quotedConstraints(set?.constraints ?? null, snapshot), [set, snapshot]);
-  const legacy = snapshot?.model === "legacy" || info?.model === "legacy";
+  const model = snapshot?.model ?? (set ? "constraints" : (info?.model ?? "unknown"));
+  const quoted = useMemo(() => (model === "constraints" ? quotedConstraints(set?.constraints ?? null, snapshot) : null), [model, set, snapshot]);
+  const legacy = model === "legacy";
   const floor = floorText(snapshot);
 
   return (
@@ -62,7 +63,7 @@ export function HowItWorks({ network }: { network: string }) {
       <main>
         <Section id="explainer" title="How the fee works">
           <div className="grid grid-cols-[minmax(0,1fr)] gap-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
-            <Explainer snapshot={snapshot} />
+            <Explainer snapshot={snapshot} model={model} />
             <div className="flex flex-col gap-6">
               <Card>
                 <Label>On {info?.displayName ?? network}</Label>
@@ -72,11 +73,11 @@ export function HowItWorks({ network }: { network: string }) {
                     <dd className="num mt-0.5 text-ink">{floor ?? "unavailable right now"}</dd>
                   </div>
                   <div>
-                    <dt className="text-ink-2">{legacy ? "Pricer" : "Constraint set in force"}</dt>
+                    <dt className="text-ink-2">{model === "constraints" ? "Constraint set in force" : "Pricer"}</dt>
                     <dd className="mt-1">
                       {legacy ? (
                         <span className="text-ink">the legacy speed-limit pricer, no constraints configured</span>
-                      ) : quoted ? (
+                      ) : model === "constraints" && quoted ? (
                         <ul className="flex flex-wrap gap-1.5">
                           {quoted.map((c, i) => (
                             <li key={`${c.target}-${c.window}-${i}`} className="num rounded bg-surface-2 px-2 py-0.5 text-xs text-ink">
@@ -84,6 +85,8 @@ export function HowItWorks({ network }: { network: string }) {
                             </li>
                           ))}
                         </ul>
+                      ) : model === "unknown" ? (
+                        <span className="text-ink-2">model unavailable right now</span>
                       ) : (
                         <span className="text-ink-2">unavailable right now</span>
                       )}
@@ -101,7 +104,7 @@ export function HowItWorks({ network }: { network: string }) {
                     </div>
                   ) : null}
                 </dl>
-                {live.error || constraints.error ? <p className="mt-3 text-xs text-ink-3">The api did not answer for the live values, so the figures above and in the prose fall back to generic ones.</p> : null}
+                {live.error || constraints.error ? <p className="mt-3 text-xs text-ink-3">One or more api requests did not answer, so unavailable current values are not inferred.</p> : null}
               </Card>
               <TaylorChart snapshot={snapshot} network={network} />
             </div>

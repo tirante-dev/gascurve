@@ -1,26 +1,9 @@
 // The fee gauge: where a multiplier over the floor sits on the arc, and the instrument drawn around it.
 // The multiplier is the pricer's own figure, so 1x is the floor and the scale runs a decade per half turn.
 
-export type DialTone = "good" | "warning" | "critical";
-
-export const GREEN_TO = 2;
-/** From GREEN_TO up to this multiplier the fee is amber; above it, red. */
-export const AMBER_TO = 10;
-
-export function dialTone(multiplier: number): DialTone {
-  if (multiplier <= GREEN_TO) return "good";
-  if (multiplier <= AMBER_TO) return "warning";
-  return "critical";
-}
-
-export const TONE_SENTENCE: Record<DialTone, string> = {
-  good: "near the floor",
-  warning: "above the floor",
-  critical: "far above the floor",
-};
-
 /** The right end of the dial: a hundred times the floor, two decades from the left end. */
 export const DIAL_MAX = 100;
+export const DIAL_SCALE_LABEL = `logarithmic 1× to ${DIAL_MAX}×`;
 
 /**
  * Where a multiplier sits on the dial, 0 at the left end (1x, the floor) and 1 at the right (DIAL_MAX),
@@ -32,16 +15,6 @@ export function dialPosition(multiplier: number): number {
   return Math.min(1, Math.log10(multiplier) / Math.log10(DIAL_MAX));
 }
 
-export type DialBand = { tone: DialTone; from: number; to: number };
-
-/** The three bands, meeting exactly at the thresholds the tone changes at, so the band under the needle
- * is the colour of the figure below it. */
-export const DIAL_BANDS: readonly DialBand[] = [
-  { tone: "good", from: 0, to: dialPosition(GREEN_TO) },
-  { tone: "warning", from: dialPosition(GREEN_TO), to: dialPosition(AMBER_TO) },
-  { tone: "critical", from: dialPosition(AMBER_TO), to: 1 },
-];
-
 /** The hub sits on the horizon near the foot of the box, so the box clears the numerals ring above the
  * arc and the hub's own lower half below it. */
 export const DIAL_VIEW_W = 240;
@@ -49,9 +22,9 @@ export const DIAL_VIEW_H = 127;
 export const DIAL_CX = 120;
 export const DIAL_CY = 118;
 
-/** The band's centreline; every other radius is placed against it. */
+/** The pressure ramp's centreline; every other radius is placed against it. */
 export const DIAL_RADIUS = 84;
-export const BAND_WIDTH = 6;
+export const PRESSURE_WIDTH = 6;
 export const R_BEZEL = 98;
 export const R_TICK_OUT = 95;
 export const R_TICK_MINOR = 91;
@@ -73,17 +46,9 @@ export function dialArc(from: number, to: number, radius = DIAL_RADIUS): string 
   return `M ${a.x.toFixed(2)} ${a.y.toFixed(2)} A ${radius} ${radius} 0 0 1 ${b.x.toFixed(2)} ${b.y.toFixed(2)}`;
 }
 
-/** Long ticks at the two band thresholds, which are the only multipliers the ring numbers. The ends are
- * not marked: the arc already says where the scale starts and stops. */
-export const DIAL_MAJOR_TICKS: readonly number[] = [GREEN_TO, AMBER_TO];
-export const DIAL_MINOR_TICKS: readonly number[] = [1.3, 1.6, 3, 4, 5, 6, 7, 8, 20, 30, 50, 70];
-
-/** The lit stretch of the ring, from the floor up to the reading. The lit length is the measurement, so
- * a band the fee has not reached is absent rather than present and empty. */
-export function litBands(multiplier: number): DialBand[] {
-  const here = dialPosition(multiplier);
-  return DIAL_BANDS.filter((band) => here > band.from).map((band) => ({ tone: band.tone, from: band.from, to: Math.min(band.to, here) }));
-}
+/** The endpoints and decade midpoint make the logarithmic context explicit. */
+export const DIAL_MAJOR_TICKS: readonly number[] = [1, 10, DIAL_MAX];
+export const DIAL_MINOR_TICKS: readonly number[] = [1.3, 1.6, 2, 3, 4, 5, 6, 7, 8, 20, 30, 50, 70];
 
 /** Half the angular width of the needle's base, as a fraction of the half turn. */
 const NEEDLE_HALF = 0.055;

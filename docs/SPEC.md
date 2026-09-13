@@ -1,6 +1,6 @@
 # Robinhood Chain Gas Explorer — Spec
 
-One-page, auto-updating site that explains Robinhood Chain's multi-constraint gas pricer and shows it working: live per-block numbers plus 1h / 24h / 30d / all-time history, sourced from the public RPC.
+One-page, auto-updating site that explains Robinhood Chain's multi-constraint gas pricer and shows it working: live per-block numbers plus 1h / 24h / 30d / all indexed history, sourced from the public RPC.
 
 Everything in the "Verified facts" sections below was measured live against `https://rpc.mainnet.chain.robinhood.com` on 2026-09-06. Re-verify before shipping; the chain owner changes parameters regularly.
 
@@ -9,7 +9,7 @@ Everything in the "Verified facts" sections below was measured live against `htt
 ## 1. Goals
 
 - Explain the mechanics: why fees can sit at the floor for weeks and then ratchet up for 11 days straight, why there are no tips, where the fees go.
-- Show the mechanics: live decomposition of the base fee into its per-constraint contributions, backlogs draining and filling in real time, and the same series over 1h / 24h / 30d / all-time.
+- Show the mechanics: live decomposition of the base fee into its per-constraint contributions, backlogs draining and filling in real time, and the same series over 1h / 24h / 30d / all indexed history.
 - Real-time first: the page updates every block-ish (~1 s) without a reload, driven by the viewer's browser polling the public RPC directly.
 - Zero-cost infra: public RPC only, static hosting, one tiny collector for history.
 - Be honest about what is measured vs. reconstructed (see §7).
@@ -64,7 +64,7 @@ Budget derived from this: **≤ 5 calls/s sustained per IP, ≤ 100 calls per HT
 
 Source of truth: Nitro `arbos/tx_processor.go`, where `FillReceiptInfo` records `posterGas` as `GasUsedForL1` and `EndTxHook` performs the three transfers. Robinhood block 1,000,000 is a nonzero vector: `gasUsed=422716`, `posterGas=767`, `baseFee=20036000`, and `minBaseFee=20000000`. It yields `computeGas=421949`, total `8469537776000` wei, infrastructure `8438980000000` wei, network `15190164000` wei, and L1 poster `15367612000` wei.
 
-### 3.2 Multi-constraint pricer (the core)
+### 3.2 Multi-constraint pricer (the core on constraint-model networks)
 
 Source of truth: `arbos/l2pricing/model.go`, `updatePricingModelSingleConstraints`.
 
@@ -89,6 +89,8 @@ Consequences to illustrate:
 - **Owner resets**: every `setGasPricingConstraints` call replaces the backlogs with the `startingBacklog` values supplied (0 on Aug 20, 7.49 T on Sep 1, 9.99 T on Sep 3). The fee can therefore jump discontinuously at an owner action.
 - Multi-gas (per-resource: compute, storage, history…) constraints exist in the precompile (`getMultiGasBaseFee` returns 9 identical values today) but are not configured. Mention as "not active".
 
+On a network whose live model is `legacy`, the page must not reuse this constraint explanation. The legacy pricer keeps one compute-gas backlog. Each elapsed second subtracts `speedLimit`, stopping at zero. `tolerance × speedLimit` is the backlog threshold below which the exponent is zero. Above it, `(backlog - tolerance × speedLimit) / (inertia × speedLimit)` supplies the exponent for the same `P4` fee multiplier. The explainer and live summary show the sampled speed limit, inertia, tolerance, and legacy backlog when available. If the model or its parameters are unavailable, the page says so and does not infer constraint or legacy values.
+
 ### 3.3 Constraint-change history (recovered from `OwnerActs` logs on ArbOwner `0x…70`)
 
 | Block | UTC | Constraints `[gas/s, window s, starting backlog]` |
@@ -101,7 +103,7 @@ Consequences to illustrate:
 | 51,865,079 | 2026-09-01 16:33 | [60M,15,0], [30M,86400,7.492T] |
 | 53,578,754 | 2026-09-03 17:08 | [60M,15,0], [40M,86400,9.989T] |
 
-Public launch was 2026-07-01, so the genesis 6-constraint set ran for the first 10 days of mainnet. Full decoded log is in `data/owner-actions.json`. The page renders this as a timeline overlaid on the all-time chart, and the collector must watch for new `OwnerActs` events (selector `0xcc0d556a`, and `0xa0188cdb` for min-fee changes) because the constraint set is expected to keep changing.
+Public launch was 2026-07-01, so the genesis 6-constraint set ran for the first 10 days of mainnet. Full decoded log is in `data/owner-actions.json`. The page renders this as a timeline overlaid on the All indexed chart, and the collector must watch for new `OwnerActs` events (selector `0xcc0d556a`, and `0xa0188cdb` for min-fee changes) because the constraint set is expected to keep changing.
 
 ### 3.4 Where the fees go
 
@@ -132,31 +134,38 @@ Page use: a "poster fees vs. ArbOS-attributed batch-posting cost" panel, batch c
 
 ## 4. Page layout (single scrolling page)
 
-1. **Hero / live strip** (updates every ~1 s)
+1. **Why now?**: the answer-first diagnosis and end-to-end data-health state described below, before the large gauge on narrow screens.
+2. **Hero / live strip** (updates every ~1 s)
    - Base fee now (gwei) and multiplier over floor; sparkline of last 120 blocks.
    - Block number, seconds since last block, gas in last block, rolling gas/s (10 s and 60 s).
-   - Cost of a 21 k-gas transfer and of a ~150 k-gas swap in ETH and USD (USD optional; needs an external price feed → make it a toggle, off by default).
+   - Base-fee execution illustrations for 21 k child-chain gas and 150 k child-chain gas in ETH and USD. These are fixed-gas illustrations, not guaranteed Nitro transaction totals. They exclude the parent-chain posting cost and say so beside the figures.
    - "Where the fee goes" mini stacked bar (floor vs. congestion).
-2. **The pricer, live**: one card per constraint: target, window, backlog (gas and "seconds of target"), `x_i`, and a fill-gauge that visibly drains at `T_i`/s between polls (client-side interpolation, corrected on each poll). Sum → `x` → `P4(x)` → base fee, drawn as an equation with live numbers.
-3. **Explainer**: the formula, the Taylor-vs-exp plot, the "burst vs. sustained" animation (two synthetic demand profiles replayed through the simulator in §6), no-tips/FCFS note.
-4. **History**: tab bar `1h · 24h · 30d · All` above a linked chart group:
+3. **The pricer, live**: on a constraint-model network, one card per constraint shows target, window, backlog (gas and "seconds of target"), and `x_i`, with client-side drain interpolation corrected on each poll. The cards sum to `x`, then `P4(x)`, then the base fee. On a legacy network, the live card and equation use the single legacy backlog, speed limit, inertia, and tolerance instead. An unknown model stays explicitly unavailable.
+4. **Explainer**: model-specific mechanics. Constraint-model networks get the constraint formula, Taylor-vs-exp plot, and burst-vs-sustained animation. Legacy networks get the speed limit, inertia, tolerance, and single-backlog formula. Both paths keep the no-tips/FCFS note.
+5. **History**: tab bar `1h · 24h · 30d · All indexed` above a linked chart group:
    - base fee (log scale), with floor line;
    - stacked per-constraint contribution to `x`;
    - gas/s vs. each constraint's target;
    - backlog per constraint;
    - owner actions as vertical markers with tooltips (constraint changes, min-fee change).
    A range brush shares x-axis across the group. Hover shows the exact numbers.
-5. **Fee flows**: balances of infra/network accounts over time (from collector samples), plus estimated fees/day computed from `Σ gasUsed × baseFee` per block.
-6. **L1 pricer** (collapsed by default).
-7. **Data & method** footer: what is live, what is reconstructed, last collector sample time, RPC health (calls/min, last 429).
+6. **Fee flows**: balances of infra/network accounts over time (from collector samples), plus estimated fees/day computed from `Σ gasUsed × baseFee` per block.
+7. **L1 pricer** (collapsed by default).
+8. **Data & method** footer: what is live, observed, replayed, complete, partial, and not indexed; last collector sample; observed and indexed heads; missing ranges; endpoint, listener, and RPC capacity health.
 
-Visual rule: green-to-red is not a fee scale; use a single sequential ramp for "multiplier over floor". Everything must be legible on dark and light.
+The first useful screen includes an answer-first "Why now?" summary. It states the current base fee and floor multiple, a recent change only when supported by a complete matching bucket with full coverage, the dominant constraint and its share of total pressure, demand against the relevant target, and whether pressure is building, draining, steady, or clear. A long-window constraint uses a matching historical compute-gas rate when that history is sufficiently complete; a 60-second burst rate is not compared with a day-scale target. Legacy networks compare current demand with the speed limit and identify the single legacy backlog, but call its current fee pressure clear when sampled x is zero. The demand comparison names the difference from target when rounded headline rates would otherwise look equal. Missing, partial, unsafe, or stale inputs produce explicit unavailable or degraded states. Any drain or continued-load calculation is a deterministic scenario that names its load assumption and says it is not a forecast.
+
+WebSocket connection state describes transport only. End-to-end data health is separate and uses sample age, observed-versus-indexed head lag, series coverage and completeness, degraded reasons, holes, RPC capacity, endpoint state, and the API notification listener where available. A connected socket does not imply healthy or current data.
+
+Time labels are explicit near time-based views. Viewer-facing chart and sample timestamps use local time and say "Local". Owner actions and protocol-effective times use UTC and say "UTC". The wire format remains UTC as specified in `ARCHITECTURE.md`.
+
+Visual rule: green-to-red is not a fee scale. The fee gauge uses a neutral sequential pressure ramp on a clearly labeled logarithmic context from 1× to 100× the floor. A high multiple is descriptive pressure, not inherently good, warning, or critical. Warning colors are reserved for actual data-quality states or an explicit user threshold. Everything must be legible on dark and light.
 
 ---
 
 ## 5. Data sources by resolution
 
-| Series | 1h | 24h | 30d | All-time | Source |
+| Series | 1h | 24h | 30d | All indexed | Source |
 |---|---|---|---|---|---|
 | Base fee per block | every block | 1-min buckets (min/avg/max) | 15-min buckets | 1-h buckets | `eth_feeHistory` (browser for the tail, collector for the rest) |
 | Gas used per block, gas/s | every block | 1-min | 15-min | 1-h | `eth_getBlockByNumber(n,false)` batched (collector) |
@@ -165,7 +174,7 @@ Visual rule: green-to-red is not a fee scale; use a single sequential ramp for "
 | L1 pricer, balances | 5 s live | 1-min samples | 15-min | 1-h | precompile / `eth_getBalance` (collector only; no backfill possible) |
 | L1 batch cost, cadence, Ethereum base fee | per batch | per batch | 15-min | 1-h | `batchPostingReportV2` internal txs in 2-tx blocks (collector; fully backfillable) |
 
-Volumes: 1h ≈ 38 k blocks, 24h ≈ 0.9 M, 30d ≈ 27 M, all-time ≈ 56 M and growing 0.9 M/day.
+Volumes: 1h ≈ 38 k blocks, 24h ≈ 0.9 M, 30d ≈ 27 M, indexed history at the time of measurement ≈ 56 M and growing 0.9 M/day.
 
 ---
 
@@ -280,7 +289,7 @@ make test-fidelity FIDELITY_URL=https://arb1.arbitrum.io/rpc FIDELITY_CPS=4 \
 - **Limiter semantics** are inferred, not documented. Log every 429 with timestamp and calls-in-last-10-s so the real window can be fitted from data.
 - **Constraint set changes** must be handled without redeploy: the page reads the constraint set from `meta.json` and the live call, renders N cards, and shows a "parameters changed at block …" banner within a minute.
 - **ArbOS upgrades** could change `P4` or the model (multi-gas constraints are already in the code). The version behind every block is recorded from its header and carried into the api (§7.1), while the sampled configuration or recorded constraint set identifies the model. An unmeasured combination is reported as such rather than assumed to behave like its predecessor. What remains open is the measurement itself: it covers the constraint-model versions in `pricer.VerifiedVersions(pricer.ModelConstraints)` and has to be repeated for each new combination.
-- **USD pricing** needs an external API; keep optional.
+- **USD pricing** needs an external API; keep optional. A true zero displays as `$0.00`. Any valid nonzero amount below one cent displays as `<$0.01`, so formatting never turns a small charge into an apparent zero.
 - **Fee-account balances** are a proxy for fees collected; withdrawals break it. Prefer `Σ gasUsed × baseFee` from headers for "fees/day", use balances only as a live counter.
 
 ---
@@ -289,7 +298,7 @@ make test-fidelity FIDELITY_URL=https://arb1.arbitrum.io/rpc FIDELITY_CPS=4 \
 
 1. `shared/pricer.ts` + unit tests against recorded live values. Browser-only page: hero strip, live constraint cards, 1h chart from `eth_feeHistory`, tail fill, back-off. (Ships without a collector; 24h+ tabs disabled.)
 2. Collector: follow head, state samples, replay with re-anchoring, 24h rollup, publish to R2. Enable 24h tab.
-3. Backfill 30 days of headers + all-time base fee; 30d and All tabs; owner-action timeline; explainer section with Taylor plot and burst-vs-sustained simulation.
+3. Backfill 30 days of headers + indexed base fee history; 30d and All indexed tabs; owner-action timeline; explainer section with Taylor plot and burst-vs-sustained simulation.
 4. Fee flows + L1 pricer sections; rate-limit telemetry; polish for mobile.
 
 ---

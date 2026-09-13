@@ -296,8 +296,10 @@ describe("definitions", () => {
     expect(signatureOf(legacy)).toBe("legacy:7000000/102/10");
     expect(bipsFor(legacy, [90_000_000])).toEqual([280]);
     expect(bipsFor(legacy, [])).toEqual([0]);
-    // A legacy snapshot without its parameters is read as an empty constraint set, never as a legacy definition.
-    expect(definitionOf({ ...snapshot, model: "legacy", constraints: [] })).toEqual({ model: "constraints", constraints: [] });
+    const unavailableLegacy = definitionOf({ ...snapshot, model: "legacy", constraints: [] });
+    expect(unavailableLegacy).toEqual({ model: "legacy", legacy: null });
+    expect(signatureOf(unavailableLegacy)).toBe("legacy:unavailable");
+    expect(bipsFor(unavailableLegacy, [])).toEqual([]);
     expect(bipsFor(definition, [900_000_000])).toEqual([10_000, 0]);
   });
 });

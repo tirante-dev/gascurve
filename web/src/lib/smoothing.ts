@@ -37,11 +37,12 @@ export const SWAP_GAS = 150_000;
  * state that moves; this is the definition that turns them into an exponent. */
 export type PricingDefinition =
   | { model: "constraints"; constraints: { target: number; window: number }[] }
-  | { model: "legacy"; legacy: { speedLimit: number; inertia: number; tolerance: number } };
+  | { model: "legacy"; legacy: { speedLimit: number; inertia: number; tolerance: number } | null };
 
-/** The definition a snapshot was priced under. A legacy snapshot without its parameters is read as an empty constraint set. */
+/** The definition a snapshot was priced under, preserving a legacy model even when its parameters are unavailable. */
 export function definitionOf(snapshot: Pick<LiveSnapshot, "model" | "constraints" | "legacy">): PricingDefinition {
-  if (snapshot.model === "legacy" && snapshot.legacy) {
+  if (snapshot.model === "legacy") {
+    if (!snapshot.legacy) return { model: "legacy", legacy: null };
     const { speedLimit, inertia, tolerance } = snapshot.legacy;
     return { model: "legacy", legacy: { speedLimit, inertia, tolerance } };
   }
@@ -55,6 +56,7 @@ export function definitionOf(snapshot: Pick<LiveSnapshot, "model" | "constraints
 export function signatureOf(definition: PricingDefinition): string {
   if (definition.model === "legacy") {
     const l = definition.legacy;
+    if (!l) return "legacy:unavailable";
     return `legacy:${l.speedLimit}/${l.inertia}/${l.tolerance}`;
   }
   return `constraints:${definition.constraints.map((c) => `${c.target}/${c.window}`).join(",")}`;
@@ -63,6 +65,7 @@ export function signatureOf(definition: PricingDefinition): string {
 /** The exponent contributions of `backlogs` under `definition`, through the integer pricer. A missing backlog counts as zero gas. */
 export function bipsFor(definition: PricingDefinition, backlogs: readonly number[]): number[] {
   if (definition.model === "legacy") {
+    if (!definition.legacy) return [];
     return [Number(legacyExponentBips(toLegacyState({ ...definition.legacy, backlog: backlogs[0] ?? 0 })))];
   }
   return contributionsBips(definition.constraints.map((c, i) => ({ target: c.target, window: c.window, backlog: backlogs[i] ?? 0 })));
@@ -302,7 +305,8 @@ export function targetValues(snapshot: LiveSnapshot, blocks: readonly BlockPoint
     definition,
     signature: signatureOf(definition),
   };
-  if (definition.model === "legacy" && snapshot.legacy) {
+  if (definition.model === "legacy") {
+    if (!snapshot.legacy) return { ...base, backlogs: [], ...derived(definition, []) };
     const backlogs = [drained(snapshot.legacy.backlog, snapshot.legacy.speedLimit, elapsedS)];
     return { ...base, backlogs, ...derived(definition, backlogs) };
   }
