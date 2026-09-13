@@ -97,9 +97,10 @@ type CollectorConfig struct {
 	HeaderBatchSize int           `mapstructure:"header_batch_size"`
 	BlockRetention  time.Duration `mapstructure:"block_retention"`
 	SampleRetention time.Duration `mapstructure:"sample_retention"`
-	// BackfillDepth is how far back the owner scan and the resumable backfill reach: a duration, or
-	// config.Genesis for the whole chain. It is decoded by hand in LoadWith rather than by
-	// mapstructure, which would have to read "genesis" as a number.
+	// BackfillDepth is how far back the owner scan and the resumable backfill reach: a duration,
+	// config.Genesis for the whole chain, or config.Hold for the floor the backfill has already
+	// reached. It is decoded by hand in LoadWith rather than by mapstructure, which would have to read
+	// those words as numbers.
 	BackfillDepth Depth `mapstructure:"-"`
 	// BackfillAnchorInterval is how many blocks the backfill replays between two state anchors on
 	// archive networks (default 1000). Networks without archive ignore it.
@@ -179,7 +180,8 @@ type NetworkConfig struct {
 	// HistoryEpoch requests a rebuild of this network's reconstructed history: a value above the
 	// stored one drops the backfill's buckets and checkpoints once and replays them. It is a counter
 	// rather than a flag so a restarted pod carrying the same configuration does not rebuild again.
-	// Raise it after giving the network an archive endpoint. Lowering it is ignored.
+	// Raise it after giving the network an archive endpoint, or alongside a shorter BackfillDepth to
+	// discard the history below the new floor: nothing else deletes a bucket. Lowering it is ignored.
 	HistoryEpoch int `mapstructure:"history_epoch"`
 	// Fallbacks are further endpoints for the same chain, tried in order when the active one fails.
 	// Capabilities are routed independently: the first endpoint with a ws_url serves newHeads, the
@@ -506,8 +508,8 @@ func (c *Config) Validate(requireRPC bool) error {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
 		}
 	}
-	if d := c.Collector.BackfillDepth; !d.IsGenesis() && d <= 0 {
-		errs = append(errs, fmt.Errorf("collector.backfill_depth must be positive, or %q for the whole chain", GenesisWord))
+	if d := c.Collector.BackfillDepth; !d.IsGenesis() && !d.IsHold() && d <= 0 {
+		errs = append(errs, fmt.Errorf("collector.backfill_depth must be positive, %q for the whole chain, or %q to stop where the backfill has reached", GenesisWord, HoldWord))
 	}
 	if r := c.Collector.BlockRetention; r > 0 && r < MinBlockRetention {
 		errs = append(errs, fmt.Errorf("collector.block_retention %v is below the minimum of %v, the widest bucket resolution: row-backed buckets are rebuilt from their rows, so rows must outlive the widest bucket", r, MinBlockRetention))

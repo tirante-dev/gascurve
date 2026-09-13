@@ -1178,6 +1178,94 @@ func TestTickReorg(t *testing.T) {
 	delete(store.FailOn, "GetState")
 }
 
+// TestTickReorgBelowOwnerScanOrigin restarts the owner scan when a rollback invalidates the state
+// sampled at its origin. Keeping that state would make later batch reports use parameters from the
+// orphaned fork.
+func TestTickReorgBelowOwnerScanOrigin(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	rows := make([]db.Block, 0, 3)
+	for _, n := range []uint64{849, 850, 1000} {
+		h := rpc.header(n)
+		rows = append(rows, db.Block{
+			ChainID: 4663, Number: n, Hash: h.Hash, ParentHash: h.ParentHash,
+			TS: time.Unix(int64(h.Timestamp), 0).UTC(), GasUsed: h.GasUsed, BaseFee: db.NewWei(h.BaseFee),
+		})
+	}
+	if err := store.UpsertBlocks(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{
+		db.StateOwnerScanOrigin:  `{"block":900,"minBaseFee":"20000000","archive":true,"batchCost":{"arbosVersion":61,"perBatchGasCharge":1,"parentGasFloorPerToken":10}}`,
+		db.StateOwnerLogCursor:   "1000",
+		db.StateOwnerScanThrough: "1000",
+		db.StateBatchScanCursor:  "1000",
+	} {
+		if err := store.SetState(ctx, 4663, key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Hold
+	if err := f.ensureInit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.scanExtended = true
+	f.mu.Unlock()
+
+	rpc.fork(850, "d")
+	rpc.setHead(850)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.Head() != 849 {
+		t.Fatalf("rewound head = %d, want 849", f.Head())
+	}
+	for _, key := range []string{db.StateOwnerScanOrigin, db.StateOwnerLogCursor, db.StateOwnerScanThrough} {
+		if value, ok, err := store.GetState(ctx, 4663, key); err != nil || ok {
+			t.Fatalf("%s survived the origin rollback: %q %v", key, value, err)
+		}
+	}
+	if value, _, _ := store.GetState(ctx, 4663, db.StateBatchScanCursor); value != "849" {
+		t.Fatalf("batch scan cursor = %q, want 849", value)
+	}
+	f.mu.Lock()
+	origin, through, extended := f.scanOrigin, f.ownerScanThrough, f.scanExtended
+	f.mu.Unlock()
+	if origin != nil || through != 0 || extended {
+		t.Fatalf("owner scan cache was not reset: %+v %d %v", origin, through, extended)
+	}
+
+	canonical, later := int64(2), int64(3)
+	f.mu.Lock()
+	f.batchCostAnchor = &batchCostAnchor{block: 1000, params: nitro.BatchPostingCostParams{
+		ArbOSVersion: 61, PerBatchGasCharge: later, ParentGasFloorPerToken: 10,
+	}}
+	f.batchCostChanges = []batchCostChange{
+		{block: 875, perBatchGas: &canonical},
+		{block: 950, perBatchGas: &later},
+	}
+	f.mu.Unlock()
+	resolver, err := f.batchCostResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := resolver.paramsAt(920, 61)
+	if err != nil || params.PerBatchGasCharge != canonical {
+		t.Fatalf("canonical batch cost parameters: %+v %v", params, err)
+	}
+
+	rpc.logRanges = nil
+	if err := f.scanOwnerActions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.logRanges) != 1 || rpc.logRanges[0] != [2]uint64{0, 849} {
+		t.Fatalf("owner scan did not restart: %v", rpc.logRanges)
+	}
+}
+
 func TestSlowDataAttachedToNextSample(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)

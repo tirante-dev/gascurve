@@ -649,3 +649,531 @@ func TestBackfillDepthWidensAcrossWindows(t *testing.T) {
 		}
 	}
 }
+
+// TestBackfillDepthHoldStopsTheDescent: backfill_depth hold settles a walk in
+// progress at the floor it has reached, lets the run in flight finish rather
+// than leaving half of it folded, and replays nothing below it. The floor it
+// settles on costs no header search.
+func TestBackfillDepthHoldStopsTheDescent(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	archive := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.archive = archive
+	f.cfg.BackfillWindow = 100
+	f.cfg.BackfillDepth = config.Genesis
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	for i := 0; i < 4; i++ {
+		if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+			t.Fatalf("step %d: %v %v", i, st, err)
+		}
+	}
+	c, err := f.loadCursor(ctx)
+	if err != nil || c.Done || !c.Active || c.DepthTarget != 1 {
+		t.Fatalf("mid descent: %+v %v", c, err)
+	}
+	floor := c.SegStart
+	held := newTestFollower(t, newFakeRPC(1000), store)
+	held.archive = archive
+	held.cfg.BackfillWindow = 100
+	held.cfg.BackfillDepth = config.Hold
+	if err := held.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, held, 50)
+	if c, err = held.loadCursor(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Done || c.DepthTarget != floor || c.DepthStart != floor || c.End != floor {
+		t.Fatalf("held cursor: %+v, floor %d", c, floor)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, floor); err != nil || b == nil {
+		t.Fatalf("the run in flight must finish: %+v %v", b, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, floor-1); err != nil || b != nil {
+		t.Fatalf("nothing below the held floor may be replayed: %+v %v", b, err)
+	}
+	if calls := held.rpc.(*fakeRPC).calledTimes("HeaderByNumber"); calls != 0 {
+		t.Fatalf("a held floor is the one already reached, not one searched for: %d header reads", calls)
+	}
+}
+
+// TestBackfillDepthHoldStopsAtTheSegmentFloor: nothing bounds a run without an
+// archive endpoint, so the floor a hold can offer is the whole constraint set
+// the run is replaying. It still stops the descent, at the end of that run
+// rather than within a window, and still replays nothing below it.
+func TestBackfillDepthHoldStopsAtTheSegmentFloor(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Genesis
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("first step: %v %v", st, err)
+	}
+	c, err := f.loadCursor(ctx)
+	if err != nil || !c.Active || c.SegStart != 500 || c.End != 1000 {
+		t.Fatalf("unwindowed run: %+v %v", c, err)
+	}
+	held := newTestFollower(t, newFakeRPC(1000), store)
+	held.cfg.BackfillDepth = config.Hold
+	if err := held.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, held, 200)
+	if c, err = held.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 500 || c.End != 500 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 499); err != nil || b != nil {
+		t.Fatalf("the segment below the held floor must not be replayed: %+v %v", b, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 500); err != nil || b == nil {
+		t.Fatalf("the run in flight must finish: %+v %v", b, err)
+	}
+}
+
+// TestBackfillDepthHoldSurvivesARewind: a reorg reaching above the backfill's
+// range drops its cursor and everything it built. The floor a hold recorded is
+// not in the configuration to be resolved again, so it outlives the cursor and
+// the rebuilt walk reaches it, rather than an emptied cursor reading as history
+// nobody wants and the hold settling at the new live start.
+func TestBackfillDepthHoldSurvivesARewind(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	archive := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	held := func(r *fakeRPC) *Follower {
+		f := newTestFollower(t, r, store)
+		f.archive = archive
+		f.cfg.BackfillWindow = 100
+		f.cfg.BackfillDepth = config.Hold
+		if err := f.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	f := newTestFollower(t, rpc, store)
+	f.archive = archive
+	f.cfg.BackfillWindow = 100
+	f.cfg.BackfillDepth = config.Genesis
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	for i := range 4 {
+		if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+			t.Fatalf("step %d: %v %v", i, st, err)
+		}
+	}
+	runBackfill(t, held(newFakeRPC(1000)), 50)
+	c, err := f.loadCursor(ctx)
+	if err != nil || !c.Done || c.DepthTarget != 900 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	// A reorg below the held floor: every row it built goes, and with them the
+	// cursor. Both fakes fork together, so the archive seeds the same chain.
+	rpc.fork(890, "d")
+	archive.fork(890, "d")
+	rpc.setHead(1005)
+	archive.setHead(1005)
+	after := held(rpc)
+	if c, err = after.loadCursor(ctx); err != nil || c.Top != 0 || c.DepthTarget != 900 {
+		t.Fatalf("the rewind keeps the floor asked for: %+v %v", c, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 900); err != nil || b != nil {
+		t.Fatalf("the rewind drops what the hold had built: %+v %v", b, err)
+	}
+	runBackfill(t, after, 200)
+	if c, err = after.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 900 || c.DepthStart != 900 {
+		t.Fatalf("the rebuilt walk reaches the held floor: %+v %v", c, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 900); err != nil || b == nil {
+		t.Fatalf("the held range must be reconstructed again: %+v %v", b, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 899); err != nil || b != nil {
+		t.Fatalf("nothing below the held floor: %+v %v", b, err)
+	}
+}
+
+// TestBackfillDepthHoldWhenAResetBeatsIt: a rewind lands on a tick, which can
+// come before the first backfill step of the process resolves the hold. The
+// cursor it resets still carries the deep target the previous configuration
+// was walking to, and preserving that verbatim would hand the rebuilt walk the
+// whole descent the hold was there to end.
+func TestBackfillDepthHoldWhenAResetBeatsIt(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	archive := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.archive = archive
+	f.cfg.BackfillWindow = 100
+	f.cfg.BackfillDepth = config.Genesis
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	// One whole window, so the rows above the reorg are contiguous and the
+	// ancestor it finds lies below the backfill's top.
+	var c *backfillCursor
+	var err error
+	for i := 0; i < 30; i++ {
+		if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+			t.Fatalf("step %d: %v %v", i, st, err)
+		}
+		if c, err = f.loadCursor(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if !c.Active {
+			break
+		}
+	}
+	if c.Active || c.DepthTarget != 1 || c.End != 900 {
+		t.Fatalf("one window under genesis: %+v", c)
+	}
+	rpc.fork(890, "d")
+	archive.fork(890, "d")
+	rpc.setHead(1005)
+	archive.setHead(1005)
+	held := newTestFollower(t, rpc, store)
+	held.archive = archive
+	held.cfg.BackfillWindow = 100
+	held.cfg.BackfillDepth = config.Hold
+	// The rewind runs here, before any backfill step has read the depth.
+	if err := held.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = held.loadCursor(ctx); err != nil || c.Top != 0 || c.DepthTarget != 900 {
+		t.Fatalf("the reset must leave the floor the walk had reached, not the one it was aiming at: %+v %v", c, err)
+	}
+	runBackfill(t, held, 200)
+	if c, err = held.loadCursor(ctx); err != nil || !c.Done || c.DepthStart != 900 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 899); err != nil || b != nil {
+		t.Fatalf("the descent the hold ended must not restart: %+v %v", b, err)
+	}
+}
+
+// TestResetTargetKeepsTheBottomOfTheHistory: what a reset cursor leaves behind.
+// Under a held depth it is the bottom of the history the reset deleted, which
+// is End and not the run in flight's own floor, since that run will never
+// finish and the blocks it wrote sit under a gap. Every other depth keeps the
+// floor it was asked for, which is what a duration and genesis both want.
+func TestResetTargetKeepsTheBottomOfTheHistory(t *testing.T) {
+	f := newTestFollower(t, newFakeRPC(1000), dbtest.New())
+	for _, tc := range []struct {
+		name  string
+		depth config.Depth
+		c     backfillCursor
+		want  uint64
+	}{
+		{"a run in flight stops at the history above it", config.Hold,
+			backfillCursor{Active: true, SegStart: 800, Next: 830, End: 900, DepthTarget: 1}, 900},
+		{"a walk between runs stops where it is", config.Hold,
+			backfillCursor{End: 900, DepthTarget: 1}, 900},
+		{"a walk bottomed below the floor asked for keeps what it built", config.Hold,
+			backfillCursor{End: 500, DepthTarget: 950}, 500},
+		{"nothing built falls back to the floor asked for", config.Hold,
+			backfillCursor{DepthTarget: 700}, 700},
+		{"a cursor written before the target existed reads its floor", config.Hold,
+			backfillCursor{DepthStart: 500}, 500},
+		{"a duration keeps the floor asked for", config.Depth(time.Hour),
+			backfillCursor{Active: true, SegStart: 800, End: 900, DepthTarget: 1}, 1},
+		{"genesis keeps the floor asked for", config.Genesis,
+			backfillCursor{End: 900, DepthTarget: 1}, 1},
+	} {
+		f.cfg.BackfillDepth = tc.depth
+		if got := f.resetTarget(&tc.c); got != tc.want {
+			t.Fatalf("%s: %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestBackfillDepthResolvesAgainAfterAReset: a head that rolls back far enough
+// leaves the floor resolved before it above the chain, which would report the
+// backfill done over an empty one. The floor a reset preserves is the ratchet,
+// not a resolution: it is compared against a fresh cutoff rather than standing
+// in for one.
+func TestBackfillDepthResolvesAgainAfterAReset(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Depth(30 * time.Second) // block 700 at head 1000
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, f, 200)
+	c, err := f.loadCursor(ctx)
+	if err != nil || c.DepthTarget != 700 {
+		t.Fatalf("first floor: %+v %v", c, err)
+	}
+	// The node comes back on a shorter chain, below the backfill's top.
+	rpc.fork(950, "d")
+	rpc.setHead(990)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = f.loadCursor(ctx); err != nil || c.Top != 0 || c.DepthTarget != 700 {
+		t.Fatalf("the reset keeps the floor as the ratchet: %+v %v", c, err)
+	}
+	// The rollback tick rewinds and samples nothing; the next one re-establishes
+	// the live head the backfill needs before it decides anything.
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	if _, err := f.BackfillStep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = f.loadCursor(ctx); err != nil || c.DepthTarget != 690 {
+		t.Fatalf("the window is measured back from the head the chain now has: %+v %v", c, err)
+	}
+}
+
+// TestBackfillDepthHoldOutlivesADiscardedCursor: the other reset. An
+// unverified live-model segment from an older collector is thrown away with
+// its buckets, and the floor the hold recorded has to survive that too, or the
+// discard would quietly become the end of the history it was keeping.
+func TestBackfillDepthHoldOutlivesADiscardedCursor(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Genesis
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(f)
+	if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+		t.Fatalf("first step: %v %v", st, err)
+	}
+	held := newTestFollower(t, newFakeRPC(1000), store)
+	held.cfg.BackfillDepth = config.Hold
+	if err := held.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, held, 200)
+	c, err := held.loadCursor(ctx)
+	if err != nil || c.DepthTarget != 500 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	c.Done, c.Active, c.SetID, c.Verified = false, true, 0, false
+	if err := held.saveCursor(ctx, store, c); err != nil {
+		t.Fatal(err)
+	}
+	after := newTestFollower(t, newFakeRPC(1000), store)
+	after.cfg.BackfillDepth = config.Hold
+	if err := after.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, after, 200)
+	if c, err = after.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 500 || c.DepthStart != 500 {
+		t.Fatalf("the discard keeps the floor asked for: %+v %v", c, err)
+	}
+}
+
+// TestBackfillDepthHoldIsIdempotent: the word says where the floor is, not
+// that it moves, so a pod restarting on the same configuration holds where it
+// held and does not walk on.
+func TestBackfillDepthHoldIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Depth(30 * time.Second) // block 700
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runBackfill(t, f, 200)
+	c, err := f.loadCursor(ctx)
+	if err != nil || !c.Done || c.End != 500 {
+		t.Fatalf("first floor: %+v %v", c, err)
+	}
+	for range 2 {
+		fresh := newFakeRPC(1000)
+		held := newTestFollower(t, fresh, store)
+		held.cfg.BackfillDepth = config.Hold
+		if err := held.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		scanned(held)
+		if st, err := held.BackfillStep(ctx); err != nil || st != BackfillDone {
+			t.Fatalf("a held backfill stays done: %v %v", st, err)
+		}
+		if c, err = held.loadCursor(ctx); err != nil || c.DepthTarget != 700 || c.DepthStart != 700 {
+			t.Fatalf("held cursor: %+v %v", c, err)
+		}
+		// The held floor is the one already recorded, so no cutoff is searched
+		// for: it is the search, not the comparison, that hold avoids here.
+		if calls := fresh.calledTimes("HeaderByNumber"); calls != 0 {
+			t.Fatalf("a held depth resolves no cutoff: %d header reads", calls)
+		}
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 499); err != nil || b != nil {
+		t.Fatalf("nothing below the held floor may be replayed: %+v %v", b, err)
+	}
+}
+
+// TestBackfillDepthHoldThenWidened: a held floor is not a state to be dug out
+// of. The run in flight finishes, so its blocks are folded once and once only,
+// and widening again resumes below the held floor rather than over it. The
+// chain is long enough to have an hour below the live start's, where buckets
+// fold additively: inside the boundary hour they are rebuilt from rows, which
+// would mask a block counted twice.
+func TestBackfillDepthHoldThenWidened(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(40_000) // ts base + 4000 s, so the hour from base is additive
+	archive := newFakeRPC(40_000)
+	store := dbtest.New()
+	if _, err := store.InsertConstraintSet(ctx, db.ConstraintSet{ChainID: 4663, EffectiveBlock: 100,
+		EffectiveAt: baseTime.Add(10 * time.Second), Source: model.SourceGenesis,
+		Constraints: entriesJSON([]model.ConstraintSetEntry{{Target: 60_000_000, Window: 15}, {Target: 40_000_000, Window: 86_400}})}); err != nil {
+		t.Fatal(err)
+	}
+	deep := func(depth config.Depth) *Follower {
+		f := newTestFollower(t, rpc, store, func(o *Options) { o.Network.CallsPerSecond = 0 })
+		f.archive = archive
+		f.now = func() time.Time { return baseTime.Add(4000 * time.Second) }
+		f.cfg.HeaderBatchSize = 100
+		f.cfg.BackfillWindow = 5000
+		f.cfg.BackfillDepth = depth
+		if err := f.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	boundary := baseTime.Add(3600 * time.Second)
+	f := deep(config.Genesis)
+	scanned(f)
+	for i := range 3 {
+		if st, err := f.BackfillStep(ctx); err != nil || st != BackfillProgressed {
+			t.Fatalf("step %d: %v %v", i, st, err)
+		}
+	}
+	c, err := f.loadCursor(ctx)
+	if err != nil || !c.Active || c.SegStart != 35_000 || c.Next >= c.End {
+		t.Fatalf("mid descent: %+v %v", c, err)
+	}
+
+	runBackfill(t, deep(config.Hold), 100)
+	if c, err = f.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 35_000 || c.End != 35_000 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	// The run in flight ran to its own floor rather than stopping where the
+	// hold found it, so the additive hour holds the whole of its lower half.
+	early, _ := store.Buckets(ctx, 4663, db.Resolution1h, baseTime, boundary)
+	if len(early) != 1 || early[0].Blocks != 1000 || early[0].LastBlock != 35_999 {
+		t.Fatalf("the held run must finish: %+v", early)
+	}
+
+	runBackfill(t, deep(config.Genesis), 600)
+	if c, err = f.loadCursor(ctx); err != nil || !c.Done || c.DepthTarget != 1 || c.End != 1 {
+		t.Fatalf("widened cursor: %+v %v", c, err)
+	}
+	// Blocks 100 (the earliest constraint set) to 35_999 (the last before the
+	// boundary hour), each folded exactly once. A run resumed over a range the
+	// hold had already folded would push this above 35_900.
+	if early, _ = store.Buckets(ctx, 4663, db.Resolution1h, baseTime, boundary); len(early) != 1 || early[0].Blocks != 35_900 {
+		t.Fatalf("a held and resumed walk folds every block once: %+v", early)
+	}
+}
+
+// TestBackfillDepthHoldWithNothingBuilt: a chain that has reconstructed
+// nothing holds at its first live block, so hold is also how a deployment
+// asks for live data and no history at all.
+func TestBackfillDepthHoldWithNothingBuilt(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.New()
+	seedSets(t, store)
+	f := newTestFollower(t, newFakeRPC(1000), store)
+	f.cfg.BackfillDepth = config.Hold
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The head has moved on since the live start, so a floor resolved from the
+	// configuration would land above it rather than on it.
+	later := newFakeRPC(1500)
+	held := newTestFollower(t, later, store)
+	held.cfg.BackfillDepth = config.Hold
+	if err := held.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	scanned(held)
+	if st, err := held.BackfillStep(ctx); err != nil || st != BackfillDone {
+		t.Fatalf("a held backfill with nothing built is done: %v %v", st, err)
+	}
+	c, err := held.loadCursor(ctx)
+	if err != nil || !c.Done || c.DepthTarget != 1000 || c.DepthStart != 1000 {
+		t.Fatalf("held cursor: %+v %v", c, err)
+	}
+	if b, err := store.BlockByNumber(ctx, 4663, 999); err != nil || b != nil {
+		t.Fatalf("a held chain reconstructs nothing: %+v %v", b, err)
+	}
+	if calls := later.calledTimes("HeaderByNumber"); calls != 0 {
+		t.Fatalf("a held depth resolves no cutoff: %d header reads", calls)
+	}
+}
+
+// TestBackfillDepthHoldScansNoHistory: a fresh owner scan under a held depth
+// has no window of its own to cover, so it starts at the margin below the head
+// rather than sweeping a chain the backfill will not replay.
+func TestBackfillDepthHoldScansNoHistory(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(largeChainHead)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Hold
+	if err := f.SlowTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpc.logRanges) == 0 || rpc.logRanges[0][0] == 0 {
+		t.Fatalf("a held scan is truncated, not swept from the first block: %v", rpc.logRanges[:1])
+	}
+	if _, ok, _ := store.GetState(ctx, 4663, db.StateOwnerScanOrigin); !ok {
+		t.Fatal("a truncated scan records where it started")
+	}
+}
+
+// TestBackfillDepthHoldLeavesTheScanOrigin: the owner scan origin is left
+// where a widening put it. Raising it would discard actions already scanned
+// for nothing, and the header search that would decide is not spent either.
+func TestBackfillDepthHoldLeavesTheScanOrigin(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	f.cfg.BackfillDepth = config.Hold
+	origin := &scanOrigin{Block: 300, Archive: true, MinBaseFee: "1"}
+	f.mu.Lock()
+	f.scanOrigin = origin
+	f.mu.Unlock()
+	if err := f.extendScanOrigin(ctx, 1000, 0); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	extended, kept := f.scanExtended, f.scanOrigin
+	f.mu.Unlock()
+	if !extended || kept != origin {
+		t.Fatalf("a held depth leaves the origin alone: %v %+v", extended, kept)
+	}
+	if calls := rpc.calledTimes("HeaderByNumber"); calls != 0 {
+		t.Fatalf("a held depth searches for no cutoff: %d header reads", calls)
+	}
+}
