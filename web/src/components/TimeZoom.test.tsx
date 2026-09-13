@@ -92,7 +92,8 @@ describe("TimeZoom", () => {
     expect(renders).toHaveBeenCalledTimes(1);
     expect(chartMoves).not.toHaveBeenCalled();
     expect(screen.getByText("0:100")).toBeInTheDocument();
-    expect(surface.querySelector("[aria-hidden=true]")).toHaveStyle({ left: "20px", width: "60px" });
+    const selection = surface.querySelector<HTMLElement>("[aria-hidden=true]");
+    expect(selection?.style.transform).toMatch(/^translate3d\(20px, 0px, 0\) scale3d\(60(?:\.\d+)?, 100, 1\)$/);
     fireEvent.pointerUp(surface, { pointerId: 1, clientX: 80, clientY: 50 });
     expect(renders).toHaveBeenCalledTimes(2);
     expect(screen.getByText("20:80")).toBeInTheDocument();

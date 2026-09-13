@@ -1,17 +1,6 @@
 "use client";
 
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-  type MouseEvent,
-  type PointerEvent,
-  type ReactNode,
-} from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { formatDateTime, formatDuration } from "@/utils/format";
 
 export type TimeDomain = readonly [number, number];
@@ -25,11 +14,6 @@ type PlotRect = {
   viewportTop: number;
 };
 
-type ZoomDraft = Pick<PlotRect, "top" | "height"> & {
-  left: number;
-  width: number;
-};
-
 type TimeZoomValue = {
   domain: TimeDomain;
   span: number;
@@ -39,30 +23,11 @@ type TimeZoomValue = {
   reset: () => void;
 };
 
-type DraftStore = {
-  getSnapshot: () => ZoomDraft | null;
-  subscribe: (listener: () => void) => () => void;
-  set: (draft: ZoomDraft | null) => void;
-};
-
 type Drag = {
   start: number;
   end: number;
   plot: PlotRect;
   pointerId: number;
-};
-
-type TimeZoomChartValue = TimeZoomValue & {
-  draft: DraftStore;
-  handlers: {
-    onPointerDownCapture: (event: PointerEvent<HTMLDivElement>) => void;
-    onPointerMoveCapture: (event: PointerEvent<HTMLDivElement>) => void;
-    onPointerUpCapture: (event: PointerEvent<HTMLDivElement>) => void;
-    onPointerCancelCapture: (event: PointerEvent<HTMLDivElement>) => void;
-    onMouseDownCapture: (event: MouseEvent<HTMLDivElement>) => void;
-    onMouseMoveCapture: (event: MouseEvent<HTMLDivElement>) => void;
-    onDoubleClickCapture: (event: MouseEvent<HTMLDivElement>) => void;
-  };
 };
 
 const TimeZoomContext = createContext<TimeZoomValue | null>(null);
@@ -74,7 +39,9 @@ function within(domain: TimeDomain, full: TimeDomain): TimeDomain {
 }
 
 function numberAttribute(element: Element, name: string): number | null {
-  const value = Number(element.getAttribute(name));
+  const attribute = element.getAttribute(name);
+  if (attribute === null) return null;
+  const value = Number(attribute);
   return Number.isFinite(value) ? value : null;
 }
 
@@ -114,29 +81,17 @@ function fractionAt(clientX: number, plot: PlotRect): number {
   return Math.max(0, Math.min(1, (clientX - plot.viewportLeft) / plot.width));
 }
 
-function preview(drag: Drag): ZoomDraft {
+function drawSelection(selection: HTMLDivElement | null, drag: Drag | null) {
+  if (selection === null) return;
+  if (drag === null || drag.start === drag.end) {
+    selection.style.display = "none";
+    return;
+  }
   const from = Math.min(drag.start, drag.end);
   const to = Math.max(drag.start, drag.end);
-  return { left: drag.plot.left + from * drag.plot.width, top: drag.plot.top, width: (to - from) * drag.plot.width, height: drag.plot.height };
+  selection.style.display = "block";
+  selection.style.transform = `translate3d(${drag.plot.left + from * drag.plot.width}px, ${drag.plot.top}px, 0) scale3d(${(to - from) * drag.plot.width}, ${drag.plot.height}, 1)`;
 }
-
-function createDraftStore(): DraftStore {
-  let current: ZoomDraft | null = null;
-  const listeners = new Set<() => void>();
-  return {
-    getSnapshot: () => current,
-    subscribe: (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    set: (next) => {
-      current = next;
-      listeners.forEach((listener) => listener());
-    },
-  };
-}
-
-const EMPTY_DRAFT = createDraftStore();
 
 export function TimeZoomProvider({ domain, mode = "timestamp", children }: { domain: TimeDomain | null; mode?: "timestamp" | "relative"; children: ReactNode }) {
   const [selected, setSelected] = useState<TimeDomain | null>(null);
@@ -165,9 +120,12 @@ export function TimeZoomProvider({ domain, mode = "timestamp", children }: { dom
   return <TimeZoomContext value={value}>{children}</TimeZoomContext>;
 }
 
-export function useTimeZoomChart(): TimeZoomChartValue | null {
-  const zoom = useContext(TimeZoomContext);
-  const [draft] = useState(createDraftStore);
+export function useTimeZoomChart(): TimeZoomValue | null {
+  return useContext(TimeZoomContext);
+}
+
+export function TimeZoomSurface({ zoom, children }: { zoom: TimeZoomValue | null; children: ReactNode }) {
+  const selection = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
 
   const begin = useCallback(
@@ -180,20 +138,17 @@ export function useTimeZoomChart(): TimeZoomChartValue | null {
       event.currentTarget.setPointerCapture?.(event.pointerId);
       const at = fractionAt(event.clientX, plot);
       drag.current = { start: at, end: at, plot, pointerId: event.pointerId };
-      draft.set(preview(drag.current));
+      drawSelection(selection.current, drag.current);
     },
-    [draft, zoom],
+    [zoom],
   );
-  const move = useCallback(
-    (event: PointerEvent<HTMLDivElement>) => {
-      if (drag.current === null || event.pointerId !== drag.current.pointerId) return;
-      event.preventDefault();
-      event.stopPropagation();
-      drag.current.end = fractionAt(event.clientX, drag.current.plot);
-      draft.set(preview(drag.current));
-    },
-    [draft],
-  );
+  const move = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (drag.current === null || event.pointerId !== drag.current.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    drag.current.end = fractionAt(event.clientX, drag.current.plot);
+    drawSelection(selection.current, drag.current);
+  }, []);
   const finish = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
       const current = drag.current;
@@ -202,25 +157,22 @@ export function useTimeZoomChart(): TimeZoomChartValue | null {
       event.stopPropagation();
       current.end = fractionAt(event.clientX, current.plot);
       drag.current = null;
-      draft.set(null);
+      drawSelection(selection.current, null);
       event.currentTarget.releasePointerCapture?.(event.pointerId);
       const from = Math.min(current.start, current.end);
       const to = Math.max(current.start, current.end);
       zoom.select([zoom.domain[0] + from * zoom.span, zoom.domain[0] + to * zoom.span]);
     },
-    [draft, zoom],
+    [zoom],
   );
-  const cancel = useCallback(
-    (event: PointerEvent<HTMLDivElement>) => {
-      if (drag.current === null || event.pointerId !== drag.current.pointerId) return;
-      event.preventDefault();
-      event.stopPropagation();
-      drag.current = null;
-      draft.set(null);
-      event.currentTarget.releasePointerCapture?.(event.pointerId);
-    },
-    [draft],
-  );
+  const cancel = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (drag.current === null || event.pointerId !== drag.current.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    drag.current = null;
+    drawSelection(selection.current, null);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  }, []);
   const guardMouse = useCallback((event: MouseEvent<HTMLDivElement>) => {
     if (drag.current === null) return;
     event.preventDefault();
@@ -232,44 +184,31 @@ export function useTimeZoomChart(): TimeZoomChartValue | null {
       event.preventDefault();
       event.stopPropagation();
       drag.current = null;
-      draft.set(null);
+      drawSelection(selection.current, null);
       zoom.reset();
     },
-    [draft, zoom],
+    [zoom],
   );
-  const handlers = useMemo(
-    () => ({
-      onPointerDownCapture: begin,
-      onPointerMoveCapture: move,
-      onPointerUpCapture: finish,
-      onPointerCancelCapture: cancel,
-      onMouseDownCapture: guardMouse,
-      onMouseMoveCapture: guardMouse,
-      onDoubleClickCapture: reset,
-    }),
-    [begin, cancel, finish, guardMouse, move, reset],
-  );
-  return useMemo(() => (zoom === null ? null : { ...zoom, draft, handlers }), [draft, handlers, zoom]);
-}
 
-function TimeZoomSelection({ zoom }: { zoom: TimeZoomChartValue | null }) {
-  const store = zoom?.draft ?? EMPTY_DRAFT;
-  const draft = useSyncExternalStore(store.subscribe, store.getSnapshot, EMPTY_DRAFT.getSnapshot);
-  if (!draft || draft.width === 0) return null;
   return (
     <div
-      aria-hidden="true"
-      className="pointer-events-none absolute z-10 border-x"
-      style={{ left: draft.left, top: draft.top, width: draft.width, height: draft.height, borderColor: "var(--accent-2)", background: "color-mix(in srgb, var(--accent-2) 16%, transparent)" }}
-    />
-  );
-}
-
-export function TimeZoomSurface({ zoom, children }: { zoom: TimeZoomChartValue | null; children: ReactNode }) {
-  return (
-    <div className={`relative h-full w-full ${zoom ? "cursor-crosshair select-none" : ""}`} {...zoom?.handlers}>
+      className={`relative h-full w-full ${zoom ? "cursor-crosshair select-none" : ""}`}
+      onPointerDownCapture={begin}
+      onPointerMoveCapture={move}
+      onPointerUpCapture={finish}
+      onPointerCancelCapture={cancel}
+      onMouseDownCapture={guardMouse}
+      onMouseMoveCapture={guardMouse}
+      onDoubleClickCapture={reset}
+    >
       {children}
-      <TimeZoomSelection zoom={zoom} />
+      <div
+        ref={selection}
+        data-time-zoom-selection=""
+        aria-hidden="true"
+        className="pointer-events-none absolute left-0 top-0 z-10 hidden h-px w-px origin-top-left"
+        style={{ background: "color-mix(in srgb, var(--accent-2) 20%, transparent)", willChange: "transform" }}
+      />
     </div>
   );
 }
