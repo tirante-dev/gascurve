@@ -15,6 +15,7 @@ import { EnlargeLink } from "./ChartActions";
 import { ChartTooltip } from "./ChartTooltip";
 import { GapBands, GapNote, PartialBands, PartialHatch, PartialNote } from "./ChartGaps";
 import { Card, ChartFrame, Legend, Stat, TIME_AXIS_RIGHT, type ChartHeight } from "./primitives";
+import { TimeZoomControls, TimeZoomSurface, useTimeZoomChart } from "./TimeZoom";
 
 // "batch" is exactly one point per posting report (every 12 to 24 s on Robinhood).
 // Both reports and poster fees are grouped into 15 s buckets before the join,
@@ -93,6 +94,7 @@ export function l1CostLegend(totals: L1Costs["totals"]) {
 
 /** Poster fees against ArbOS-attributed batch-poster spending, per bucket. */
 export const L1CostChart = memo(function L1CostChart({ rows, bucket, span, domain, gaps = NO_GAPS, height = L1_CHART_HEIGHT }: { rows: CostRow[]; bucket: number; span: number; domain: [number, number]; gaps?: GapModel; height?: ChartHeight }) {
+  const zoom = useTimeZoomChart();
   const window = gaps.window.to > gaps.window.from ? gaps.window : { from: rows[0]?.t ?? 0, to: rows[rows.length - 1]?.t ?? 0 };
   const bands = useMemo(() => partialBands(rows, bucket, window.to), [rows, bucket, window.to]);
   // Recharts keys its selectors off the `data` identity, so the broken rows
@@ -106,12 +108,13 @@ export const L1CostChart = memo(function L1CostChart({ rows, bucket, span, domai
             <PartialHatch />
           </defs>
         </svg>
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
+        <TimeZoomSurface zoom={zoom}>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={drawn} margin={{ top: 8, right: TIME_AXIS_RIGHT, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} />
             <GapBands gaps={gaps.gaps} />
             <PartialBands bands={bands} />
-            <XAxis dataKey="t" type="number" domain={[window.from, window.to]} tickFormatter={(t: number) => formatTick(t, span)} tickLine={false} axisLine={false} minTickGap={48} />
+            <XAxis dataKey="t" type="number" domain={zoom?.domain ?? [window.from, window.to]} allowDataOverflow tickFormatter={(t: number) => formatTick(t, zoom?.span ?? span)} tickLine={false} axisLine={false} minTickGap={48} />
             <YAxis scale="log" domain={domain} tickFormatter={(v: number) => formatSignificant(v, 1)} tickLine={false} axisLine={false} width={56} />
             <Tooltip
               isAnimationActive={false}
@@ -130,8 +133,9 @@ export const L1CostChart = memo(function L1CostChart({ rows, bucket, span, domai
             />
             <Line type="monotone" dataKey="plottedPosterFeesEth" stroke="var(--series-1)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
             <Line type="monotone" dataKey="attributedCostEth" stroke="var(--series-2)" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
-          </LineChart>
-        </ResponsiveContainer>
+            </LineChart>
+          </ResponsiveContainer>
+        </TimeZoomSurface>
       </ChartFrame>
       <GapNote gaps={gaps} />
       <PartialNote bands={bands} />
@@ -156,6 +160,7 @@ export function L1Section({ network, range, snapshot, series }: { network: strin
         L1 pricer and attributed batch costs <span className="ml-2 font-normal text-ink-3">{open ? "" : "collapsed"}</span>
       </summary>
       <div className="border-t border-hairline p-4">
+        <TimeZoomControls className="mb-3" />
         {l1State ? (
           <div className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
             <Stat label="Price per L1 gas unit" value={formatGwei(l1State.baseFeeEstimate)} unit="gwei" size="sm" hint="getL1BaseFeeEstimate" />
