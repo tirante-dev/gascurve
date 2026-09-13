@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { memo, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { TimeZoomControls, TimeZoomProvider, TimeZoomSurface, useTimeZoomChart } from "./TimeZoom";
 
@@ -97,6 +98,40 @@ describe("TimeZoom", () => {
     fireEvent.pointerUp(surface, { pointerId: 1, clientX: 80, clientY: 50 });
     expect(renders).toHaveBeenCalledTimes(2);
     expect(screen.getByText("20:80")).toBeInTheDocument();
+  });
+
+  // A zoomed provider that hands out a fresh domain each render re-renders every
+  // memoised chart on the frame clock, which is what made zoomed charts crawl.
+  it("holds the context value still while a zoomed parent re-renders", () => {
+    const chart = vi.fn();
+    const Chart = memo(function Chart() {
+      chart();
+      const zoom = useTimeZoomChart();
+      if (zoom === null) return <span>no zoom</span>;
+      return (
+        <TimeZoomSurface zoom={zoom}>
+          <div data-testid="chart" />
+        </TimeZoomSurface>
+      );
+    });
+    function Frame() {
+      const [tick, setTick] = useState(0);
+      return (
+        <TimeZoomProvider domain={[0, 100]}>
+          <button type="button" onClick={() => setTick(tick + 1)}>
+            frame
+          </button>
+          <Chart />
+        </TimeZoomProvider>
+      );
+    }
+    render(<Frame />);
+    const frame = screen.getByRole("button", { name: "frame" });
+    drag(chartSurface(), 20, 80);
+    chart.mockClear();
+    fireEvent.click(frame);
+    fireEvent.click(frame);
+    expect(chart).not.toHaveBeenCalled();
   });
 
   it("does not offer zoom for an empty domain", () => {

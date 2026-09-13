@@ -99,7 +99,10 @@ export function TimeZoomProvider({ domain, mode = "timestamp", children }: { dom
   const fullFrom = valid ? domain[0] : 0;
   const fullTo = valid ? domain[1] : 1;
   const full = useMemo<TimeDomain>(() => [fullFrom, fullTo], [fullFrom, fullTo]);
-  const visible = selected === null ? full : within(selected, full);
+  const bounded = selected === null ? null : within(selected, [fullFrom, fullTo]);
+  const visibleFrom = bounded === null ? fullFrom : bounded[0];
+  const visibleTo = bounded === null ? fullTo : bounded[1];
+  const visible = useMemo<TimeDomain>(() => [visibleFrom, visibleTo], [visibleFrom, visibleTo]);
 
   const reset = useCallback(() => {
     setSelected(null);
