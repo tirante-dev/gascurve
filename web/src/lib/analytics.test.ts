@@ -10,9 +10,12 @@ afterEach(() => {
 });
 
 describe("analytics paths", () => {
-  it("serves the script and the collection endpoint from this origin", () => {
-    expect(ANALYTICS_PROXY_PATH).toBe("/api/stats");
-    expect(ANALYTICS_SCRIPT_PATH).toBe("/api/stats/script.js");
+  it("serves the script and the collection endpoint from this origin, outside /api", () => {
+    expect(ANALYTICS_PROXY_PATH).toBe("/stats");
+    expect(ANALYTICS_SCRIPT_PATH).toBe("/stats/script.js");
+    // /api is the Go API's prefix wherever one proxy fronts both, so a path under it never reaches the
+    // web pod. See docs/ARCHITECTURE.md, section 8.
+    expect(ANALYTICS_PROXY_PATH.startsWith("/api")).toBe(false);
     // Root relative, so the tracker reports to whichever origin served the page.
     expect(ANALYTICS_HOST_URL.startsWith("/")).toBe(true);
     expect(ANALYTICS_BEFORE_SEND).toBe("gascurveBeforeSend");

@@ -16,7 +16,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("GET /api/stats", () => {
+describe("GET /stats", () => {
   it("relays the tracker script and caches it", async () => {
     let requested: string | undefined;
     vi.stubGlobal("fetch", async (url: string) => {
@@ -24,7 +24,7 @@ describe("GET /api/stats", () => {
       return new Response("!function(){}", { status: 200, headers: { "Content-Type": "text/javascript" } });
     });
 
-    const response = await GET(new Request("https://gascurve.com/api/stats/script.js"), params("script.js"));
+    const response = await GET(new Request("https://gascurve.com/stats/script.js"), params("script.js"));
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("!function(){}");
@@ -39,7 +39,7 @@ describe("GET /api/stats", () => {
       return new Response("", { status: 200 });
     });
 
-    await GET(new Request("https://gascurve.com/api/stats/script.js", { headers: { cookie: "session=secret", "user-agent": "probe" } }), params("script.js"));
+    await GET(new Request("https://gascurve.com/stats/script.js", { headers: { cookie: "session=secret", "user-agent": "probe" } }), params("script.js"));
 
     expect(sent?.has("cookie")).toBe(false);
     expect(sent?.get("user-agent")).toBe("probe");
@@ -49,8 +49,8 @@ describe("GET /api/stats", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    expect((await GET(new Request("https://gascurve.com/api/stats/api/send"), params("api", "send"))).status).toBe(404);
-    expect((await GET(new Request("https://gascurve.com/api/stats/../../etc"), params("..", "..", "etc"))).status).toBe(404);
+    expect((await GET(new Request("https://gascurve.com/stats/api/send"), params("api", "send"))).status).toBe(404);
+    expect((await GET(new Request("https://gascurve.com/stats/../../etc"), params("..", "..", "etc"))).status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -59,22 +59,22 @@ describe("GET /api/stats", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    expect((await GET(new Request("https://gascurve.com/api/stats/script.js"), params("script.js"))).status).toBe(404);
+    expect((await GET(new Request("https://gascurve.com/stats/script.js"), params("script.js"))).status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("502s when the instance answers with an error or cannot be reached", async () => {
     vi.stubGlobal("fetch", async () => new Response("nope", { status: 500 }));
-    expect((await GET(new Request("https://gascurve.com/api/stats/script.js"), params("script.js"))).status).toBe(502);
+    expect((await GET(new Request("https://gascurve.com/stats/script.js"), params("script.js"))).status).toBe(502);
 
     vi.stubGlobal("fetch", async () => {
       throw new Error("ECONNREFUSED");
     });
-    expect((await GET(new Request("https://gascurve.com/api/stats/script.js"), params("script.js"))).status).toBe(502);
+    expect((await GET(new Request("https://gascurve.com/stats/script.js"), params("script.js"))).status).toBe(502);
   });
 });
 
-describe("POST /api/stats", () => {
+describe("POST /stats", () => {
   it("relays a beacon and returns what the instance said", async () => {
     let body: string | undefined;
     vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
@@ -84,7 +84,7 @@ describe("POST /api/stats", () => {
     });
 
     const beacon = JSON.stringify({ type: "event", payload: { website: "id", url: "/robinhood" } });
-    const response = await POST(new Request("https://gascurve.com/api/stats/api/send", { method: "POST", body: beacon }), params("api", "send"));
+    const response = await POST(new Request("https://gascurve.com/stats/api/send", { method: "POST", body: beacon }), params("api", "send"));
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("token");
@@ -96,7 +96,28 @@ describe("POST /api/stats", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    expect((await POST(new Request("https://gascurve.com/api/stats/script.js", { method: "POST" }), params("script.js"))).status).toBe(404);
+    expect((await POST(new Request("https://gascurve.com/stats/script.js", { method: "POST" }), params("script.js"))).status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a body bigger than a beacon, by declared length and by what arrives", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const oversized = "x".repeat(17 * 1024);
+
+    const declared = await POST(new Request("https://gascurve.com/stats/api/send", { method: "POST", body: oversized }), params("api", "send"));
+    expect(declared.status).toBe(413);
+
+    // A chunked body declares no length, so the ceiling has to hold while the stream is read.
+    const chunked = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(oversized));
+        controller.close();
+      },
+    });
+    const streamed = await POST(new Request("https://gascurve.com/stats/api/send", { method: "POST", body: chunked, duplex: "half" } as RequestInit), params("api", "send"));
+    expect(streamed.status).toBe(413);
+
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -105,7 +126,7 @@ describe("POST /api/stats", () => {
       throw new Error("ECONNREFUSED");
     });
 
-    const response = await POST(new Request("https://gascurve.com/api/stats/api/send", { method: "POST", body: "{}" }), params("api", "send"));
+    const response = await POST(new Request("https://gascurve.com/stats/api/send", { method: "POST", body: "{}" }), params("api", "send"));
     expect(response.status).toBe(502);
   });
 });

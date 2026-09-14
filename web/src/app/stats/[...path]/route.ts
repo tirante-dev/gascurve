@@ -1,9 +1,7 @@
 /**
- * First party proxy to the self hosted Umami instance, so the tracker script and the pageviews it reports
- * both travel over this app's own origin:
- *
- *   GET  /api/stats/script.js  ->  {UMAMI_URL}/script.js
- *   POST /api/stats/api/send   ->  {UMAMI_URL}/api/send
+ * First party proxy to the self hosted Umami instance, relaying GET /stats/script.js and
+ * POST /stats/api/send to {UMAMI_URL}. Not under /api, which belongs to the Go API in every deployment
+ * that fronts both: a path there would 404 everywhere but `next start`. See docs/ARCHITECTURE.md.
  */
 
 // Only those two paths are relayed. The upstream base is operator set, but an unrestricted path would
@@ -14,6 +12,11 @@
 export const dynamic = "force-dynamic";
 
 const UPSTREAM_TIMEOUT_MS = 10_000;
+
+/** A tracker beacon is a few hundred bytes. This endpoint is public, so a body is read against a ceiling
+ * rather than buffered whole: without one a client could make every replica hold an arbitrary body in
+ * memory and forward it upstream. */
+const MAX_BEACON_BYTES = 16 * 1024;
 
 /** Relative to UMAMI_URL, matched exactly against the joined route path. */
 const SCRIPT_PATH = "script.js";
@@ -82,6 +85,38 @@ async function relay(request: Request, upstreamUrl: string, body: BodyInit | nul
   }
 }
 
+/** The request body as text, or null when it is longer than `limit`. A declared length over the ceiling is
+ * refused outright; the stream is then counted as it is read, since a chunked body declares none. */
+async function readBody(request: Request, limit: number): Promise<string | null> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) return null;
+
+  const body = request.body;
+  if (body === null) return "";
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+
+  const joined = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+
 async function resolvePath(params: Promise<{ path: string[] }>): Promise<string> {
   const { path } = await params;
   return (path ?? []).join("/");
@@ -110,9 +145,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ pat
   const base = upstreamBase();
   if (base === "" || (await resolvePath(params)) !== COLLECT_PATH) return new Response(null, { status: 404 });
 
-  // Buffered rather than streamed: the payload is a few hundred bytes, and a stream body would need duplex
-  // support that not every runtime offers.
-  const upstream = await relay(request, `${base}/${COLLECT_PATH}`, await request.text());
+  // Relayed as text rather than as a stream: a stream body would need duplex support that not every
+  // runtime offers, and the ceiling above is what makes buffering it safe.
+  const body = await readBody(request, MAX_BEACON_BYTES);
+  if (body === null) return new Response(null, { status: 413 });
+
+  const upstream = await relay(request, `${base}/${COLLECT_PATH}`, body);
   // The tracker ignores the response, so an unreachable instance costs the visitor nothing but a status.
   if (upstream === null) return new Response(null, { status: 502 });
 

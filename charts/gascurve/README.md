@@ -32,7 +32,7 @@ helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
 | `database.url` | Rendered into a chart-managed Secret. Exactly one of `database.url` and `database.existingSecret` is required when the collector or api is enabled | `""` |
 | `database.existingSecret`, `database.existingSecretKey` | Use an existing Secret instead of `database.url` | `""`, `DB_URL` |
 | `migrations.enabled` | Run `gascurve-migrate up` as an init container on the collector and api pods | `true` |
-| `web.umamiUrl` | Base URL of a self-hosted Umami instance for the web app's `/api/stats` proxy to relay to. See Web analytics | `""` |
+| `web.umamiUrl` | Base URL of a self-hosted Umami instance for the web app's `/stats` proxy to relay to. See Web analytics | `""` |
 | `collector.securityContext`, `api.securityContext`, `web.securityContext`, `migrations.securityContext` | Numeric `runAsUser`/`runAsGroup`, must match the image's `USER` | `65532` (Go images), `1001` (web) |
 | `config` | Rendered to `config.yaml` (networks, collector pacing, CORS) | see values.yaml |
 | `collector.extraEnv`, `api.extraEnv`, `migrations.extraEnv` | Extra env for that container only. Private RPC URLs belong in `collector.extraEnv` | `[]` |
@@ -97,7 +97,9 @@ Upgrades of an existing release with both ingress and API enabled must add `conf
 
 ## Web analytics
 
-The web image can load a [Umami](https://umami.is) tracker, and serves both halves of it from the site's own origin: `GET /api/stats/script.js` and `POST /api/stats/api/send` are relayed to `UMAMI_URL`, which `web.umamiUrl` sets. Nothing else under that path is forwarded, so the route cannot be used as a general proxy into whatever the web pod can reach. The instance is contacted from inside the cluster and never by the visitor, so a Service address is the expected value and the instance does not have to be reachable from the internet, need no CORS configuration, and is not named anywhere in the page.
+The web image can load a [Umami](https://umami.is) tracker, and serves both halves of it from the site's own origin: `GET /stats/script.js` and `POST /stats/api/send` are relayed to `UMAMI_URL`, which `web.umamiUrl` sets. Nothing else under that path is forwarded, so the route cannot be used as a general proxy into whatever the web pod can reach, and a body larger than a beacon is refused rather than buffered. The instance is contacted from inside the cluster and never by the visitor, so a Service address is the expected value and the instance does not have to be reachable from the internet, need no CORS configuration, and is not named anywhere in the page.
+
+The path is deliberately not under `/api`. This chart's Ingress sends the whole `/api` prefix to the API service, and a deployment fronting both components some other way (a Cloudflare Tunnel, a Gateway) splits them the same way, so a proxy under `/api` would reach the Go API, which has no such route, and analytics would 404 with nothing to show for it. `/stats` falls through to the web backend on the rule that is already there, which is why neither this chart's Ingress nor an external proxy needs a rule of its own.
 
 Two switches, and both must be on. `web.umamiUrl` is the runtime half. The website id is the build-time half: Next inlines `NEXT_PUBLIC_*` into the client bundle, so it is baked in by `Dockerfile.web` from the `NEXT_PUBLIC_UMAMI_WEBSITE_ID` build argument, which the publish workflow fills from the `UMAMI_WEBSITE_ID` repository variable. An image built without one loads no tracker at all, whatever `web.umamiUrl` says, and that is the shape a deployment that does not want analytics should use: leaving the id in and the URL out means the page still asks for a script that 404s.
 

@@ -1,8 +1,8 @@
 // Client side interface to the self hosted Umami instance. Both the tracker script and the endpoint it
-// reports to are served from this app's own origin by app/api/stats/[...path]/route.ts. See
-// docs/ARCHITECTURE.md, section 8, for why.
+// reports to are served from this app's own origin by app/stats/[...path]/route.ts. See
+// docs/ARCHITECTURE.md, section 8, for why, and for why this path is not under /api.
 
-export const ANALYTICS_PROXY_PATH = "/api/stats";
+export const ANALYTICS_PROXY_PATH = "/stats";
 
 export const ANALYTICS_SCRIPT_PATH = `${ANALYTICS_PROXY_PATH}/script.js`;
 
