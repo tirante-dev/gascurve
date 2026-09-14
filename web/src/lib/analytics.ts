@@ -1,30 +1,24 @@
-// Client side interface to the self hosted Umami instance. The tracker script and the endpoint it
-// reports to are both served from this app's own origin by app/api/stats/[...path]/route.ts, so no
-// analytics hostname appears in the page and a filter list keyed on one does not block collection.
+// Client side interface to the self hosted Umami instance. Both the tracker script and the endpoint it
+// reports to are served from this app's own origin by app/api/stats/[...path]/route.ts. See
+// docs/ARCHITECTURE.md, section 8, for why.
 
-/** Where the proxy serves the tracker from, and what the tracker reports back to. */
 export const ANALYTICS_PROXY_PATH = "/api/stats";
 
 export const ANALYTICS_SCRIPT_PATH = `${ANALYTICS_PROXY_PATH}/script.js`;
 
-/** The tracker appends its collection path to data-host-url verbatim, so a root relative value resolves
- * against whichever origin served the page: one build reports correctly from production, a preview and
- * localhost alike, with no origin in the bundle and no CORS preflight. */
+/** data-host-url. Root relative, so the tracker reports to whichever origin served the page and one build
+ * works in production, in a preview and on localhost alike. */
 export const ANALYTICS_HOST_URL = ANALYTICS_PROXY_PATH;
 
-/** Baked in by Dockerfile.web. Next inlines NEXT_PUBLIC_ values at build time, so an id supplied only at
- * run time never reaches the browser. Empty is the off switch: no tracker is loaded at all. */
+/** Baked in by Dockerfile.web, since Next inlines NEXT_PUBLIC_ values at build time. Empty is the off
+ * switch: no tracker is loaded at all. */
 export const ANALYTICS_WEBSITE_ID = process.env.NEXT_PUBLIC_UMAMI_WEBSITE_ID ?? "";
 
-/** Custom events and the properties each carries. Umami turns properties into filter facets rather than
- * log lines, so keep the values scalar and low cardinality. An empty `previous` is a page that was still
- * on its default, since these two read the outgoing value off the URL. */
+/** Custom events and their properties, which Umami turns into filter facets rather than log lines: keep
+ * the values scalar and low cardinality. An empty `previous` is a page that was still on its default. */
 interface AnalyticsEvents {
-  /** A visitor changed chain from the header's network picker. */
   "network-switch": { from: string; to: string };
-  /** A visitor changed a chart page's range. */
   "range-change": { chart: string; range: string; previous: string };
-  /** A visitor changed a chart page's constraint slot. */
   "constraint-change": { chart: string; constraint: string; previous: string };
 }
 
@@ -38,8 +32,8 @@ interface TrackerPayload {
   name?: string;
 }
 
-/** Name of the global the tracker calls before every beacon, passed to it as data-before-send. The literal
- * type keeps it from drifting from the Window property declared below. */
+/** Passed to the tracker as data-before-send. The literal type keeps it from drifting from the Window
+ * property declared below. */
 export const ANALYTICS_BEFORE_SEND = "gascurveBeforeSend" as const;
 
 declare global {
@@ -54,8 +48,8 @@ const STATE_PARAMS = ["range", "constraint"] as const;
 
 let lastPageviewKey: string | null = null;
 
-/** Path and query of a pageview URL, minus the state parameters. The tracker reports `url` as a path, not
- * an absolute URL, so parsing needs a base; an absolute one still parses as itself. */
+/** The tracker reports `url` as a path, not an absolute URL, so parsing it needs a base. An absolute one
+ * still parses as itself. */
 function pageviewKey(url: string): string | null {
   let parsed: URL;
   try {
@@ -68,13 +62,9 @@ function pageviewKey(url: string): string | null {
 }
 
 /**
- * Drops the pageview that changing a chart's range or constraint would otherwise produce. Both live in the
- * query string so a view can be linked, and the tracker reports on any URL change, so the site's most
- * common interaction would inflate pageviews on exactly the pages that get used most. Each switch is still
- * recorded, as an event carrying both sides of it, which is the more useful shape anyway.
- *
- * Returning undefined cancels the beacon. Everything else passes through untouched: custom events, real
- * navigations, and every other query parameter, campaign tags included.
+ * Drops the pageview that changing a chart's range or constraint would otherwise produce, since both live
+ * in the query string and the tracker reports on any URL change. Each switch is recorded as an event
+ * instead. Returning undefined cancels the beacon; everything else passes through untouched.
  */
 export function beforeSend(type: string, payload: TrackerPayload): TrackerPayload | undefined {
   if (type !== "event" || payload?.name || typeof payload?.url !== "string") return payload;
@@ -106,8 +96,8 @@ export function trackEvent<K extends AnalyticsEventName>(name: K, data: Analytic
   }
 }
 
-/** Hostname for the tracker's data-domains, or undefined to leave the attribute off. Restricting
- * collection to the canonical host keeps a local build from reporting into the site's stats. */
+/** Hostname for data-domains, or undefined to leave the attribute off, which keeps a local build that was
+ * given an id from reporting into the site's statistics. */
 export function trackedDomain(siteUrl: string): string | undefined {
   let hostname: string;
   try {

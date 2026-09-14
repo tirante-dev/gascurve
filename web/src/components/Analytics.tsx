@@ -11,13 +11,10 @@ if (typeof window !== "undefined") {
 }
 
 /**
- * Loads the Umami tracker, which collects pageviews on its own: it hooks history.pushState and
- * replaceState and reports shortly after each one, which is what makes an App Router navigation land with
- * the new page's title rather than the previous one's.
- *
- * Renders nothing unless a website id was baked in, so local development and an unconfigured deployment
- * stay clean. Umami sets no cookies and stores no personal data, so this needs no consent banner;
- * data-do-not-track additionally honours browsers that send the signal, at the cost of undercounting them.
+ * Loads the Umami tracker, which collects pageviews on its own by hooking history.pushState and
+ * replaceState. Renders nothing unless a website id was baked in, so local development and an
+ * unconfigured deployment stay clean. Umami sets no cookies and stores no personal data, so this needs
+ * no consent banner; data-do-not-track honours browsers that send the signal.
  */
 export default function Analytics() {
   if (ANALYTICS_WEBSITE_ID === "") return null;

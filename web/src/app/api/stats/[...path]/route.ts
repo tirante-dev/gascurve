@@ -24,13 +24,11 @@ const COLLECT_PATH = "api/send";
 const SCRIPT_CACHE_CONTROL = "public, max-age=3600, stale-while-revalidate=86400";
 
 /**
- * Request headers that are not forwarded. Everything else is relayed, because the tracker carries its own
- * x-umami-* headers and Umami derives the browser, device and language from user-agent and
- * accept-language, so a whitelist would silently degrade the data on any tracker update.
- *
- * cookie is dropped deliberately: the collection endpoint has no use for this app's cookies, and
- * forwarding them would hand session state to a service that should only ever see anonymous pageviews.
- * The rest are hop by hop, or are recomputed by fetch for the new request.
+ * Request headers that are not forwarded; everything else is relayed, because the tracker carries its own
+ * x-umami-* headers and Umami derives browser, device and language from user-agent and accept-language,
+ * so a whitelist would silently degrade the data on any tracker update. cookie is dropped deliberately:
+ * the collection endpoint has no use for this app's cookies. The rest are hop by hop, or are recomputed
+ * by fetch for the new request.
  */
 const BLOCKED_REQUEST_HEADERS = new Set([
   "cookie",
