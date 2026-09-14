@@ -7,6 +7,7 @@ import { useApi } from "@/hooks/useApi";
 import { useNetworkLive } from "@/hooks/useNetworkLive";
 import { useRefreshOnOwnerAction, useSeries } from "@/hooks/useSeries";
 import { useLiveFrame, type SmoothedLive } from "@/hooks/useSmoothedLive";
+import { trackEvent } from "@/lib/analytics";
 import { listNetworks } from "@/lib/api/networks";
 import {
   CHART_VIEWS,
@@ -202,14 +203,19 @@ export function ChartDetail({ network, chart }: { network: string; chart: string
   })();
   const relativeZoom = viewId === "backlog-sawtooth" || ((viewId === "base-fee" || viewId === "gas-per-second") && range === "live");
 
-  /** The URL is the source of truth: a control writes to it and the page follows. */
+  /** The URL is the source of truth: a control writes to it and the page follows. The tracker drops the
+   * pageview a state parameter rewrite produces, so each switch is recorded as an event carrying both
+   * sides of it instead. */
   const setParam = useCallback(
     (key: string, value: string) => {
+      const previous = searchParams.get(key) ?? "";
       const next = new URLSearchParams(searchParams.toString());
       next.set(key, value);
       router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+      if (key === "range") trackEvent("range-change", { chart, range: value, previous });
+      else if (key === "constraint") trackEvent("constraint-change", { chart, constraint: value, previous });
     },
-    [pathname, router, searchParams],
+    [chart, pathname, router, searchParams],
   );
 
   // The switcher stays to slot numbers: a full constraint label ("C1 · 60

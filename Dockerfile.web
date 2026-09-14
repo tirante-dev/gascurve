@@ -14,10 +14,15 @@ WORKDIR /app
 ARG VERSION=0.0.0
 ARG NEXT_PUBLIC_SITE_URL=https://gascurve.com
 ARG NEXT_PUBLIC_API_URL=/api/v1
+# Umami website id. Next inlines NEXT_PUBLIC_ values into the client bundle at
+# build time, so an id supplied only at run time never reaches the browser and
+# no tracker is loaded. Empty, the default, ships no tracker at all.
+ARG NEXT_PUBLIC_UMAMI_WEBSITE_ID=
 ENV NEXT_TELEMETRY_DISABLED=1 \
     APP_VERSION=$VERSION \
     NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
-    NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+    NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+    NEXT_PUBLIC_UMAMI_WEBSITE_ID=$NEXT_PUBLIC_UMAMI_WEBSITE_ID
 COPY --from=deps /app/node_modules ./node_modules
 COPY web/ .
 RUN npm run build
@@ -27,10 +32,12 @@ FROM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f
 WORKDIR /app
 ARG NEXT_PUBLIC_SITE_URL=https://gascurve.com
 ARG NEXT_PUBLIC_API_URL=/api/v1
+ARG NEXT_PUBLIC_UMAMI_WEBSITE_ID=
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
     NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+    NEXT_PUBLIC_UMAMI_WEBSITE_ID=$NEXT_PUBLIC_UMAMI_WEBSITE_ID \
     HOSTNAME=0.0.0.0 \
     PORT=3000
 # Drop the bundled npm, corepack and yarn: the standalone server only needs

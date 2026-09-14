@@ -118,6 +118,14 @@ web:
   # http://RELEASE-api:8080/api/v1 skips that hop, but api.networkPolicy admits only the ingress
   # controller and the monitoring peers, so add the web pod there first. See docs/ARCHITECTURE.md.
   serverApiUrl: ""
+  # Base URL of a self-hosted Umami instance, relayed by the web app's own
+  # /stats proxy so the tracker script and the pageviews it reports travel
+  # over the site's origin. It is reached from the web pod, so a cluster
+  # address works and the instance need not be public. Empty disables the
+  # proxy. The website id is separate and is baked into the image at build
+  # time (NEXT_PUBLIC_UMAMI_WEBSITE_ID), so an image built without one loads no
+  # tracker whatever this is set to.
+  umamiUrl: ""
   # Must match the image's numeric USER (nextjs, uid 1001).
   securityContext:
     runAsUser: 1001

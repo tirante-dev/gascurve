@@ -343,6 +343,8 @@ src/types/               the shapes above, less the response fields no component
 src/utils/               formatting (gwei, gas, durations), bips math
 src/lib/seo.ts           site metadata: canonical origin, titles, the social cards, the network list the sitemap uses
 src/lib/card.ts          the live social card's palette and its gauge, as an SVG document with no text in it
+src/lib/analytics.ts     the Umami tracker's paths, its before-send hook and the typed custom events
+src/app/stats/           first-party proxy to the Umami instance, deliberately outside /api
 ```
 
 `src/types/` narrows the response shapes to what the client renders rather than restating them. `/status` carries fields meant for an operator that no component reads: `holes`, `activeEndpoint`, `failovers`, `endpoints` and `listener` are all absent from `StatusResponse`. Add one when something on the page starts using it, so a type that grows records a real dependency instead of churning four test fixtures for a field nothing reads.
@@ -351,7 +353,19 @@ Every chart card carries an enlarge control linking to `/{network}/charts/{chart
 
 Units in copy: gas carries an SI prefix on the unit, never on the number (`11.2 Tgas`, `60 Mgas/s`, `812,345 gas` below one million). Figures that animate use fixed decimal counts per band so neighbouring elements never shift. USD figures (from `ethUsd`) are shown by default; hovering one gives the working (`ETH amount × $price/ETH = $figure`) and the quote behind it (source and age), and the same facts are in the accessible description.
 
-Environment: `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`), `NEXT_PUBLIC_WS_URL` (derived from the API URL when unset), `NEXT_PUBLIC_SITE_URL` (canonical origin, default `https://gascurve.com`), `GASCURVE_SERVER_API_URL` (optional, see the card below).
+Environment: `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`), `NEXT_PUBLIC_WS_URL` (derived from the API URL when unset), `NEXT_PUBLIC_SITE_URL` (canonical origin, default `https://gascurve.com`), `GASCURVE_SERVER_API_URL` (optional, see the card below), `UMAMI_URL` and `NEXT_PUBLIC_UMAMI_WEBSITE_ID` (optional, see Analytics below).
+
+### Analytics
+
+Pageviews go to a self-hosted [Umami](https://umami.is) instance, and both halves of the tracker are served from the site's own origin by `app/stats/[...path]/route.ts`: `GET /stats/script.js` and `POST /stats/api/send` are relayed to `UMAMI_URL`, and every other path 404s rather than being forwarded, so the route is not an open proxy into whatever the pod can reach. That first-party path is what keeps the script loading for most visitors, since filter lists key on third-party analytics hostnames; it also means the instance needs no CORS configuration, need not be reachable from the internet, and is named nowhere in the page. `cookie` is the one request header the proxy drops: the collection endpoint has no use for the site's cookies. The collection endpoint is public, so a body is read against a 16 KiB ceiling and refused with a 413 rather than buffered whole, by declared length and again as the stream arrives, since a chunked body declares none.
+
+`/stats` and not `/api/stats`, which is the one part of this that is not free to move. Every deployment that fronts the web app and the API together splits them on the `/api` prefix: the chart's Ingress does, and so does the Cloudflare Tunnel in front of gascurve.com. A proxy path under `/api` therefore reaches the Go API, which has no such route, and the tracker 404s in exactly the deployments it is meant for while working perfectly against `next start`. Outside `/api` it falls through to the web backend on the catch-all rule that is already there, so no deployment needs a rule of its own. In the app, `app/stats/` is a static segment and wins over `[network]`, so it costs nothing but the name.
+
+Analytics needs both halves, and they are set in different places. `UMAMI_URL` is runtime, from the chart's `web.umamiUrl`. `NEXT_PUBLIC_UMAMI_WEBSITE_ID` is build time, baked in by `Dockerfile.web`, because Next inlines `NEXT_PUBLIC_*` into the client bundle: an id set on the running container never reaches the browser. `src/components/Analytics.tsx` renders nothing when the id is empty, so a development build and an unconfigured deployment load no tracker at all.
+
+The tracker counts pageviews itself, hooking `history.pushState` and `replaceState`, so App Router navigations are recorded without per-page wiring. One case is suppressed, through the `data-before-send` hook in `src/lib/analytics.ts`: a chart page keeps its range in `?range=` and its constraint slot in `?constraint=` so the view can be linked, which means every toggle rewrites the URL and would otherwise report a pageview. Left alone, the site's most common interaction would inflate pageviews on exactly the pages that get used most. Both switches are recorded as custom events carrying the previous value and the new one, which is the more useful shape anyway, and a chain change from the network picker is recorded the same way. Nothing else is filtered: real navigations, other query parameters and campaign tags all pass through.
+
+Umami sets no cookies and stores no personal data, and the tracker is given `data-do-not-track`, so there is no consent banner. `data-domains` is the canonical hostname, which keeps a local build that was somehow given an id from reporting into the site's statistics.
 
 ### Search metadata and icons
 
