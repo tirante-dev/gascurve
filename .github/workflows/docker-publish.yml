@@ -229,6 +229,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
             NEXT_PUBLIC_SITE_URL=${{ vars.SITE_URL || 'https://gascurve.com' }}
+            NEXT_PUBLIC_UMAMI_WEBSITE_ID=${{ vars.UMAMI_WEBSITE_ID }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -266,6 +267,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
             NEXT_PUBLIC_SITE_URL=${{ vars.SITE_URL || 'https://gascurve.com' }}
+            NEXT_PUBLIC_UMAMI_WEBSITE_ID=${{ vars.UMAMI_WEBSITE_ID }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

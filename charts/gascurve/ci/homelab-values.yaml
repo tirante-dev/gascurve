@@ -12,6 +12,9 @@
 database:
   existingSecret: gascurve-db
 
+web:
+  umamiUrl: http://umami.analytics.svc.cluster.local:3000
+
 collector:
   extraEnv:
     - name: NETWORK_ROBINHOOD_RPC_URL

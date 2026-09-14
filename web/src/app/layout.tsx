@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Orbitron } from "next/font/google";
 import type { ReactNode } from "react";
+import Analytics from "@/components/Analytics";
 import { CARD_IMAGE, PRIMARY_NETWORK, PRIMARY_NETWORK_NAME, SITE_DESCRIPTION, SITE_NAME, SITE_TAGLINE, SITE_TITLE, SITE_URL, absoluteUrl } from "@/lib/seo";
 import "./globals.css";
 
@@ -85,7 +86,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
         <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }} />
       </head>
-      <body className="min-h-full antialiased">{children}</body>
+      <body className="min-h-full antialiased">
+        {children}
+        <Analytics />
+      </body>
     </html>
   );
 }

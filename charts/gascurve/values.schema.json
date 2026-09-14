@@ -83,7 +83,8 @@
         "securityContext": { "$ref": "#/definitions/componentSecurityContext" },
         "service": { "$ref": "#/definitions/service" },
         "resources": { "$ref": "#/definitions/resources" },
-        "serverApiUrl": { "type": "string" }
+        "serverApiUrl": { "type": "string" },
+        "umamiUrl": { "type": "string" }
       },
       "required": ["enabled", "image", "service"],
       "additionalProperties": false

@@ -32,6 +32,7 @@ helm install gascurve oci://registry.ahkc.win/gascurve/charts/gascurve \
 | `database.url` | Rendered into a chart-managed Secret. Exactly one of `database.url` and `database.existingSecret` is required when the collector or api is enabled | `""` |
 | `database.existingSecret`, `database.existingSecretKey` | Use an existing Secret instead of `database.url` | `""`, `DB_URL` |
 | `migrations.enabled` | Run `gascurve-migrate up` as an init container on the collector and api pods | `true` |
+| `web.umamiUrl` | Base URL of a self-hosted Umami instance for the web app's `/api/stats` proxy to relay to. See Web analytics | `""` |
 | `collector.securityContext`, `api.securityContext`, `web.securityContext`, `migrations.securityContext` | Numeric `runAsUser`/`runAsGroup`, must match the image's `USER` | `65532` (Go images), `1001` (web) |
 | `config` | Rendered to `config.yaml` (networks, collector pacing, CORS) | see values.yaml |
 | `collector.extraEnv`, `api.extraEnv`, `migrations.extraEnv` | Extra env for that container only. Private RPC URLs belong in `collector.extraEnv` | `[]` |
@@ -93,6 +94,14 @@ Those peers are appended to the policy's `from` list and can reach every API rou
 `config.server.trusted_proxies` is enforced only for chart-managed ingress, because that is the only proxy this chart can see. An API reached through a Cloudflare Tunnel, a Gateway, or an Ingress owned by something else has exactly the same problem and none of the checks: the tunnel or gateway pod is the API's direct peer, so every visitor shares one bucket and one WebSocket cap. Set the value there too, to the addresses the API pods see for that proxy, and pair it with a policy that stops other pods in the same range from reaching the API. The install notes warn when the API is enabled, the chart renders no Ingress, and the list is empty.
 
 Upgrades of an existing release with both ingress and API enabled must add `config.server.trusted_proxies` before this chart version will render. Confirm the controller peer range and labels first, then apply the Helm upgrade. A wrong CIDR leaves forwarded headers ignored, and wrong NetworkPolicy selectors block ingress traffic. No database migration or data recomputation is involved.
+
+## Web analytics
+
+The web image can load a [Umami](https://umami.is) tracker, and serves both halves of it from the site's own origin: `GET /api/stats/script.js` and `POST /api/stats/api/send` are relayed to `UMAMI_URL`, which `web.umamiUrl` sets. Nothing else under that path is forwarded, so the route cannot be used as a general proxy into whatever the web pod can reach. The instance is contacted from inside the cluster and never by the visitor, so a Service address is the expected value and the instance does not have to be reachable from the internet, need no CORS configuration, and is not named anywhere in the page.
+
+Two switches, and both must be on. `web.umamiUrl` is the runtime half. The website id is the build-time half: Next inlines `NEXT_PUBLIC_*` into the client bundle, so it is baked in by `Dockerfile.web` from the `NEXT_PUBLIC_UMAMI_WEBSITE_ID` build argument, which the publish workflow fills from the `UMAMI_WEBSITE_ID` repository variable. An image built without one loads no tracker at all, whatever `web.umamiUrl` says, and that is the shape a deployment that does not want analytics should use: leaving the id in and the URL out means the page still asks for a script that 404s.
+
+The tracker sets no cookies and stores no personal data, and it is sent `data-do-not-track`, so no consent banner is involved.
 
 ## Health and collector metrics
 

@@ -2,6 +2,7 @@
 
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect } from "react";
+import { trackEvent } from "@/lib/analytics";
 
 export const DEFAULT_NETWORK = "robinhood";
 export const NETWORK_STORAGE_KEY = "gascurve:network";
@@ -48,6 +49,7 @@ export function useNetwork(): { network: string; setNetwork: (name: string) => v
     (name: string) => {
       if (!isValidNetworkName(name) || name === network) return;
       storeNetwork(name);
+      trackEvent("network-switch", { from: network, to: name });
       router.push(`/${encodeURIComponent(name)}`);
     },
     [network, router],
