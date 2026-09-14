@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/tirante-dev/gascurve/compare/v1.5.0...v1.6.0) (2026-09-14)
+
+
+### Features
+
+* report pageviews to a self-hosted Umami instance ([#97](https://github.com/tirante-dev/gascurve/issues/97)) ([093adce](https://github.com/tirante-dev/gascurve/commit/093adce5bc2ec1d10451528549eea2b106080eeb))
+
 ## [1.5.0](https://github.com/tirante-dev/gascurve/compare/v1.4.0...v1.5.0) (2026-09-13)
 
 
