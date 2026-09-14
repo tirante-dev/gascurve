@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.6.0...gascurve-chart-v0.7.0) (2026-09-14)
+
+
+### Features
+
+* report pageviews to a self-hosted Umami instance ([#97](https://github.com/tirante-dev/gascurve/issues/97)) ([093adce](https://github.com/tirante-dev/gascurve/commit/093adce5bc2ec1d10451528549eea2b106080eeb))
+
+
+### Bug Fixes
+
+* **helm:** update chart app version to 1.6.0 ([#100](https://github.com/tirante-dev/gascurve/issues/100)) ([a140c56](https://github.com/tirante-dev/gascurve/commit/a140c566ce20911502535062c3e0c9a3319241d2))
+
 ## [0.6.0](https://github.com/tirante-dev/gascurve/compare/gascurve-chart-v0.5.0...gascurve-chart-v0.6.0) (2026-09-13)
 
 
