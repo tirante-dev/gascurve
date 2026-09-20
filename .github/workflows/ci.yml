@@ -218,9 +218,9 @@ jobs:
       run:
         working-directory: web
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install libatomic for Node
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends libatomic1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
@@ -236,9 +236,9 @@ jobs:
       run:
         working-directory: web
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install libatomic for Node
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends libatomic1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
@@ -254,9 +254,9 @@ jobs:
       run:
         working-directory: web
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install libatomic for Node
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends libatomic1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
@@ -288,9 +288,9 @@ jobs:
       run:
         working-directory: web
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install libatomic for Node
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends libatomic1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
