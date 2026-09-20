@@ -29,7 +29,7 @@ jobs:
     # Only application releases (tags v1.2.3). Chart releases are tagged
     # gascurve-chart-v* and are handled by helm-publish.yml.
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
-    runs-on: ubuntu-latest
+    runs-on: homelab-8cpu-32ram-dind
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST || 'registry.ahkc.win' }}
       REGISTRY_PROJECT: gascurve
@@ -47,6 +47,15 @@ jobs:
           - image: gascurve-web
             dockerfile: Dockerfile.web
     steps:
+      - name: Install gh
+        env:
+          GH_VERSION: 2.101.0
+          GH_SHA256: 9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o "${RUNNER_TEMP}/gh.tgz"
+          echo "${GH_SHA256}  ${RUNNER_TEMP}/gh.tgz" | sha256sum -c -
+          sudo tar -xzf "${RUNNER_TEMP}/gh.tgz" --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_amd64/bin/gh"
       # Resolve and validate the version before checking anything out so a
       # malformed input, or a stray tag on an unreleased commit, can never
       # publish or overwrite anything. A Git tag is not evidence of a release:

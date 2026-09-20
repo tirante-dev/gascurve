@@ -34,11 +34,20 @@ jobs:
   helm:
     # Only chart releases, not app releases
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'gascurve-chart-v')
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram-dind
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST || 'registry.ahkc.win' }}
       REGISTRY_PROJECT: gascurve
     steps:
+      - name: Install gh
+        env:
+          GH_VERSION: 2.101.0
+          GH_SHA256: 9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o "${RUNNER_TEMP}/gh.tgz"
+          echo "${GH_SHA256}  ${RUNNER_TEMP}/gh.tgz" | sha256sum -c -
+          sudo tar -xzf "${RUNNER_TEMP}/gh.tgz" --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_amd64/bin/gh"
       # The chart version comes from the release tag (or the dispatch input),
       # and is validated before anything is checked out so a malformed input
       # cannot select a ref. As in Docker Publish, a Git tag is not evidence
