@@ -16,8 +16,10 @@ permissions:
 jobs:
   migration-immutability:
     name: Migration Immutability
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     steps:
+      - name: Install make
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -27,8 +29,10 @@ jobs:
 
   go-format:
     name: Go Format
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     steps:
+      - name: Install make
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -42,15 +46,19 @@ jobs:
 
   comments:
     name: Comment Budget
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     steps:
+      - name: Install make
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make comment-check
 
   go-lint:
     name: Go Lint
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     steps:
+      - name: Install make
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -62,7 +70,7 @@ jobs:
 
   go-vet:
     name: Go Vet
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -72,8 +80,10 @@ jobs:
 
   go-staticcheck:
     name: Staticcheck
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     steps:
+      - name: Install make
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -84,7 +94,7 @@ jobs:
 
   go-test:
     name: Go Test
-    runs-on: ubuntu-latest
+    runs-on: homelab-8cpu-32ram
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -111,8 +121,10 @@ jobs:
 
   go-race:
     name: Race Detection
-    runs-on: ubuntu-latest
+    runs-on: homelab-8cpu-32ram
     steps:
+      - name: Install make and gcc
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends build-essential
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -121,7 +133,7 @@ jobs:
 
   go-integration:
     name: Integration (Postgres)
-    runs-on: ubuntu-latest
+    runs-on: homelab-8cpu-32ram-dind
     services:
       postgres:
         image: postgres:16-alpine
@@ -147,8 +159,10 @@ jobs:
 
   go-security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     steps:
+      - name: Install make
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -159,7 +173,7 @@ jobs:
 
   go-mod:
     name: Module Verify and Tidy
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -179,7 +193,7 @@ jobs:
 
   go-build:
     name: Go Build
-    runs-on: ubuntu-latest
+    runs-on: homelab-8cpu-32ram
     strategy:
       matrix: ${{ fromJSON(github.event_name == 'pull_request' && '{"include":[{"goos":"linux","goarch":"amd64"}]}' || '{"include":[{"goos":"linux","goarch":"amd64"},{"goos":"linux","goarch":"arm64"},{"goos":"darwin","goarch":"arm64"}]}') }}
     steps:
@@ -199,7 +213,7 @@ jobs:
 
   web-lint:
     name: Web Lint
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     defaults:
       run:
         working-directory: web
@@ -215,7 +229,7 @@ jobs:
 
   web-typecheck:
     name: Web Typecheck
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     defaults:
       run:
         working-directory: web
@@ -231,7 +245,7 @@ jobs:
 
   web-test:
     name: Web Test
-    runs-on: ubuntu-latest
+    runs-on: homelab-2cpu-8ram
     defaults:
       run:
         working-directory: web
@@ -262,7 +276,7 @@ jobs:
 
   web-build:
     name: Web Build
-    runs-on: ubuntu-latest
+    runs-on: homelab-8cpu-32ram
     needs: [web-lint, web-typecheck, web-test]
     defaults:
       run:
@@ -295,7 +309,7 @@ jobs:
   # main.
   docker:
     name: Docker Build
-    runs-on: ubuntu-latest
+    runs-on: homelab-8cpu-32ram-dind
     strategy:
       matrix:
         include:
