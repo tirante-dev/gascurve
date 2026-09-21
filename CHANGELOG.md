@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.1](https://github.com/tirante-dev/gascurve/compare/v1.6.0...v1.6.1) (2026-09-21)
+
+
+### Dependencies
+
+* bump github.com/golang-migrate/migrate/v4 from 4.19.1 to 4.20.1 ([#103](https://github.com/tirante-dev/gascurve/issues/103)) ([232c8fe](https://github.com/tirante-dev/gascurve/commit/232c8fe53c016cc64878475043b4d7eecad94bfb))
+* bump golang.org/x/crypto from 0.56.0 to 0.57.0 ([#101](https://github.com/tirante-dev/gascurve/issues/101)) ([be210f2](https://github.com/tirante-dev/gascurve/commit/be210f2dea0c9c39b459f7e301afc9cd52bb565d))
+* bump golang.org/x/time from 0.15.0 to 0.16.0 ([#102](https://github.com/tirante-dev/gascurve/issues/102)) ([cc102ca](https://github.com/tirante-dev/gascurve/commit/cc102ca38252bae4e6bfc7aee5529200eb54f137))
+* bump node from `2d984a1` to `ef24c50` ([#109](https://github.com/tirante-dev/gascurve/issues/109)) ([a0be127](https://github.com/tirante-dev/gascurve/commit/a0be127a3a81166afe9899e734fbba701f5dba04))
+* **deps-dev:** bump @types/node from 26.4.1 to 26.6.1 in /web ([#111](https://github.com/tirante-dev/gascurve/issues/111)) ([d85bc13](https://github.com/tirante-dev/gascurve/commit/d85bc13307db545fb4021f8c5866bc8e50430ebe))
+* **deps-dev:** bump eslint-config-next from 16.3.4 to 16.3.5 in /web ([#116](https://github.com/tirante-dev/gascurve/issues/116)) ([c3c65db](https://github.com/tirante-dev/gascurve/commit/c3c65dbf9003f1f3601c47f4064b96c00eca3659))
+* **deps-dev:** bump jsdom from 30.0.1 to 30.1.0 in /web ([#113](https://github.com/tirante-dev/gascurve/issues/113)) ([87e4bb7](https://github.com/tirante-dev/gascurve/commit/87e4bb7bf6298f524239761d0259b5a9f9d2e988))
+
 ## [1.6.0](https://github.com/tirante-dev/gascurve/compare/v1.5.0...v1.6.0) (2026-09-14)
 
 
