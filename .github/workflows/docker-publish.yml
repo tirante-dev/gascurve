@@ -199,7 +199,7 @@ jobs:
 
       # The binfmt image is pinned by digest (tonistiigi/binfmt:qemu-v10.2.3)
       # so the emulator used for the arm64 build cannot change under a rerun.
-      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         if: steps.existing.outputs.publish == 'true'
         with:
           image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
