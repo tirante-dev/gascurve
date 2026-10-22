@@ -10,6 +10,13 @@ updates:
     commit-message:
       prefix: "deps"
     open-pull-requests-limit: 10
+    groups:
+      go-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "npm"
     directory: "/web"
@@ -29,6 +36,12 @@ updates:
           - "react-dom"
           - "@types/react"
           - "@types/react-dom"
+      web-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -40,6 +53,13 @@ updates:
     commit-message:
       prefix: "deps"
     open-pull-requests-limit: 10
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "docker"
     directory: "/"
@@ -51,6 +71,10 @@ updates:
     commit-message:
       prefix: "deps"
     open-pull-requests-limit: 5
+    groups:
+      docker-images:
+        patterns:
+          - "*"
 
   - package-ecosystem: "helm"
     directory: "/charts/gascurve"
