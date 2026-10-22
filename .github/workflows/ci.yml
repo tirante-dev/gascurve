@@ -14,8 +14,49 @@ permissions:
   contents: read
 
 jobs:
+  # Gated jobs test `!= 'false'`, never `== 'true'`: if this job fails, its
+  # outputs are empty and every gated job runs. A skipped job satisfies a
+  # required check, so failing closed here would pass the whole gate unrun.
+  changes:
+    name: Changed Paths
+    runs-on: homelab-2cpu-8ram
+    outputs:
+      go: ${{ steps.paths.outputs.go }}
+      web: ${{ steps.paths.outputs.web }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 2
+      - name: Classify changed paths
+        id: paths
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" != "pull_request" ]; then
+            echo "go=true" >> "${GITHUB_OUTPUT}"
+            echo "web=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          changed="$(git diff --name-only HEAD^1 HEAD)"
+          printf '%s\n' "${changed}"
+          go=false
+          web=false
+          if printf '%s\n' "${changed}" | grep -qv '^web/'; then
+            go=true
+          fi
+          if printf '%s\n' "${changed}" | grep -qE '^(web/|\.github/workflows/ci\.yml$)'; then
+            web=true
+          fi
+          echo "go=${go}" >> "${GITHUB_OUTPUT}"
+          echo "web=${web}" >> "${GITHUB_OUTPUT}"
+          echo "go=${go} web=${web}"
+
   migration-immutability:
     name: Migration Immutability
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: homelab-2cpu-8ram
     steps:
       - name: Install make
@@ -29,15 +70,24 @@ jobs:
 
   go-format:
     name: Go Format
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: homelab-2cpu-8ram
     steps:
       - name: Install make
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         with:
           go-version-file: go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: goimports
+        with:
+          path: .tools/bin/goimports
+          key: go-tool-goimports-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('scripts/tool-versions.env') }}
       - name: Install pinned goimports
+        if: steps.goimports.outputs.cache-hit != 'true'
         run: make tool-goimports
       - name: Check formatting
         run: make fmt-check
@@ -55,21 +105,32 @@ jobs:
 
   go-lint:
     name: Go Lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: homelab-2cpu-8ram
     steps:
       - name: Install make
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         with:
           go-version-file: go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: golangci-lint
+        with:
+          path: .tools/bin/golangci-lint
+          key: go-tool-golangci-lint-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('scripts/tool-versions.env') }}
       - name: Install pinned golangci-lint
+        if: steps.golangci-lint.outputs.cache-hit != 'true'
         run: make tool-golangci-lint
       - name: golangci-lint
         run: make lint
 
   go-vet:
     name: Go Vet
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: homelab-2cpu-8ram
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,21 +141,32 @@ jobs:
 
   go-staticcheck:
     name: Staticcheck
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: homelab-2cpu-8ram
     steps:
       - name: Install make
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         with:
           go-version-file: go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: staticcheck
+        with:
+          path: .tools/bin/staticcheck
+          key: go-tool-staticcheck-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('scripts/tool-versions.env') }}
       - name: Install pinned staticcheck
+        if: steps.staticcheck.outputs.cache-hit != 'true'
         run: make tool-staticcheck
       - run: make staticcheck
 
   go-test:
     name: Go Test
-    runs-on: homelab-8cpu-32ram
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: homelab-8cpu-16ram
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -121,7 +193,9 @@ jobs:
 
   go-race:
     name: Race Detection
-    runs-on: homelab-8cpu-32ram
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: homelab-8cpu-16ram
     steps:
       - name: Install make and gcc
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends build-essential
@@ -133,7 +207,9 @@ jobs:
 
   go-integration:
     name: Integration (Postgres)
-    runs-on: homelab-8cpu-32ram-dind
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: homelab-8cpu-16ram-dind
     services:
       postgres:
         image: postgres:16-alpine
@@ -157,6 +233,9 @@ jobs:
           go-version-file: go.mod
       - run: go test -tags integration -count=1 -v ./internal/db/... ./internal/collector/... ./internal/api/...
 
+  # Not gated on changed paths: the vulnerability database changes daily, so
+  # an unchanged module graph can still fail here. The same holds for the
+  # Trivy scan in Docker Build.
   go-security:
     name: Security Scan
     runs-on: homelab-2cpu-8ram
@@ -165,14 +244,23 @@ jobs:
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends make
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         with:
           go-version-file: go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: govulncheck
+        with:
+          path: .tools/bin/govulncheck
+          key: go-tool-govulncheck-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('scripts/tool-versions.env') }}
       - name: Install pinned govulncheck
+        if: steps.govulncheck.outputs.cache-hit != 'true'
         run: make tool-govulncheck
       - run: make govulncheck
 
   go-mod:
     name: Module Verify and Tidy
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: homelab-2cpu-8ram
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -191,11 +279,40 @@ jobs:
             exit 1
           fi
 
+  # Not a matrix: a matrix job skipped by its `if` reports one check under the
+  # bare job name, so the required "Go Build (linux, amd64)" would never
+  # report and every web-only pull request would wait on it forever.
   go-build:
+    name: Go Build (linux, amd64)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: homelab-8cpu-16ram
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build binaries
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          go build -o gascurve-collector-linux-amd64 ./cmd/collector
+          go build -o gascurve-api-linux-amd64 ./cmd/api
+          go build -o gascurve-migrate-linux-amd64 ./cmd/migrate
+
+  go-build-cross:
     name: Go Build
-    runs-on: homelab-8cpu-32ram
+    if: github.event_name != 'pull_request'
+    runs-on: homelab-8cpu-16ram
     strategy:
-      matrix: ${{ fromJSON(github.event_name == 'pull_request' && '{"include":[{"goos":"linux","goarch":"amd64"}]}' || '{"include":[{"goos":"linux","goarch":"amd64"},{"goos":"linux","goarch":"arm64"},{"goos":"darwin","goarch":"arm64"}]}') }}
+      matrix:
+        include:
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -213,6 +330,8 @@ jobs:
 
   web-lint:
     name: Web Lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.web != 'false' }}
     runs-on: homelab-2cpu-8ram
     defaults:
       run:
@@ -231,6 +350,8 @@ jobs:
 
   web-typecheck:
     name: Web Typecheck
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.web != 'false' }}
     runs-on: homelab-2cpu-8ram
     defaults:
       run:
@@ -249,6 +370,8 @@ jobs:
 
   web-test:
     name: Web Test
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.web != 'false' }}
     runs-on: homelab-2cpu-8ram
     defaults:
       run:
@@ -282,8 +405,9 @@ jobs:
 
   web-build:
     name: Web Build
-    runs-on: homelab-8cpu-32ram
     needs: [web-lint, web-typecheck, web-test]
+    if: ${{ !cancelled() && needs.web-lint.result == 'success' && needs.web-typecheck.result == 'success' && needs.web-test.result == 'success' }}
+    runs-on: homelab-8cpu-16ram
     defaults:
       run:
         working-directory: web
@@ -317,7 +441,7 @@ jobs:
   # main.
   docker:
     name: Docker Build
-    runs-on: homelab-8cpu-32ram-dind
+    runs-on: homelab-2cpu-8ram-dind
     strategy:
       matrix:
         include:
