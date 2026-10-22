@@ -3,8 +3,16 @@ name: Chart Test
 on:
   pull_request:
     branches: [main]
+    paths:
+      - "charts/**"
+      - "scripts/chart-checks.sh"
+      - ".github/workflows/chart-test.yml"
   push:
     branches: [main]
+    paths:
+      - "charts/**"
+      - "scripts/chart-checks.sh"
+      - ".github/workflows/chart-test.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

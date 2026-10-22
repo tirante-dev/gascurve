@@ -19,7 +19,7 @@ COVERAGE_PACKAGES ?= ./internal/...
 COVERAGE_DIR=coverage
 COVERAGE_FILE=$(COVERAGE_DIR)/coverage.out
 COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
-# Cross-build matrix, same as the go-build job in .github/workflows/ci.yml.
+# Cross-build matrix, same as the go-build jobs in .github/workflows/ci.yml.
 BUILD_PLATFORMS ?= linux/amd64 linux/arm64 darwin/arm64
 DIST_DIR=dist
 NPM=npm --prefix web
@@ -262,7 +262,7 @@ web-ci: web-lint web-typecheck web-test-coverage web-build
 # `make ci` is the CI workflow (.github/workflows/ci.yml) minus the jobs that
 # need external services or tools: it never writes tracked files (fmt-check,
 # not fmt; go mod tidy -diff, not tidy), cross-builds the same platform matrix
-# as the go-build job (build-matrix) and is self-contained on a fresh clone
+# as the go-build jobs (build-matrix) and is self-contained on a fresh clone
 # after `make tools` installs the pinned Go commands (web-install). The
 # remaining CI jobs
 # have their own targets so they can be run when the prerequisites exist:

@@ -29,7 +29,7 @@ jobs:
     # Only application releases (tags v1.2.3). Chart releases are tagged
     # gascurve-chart-v* and are handled by helm-publish.yml.
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
-    runs-on: homelab-8cpu-32ram-dind
+    runs-on: homelab-8cpu-16ram-dind
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST || 'registry.ahkc.win' }}
       REGISTRY_PROJECT: gascurve
