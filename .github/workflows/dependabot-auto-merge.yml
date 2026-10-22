@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   auto-merge:
-    runs-on: homelab-2cpu-8ram
+    runs-on: homelab-2cpu-3ram
     if: github.actor == 'dependabot[bot]'
     env:
       HAS_RELEASE_APP: ${{ secrets.RELEASE_APP_ID != '' }}

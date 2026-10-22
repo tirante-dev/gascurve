@@ -34,7 +34,7 @@ jobs:
   helm:
     # Only chart releases, not app releases
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'gascurve-chart-v')
-    runs-on: homelab-2cpu-8ram-dind
+    runs-on: homelab-2cpu-3ram-dind
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST || 'registry.ahkc.win' }}
       REGISTRY_PROJECT: gascurve
