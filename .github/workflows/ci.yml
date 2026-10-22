@@ -166,7 +166,7 @@ jobs:
     name: Go Test
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
-    runs-on: homelab-8cpu-32ram
+    runs-on: homelab-8cpu-16ram
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -195,7 +195,7 @@ jobs:
     name: Race Detection
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
-    runs-on: homelab-8cpu-32ram
+    runs-on: homelab-8cpu-16ram
     steps:
       - name: Install make and gcc
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends build-essential
@@ -209,7 +209,7 @@ jobs:
     name: Integration (Postgres)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
-    runs-on: homelab-8cpu-32ram-dind
+    runs-on: homelab-8cpu-16ram-dind
     services:
       postgres:
         image: postgres:16-alpine
@@ -286,7 +286,7 @@ jobs:
     name: Go Build (linux, amd64)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
-    runs-on: homelab-8cpu-32ram
+    runs-on: homelab-8cpu-16ram
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -305,7 +305,7 @@ jobs:
   go-build-cross:
     name: Go Build
     if: github.event_name != 'pull_request'
-    runs-on: homelab-8cpu-32ram
+    runs-on: homelab-8cpu-16ram
     strategy:
       matrix:
         include:
@@ -407,7 +407,7 @@ jobs:
     name: Web Build
     needs: [web-lint, web-typecheck, web-test]
     if: ${{ !cancelled() && needs.web-lint.result == 'success' && needs.web-typecheck.result == 'success' && needs.web-test.result == 'success' }}
-    runs-on: homelab-8cpu-32ram
+    runs-on: homelab-8cpu-16ram
     defaults:
       run:
         working-directory: web
