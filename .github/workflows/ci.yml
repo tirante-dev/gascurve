@@ -212,7 +212,7 @@ jobs:
     runs-on: homelab-8cpu-16ram-dind
     services:
       postgres:
-        image: postgres:16-alpine
+        image: registry.ahkc.win/docker.io/library/postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -453,8 +453,17 @@ jobs:
             dockerfile: Dockerfile.web
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Docker Hub's anonymous pull limit is shared by every runner behind the
+      # homelab's one public IP, so Hub pulls go through the Harbor cache. Only
+      # BuildKit takes a mirror with a path; dockerd's registry-mirrors cannot.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          driver-opts: image=registry.ahkc.win/docker.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["registry.ahkc.win/docker.io"]
       - name: Build image
-        run: docker build -f ${{ matrix.dockerfile }} -t ${{ matrix.image }}:test .
+        run: docker buildx build --load -f ${{ matrix.dockerfile }} -t ${{ matrix.image }}:test .
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
