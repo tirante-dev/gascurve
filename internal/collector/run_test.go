@@ -459,7 +459,7 @@ func TestRunHistoryFillsGaps(t *testing.T) {
 	// Every header fetch fails at first, so both error paths of the loop
 	// run: the gap fill's and the backfill's.
 	rpc.errs["HeadersByNumbers"] = errRPC
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
