@@ -3,13 +3,13 @@
 # Base images are pinned by digest; Dependabot (docker ecosystem) bumps them.
 
 # deps: install from the lockfile
-FROM node:26-alpine@sha256:dbaa92e5758cbbcf85d65d5403fdb530fe3442cbe8c6dbfb7ef23365450d5070 AS deps
+FROM node:26-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797 AS deps
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
 # builder: Next.js standalone output
-FROM node:26-alpine@sha256:dbaa92e5758cbbcf85d65d5403fdb530fe3442cbe8c6dbfb7ef23365450d5070 AS builder
+FROM node:26-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797 AS builder
 WORKDIR /app
 ARG VERSION=0.0.0
 ARG NEXT_PUBLIC_SITE_URL=https://gascurve.com
@@ -28,7 +28,7 @@ COPY web/ .
 RUN npm run build
 
 # runner
-FROM node:26-alpine@sha256:dbaa92e5758cbbcf85d65d5403fdb530fe3442cbe8c6dbfb7ef23365450d5070 AS runner
+FROM node:26-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797 AS runner
 WORKDIR /app
 ARG NEXT_PUBLIC_SITE_URL=https://gascurve.com
 ARG NEXT_PUBLIC_API_URL=/api/v1
