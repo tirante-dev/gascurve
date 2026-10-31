@@ -243,7 +243,7 @@ config:
       display_name: Robinhood Chain Testnet
       chain_id: 46630
       rpc_url: https://rpc.testnet.chain.robinhood.com
-      explorer_url: https://testnet.robinhoodchain.blockscout.com
+      explorer_url: https://explorer.testnet.chain.robinhood.com
       calls_per_second: 4
       enabled: true
     - name: arbitrum-one
