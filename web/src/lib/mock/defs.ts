@@ -186,7 +186,7 @@ export const ROBINHOOD: MockNetworkDef = {
   name: "robinhood",
   displayName: "Robinhood Chain",
   chainId: 4663,
-  explorerUrl: "https://explorer.chain.robinhood.com",
+  explorerUrl: "https://robinhoodchain.blockscout.com",
   model: "constraints",
   historyStart: "2026-07-01T00:00:00Z",
   blockAtHistoryStart: 0,
