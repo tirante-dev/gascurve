@@ -10,6 +10,7 @@ import (
 
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
@@ -343,7 +344,7 @@ func TestFillRestartedByReorg(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
-		return f.rewindHoles(ctx, s, 1010, false)
+		return f.rewindHoles(ctx, s, 1010, time.Time{})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -866,7 +867,7 @@ func TestFillFoldsOnceAcrossARewind(t *testing.T) {
 	}
 	// A rewind that reaches into what the filler wrote restarts the hole.
 	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
-		return f.rewindHoles(ctx, s, 1005, false)
+		return f.rewindHoles(ctx, s, 1005, time.Time{})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -879,17 +880,17 @@ func TestFillFoldsOnceAcrossARewind(t *testing.T) {
 		t.Fatalf("a refilled range must not be folded twice: %d -> %d", before, got)
 	}
 	// When the rewind deleted the additive buckets themselves, everything
-	// the hole folded into them went with them and the watermark resets.
+	// the hole folded into them went with them and the watermark no longer covers those blocks.
 	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
 		if err := f.saveHoles(ctx, s, []hole{{From: 1001, To: 1149, Next: 1021, Folded: 1021}}); err != nil {
 			return err
 		}
-		return f.rewindHoles(ctx, s, 1005, true)
+		return f.rewindHoles(ctx, s, 1005, baseTime.Add(2*time.Hour))
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Folded != 0 {
-		t.Fatalf("deleted buckets clear the watermark: %+v", holes)
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Folded != 1021 || holes[0].State == nil || holes[0].State.CountedFrom != baseTime.Add(2*time.Hour).Unix() {
+		t.Fatalf("deleted buckets limit the watermark to what survives: %+v", holes)
 	}
 }
 
@@ -1310,12 +1311,14 @@ func TestFillFoldsIntoAWindowTheStoreWillNotRebuild(t *testing.T) {
 
 // After a rewind discarded a window below the frontier there is no bucket to add to. Folding the
 // recovered rows would insert a bucket holding them alone, pruned prefix and canonical suffix both
-// absent, and the hole's completion would present it as whole. Absent stays absent.
+// absent, and the hole's completion would present it as whole. Absent stays absent, and the range is
+// recorded as incomplete history rather than filled, so no counter certifies it.
 func TestFillLeavesADiscardedWindowAbsent(t *testing.T) {
 	ctx := context.Background()
+	reg := metrics.NewRegistry()
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
-	f := newTestFollower(t, rpc, store)
+	f := newTestFollower(t, rpc, store, func(o *Options) { o.Metrics = metrics.NewCollector(reg) })
 	skipGap(t, f, rpc)
 	inside := time.Unix(int64(tsFor(900)), 0).UTC()
 	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, inside.Format(time.RFC3339Nano)); err != nil {
@@ -1329,11 +1332,22 @@ func TestFillLeavesADiscardedWindowAbsent(t *testing.T) {
 		t.Fatalf("the window was not discarded: %d", len(before))
 	}
 	fillAll(t, f, 40)
-	if holesOf(t, store) != nil {
-		t.Fatalf("the gap must finish: %+v", holesOf(t, store))
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].Reason != reasonIncompleteHistory || holes[0].Lifecycle != rangeBlocked || holes[0].State == nil || holes[0].State.Unbuilt == 0 {
+		t.Fatalf("a hole with a window it could not write is kept as incomplete history: %+v", holes)
 	}
 	if after, _ := store.Buckets(ctx, 4663, db.Resolution1m, minute, minute.Add(time.Minute)); len(after) != 0 {
 		t.Fatalf("a fold inserted a partial bucket into a discarded window: %+v", after[0])
+	}
+	body := scrapeRegistry(t, reg)
+	hasSeries(t, body, `gascurve_collector_holes_filled_total{chain_id="4663",network="robinhood"} 0`)
+	hasSeries(t, body, `gascurve_collector_holes_unfillable{chain_id="4663",network="robinhood"} 1`)
+	rpc.headerCalls = nil
+	if status, err := f.FillStep(ctx); err != nil || status != FillNone {
+		t.Fatalf("incomplete history is not replayed again: %v %v", status, err)
+	}
+	if len(rpc.headerCalls) != 0 {
+		t.Fatalf("no headers are fetched for it: %v", rpc.headerCalls)
 	}
 }
 
@@ -1455,7 +1469,8 @@ func TestFillAnchorsAPrunedHoleOnTheArchive(t *testing.T) {
 }
 
 // An archive whose state at the block before the hole has a shape no recorded set explains cannot
-// seed the replay, so the hole is reclassified exactly as it is without an archive.
+// seed the replay yet. The shape may still be recorded, so the hole backs off and is tried again
+// instead of being written off as having no state.
 func TestFillDoesNotAnchorOnAnArchiveOfAnotherShape(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
@@ -1471,11 +1486,50 @@ func TestFillDoesNotAnchorOnAnArchiveOfAnotherShape(t *testing.T) {
 	if st, err := f.FillStep(ctx); err != nil || st != FillNone {
 		t.Fatalf("nothing to replay from: %v %v", st, err)
 	}
-	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Reason != reasonNoState {
-		t.Fatalf("the hole is unfillable: %+v", holes)
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].Reason == reasonNoState || holes[0].Lifecycle != rangeRetrying || holes[0].RetryCount != 1 || holes[0].NextRetryAt == "" || holes[0].LastError == "" {
+		t.Fatalf("the hole backs off and stays fillable: %+v", holes)
 	}
 	if len(rpc.headerCalls) != 0 {
 		t.Fatalf("no headers are fetched for it: %v", rpc.headerCalls)
+	}
+	archive.constraintsAt = nil
+	archive.backlogsAt = func(uint64) []uint64 { return []uint64{5_000_000, 11_194_391_810_886} }
+	if st, err := f.FillStep(ctx); err != nil || st != FillNone || len(archive.sampleAt) != 1 {
+		t.Fatalf("inside the backoff the archive is not asked again: %v %v %v", st, err, archive.sampleAt)
+	}
+	advanceRetry(f)
+	fillAll(t, f, 40)
+	if holesOf(t, store) != nil {
+		t.Fatalf("once the shape matches the hole is filled: %+v", holesOf(t, store))
+	}
+}
+
+func TestFillBacksOffWhenTheArchiveFails(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	delete(store.BlockRows[4663], 1000)
+	archive := newFakeRPC(gapHead)
+	archive.errs["PricingSampleAt"] = errRPC
+	f.archive = archive
+	for want := uint64(1); want <= 2; want++ {
+		if st, err := f.FillStep(ctx); err != nil || st != FillNone {
+			t.Fatalf("a failing archive is a wait, not a failure of the step: %v %v", st, err)
+		}
+		holes := holesOf(t, store)
+		if len(holes) != 1 || holes[0].Lifecycle != rangeRetrying || holes[0].RetryCount != want || holes[0].LastError == "" || holes[0].NextRetryAt == "" {
+			t.Fatalf("attempt %d is recorded durably: %+v", want, holes)
+		}
+		if got := archive.calls["PricingSampleAt"]; got != int(want) {
+			t.Fatalf("one archive call per attempt, got %d", got)
+		}
+		if _, err := f.FillStep(ctx); err != nil || archive.calls["PricingSampleAt"] != int(want) {
+			t.Fatalf("no call inside the backoff: %v %d", err, archive.calls["PricingSampleAt"])
+		}
+		advanceRetry(f)
 	}
 }
 
@@ -1637,5 +1691,131 @@ func TestFillAcceptsAChangeInTheBlockAfterTheRange(t *testing.T) {
 	}
 	if b, _ := store.BlockByNumber(ctx, 4663, 1149); b == nil || len(b.Backlogs) != 2 {
 		t.Fatalf("the range kept the set that was in force through it: %+v", b)
+	}
+}
+
+func TestRefusedSpansMergeAndStayBounded(t *testing.T) {
+	step := time.Minute
+	var spans []model.Span
+	for i := 0; i < 5; i++ {
+		spans = spanAdd(spans, db.Resolution1m, baseTime.Add(time.Duration(i)*step), step)
+	}
+	if len(spans) != 1 || spans[0].To-spans[0].From != 4*60 {
+		t.Fatalf("adjacent windows share a span: %+v", spans)
+	}
+	for i := 0; i < 3*maxRefusedSpans; i++ {
+		spans = spanAdd(spans, db.Resolution1m, baseTime.Add(time.Duration(10+2*i)*step), step)
+	}
+	if len(spans) > maxRefusedSpans {
+		t.Fatalf("the list is capped: %d", len(spans))
+	}
+	for i := 0; i < 3*maxRefusedSpans; i++ {
+		if !spanHas(spans, db.Resolution1m, baseTime.Add(time.Duration(10+2*i)*step)) {
+			t.Fatalf("a refused window is never forgotten: %d", i)
+		}
+	}
+	if spanHas(spans, db.Resolution1h, baseTime) {
+		t.Fatal("another resolution is not refused")
+	}
+}
+
+// A rewind that reaches a repair in progress sends its cursor back to the start but keeps the fold
+// watermark. What the repair already learned about windows it could not write must survive that, or
+// the replay folds into the surviving bucket and completion reports the range filled.
+func TestFillRewindKeepsIncompleteHistory(t *testing.T) {
+	ctx := context.Background()
+	reg := metrics.NewRegistry()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store, func(o *Options) { o.Metrics = metrics.NewCollector(reg) })
+	skipWideGap(t, f, rpc)
+	frontier := baseTime.Add(5 * time.Minute)
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, frontier.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	survivor := baseTime.Add(2 * time.Minute)
+	if err := store.FoldBuckets(ctx, []db.Bucket{{ChainID: 4663, Resolution: db.Resolution1m, BucketStart: survivor, Blocks: 1, LastBlock: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+			t.Fatalf("fill step %d: %v %v", i, st, err)
+		}
+		if h := holesOf(t, store); len(h) == 1 && h[0].State != nil && h[0].State.Unbuilt > 0 {
+			break
+		}
+	}
+	if h := holesOf(t, store); len(h) != 1 || h[0].State == nil || h[0].State.Unbuilt == 0 {
+		t.Fatalf("the surviving window must have been refused by now: %+v", h)
+	}
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.rewindHoles(ctx, s, 1005, time.Time{}) }); err != nil {
+		t.Fatal(err)
+	}
+	if h := holesOf(t, store); h[0].Next != 0 || h[0].Folded == 0 {
+		t.Fatalf("the rewind restarts the cursor and keeps the watermark: %+v", h)
+	}
+	fillAll(t, f, 400)
+	h := holesOf(t, store)
+	if len(h) != 1 || h[0].Reason != reasonIncompleteHistory {
+		t.Fatalf("a refused window stays refused across a rewind: %+v", h)
+	}
+	if b := minuteBucket(t, store, survivor); b == nil || b.Blocks != 1 {
+		t.Fatalf("the surviving bucket is left as it was: %+v", b)
+	}
+	hasSeries(t, scrapeRegistry(t, reg), `gascurve_collector_holes_filled_total{chain_id="4663",network="robinhood"} 0`)
+}
+
+// A deletion of every bucket older than a time takes the contributions older than it and leaves the
+// rest. One batch holding rows on both sides of that time, all below the fold watermark: the older
+// rows are folded again, the newer ones are not.
+func TestFillRefoldsOnlyWhatTheDeletionTook(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	boundary := baseTime
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, baseTime.Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	counted := db.Bucket{ChainID: 4663, Resolution: db.Resolution1m, BucketStart: boundary, Blocks: 2, LastBlock: 503}
+	if err := store.FoldBuckets(ctx, []db.Bucket{counted}); err != nil {
+		t.Fatal(err)
+	}
+	rows := []db.Block{
+		{ChainID: 4663, Number: 500, TS: boundary.Add(-2 * time.Second), GasUsed: 1},
+		{ChainID: 4663, Number: 501, TS: boundary.Add(-time.Second), GasUsed: 1},
+		{ChainID: 4663, Number: 502, TS: boundary, GasUsed: 1},
+		{ChainID: 4663, Number: 503, TS: boundary.Add(time.Second), GasUsed: 1},
+	}
+	h := hole{From: 500, To: 503, Next: 504, Folded: 504, SuccessorAt: boundary.Add(time.Minute).Format(time.RFC3339)}
+	if keepProgressBelow(&h, boundary) != true || h.Next != 0 || h.Folded != 504 || h.State.CountedFrom != boundary.Unix() {
+		t.Fatalf("the restart keeps the watermark and limits it: %+v", h)
+	}
+	h.Next = 504
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.saveHoles(ctx, s, []hole{h}) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.commitFill(ctx, 0, h, uint64(boundary.Unix()-10), rows, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if b := minuteBucket(t, store, boundary); b == nil || b.Blocks != 2 {
+		t.Fatalf("the rows at or after the deletion are not counted again: %+v", b)
+	}
+	if b := minuteBucket(t, store, boundary.Add(-time.Minute)); b == nil || b.Blocks != 2 {
+		t.Fatalf("the rows before it are counted again: %+v", b)
+	}
+}
+
+func TestNormalizeKeepsProgressApartFromAnEarlierRange(t *testing.T) {
+	f := newTestFollower(t, newFakeRPC(1000), dbtest.New())
+	got := f.normalizeHoles([]hole{
+		{From: 100, To: 199},
+		{From: 200, To: 299, Next: 250, Folded: 250},
+	})
+	if len(got) != 2 || got[1].Folded != 250 || got[0].Folded != 0 {
+		t.Fatalf("a watermark must not cover blocks of an earlier range that never folded: %+v", got)
 	}
 }

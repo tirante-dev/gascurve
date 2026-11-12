@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/tirante-dev/gascurve/internal/db"
 )
@@ -46,9 +47,10 @@ func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 	}
 	boundary, hasBoundary := f.boundaryLocked()
 	var deleted int64
+	var deletedBefore time.Time
 	rebuilt := false
 	err = f.store.WithChainTx(ctx, f.chainID, func(s db.Store) error {
-		deleted, rebuilt = 0, false
+		deleted, rebuilt, deletedBefore = 0, false, time.Time{}
 		// Re-read inside the transaction: another collector for this chain may have rebuilt meanwhile.
 		current, err := f.historyEpoch(ctx, s)
 		if err != nil {
@@ -65,6 +67,9 @@ func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 			if deleted, err = s.DeleteBucketsBefore(ctx, f.chainID, boundary); err != nil {
 				return fmt.Errorf("delete backfilled buckets: %w", err)
 			}
+			if deleted > 0 {
+				deletedBefore = boundary
+			}
 		}
 		if err := f.saveCursor(ctx, s, &backfillCursor{}); err != nil {
 			return err
@@ -74,7 +79,7 @@ func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 				return fmt.Errorf("clear %s: %w", key, err)
 			}
 		}
-		if err := f.resetHistoryHoles(ctx, s, deleted > 0); err != nil {
+		if err := f.resetHistoryHoles(ctx, s, deletedBefore); err != nil {
 			return err
 		}
 		rebuilt = true
@@ -101,9 +106,9 @@ func (f *Follower) applyHistoryEpochLocked(ctx context.Context) error {
 
 // resetHistoryHoles puts the recorded ranges back in step with history that is being rebuilt. A range
 // blocked for lack of state becomes pending so it is examined again against the re-established origin.
-// A range that folded into the deleted additive buckets restarts, since its contribution went with
-// them; a row-backed range keeps its progress, because those buckets were not deleted.
-func (f *Follower) resetHistoryHoles(ctx context.Context, s db.Store, bucketsDeleted bool) error {
+// A range restarts, but what it folded into buckets that survive stays counted: only the part older
+// than the deletion is folded again.
+func (f *Follower) resetHistoryHoles(ctx context.Context, s db.Store, deletedBefore time.Time) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil || len(holes) == 0 {
 		return err
@@ -116,9 +121,8 @@ func (f *Follower) resetHistoryHoles(ctx context.Context, s db.Store, bucketsDel
 			h.Lifecycle, h.Reason, h.NextRetryAt, h.LastError = rangePending, "", "", ""
 			changed = true
 		}
-		if bucketsDeleted && h.Folded > 0 {
-			f.log.Info("restarting a range whose folded buckets the rebuild deleted", "from", h.From, "to", h.To)
-			h.Next, h.State, h.Folded, h.CursorAt = 0, nil, 0, ""
+		if keepProgressBelow(&h, deletedBefore) {
+			f.log.Info("restarting a range whose folded buckets the rebuild partly deleted", "from", h.From, "to", h.To)
 			changed = true
 		}
 		out = append(out, h)

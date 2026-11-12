@@ -240,7 +240,7 @@ func TestHistoryEpochResetsHoles(t *testing.T) {
 	if got[0].From != 10 || got[0].Lifecycle != rangePending || got[0].Reason != "" {
 		t.Fatalf("the blocked range is requeued without being erased: %+v", got[0])
 	}
-	if got[1].From != 200 || got[1].Next != 0 || got[1].Folded != 0 || got[1].State != nil || got[1].CursorAt != "" {
+	if got[1].From != 200 || got[1].Next != 0 || got[1].Folded != 300 || got[1].State == nil || got[1].State.CountedFrom == 0 || got[1].CursorAt != "" {
 		t.Fatalf("a range folded into deleted buckets restarts: %+v", got[1])
 	}
 	if got[2].From != 1100 || got[2].Next != 1150 || got[2].State == nil {

@@ -315,6 +315,7 @@ const (
 	reasonNoState             = model.HoleReasonNoState
 	reasonExpired             = model.HoleReasonExpired
 	reasonUnsupportedModel    = model.HoleReasonUnsupportedModel
+	reasonIncompleteHistory   = model.HoleReasonIncompleteHistory
 )
 
 // scanOrigin is where a deliberately truncated owner scan began. With Archive the complete pricer

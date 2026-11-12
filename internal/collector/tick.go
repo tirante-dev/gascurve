@@ -368,7 +368,11 @@ func (f *Follower) rewindToAncestor(ctx context.Context, from uint64) (uint64, e
 		}
 		// A hole the filler had started is restarted: what it wrote above the ancestor went with the
 		// orphaned chain. Its fold watermark is kept unless the additive buckets went too.
-		if err := f.rewindHoles(ctx, s, ancestor, cleared); err != nil {
+		var deletedBefore time.Time
+		if cleared {
+			deletedBefore = boundary
+		}
+		if err := f.rewindHoles(ctx, s, ancestor, deletedBefore); err != nil {
 			return err
 		}
 		if ls != nil && ls.Block > ancestor {
