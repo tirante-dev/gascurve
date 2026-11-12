@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/tirante-dev/gascurve/internal/config"
-	"github.com/tirante-dev/gascurve/internal/db/dbtest"
+	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/logger"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 )
@@ -75,6 +75,8 @@ type fakeRPC struct {
 	noHeaders   bool
 	headerShift uint64
 	sampledAt   time.Time
+	// spacing, when set, is the seconds between blocks instead of one every tenth of a second.
+	spacing uint64
 	// posterGasCalls records the block numbers of each PosterGasByNumbers
 	// batch, so a test can see how the repair sized and narrowed its reads.
 	posterGasCalls [][]uint64
@@ -135,7 +137,15 @@ func (f *fakeRPC) classOf(method string) nitro.Class {
 	return f.classes[method]
 }
 
-func tsFor(n uint64) uint64  { return uint64(baseTime.Unix()) + n/10 }
+func tsFor(n uint64) uint64 { return uint64(baseTime.Unix()) + n/10 }
+
+func (f *fakeRPC) tsOf(n uint64) uint64 {
+	if f.spacing > 0 {
+		return uint64(baseTime.Unix()) + n*f.spacing
+	}
+	return tsFor(n)
+}
+
 func gasFor(n uint64) uint64 { return 1_000_000 + n%7 }
 func feeFor(n uint64) *big.Int {
 	return big.NewInt(20_000_000 + int64(n%13))
@@ -171,7 +181,7 @@ func (f *fakeRPC) header(n uint64) nitro.Header {
 		parent = h
 	}
 	posterGas := f.posterGas(n)
-	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: tsFor(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50,
+	return nitro.Header{Number: n, Hash: f.hashFor(n), ParentHash: parent, Timestamp: f.tsOf(n), GasUsed: gasFor(n), BaseFee: feeFor(n), L1BlockNumber: 50,
 		ArbOSVersion: f.arbosOf(n), ArbOSVersionKnown: true, TxCount: f.txCount(n), TxHashes: []string{"0x1", "0x2", "0x3"}[:f.txCount(n)], PosterGas: &posterGas}
 }
 
@@ -485,7 +495,7 @@ func testConfig() config.CollectorConfig {
 	}
 }
 
-func newTestFollower(t *testing.T, rpc *fakeRPC, store *dbtest.MemStore, opts ...func(*Options)) *Follower {
+func newTestFollower(t *testing.T, rpc *fakeRPC, store db.Store, opts ...func(*Options)) *Follower {
 	t.Helper()
 	clock := baseTime.Add(1000 * time.Second / 10)
 	o := Options{

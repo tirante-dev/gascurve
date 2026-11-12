@@ -77,7 +77,7 @@ test-race:
 # Integration tests need a throwaway Postgres in TEST_DB_URL. Gated by the
 # `integration` build tag so they never run by accident.
 test-integration:
-	$(GOTEST) -tags integration -count=1 -v ./internal/db/... ./internal/collector/... ./internal/api/...
+	$(GOTEST) -tags integration -count=1 -p 1 -v ./internal/db/... ./internal/collector/... ./internal/api/...
 
 # The replay fidelity measurement (docs/SPEC.md section 7.1). It calls a public RPC, so it is gated by
 # the `fidelity` build tag and never runs in CI. Override FIDELITY_URL, FIDELITY_CPS and

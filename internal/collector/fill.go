@@ -229,7 +229,7 @@ func effectiveLifecycle(h hole) string {
 	if h.Lifecycle != "" {
 		return h.Lifecycle
 	}
-	if h.Reason == reasonNoState || h.Reason == reasonUnsupportedModel {
+	if h.Reason == reasonNoState || h.Reason == reasonUnsupportedModel || h.Reason == reasonIncompleteHistory {
 		return rangeBlocked
 	}
 	return rangePending
@@ -324,9 +324,14 @@ func (f *Follower) fillStep(ctx context.Context) (FillStatus, error) {
 	if len(holes) == 0 {
 		return FillNone, nil
 	}
-	target, reasons, err := f.pickHole(ctx, holes)
+	target, reasons, held, err := f.pickHole(ctx, holes)
 	if err != nil {
 		return FillNone, err
+	}
+	for _, w := range held {
+		if err := f.recordFillFailure(ctx, w.h, w.cause); err != nil {
+			return FillNone, fmt.Errorf("record missing-range retry: %w", err)
+		}
 	}
 	if len(reasons) > 0 {
 		// Reclassify straight away so it stops counting as work that will never be done. It is
@@ -354,12 +359,27 @@ func (f *Follower) fillStep(ctx context.Context) (FillStatus, error) {
 	return status, err
 }
 
+// heldHole is a range that cannot be replayed yet for a reason that may pass, with the cause the
+// retry record keeps.
+type heldHole struct {
+	h     hole
+	cause error
+}
+
+// fillWaitError is a wait for something outside the database: the archive endpoint failing, or answering
+// with a shape the recorded history cannot yet explain. It backs the range off instead of reclassifying it.
+type fillWaitError struct{ cause error }
+
+func (w *fillWaitError) Error() string { return w.cause.Error() }
+func (w *fillWaitError) Unwrap() error { return w.cause }
+
 // pickHole chooses the newest hole whose predecessor state is known, from the hole's own
 // replay checkpoint, the stored block there, or the archive when that block was pruned. Holes
 // marked unfillable are examined only when nothing else is, and lose the mark once a state
 // appears. Costs database reads, plus one archive read for a hole whose predecessor is gone.
-// The second return carries the ranges to mark unfillable, keyed by start.
-func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map[uint64]string, error) {
+// The second return carries the ranges to mark unfillable, keyed by start; the third the ranges that
+// must wait and are to go through the durable retry backoff.
+func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map[uint64]string, []heldHole, error) {
 	order := make([]int, 0, len(holes))
 	for i := range holes {
 		order = append(order, i)
@@ -374,27 +394,34 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 		return ha.From > hb.From
 	})
 	var reasons map[uint64]string
+	var held []heldHole
 	for _, blocked := range []bool{false, true} {
 		for _, i := range order {
 			h := holes[i]
 			if (effectiveLifecycle(h) == rangeBlocked) != blocked {
 				continue
 			}
-			if h.Reason == reasonUnsupportedModel {
+			if h.Reason == reasonUnsupportedModel || h.Reason == reasonIncompleteHistory {
 				continue
 			}
 			if effectiveLifecycle(h) == rangeRetrying && h.NextRetryAt != "" {
 				next, err := requiredTime(h.NextRetryAt, "next retry at")
 				if err != nil {
-					return nil, reasons, err
+					return nil, reasons, held, err
 				}
 				if next.After(f.now()) {
 					continue
 				}
 			}
 			target, stranded, err := f.targetFor(ctx, h)
+			var wait *fillWaitError
+			if errors.As(err, &wait) {
+				f.log.Warn("a pruned hole cannot be anchored yet, backing off", "from", h.From, "to", h.To, "err", err.Error())
+				held = append(held, heldHole{h: h, cause: err})
+				continue
+			}
 			if err != nil {
-				return nil, reasons, err
+				return nil, reasons, held, err
 			}
 			if target == nil {
 				if stranded && effectiveLifecycle(h) != rangeBlocked {
@@ -409,7 +436,7 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 			}
 			explained, err := f.endsInKnownShape(ctx, h, target.state)
 			if err != nil {
-				return nil, reasons, err
+				return nil, reasons, held, err
 			}
 			if !explained {
 				f.log.Warn("the block after a queued range carries a pricer shape no recorded set explains, leaving the range for the set that does",
@@ -425,10 +452,10 @@ func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map
 				target.h.Reason = ""
 				target.h.Lifecycle = rangePending
 			}
-			return target, reasons, nil
+			return target, reasons, held, nil
 		}
 	}
-	return nil, reasons, nil
+	return nil, reasons, held, nil
 }
 
 // endsInKnownShape reports whether the shape the replay reaches the end of a range with agrees with
@@ -607,16 +634,15 @@ func (f *Follower) targetFor(ctx context.Context, h hole) (target *fillTarget, s
 			return &fillTarget{h: h, prev: carried.Block, hash: carried.Hash, prevTs: carried.PrevTS, state: st, carry: carriedCarry(carried)}, false, nil
 		}
 	}
-	if prev == nil && h.Reason != reasonNoState {
+	if prev == nil && h.Reason != reasonNoState && f.archive != nil {
 		st, header, err := f.archiveFillState(ctx, start-1)
 		if err != nil {
-			f.log.Warn("the archive could not answer for the block a pruned hole replays from, trying again later",
-				"block", start-1, "from", h.From, "to", h.To, "err", err.Error())
-			return nil, false, nil
+			return nil, false, &fillWaitError{cause: fmt.Errorf("archive state at block %d: %w", start-1, err)}
 		}
-		if st != nil {
-			return &fillTarget{h: h, prev: header.Number, hash: header.Hash, prevTs: header.Timestamp, state: st}, false, nil
+		if st == nil {
+			return nil, false, &fillWaitError{cause: fmt.Errorf("archive state at block %d does not match the recorded pricer shape", start-1)}
 		}
+		return &fillTarget{h: h, prev: header.Number, hash: header.Hash, prevTs: header.Timestamp, state: st}, false, nil
 	}
 	// A stored predecessor whose state cannot be built yet is a wait: the shape may still be
 	// recorded. One that is not there at all never comes back, so the range is reclassified.
@@ -624,12 +650,9 @@ func (f *Follower) targetFor(ctx context.Context, h hole) (target *fillTarget, s
 }
 
 // archiveFillState is the pricer state at the end of block n as the archive endpoint reports it,
-// for a hole whose stored predecessor was pruned before the fill reached it. Nil without an archive,
-// or when the archive's shape is not the one recorded for that block.
+// for a hole whose stored predecessor was pruned before the fill reached it. Nil when the archive's
+// shape is not the one recorded for that block.
 func (f *Follower) archiveFillState(ctx context.Context, n uint64) (*pricer.State, *nitro.Header, error) {
-	if f.archive == nil {
-		return nil, nil, nil
-	}
 	sample, err := f.archive.PricingSampleAt(ctx, n)
 	if err != nil {
 		return nil, nil, err
@@ -820,6 +843,12 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 		return FillIdle, err
 	}
 	rows, filledTail, end := f.replayHole(t, headers, tail, tl, actions)
+	if h.State != nil {
+		end.Origin, end.Unbuilt, end.Refused = h.State.Origin, h.State.Unbuilt, h.State.Refused
+	}
+	if from == h.From {
+		end.Origin = t.prevTs
+	}
 	h.Next, h.State = from+n, end
 	h.CursorAt = time.Unix(int64(headers[len(headers)-1].Timestamp), 0).UTC().Format(time.RFC3339)
 	h.Lifecycle, h.NextRetryAt, h.LastError = rangePending, "", ""
@@ -990,7 +1019,13 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, prevTs ui
 	setID := func(n uint64) sql.NullInt64 { return setIDs[n] }
 	buckets := db.FoldBlocks(additive, setID)
 	rowFolds := db.FoldBlocks(foldable, setID)
+	incomplete := false
 	err := f.withGeneration(ctx, gen, func(s db.Store) error {
+		unbuilt := 0
+		var refused []model.Span
+		if h.State != nil {
+			refused = append(refused, h.State.Refused...)
+		}
 		if stored := append(append([]db.Block{}, rowBacked...), keptBuckets...); len(stored) > 0 {
 			if err := s.UpsertBlocks(ctx, stored); err != nil {
 				return fmt.Errorf("gap blocks: %w", err)
@@ -1015,6 +1050,7 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, prevTs ui
 				// discarded a window there is nothing to add to, and a fold would insert a bucket holding
 				// the recovered rows alone, pruned prefix and canonical suffix both absent, served as whole.
 				first := firstRows(rowBacked, res)
+				firstFolded := firstRows(foldable, res)
 				for _, b := range rowFolds {
 					if b.Resolution != res || !startAmong(b.BucketStart, declined) {
 						continue
@@ -1024,33 +1060,104 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, prevTs ui
 					if err != nil {
 						return fmt.Errorf("gap buckets: %w", err)
 					}
-					if len(existing) > 0 || insideHole(b.BucketStart, width, prevTs, h.SuccessorAt, first[b.BucketStart.Unix()], folded) {
+					inside := insideHole(b.BucketStart, width, prevTs, h.SuccessorAt, first[b.BucketStart.Unix()], folded)
+					firstTouch := prevTs != 0 && time.Unix(int64(prevTs), 0).Before(b.BucketStart)
+					switch {
+					case spanHas(refused, res, b.BucketStart):
+					case len(existing) == 0 && inside:
 						toFold = append(toFold, b)
-					} else {
-						f.log.Warn("a window below the prune frontier has no bucket the recovered rows can complete, leaving it as a gap",
-							"resolution", res, "start", b.BucketStart.Format(time.RFC3339), "from", h.From, "to", h.To)
+						continue
+					case len(existing) > 0 && !inside && !holdsRowsOf(existing[0], h, b.BucketStart, firstFolded[b.BucketStart.Unix()], firstTouch):
+						toFold = append(toFold, b)
+						continue
+					default:
+						refused = spanAdd(refused, res, b.BucketStart, width)
 					}
+					unbuilt++
+					f.log.Warn("a window below the prune frontier cannot be completed from the recovered rows, leaving it as it is",
+						"resolution", res, "start", b.BucketStart.Format(time.RFC3339), "from", h.From, "to", h.To, "bucketExists", len(existing) > 0)
 				}
 			}
 		}
 		if err := s.FoldBuckets(ctx, toFold); err != nil {
 			return fmt.Errorf("gap buckets: %w", err)
 		}
-		return f.advanceHole(ctx, s, h, done)
+		if unbuilt > 0 && h.State != nil {
+			state := *h.State
+			state.Unbuilt += unbuilt
+			state.Refused = refused
+			h.State = &state
+		}
+		incomplete = h.State != nil && h.State.Unbuilt > 0
+		return f.advanceHole(ctx, s, h, done, incomplete)
 	})
 	if err != nil {
 		return err
 	}
-	if done {
+	switch {
+	case done && incomplete:
+		f.log.Error("gap replayed but not filled: some bucket windows could not be written whole, recording the range as incomplete history",
+			"from", h.From, "to", h.To, "windows", h.State.Unbuilt)
+	case done:
 		f.metrics.HoleFilled()
 		f.log.Info("gap filled", "from", h.From, "to", h.To)
 	}
 	return nil
 }
 
+// holdsRowsOf reports whether a stored bucket already counts blocks of the hole, which a fold would
+// count a second time. A bucket whose last block lies at or past the batch's first row and inside the
+// hole does. So does one whose last block is past the hole and which holds more blocks than lie
+// between the hole and that last block, but only where nothing of the hole is in the bucket legitimately
+// yet (the batch is the first to reach the window) and the window cannot also hold blocks from before
+// the hole, which would explain the extra. A hole lying inside one window cannot be told apart this way.
+func holdsRowsOf(b db.Bucket, h hole, start time.Time, firstRow uint64, firstTouch bool) bool {
+	if b.LastBlock >= firstRow && b.LastBlock <= h.To {
+		return true
+	}
+	if firstTouch && b.LastBlock > h.To && h.State != nil && h.State.Origin != 0 && time.Unix(int64(h.State.Origin), 0).Before(start) {
+		return uint64(b.Blocks) > b.LastBlock-h.To
+	}
+	return false
+}
+
+// spanHas reports whether the window starting at start is in one of the spans of res.
+func spanHas(spans []model.Span, res string, start time.Time) bool {
+	for _, sp := range spans {
+		if sp.Res == res && start.Unix() >= sp.From && start.Unix() <= sp.To {
+			return true
+		}
+	}
+	return false
+}
+
+const maxRefusedSpans = 32
+
+// spanAdd records a refused window, extending the span that ends just before it. Past the cap the
+// last span of the resolution grows over the gap instead, which refuses more windows, never fewer.
+func spanAdd(spans []model.Span, res string, start time.Time, width time.Duration) []model.Span {
+	at, step := start.Unix(), int64(width/time.Second)
+	last := -1
+	for i, sp := range spans {
+		if sp.Res != res {
+			continue
+		}
+		last = i
+		if at == sp.To+step {
+			spans[i].To = at
+			return spans
+		}
+	}
+	if len(spans) >= maxRefusedSpans && last >= 0 {
+		spans[last].To = max(spans[last].To, at)
+		return spans
+	}
+	return append(spans, model.Span{Res: res, From: at, To: at})
+}
+
 // advanceHole records a hole's progress inside the commit. The entry is matched by start
 // because another writer may have appended or merged one meanwhile, so it may have grown.
-func (f *Follower) advanceHole(ctx context.Context, s db.Store, h hole, done bool) error {
+func (f *Follower) advanceHole(ctx context.Context, s db.Store, h hole, done, incomplete bool) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil {
 		return err
@@ -1062,7 +1169,10 @@ func (f *Follower) advanceHole(ctx context.Context, s db.Store, h hole, done boo
 			continue
 		}
 		if done && cur.To == h.To {
-			continue
+			if !incomplete {
+				continue
+			}
+			h.Reason, h.Lifecycle, h.NextRetryAt = reasonIncompleteHistory, rangeBlocked, ""
 		}
 		cur.Next, cur.State, cur.Reason, cur.Lifecycle = h.Next, h.State, h.Reason, h.Lifecycle
 		cur.CursorAt, cur.NextRetryAt, cur.LastError = h.CursorAt, h.NextRetryAt, h.LastError

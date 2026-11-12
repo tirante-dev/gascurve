@@ -10,6 +10,7 @@ import (
 
 	"github.com/tirante-dev/gascurve/internal/db"
 	"github.com/tirante-dev/gascurve/internal/db/dbtest"
+	"github.com/tirante-dev/gascurve/internal/metrics"
 	"github.com/tirante-dev/gascurve/internal/model"
 	"github.com/tirante-dev/gascurve/internal/nitro"
 	"github.com/tirante-dev/gascurve/internal/pricer"
@@ -1310,12 +1311,14 @@ func TestFillFoldsIntoAWindowTheStoreWillNotRebuild(t *testing.T) {
 
 // After a rewind discarded a window below the frontier there is no bucket to add to. Folding the
 // recovered rows would insert a bucket holding them alone, pruned prefix and canonical suffix both
-// absent, and the hole's completion would present it as whole. Absent stays absent.
+// absent, and the hole's completion would present it as whole. Absent stays absent, and the range is
+// recorded as incomplete history rather than filled, so no counter certifies it.
 func TestFillLeavesADiscardedWindowAbsent(t *testing.T) {
 	ctx := context.Background()
+	reg := metrics.NewRegistry()
 	rpc := newFakeRPC(1000)
 	store := dbtest.New()
-	f := newTestFollower(t, rpc, store)
+	f := newTestFollower(t, rpc, store, func(o *Options) { o.Metrics = metrics.NewCollector(reg) })
 	skipGap(t, f, rpc)
 	inside := time.Unix(int64(tsFor(900)), 0).UTC()
 	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, inside.Format(time.RFC3339Nano)); err != nil {
@@ -1329,11 +1332,22 @@ func TestFillLeavesADiscardedWindowAbsent(t *testing.T) {
 		t.Fatalf("the window was not discarded: %d", len(before))
 	}
 	fillAll(t, f, 40)
-	if holesOf(t, store) != nil {
-		t.Fatalf("the gap must finish: %+v", holesOf(t, store))
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].Reason != reasonIncompleteHistory || holes[0].Lifecycle != rangeBlocked || holes[0].State == nil || holes[0].State.Unbuilt == 0 {
+		t.Fatalf("a hole with a window it could not write is kept as incomplete history: %+v", holes)
 	}
 	if after, _ := store.Buckets(ctx, 4663, db.Resolution1m, minute, minute.Add(time.Minute)); len(after) != 0 {
 		t.Fatalf("a fold inserted a partial bucket into a discarded window: %+v", after[0])
+	}
+	body := scrapeRegistry(t, reg)
+	hasSeries(t, body, `gascurve_collector_holes_filled_total{chain_id="4663",network="robinhood"} 0`)
+	hasSeries(t, body, `gascurve_collector_holes_unfillable{chain_id="4663",network="robinhood"} 1`)
+	rpc.headerCalls = nil
+	if status, err := f.FillStep(ctx); err != nil || status != FillNone {
+		t.Fatalf("incomplete history is not replayed again: %v %v", status, err)
+	}
+	if len(rpc.headerCalls) != 0 {
+		t.Fatalf("no headers are fetched for it: %v", rpc.headerCalls)
 	}
 }
 
@@ -1455,7 +1469,8 @@ func TestFillAnchorsAPrunedHoleOnTheArchive(t *testing.T) {
 }
 
 // An archive whose state at the block before the hole has a shape no recorded set explains cannot
-// seed the replay, so the hole is reclassified exactly as it is without an archive.
+// seed the replay yet. The shape may still be recorded, so the hole backs off and is tried again
+// instead of being written off as having no state.
 func TestFillDoesNotAnchorOnAnArchiveOfAnotherShape(t *testing.T) {
 	ctx := context.Background()
 	rpc := newFakeRPC(1000)
@@ -1471,11 +1486,50 @@ func TestFillDoesNotAnchorOnAnArchiveOfAnotherShape(t *testing.T) {
 	if st, err := f.FillStep(ctx); err != nil || st != FillNone {
 		t.Fatalf("nothing to replay from: %v %v", st, err)
 	}
-	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Reason != reasonNoState {
-		t.Fatalf("the hole is unfillable: %+v", holes)
+	holes := holesOf(t, store)
+	if len(holes) != 1 || holes[0].Reason == reasonNoState || holes[0].Lifecycle != rangeRetrying || holes[0].RetryCount != 1 || holes[0].NextRetryAt == "" || holes[0].LastError == "" {
+		t.Fatalf("the hole backs off and stays fillable: %+v", holes)
 	}
 	if len(rpc.headerCalls) != 0 {
 		t.Fatalf("no headers are fetched for it: %v", rpc.headerCalls)
+	}
+	archive.constraintsAt = nil
+	archive.backlogsAt = func(uint64) []uint64 { return []uint64{5_000_000, 11_194_391_810_886} }
+	if st, err := f.FillStep(ctx); err != nil || st != FillNone || len(archive.sampleAt) != 1 {
+		t.Fatalf("inside the backoff the archive is not asked again: %v %v %v", st, err, archive.sampleAt)
+	}
+	advanceRetry(f)
+	fillAll(t, f, 40)
+	if holesOf(t, store) != nil {
+		t.Fatalf("once the shape matches the hole is filled: %+v", holesOf(t, store))
+	}
+}
+
+func TestFillBacksOffWhenTheArchiveFails(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	delete(store.BlockRows[4663], 1000)
+	archive := newFakeRPC(gapHead)
+	archive.errs["PricingSampleAt"] = errRPC
+	f.archive = archive
+	for want := uint64(1); want <= 2; want++ {
+		if st, err := f.FillStep(ctx); err != nil || st != FillNone {
+			t.Fatalf("a failing archive is a wait, not a failure of the step: %v %v", st, err)
+		}
+		holes := holesOf(t, store)
+		if len(holes) != 1 || holes[0].Lifecycle != rangeRetrying || holes[0].RetryCount != want || holes[0].LastError == "" || holes[0].NextRetryAt == "" {
+			t.Fatalf("attempt %d is recorded durably: %+v", want, holes)
+		}
+		if got := archive.calls["PricingSampleAt"]; got != int(want) {
+			t.Fatalf("one archive call per attempt, got %d", got)
+		}
+		if _, err := f.FillStep(ctx); err != nil || archive.calls["PricingSampleAt"] != int(want) {
+			t.Fatalf("no call inside the backoff: %v %d", err, archive.calls["PricingSampleAt"])
+		}
+		advanceRetry(f)
 	}
 }
 
@@ -1637,5 +1691,30 @@ func TestFillAcceptsAChangeInTheBlockAfterTheRange(t *testing.T) {
 	}
 	if b, _ := store.BlockByNumber(ctx, 4663, 1149); b == nil || len(b.Backlogs) != 2 {
 		t.Fatalf("the range kept the set that was in force through it: %+v", b)
+	}
+}
+
+func TestRefusedSpansMergeAndStayBounded(t *testing.T) {
+	step := time.Minute
+	var spans []model.Span
+	for i := 0; i < 5; i++ {
+		spans = spanAdd(spans, db.Resolution1m, baseTime.Add(time.Duration(i)*step), step)
+	}
+	if len(spans) != 1 || spans[0].To-spans[0].From != 4*60 {
+		t.Fatalf("adjacent windows share a span: %+v", spans)
+	}
+	for i := 0; i < 3*maxRefusedSpans; i++ {
+		spans = spanAdd(spans, db.Resolution1m, baseTime.Add(time.Duration(10+2*i)*step), step)
+	}
+	if len(spans) > maxRefusedSpans {
+		t.Fatalf("the list is capped: %d", len(spans))
+	}
+	for i := 0; i < 3*maxRefusedSpans; i++ {
+		if !spanHas(spans, db.Resolution1m, baseTime.Add(time.Duration(10+2*i)*step)) {
+			t.Fatalf("a refused window is never forgotten: %d", i)
+		}
+	}
+	if spanHas(spans, db.Resolution1h, baseTime) {
+		t.Fatal("another resolution is not refused")
 	}
 }

@@ -394,7 +394,19 @@ const (
 	// model the chain did not have, so the range is left unpriced rather than filled with a number
 	// nothing supports.
 	HoleReasonUnsupportedModel = "unsupported model"
+	// HoleReasonIncompleteHistory marks a range whose blocks all replayed but at least one bucket
+	// window could not be written whole, because it had lost rows to prune or a rewind, or already
+	// held some of the range's blocks. It is never filled again on its own: an operator repairs the
+	// windows and re-queues the range.
+	HoleReasonIncompleteHistory = "incomplete history"
 )
+
+// Span is a run of adjacent bucket windows of one resolution, by the unix start of its first and last.
+type Span struct {
+	Res  string `json:"res"`
+	From int64  `json:"from"`
+	To   int64  `json:"to"`
+}
 
 // HoleState is the pricer state at the end of the last block a filler committed, carried in the
 // hole record itself so a continuation never depends on a stored block at Next-1 that retention may
@@ -413,6 +425,13 @@ type HoleState struct {
 	PendingFee      string  `json:"pendingFee,omitempty"`
 	PendingExponent int64   `json:"pendingExponent,omitempty"`
 	PendingBips     []int64 `json:"pendingBips,omitempty"`
+	// Unbuilt counts the bucket windows the batches so far could not write whole.
+	Unbuilt int `json:"unbuilt,omitempty"`
+	// Refused are the bucket windows a batch left alone because a stored bucket already counts some of
+	// the range's blocks, so no later batch folds into them either.
+	Refused []Span `json:"refused,omitempty"`
+	// Origin is the timestamp of the block before the range, kept from its first batch on.
+	Origin uint64 `json:"origin,omitempty"`
 }
 
 // Hole is the collector's domain shape for one durable missing_ranges row and the decoder for the
