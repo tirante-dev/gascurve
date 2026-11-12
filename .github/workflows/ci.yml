@@ -440,7 +440,7 @@ jobs:
   # repository setting: add "Docker Build" to the required status checks for
   # main.
   docker:
-    name: Docker Build
+    name: Docker Build (${{ matrix.image }}, ${{ matrix.dockerfile }})
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
