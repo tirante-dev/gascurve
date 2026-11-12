@@ -3,7 +3,7 @@ name: gascurve
 description: Live and historical gas pricing for Arbitrum Nitro chains.
   Collector, API, and web frontend.
 type: application
-version: 0.7.0
+version: 0.7.1
 appVersion: "1.6.3"
 home: https://gascurve.com
 sources:
