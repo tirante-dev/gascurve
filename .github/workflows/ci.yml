@@ -185,7 +185,7 @@ jobs:
             echo "::error::Coverage ${COVERAGE}% is below the ${THRESHOLD}% threshold"
             exit 1
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: go-coverage
           path: coverage.out
@@ -340,7 +340,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install libatomic for Node
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends libatomic1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -360,7 +360,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install libatomic for Node
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends libatomic1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -380,7 +380,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install libatomic for Node
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends libatomic1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -397,7 +397,7 @@ jobs:
             echo "::error::Coverage ${COVERAGE}% is below the ${THRESHOLD}% threshold"
             exit 1
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: web-coverage
           path: web/coverage
@@ -415,7 +415,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install libatomic for Node
         run: sudo apt-get -qq update && sudo apt-get -qq install -y --no-install-recommends libatomic1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -456,7 +456,7 @@ jobs:
       # Docker Hub's anonymous pull limit is shared by every runner behind the
       # homelab's one public IP, so Hub pulls go through the Harbor cache. Only
       # BuildKit takes a mirror with a path; dockerd's registry-mirrors cannot.
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=registry.ahkc.win/docker.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
