@@ -3,13 +3,13 @@
 # Base images are pinned by digest; Dependabot (docker ecosystem) bumps them.
 
 # deps: install from the lockfile
-FROM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS deps
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS deps
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
 # builder: Next.js standalone output
-FROM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS builder
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS builder
 WORKDIR /app
 ARG VERSION=0.0.0
 ARG NEXT_PUBLIC_SITE_URL=https://gascurve.com
@@ -27,19 +27,18 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY web/ .
 RUN npm run build
 
-# runner
-FROM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS runner
-WORKDIR /app
-ARG NEXT_PUBLIC_SITE_URL=https://gascurve.com
-ARG NEXT_PUBLIC_API_URL=/api/v1
-ARG NEXT_PUBLIC_UMAMI_WEBSITE_ID=
-ENV NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1 \
-    NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
-    NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
-    NEXT_PUBLIC_UMAMI_WEBSITE_ID=$NEXT_PUBLIC_UMAMI_WEBSITE_ID \
-    HOSTNAME=0.0.0.0 \
-    PORT=3000
+# app: sharp is an optional native dependency of Next, installed for the build platform
+FROM builder AS app
+ARG BUILDARCH
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" != "$BUILDARCH" ]; then rm -rf .next/standalone/node_modules/@img; fi
+
+# node-base: the target-platform node image, only ever read by COPY
+FROM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS node-base
+
+# rootfs: assembled on the build platform so the target platform needs no emulation
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS rootfs
+COPY --from=node-base / /rootfs
 # Drop the bundled npm, corepack and yarn: the standalone server only needs
 # node, and npm's own dependency tree is where the rest of the image's CVEs
 # live (brace-expansion, pacote, sigstore, tar). Nothing in this application
@@ -49,11 +48,29 @@ ENV NODE_ENV=production \
 # happens to hold at build time, so the same commit and the same base digest
 # would produce a different runtime on a later rebuild. OS patches come from
 # bumping the digest-pinned base above, which Dependabot does.
-RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
- && addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
-COPY --from=builder /app/public ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+RUN cd /rootfs \
+ && rm -rf usr/local/lib/node_modules usr/local/bin/npm usr/local/bin/npx usr/local/bin/corepack opt/yarn* usr/local/bin/yarn usr/local/bin/yarnpkg \
+ && echo "nodejs:x:1001:" >> etc/group \
+ && echo "nextjs:x:1001:1001:nextjs:/home/nextjs:/sbin/nologin" >> etc/passwd
+
+# runner
+FROM scratch AS runner
+COPY --from=rootfs /rootfs /
+WORKDIR /app
+ARG NEXT_PUBLIC_SITE_URL=https://gascurve.com
+ARG NEXT_PUBLIC_API_URL=/api/v1
+ARG NEXT_PUBLIC_UMAMI_WEBSITE_ID=
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
+    NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+    NEXT_PUBLIC_UMAMI_WEBSITE_ID=$NEXT_PUBLIC_UMAMI_WEBSITE_ID \
+    HOSTNAME=0.0.0.0 \
+    PORT=3000
+COPY --from=app /app/public ./public
+COPY --from=app --chown=1001:1001 /app/.next/standalone ./
+COPY --from=app --chown=1001:1001 /app/.next/static ./.next/static
 # Numeric UID/GID so Kubernetes can enforce runAsNonRoot.
 USER 1001:1001
 EXPOSE 3000

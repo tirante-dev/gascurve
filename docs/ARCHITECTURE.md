@@ -457,7 +457,7 @@ The chart renders a `ServiceMonitor` per deployable and a `PrometheusRule` (both
 
 ## 10. Versioning, images and delivery
 
-One version for the whole repo, managed by release-please from the Go component; `web/package.json` is bumped as an extra file. Three images: `gascurve-collector`, `gascurve-api`, `gascurve-web`, each built for `linux/amd64` and `linux/arm64`. The Helm chart under `charts/gascurve` is versioned separately and records the application version it ships as `Chart.yaml` `appVersion`.
+One version for the whole repo, managed by release-please from the Go component; `web/package.json` is bumped as an extra file. Three images: `gascurve-collector`, `gascurve-api`, `gascurve-web`, each built for `linux/amd64` and `linux/arm64`. The runners have no `binfmt_misc`, so nothing is emulated: every Dockerfile compiles and assembles on `$BUILDPLATFORM` and its target-platform stage only `COPY`s, so a `RUN` in a target-platform stage breaks the publish. The Helm chart under `charts/gascurve` is versioned separately and records the application version it ships as `Chart.yaml` `appVersion`.
 
 Two tag namespaces, two workflows, and they must not be confused: `v<version>` is an application release and is handled by Docker Publish; `gascurve-chart-v<version>` is a chart release and is handled by Helm Publish. Both refuse to act on a bare Git tag: the version must have a published, non-prerelease GitHub release, and `.release-please-manifest.json` at that tag must record the same version, so a tag moved onto an unrelated commit cannot be published.
 
