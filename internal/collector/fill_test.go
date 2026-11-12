@@ -1337,6 +1337,148 @@ func TestFillLeavesADiscardedWindowAbsent(t *testing.T) {
 	}
 }
 
+// wideGapHead puts the whole minutes at 07:02 (blocks 1200 to 1799) and 07:03 (1800 to 2399)
+// inside the skipped range, between the minute of block 1000 and the minute of the head.
+const wideGapHead = 2500
+
+func skipWideGap(t *testing.T, f *Follower, rpc *fakeRPC) {
+	t.Helper()
+	ctx := context.Background()
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.setHead(wideGapHead)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rpc.headerCalls = nil
+}
+
+func minuteBucket(t *testing.T, store *dbtest.MemStore, minute time.Time) *db.Bucket {
+	t.Helper()
+	got, err := store.Buckets(context.Background(), 4663, db.Resolution1m, minute, minute.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		return nil
+	}
+	return &got[0]
+}
+
+// A hole older than block_retention by the time it is filled: every window it crosses is below the
+// prune frontier. The windows lying wholly inside it never had a bucket, and the hole's own rows are
+// all of their blocks, so they are written from them rather than reported filled and left empty.
+func TestFillBuildsWindowsInsideAHoleBelowTheFrontier(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipWideGap(t, f, rpc)
+	frontier := baseTime.Add(5 * time.Minute)
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, frontier.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	fillAll(t, f, 200)
+	if holesOf(t, store) != nil {
+		t.Fatalf("the gap must finish: %+v", holesOf(t, store))
+	}
+	for _, minute := range []time.Time{baseTime.Add(2 * time.Minute), baseTime.Add(3 * time.Minute)} {
+		if b := minuteBucket(t, store, minute); b == nil || b.Blocks != 600 {
+			t.Fatalf("the window at %s lies inside the hole and must hold all 600 of its blocks: %+v", minute.Format("15:04"), b)
+		}
+	}
+	for _, res := range db.ResolutionOrder {
+		if got := blockCountIn(store, res); got != wideGapHead-1000+1 {
+			t.Fatalf("%s: every block from 1000 to the head counted once, got %d", res, got)
+		}
+	}
+}
+
+// A rewind keeps the hole's fold watermark while it sends the cursor back, so the rows of a window
+// below it are taken as already counted. Inserting that window from the rows above the watermark
+// would present part of it as the whole; it stays absent while the next window, all of whose rows
+// are above the watermark, is still built.
+func TestFillLeavesAWindowWithFoldedRowsAbsent(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipWideGap(t, f, rpc)
+	frontier := baseTime.Add(5 * time.Minute)
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, frontier.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
+		holes, err := f.loadHoles(ctx, s)
+		if err != nil {
+			return err
+		}
+		holes[0].Folded = 1300
+		return f.saveHoles(ctx, s, holes)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fillAll(t, f, 200)
+	if b := minuteBucket(t, store, baseTime.Add(2*time.Minute)); b != nil {
+		t.Fatalf("a window with rows under the watermark must not be built from the rest: %+v", b)
+	}
+	if b := minuteBucket(t, store, baseTime.Add(3*time.Minute)); b == nil || b.Blocks != 600 {
+		t.Fatalf("the window above the watermark is still built whole: %+v", b)
+	}
+}
+
+// The stored block a hole replays from is pruned before the fill starts, as it is for a range
+// re-queued days after the fact. With an archive endpoint the replay starts from the archive's own
+// state at that block instead of the hole being written off as having no state.
+func TestFillAnchorsAPrunedHoleOnTheArchive(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	delete(store.BlockRows[4663], 1000)
+	archive := newFakeRPC(gapHead)
+	archive.backlogsAt = func(uint64) []uint64 { return []uint64{5_000_000, 11_194_391_810_886} }
+	f.archive = archive
+	fillAll(t, f, 40)
+	if holesOf(t, store) != nil {
+		t.Fatalf("the gap must finish: %+v", holesOf(t, store))
+	}
+	if len(archive.sampleAt) != 1 || archive.sampleAt[0] != 1000 {
+		t.Fatalf("one archive read, at the block before the hole: %v", archive.sampleAt)
+	}
+	b1001, _ := store.BlockByNumber(ctx, 4663, 1001)
+	if b1001 == nil || b1001.Backlogs[0] != 5_000_000+gasFor(1001) {
+		t.Fatalf("the replay continues from the archive's backlogs: %+v", b1001)
+	}
+}
+
+// An archive whose state at the block before the hole has a shape no recorded set explains cannot
+// seed the replay, so the hole is reclassified exactly as it is without an archive.
+func TestFillDoesNotAnchorOnAnArchiveOfAnotherShape(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	skipGap(t, f, rpc)
+	delete(store.BlockRows[4663], 1000)
+	archive := newFakeRPC(gapHead)
+	archive.constraintsAt = func(uint64) []nitro.Constraint {
+		return []nitro.Constraint{{Target: 7_000_000, Window: 102, Backlog: 1}}
+	}
+	f.archive = archive
+	if st, err := f.FillStep(ctx); err != nil || st != FillNone {
+		t.Fatalf("nothing to replay from: %v %v", st, err)
+	}
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Reason != reasonNoState {
+		t.Fatalf("the hole is unfillable: %+v", holes)
+	}
+	if len(rpc.headerCalls) != 0 {
+		t.Fatalf("no headers are fetched for it: %v", rpc.headerCalls)
+	}
+}
+
 // TestFillLegacyAdoptsConstraints: a legacy chain that adopts the constraint
 // model inside a skipped range. The replay switches to the recorded set at the
 // owner call's block instead of pricing the rest of the range with parameters

@@ -355,8 +355,9 @@ func (f *Follower) fillStep(ctx context.Context) (FillStatus, error) {
 }
 
 // pickHole chooses the newest hole whose predecessor state is known, from the hole's own
-// replay checkpoint or the stored block there. Holes marked unfillable are examined only
-// when nothing else is, and lose the mark once a state appears. Costs database reads only.
+// replay checkpoint, the stored block there, or the archive when that block was pruned. Holes
+// marked unfillable are examined only when nothing else is, and lose the mark once a state
+// appears. Costs database reads, plus one archive read for a hole whose predecessor is gone.
 // The second return carries the ranges to mark unfillable, keyed by start.
 func (f *Follower) pickHole(ctx context.Context, holes []hole) (*fillTarget, map[uint64]string, error) {
 	order := make([]int, 0, len(holes))
@@ -606,9 +607,46 @@ func (f *Follower) targetFor(ctx context.Context, h hole) (target *fillTarget, s
 			return &fillTarget{h: h, prev: carried.Block, hash: carried.Hash, prevTs: carried.PrevTS, state: st, carry: carriedCarry(carried)}, false, nil
 		}
 	}
+	if prev == nil && h.Reason != reasonNoState {
+		st, header, err := f.archiveFillState(ctx, start-1)
+		if err != nil {
+			f.log.Warn("the archive could not answer for the block a pruned hole replays from, trying again later",
+				"block", start-1, "from", h.From, "to", h.To, "err", err.Error())
+			return nil, false, nil
+		}
+		if st != nil {
+			return &fillTarget{h: h, prev: header.Number, hash: header.Hash, prevTs: header.Timestamp, state: st}, false, nil
+		}
+	}
 	// A stored predecessor whose state cannot be built yet is a wait: the shape may still be
 	// recorded. One that is not there at all never comes back, so the range is reclassified.
 	return nil, prev == nil, nil
+}
+
+// archiveFillState is the pricer state at the end of block n as the archive endpoint reports it,
+// for a hole whose stored predecessor was pruned before the fill reached it. Nil without an archive,
+// or when the archive's shape is not the one recorded for that block.
+func (f *Follower) archiveFillState(ctx context.Context, n uint64) (*pricer.State, *nitro.Header, error) {
+	if f.archive == nil {
+		return nil, nil, nil
+	}
+	sample, err := f.archive.PricingSampleAt(ctx, n)
+	if err != nil {
+		return nil, nil, err
+	}
+	recorded, err := f.store.StateSampleAt(ctx, f.chainID, n)
+	if err != nil {
+		return nil, nil, fmt.Errorf("state sample at %d: %w", n, err)
+	}
+	f.mu.Lock()
+	st := f.shapeAtLocked(n, recorded)
+	f.mu.Unlock()
+	if sample.MinBaseFee == nil || !sameShape(st, sample) {
+		return nil, nil, nil
+	}
+	st.SetBacklogs(sampleBacklogs(sample))
+	st.MinBaseFee = new(big.Int).Set(sample.MinBaseFee)
+	return st, &sample.Header, nil
 }
 
 // storedFillState builds the pricer state at the end of a stored block: the shape really in force
@@ -785,7 +823,7 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	h.Next, h.State = from+n, end
 	h.CursorAt = time.Unix(int64(headers[len(headers)-1].Timestamp), 0).UTC().Format(time.RFC3339)
 	h.Lifecycle, h.NextRetryAt, h.LastError = rangePending, "", ""
-	if err := f.commitFill(ctx, gen, h, rows, filledTail, h.Next > h.To); err != nil {
+	if err := f.commitFill(ctx, gen, h, t.prevTs, rows, filledTail, h.Next > h.To); err != nil {
 		return FillProgressed, err
 	}
 	f.noteFilledHead(filledTail)
@@ -803,6 +841,35 @@ func (f *Follower) noteFilledHead(filled *db.Block) {
 	if filled.Number == f.head {
 		f.lastErrBips = db.ReplayErrorBips(*filled)
 	}
+}
+
+// insideHole reports whether every block of the window at start is a row this hole replays from
+// here on: the block before the batch is earlier than the window, so its first block is in the
+// batch and at or above the fold watermark, and the block after the hole is no earlier than its end.
+// Such a window had no bucket before the hole and its rows are all of it, so an absent bucket there
+// is built from them; any other absent window may have lost rows to prune or a rewind.
+func insideHole(start time.Time, width time.Duration, prevTs uint64, successor string, firstRow, folded uint64) bool {
+	if prevTs == 0 || successor == "" || firstRow < folded {
+		return false
+	}
+	after, err := time.Parse(time.RFC3339, successor)
+	if err != nil {
+		return false
+	}
+	return time.Unix(int64(prevTs), 0).Before(start) && !after.Before(start.Add(width))
+}
+
+// firstRows maps each window start of rows at a resolution to the lowest block number in it.
+func firstRows(rows []db.Block, res string) map[int64]uint64 {
+	width := db.Resolutions[res]
+	out := map[int64]uint64{}
+	for _, r := range rows {
+		start := r.TS.UTC().Truncate(width).Unix()
+		if n, ok := out[start]; !ok || r.Number < n {
+			out[start] = r.Number
+		}
+	}
+	return out
 }
 
 // startAmong reports whether start is one of starts.
@@ -883,7 +950,7 @@ func headerOf(block db.Block) nitro.Header {
 // the first live block on are rows the buckets are rebuilt from; anything older folds
 // additively, so an aged hole cannot wipe the backfill's folds. Blocks below the hole's fold
 // watermark are replayed for the state they carry but never folded twice.
-func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db.Block, tail *db.Block, done bool) error {
+func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, prevTs uint64, rows []db.Block, tail *db.Block, done bool) error {
 	f.mu.Lock()
 	boundary, hasBoundary := f.boundaryLocked()
 	setIDs := make(map[uint64]sql.NullInt64, len(rows))
@@ -918,6 +985,7 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db
 			keptBuckets = append(keptBuckets, *tail)
 		}
 	}
+	folded := h.Folded
 	h.Folded = max(h.Folded, h.Next)
 	setID := func(n uint64) sql.NullInt64 { return setIDs[n] }
 	buckets := db.FoldBlocks(additive, setID)
@@ -943,19 +1011,24 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, rows []db
 				if err != nil {
 					return fmt.Errorf("gap buckets: %w", err)
 				}
-				// Only into a bucket that is still there. After a rewind discarded the window there is
-				// nothing to add to, and a fold would insert a bucket holding the recovered rows alone:
-				// pruned prefix and canonical suffix both absent, served as whole. Absent stays absent.
+				// Into a bucket that is still there, or one the hole's rows describe whole. After a rewind
+				// discarded a window there is nothing to add to, and a fold would insert a bucket holding
+				// the recovered rows alone, pruned prefix and canonical suffix both absent, served as whole.
+				first := firstRows(rowBacked, res)
 				for _, b := range rowFolds {
 					if b.Resolution != res || !startAmong(b.BucketStart, declined) {
 						continue
 					}
-					existing, err := s.Buckets(ctx, f.chainID, res, b.BucketStart, b.BucketStart.Add(db.Resolutions[res]))
+					width := db.Resolutions[res]
+					existing, err := s.Buckets(ctx, f.chainID, res, b.BucketStart, b.BucketStart.Add(width))
 					if err != nil {
 						return fmt.Errorf("gap buckets: %w", err)
 					}
-					if len(existing) > 0 {
+					if len(existing) > 0 || insideHole(b.BucketStart, width, prevTs, h.SuccessorAt, first[b.BucketStart.Unix()], folded) {
 						toFold = append(toFold, b)
+					} else {
+						f.log.Warn("a window below the prune frontier has no bucket the recovered rows can complete, leaving it as a gap",
+							"resolution", res, "start", b.BucketStart.Format(time.RFC3339), "from", h.From, "to", h.To)
 					}
 				}
 			}
