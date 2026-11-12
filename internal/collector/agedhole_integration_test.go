@@ -409,15 +409,7 @@ func TestIntegrationRequeuedHoleRunningIntoLiveBucketsIsRefused(t *testing.T) {
 	if got := fx.holesFilledCount(); got != filled {
 		t.Fatalf("holes_filled_total moved from %d to %d", filled, got)
 	}
-	got := fx.snapshot(agedStart, agedEnd.Add(time.Hour))
-	for key, w := range want {
-		if key.start.Before(agedEnd) && got[key] != w {
-			t.Fatalf("%s %s is %+v, want %+v", key.res, key.start.Format("15:04"), got[key], w)
-		}
-		if !key.start.Before(agedEnd) && got[key].Blocks > w.Blocks {
-			t.Fatalf("%s %s grew from %d to %d blocks: a block was counted twice", key.res, key.start.Format("15:04"), w.Blocks, got[key].Blocks)
-		}
-	}
+	sameSnapshot(t, "outage and the live hour after it", fx.snapshot(agedStart, agedEnd.Add(time.Hour)), want)
 	fx.requireWholeWindows(agedStart, agedEnd)
 }
 
@@ -452,4 +444,28 @@ func TestIntegrationRequeuedHoleWithoutASuccessorBuildsNothing(t *testing.T) {
 	if got := fx.snapshot(agedStart, agedEnd); len(got) != 0 {
 		t.Fatalf("no window may be written without proof it is whole: %d buckets", len(got))
 	}
+}
+
+// A range queued wholly inside one surviving window, its predecessor and successor both in that
+// window's hour. The hour bucket already counts the range's blocks and cannot be told otherwise from
+// its own fields, so it is left alone and the range is recorded as incomplete history.
+func TestIntegrationRequeuedHoleInsideOneSurvivingWindowIsRefused(t *testing.T) {
+	fx := newAgedFixture(t)
+	fx.fill()
+	fx.settle()
+	want := fx.snapshot(agedStart, agedEnd.Add(time.Hour))
+	filled := fx.holesFilledCount()
+
+	from, to := uint64(agedFrom+40), uint64(agedFrom+59)
+	fx.requeue(from, to, baseTime.Add(time.Duration(to+1)*agedSpacing*time.Second))
+	fx.fill()
+	fx.settle()
+	h := fx.holes()
+	if len(h) != 1 || h[0].Reason != reasonIncompleteHistory || h[0].State == nil || h[0].State.Unbuilt == 0 {
+		t.Fatalf("a range inside one surviving window is incomplete history: %+v", h)
+	}
+	if got := fx.holesFilledCount(); got != filled {
+		t.Fatalf("holes_filled_total moved from %d to %d", filled, got)
+	}
+	sameSnapshot(t, "buckets around the range", fx.snapshot(agedStart, agedEnd.Add(time.Hour)), want)
 }

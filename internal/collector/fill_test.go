@@ -1718,3 +1718,49 @@ func TestRefusedSpansMergeAndStayBounded(t *testing.T) {
 		t.Fatal("another resolution is not refused")
 	}
 }
+
+// A rewind that reaches a repair in progress sends its cursor back to the start but keeps the fold
+// watermark. What the repair already learned about windows it could not write must survive that, or
+// the replay folds into the surviving bucket and completion reports the range filled.
+func TestFillRewindKeepsIncompleteHistory(t *testing.T) {
+	ctx := context.Background()
+	reg := metrics.NewRegistry()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store, func(o *Options) { o.Metrics = metrics.NewCollector(reg) })
+	skipWideGap(t, f, rpc)
+	frontier := baseTime.Add(5 * time.Minute)
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, frontier.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	survivor := baseTime.Add(2 * time.Minute)
+	if err := store.FoldBuckets(ctx, []db.Bucket{{ChainID: 4663, Resolution: db.Resolution1m, BucketStart: survivor, Blocks: 1, LastBlock: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+			t.Fatalf("fill step %d: %v %v", i, st, err)
+		}
+		if h := holesOf(t, store); len(h) == 1 && h[0].State != nil && h[0].State.Unbuilt > 0 {
+			break
+		}
+	}
+	if h := holesOf(t, store); len(h) != 1 || h[0].State == nil || h[0].State.Unbuilt == 0 {
+		t.Fatalf("the surviving window must have been refused by now: %+v", h)
+	}
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.rewindHoles(ctx, s, 1005, false) }); err != nil {
+		t.Fatal(err)
+	}
+	if h := holesOf(t, store); h[0].Next != 0 || h[0].Folded == 0 {
+		t.Fatalf("the rewind restarts the cursor and keeps the watermark: %+v", h)
+	}
+	fillAll(t, f, 400)
+	h := holesOf(t, store)
+	if len(h) != 1 || h[0].Reason != reasonIncompleteHistory {
+		t.Fatalf("a refused window stays refused across a rewind: %+v", h)
+	}
+	if b := minuteBucket(t, store, survivor); b == nil || b.Blocks != 1 {
+		t.Fatalf("the surviving bucket is left as it was: %+v", b)
+	}
+	hasSeries(t, scrapeRegistry(t, reg), `gascurve_collector_holes_filled_total{chain_id="4663",network="robinhood"} 0`)
+}

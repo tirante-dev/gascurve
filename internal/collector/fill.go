@@ -1105,20 +1105,25 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, prevTs ui
 	return nil
 }
 
-// holdsRowsOf reports whether a stored bucket already counts blocks of the hole, which a fold would
+// holdsRowsOf reports whether a stored bucket may already count blocks of the hole, which a fold would
 // count a second time. A bucket whose last block lies at or past the batch's first row and inside the
 // hole does. So does one whose last block is past the hole and which holds more blocks than lie
-// between the hole and that last block, but only where nothing of the hole is in the bucket legitimately
-// yet (the batch is the first to reach the window) and the window cannot also hold blocks from before
-// the hole, which would explain the extra. A hole lying inside one window cannot be told apart this way.
+// between the hole and that last block, where nothing of the hole is legitimately in it yet (the
+// batch is the first to reach the window) and the window holds nothing from before the hole. When the
+// window holds both sides of the hole nothing in the bucket tells its contents apart, so it counts
+// as holding them unless the collector itself recorded the range (it carries a predecessor time),
+// whose blocks were never indexed.
 func holdsRowsOf(b db.Bucket, h hole, start time.Time, firstRow uint64, firstTouch bool) bool {
 	if b.LastBlock >= firstRow && b.LastBlock <= h.To {
 		return true
 	}
-	if firstTouch && b.LastBlock > h.To && h.State != nil && h.State.Origin != 0 && time.Unix(int64(h.State.Origin), 0).Before(start) {
-		return uint64(b.Blocks) > b.LastBlock-h.To
+	if b.LastBlock <= h.To {
+		return false
 	}
-	return false
+	if h.State != nil && h.State.Origin != 0 && time.Unix(int64(h.State.Origin), 0).Before(start) {
+		return firstTouch && uint64(b.Blocks) > b.LastBlock-h.To
+	}
+	return h.PredecessorAt == ""
 }
 
 // spanHas reports whether the window starting at start is in one of the spans of res.
@@ -1202,11 +1207,21 @@ func (f *Follower) rewindHoles(ctx context.Context, s db.Store, ancestor uint64,
 			continue
 		}
 		f.log.Warn("reorg reaches into a hole being filled, restarting it", "from", h.From, "to", h.To, "ancestor", ancestor)
-		holes[i].Next, holes[i].State, holes[i].CursorAt = 0, nil, ""
+		holes[i].Next, holes[i].State, holes[i].CursorAt = 0, completenessOf(h.State, bucketsCleared), ""
 		changed = true
 	}
 	if !changed {
 		return nil
 	}
 	return f.saveHoles(ctx, s, holes)
+}
+
+// completenessOf keeps what a restarted replay still needs to know about the windows it has refused:
+// they are not reconsidered under the fold watermark, and completion must not call the range filled.
+// Nothing is kept when the rewind deleted the buckets they described.
+func completenessOf(st *model.HoleState, bucketsCleared bool) *model.HoleState {
+	if st == nil || bucketsCleared || (st.Unbuilt == 0 && len(st.Refused) == 0) {
+		return nil
+	}
+	return &model.HoleState{Origin: st.Origin, Unbuilt: st.Unbuilt, Refused: st.Refused}
 }
