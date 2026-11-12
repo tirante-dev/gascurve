@@ -440,17 +440,22 @@ jobs:
   # repository setting: add "Docker Build" to the required status checks for
   # main.
   docker:
-    name: Docker Build
-    runs-on: homelab-2cpu-3ram-dind
+    name: Docker Build (${{ matrix.image }}, ${{ matrix.dockerfile }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
           - image: gascurve-collector
             dockerfile: Dockerfile.collector
+            runner: homelab-2cpu-3ram-dind
           - image: gascurve-api
             dockerfile: Dockerfile.api
+            runner: homelab-2cpu-3ram-dind
+          # Every homelab node reset with job data followed this build starting
+          # on that node (tirante-dev/homelab HL-111); keep it off homelab runners.
           - image: gascurve-web
             dockerfile: Dockerfile.web
+            runner: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Docker Hub's anonymous pull limit is shared by every runner behind the
