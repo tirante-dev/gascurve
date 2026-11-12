@@ -215,7 +215,7 @@ func (f *Follower) normalizeHoles(holes []hole) []hole {
 	for _, h := range out {
 		if n := len(merged); n > 0 {
 			prev := &merged[n-1]
-			if compatibleLifecycle(*prev, h) && prev.Reason == h.Reason && prev.To < ^uint64(0) && h.From <= prev.To+1 {
+			if compatibleLifecycle(*prev, h) && prev.Reason == h.Reason && prev.To < ^uint64(0) && h.From <= prev.To+1 && (h.Folded == 0 || prev.Folded > 0 || h.From == prev.From) {
 				mergeHole(prev, h)
 				continue
 			}
@@ -844,7 +844,7 @@ func (f *Follower) fillBatch(ctx context.Context, gen uint64, t *fillTarget) (Fi
 	}
 	rows, filledTail, end := f.replayHole(t, headers, tail, tl, actions)
 	if h.State != nil {
-		end.Origin, end.Unbuilt, end.Refused = h.State.Origin, h.State.Unbuilt, h.State.Refused
+		end.Origin, end.Unbuilt, end.Refused, end.CountedFrom = h.State.Origin, h.State.Unbuilt, h.State.Refused, h.State.CountedFrom
 	}
 	if from == h.From {
 		end.Origin = t.prevTs
@@ -989,6 +989,9 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, prevTs ui
 		}
 	}
 	f.mu.Unlock()
+	counted := func(r db.Block) bool {
+		return r.Number < h.Folded && (h.State == nil || h.State.CountedFrom == 0 || r.TS.Unix() >= h.State.CountedFrom)
+	}
 	rowBacked, additive, keptBuckets := []db.Block{}, []db.Block{}, []db.Block{}
 	// Row-backed hole rows a fold may add to a bucket the store will not rebuild, under the same
 	// watermark as the additive rows so a retry cannot count them twice. Never the tail: it was
@@ -998,10 +1001,10 @@ func (f *Follower) commitFill(ctx context.Context, gen uint64, h hole, prevTs ui
 		switch {
 		case hasBoundary && !r.TS.Before(boundary):
 			rowBacked = append(rowBacked, r)
-			if r.Number >= h.Folded {
+			if !counted(r) {
 				foldable = append(foldable, r)
 			}
-		case r.Number < h.Folded:
+		case counted(r):
 			f.log.Debug("skipping a bucket fold that is already committed", "block", r.Number, "folded", h.Folded)
 		default:
 			additive = append(additive, r)
@@ -1192,22 +1195,21 @@ func (f *Follower) advanceHole(ctx context.Context, s db.Store, h hole, done, in
 // blocks above the ancestor went with the orphaned chain. The fold watermark deliberately
 // survives, since additive buckets are not rebuilt from rows and their blocks must not be
 // counted twice. It is cleared only when the rewind deleted those buckets too.
-func (f *Follower) rewindHoles(ctx context.Context, s db.Store, ancestor uint64, bucketsCleared bool) error {
+func (f *Follower) rewindHoles(ctx context.Context, s db.Store, ancestor uint64, deletedBefore time.Time) error {
 	holes, err := f.loadHoles(ctx, s)
 	if err != nil || len(holes) == 0 {
 		return err
 	}
 	changed := false
 	for i, h := range holes {
-		if bucketsCleared && h.Folded > 0 {
-			holes[i].Folded = 0
+		if keepProgressBelow(&holes[i], deletedBefore) {
 			changed = true
 		}
 		if h.Next == 0 || h.Next-1 <= ancestor {
 			continue
 		}
 		f.log.Warn("reorg reaches into a hole being filled, restarting it", "from", h.From, "to", h.To, "ancestor", ancestor)
-		holes[i].Next, holes[i].State, holes[i].CursorAt = 0, completenessOf(h.State, bucketsCleared), ""
+		holes[i].Next, holes[i].State, holes[i].CursorAt = 0, completenessOf(holes[i].State), ""
 		changed = true
 	}
 	if !changed {
@@ -1216,12 +1218,28 @@ func (f *Follower) rewindHoles(ctx context.Context, s db.Store, ancestor uint64,
 	return f.saveHoles(ctx, s, holes)
 }
 
+// keepProgressBelow answers a deletion of every bucket older than deletedBefore (zero when nothing was
+// deleted). What the hole folded before that time went with them and is counted again; what it folded
+// at or after it is still in surviving buckets and must not be, so the fold watermark stays and only
+// remembers where it stops applying. The cursor restarts either way.
+func keepProgressBelow(h *hole, deletedBefore time.Time) bool {
+	if deletedBefore.IsZero() || h.Folded == 0 {
+		return false
+	}
+	state := completenessOf(h.State)
+	if state == nil {
+		state = &model.HoleState{}
+	}
+	state.CountedFrom = max(state.CountedFrom, deletedBefore.Unix())
+	h.Next, h.State, h.CursorAt = 0, state, ""
+	return true
+}
+
 // completenessOf keeps what a restarted replay still needs to know about the windows it has refused:
 // they are not reconsidered under the fold watermark, and completion must not call the range filled.
-// Nothing is kept when the rewind deleted the buckets they described.
-func completenessOf(st *model.HoleState, bucketsCleared bool) *model.HoleState {
-	if st == nil || bucketsCleared || (st.Unbuilt == 0 && len(st.Refused) == 0) {
+func completenessOf(st *model.HoleState) *model.HoleState {
+	if st == nil || (st.Unbuilt == 0 && len(st.Refused) == 0 && st.CountedFrom == 0) {
 		return nil
 	}
-	return &model.HoleState{Origin: st.Origin, Unbuilt: st.Unbuilt, Refused: st.Refused}
+	return &model.HoleState{Origin: st.Origin, Unbuilt: st.Unbuilt, Refused: st.Refused, CountedFrom: st.CountedFrom}
 }

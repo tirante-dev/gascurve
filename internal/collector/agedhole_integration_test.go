@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -206,13 +207,7 @@ type bucketKey struct {
 	start time.Time
 }
 
-type bucketFacts struct {
-	Blocks    int64
-	GasUsed   uint64
-	Fees      string
-	Sum       string
-	LastBlock uint64
-}
+type bucketFacts = db.Bucket
 
 func (fx *agedFixture) snapshot(from, to time.Time) map[bucketKey]bucketFacts {
 	fx.t.Helper()
@@ -223,7 +218,7 @@ func (fx *agedFixture) snapshot(from, to time.Time) map[bucketKey]bucketFacts {
 			if _, dup := out[key]; dup {
 				fx.t.Fatalf("two buckets for %s %s", res, key.start)
 			}
-			out[key] = bucketFacts{Blocks: b.Blocks, GasUsed: b.GasUsed, Fees: b.FeesWei.String(), Sum: b.BaseFeeSum.Wei.String(), LastBlock: b.LastBlock}
+			out[key] = b
 		}
 	}
 	return out
@@ -235,7 +230,7 @@ func sameSnapshot(t *testing.T, what string, got, want map[bucketKey]bucketFacts
 		t.Fatalf("%s: %d buckets, want %d", what, len(got), len(want))
 	}
 	for k, w := range want {
-		if g, ok := got[k]; !ok || g != w {
+		if g, ok := got[k]; !ok || !reflect.DeepEqual(g, w) {
 			t.Fatalf("%s: %s %s is %+v, want %+v", what, k.res, k.start.Format("15:04"), g, w)
 		}
 	}
@@ -468,4 +463,81 @@ func TestIntegrationRequeuedHoleInsideOneSurvivingWindowIsRefused(t *testing.T) 
 		t.Fatalf("holes_filled_total moved from %d to %d", filled, got)
 	}
 	sameSnapshot(t, "buckets around the range", fx.snapshot(agedStart, agedEnd.Add(time.Hour)), want)
+}
+
+// A gap wholly inside one window, filled in part. A history rebuild then deletes the backfilled
+// buckets older than the live boundary and sends the gap's cursor back to the start, while the gap's
+// own buckets, at or after the boundary, survive with the part already counted. The replay must not
+// count that part a second time at any resolution.
+func partialGapScenario(t *testing.T, raiseEpoch bool) map[bucketKey]bucketFacts {
+	t.Helper()
+	ctx := context.Background()
+	pg := openAgedPostgres(t)
+	rpc := sparseChain(600)
+	rpc.spacing = 1
+	f := newTestFollower(t, rpc, pg, func(o *Options) {
+		o.Collector = config.CollectorConfig{
+			TickInterval: time.Second, SlowInterval: time.Minute, HeaderBatchSize: 10,
+			BlockRetention: agedRetained, SampleRetention: 168 * time.Hour, BackfillDepth: config.Depth(700 * time.Second),
+		}
+	})
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	old := baseTime.Add(-time.Hour)
+	if err := pg.FoldBuckets(ctx, []db.Bucket{{ChainID: 4663, Resolution: db.Resolution1h, BucketStart: old, Blocks: 1, LastBlock: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	rpc.setHead(801)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.SetState(ctx, 4663, db.StatePruneFrontier, baseTime.Add(30*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		if st, err := f.FillStep(ctx); err != nil || st != FillProgressed {
+			t.Fatalf("fill step %d: %v %v", i, st, err)
+		}
+	}
+	if _, err := pg.DB().ExecContext(ctx, `DELETE FROM blocks WHERE chain_id = 4663 AND number BETWEEN 601 AND 680`); err != nil {
+		t.Fatal(err)
+	}
+	if raiseEpoch {
+		f.net.HistoryEpoch = 1
+		f.mu.Lock()
+		err := f.applyHistoryEpochLocked(ctx)
+		f.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 100; i++ {
+		st, err := f.FillStep(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st == FillNone {
+			break
+		}
+	}
+	out := map[bucketKey]bucketFacts{}
+	for _, res := range db.ResolutionOrder {
+		rows, err := pg.Buckets(ctx, 4663, res, baseTime, baseTime.Add(2*time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, b := range rows {
+			out[bucketKey{res, b.BucketStart.UTC()}] = b
+		}
+	}
+	return out
+}
+
+func TestIntegrationHistoryRebuildDoesNotRecountAPartiallyFilledGap(t *testing.T) {
+	want := partialGapScenario(t, false)
+	if len(want) == 0 {
+		t.Fatal("the control run wrote no buckets")
+	}
+	sameSnapshot(t, "after a history rebuild mid-fill", partialGapScenario(t, true), want)
 }

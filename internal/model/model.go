@@ -430,6 +430,9 @@ type HoleState struct {
 	// Refused are the bucket windows a batch left alone because a stored bucket already counts some of
 	// the range's blocks, so no later batch folds into them either.
 	Refused []Span `json:"refused,omitempty"`
+	// CountedFrom, when set, limits the fold watermark: a block below it that is older than this time
+	// lost its bucket to a rebuild and is counted again, one at or after it is still counted.
+	CountedFrom int64 `json:"countedFrom,omitempty"`
 	// Origin is the timestamp of the block before the range, kept from its first batch on.
 	Origin uint64 `json:"origin,omitempty"`
 }

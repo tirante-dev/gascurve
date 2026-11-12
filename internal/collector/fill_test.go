@@ -344,7 +344,7 @@ func TestFillRestartedByReorg(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
-		return f.rewindHoles(ctx, s, 1010, false)
+		return f.rewindHoles(ctx, s, 1010, time.Time{})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -867,7 +867,7 @@ func TestFillFoldsOnceAcrossARewind(t *testing.T) {
 	}
 	// A rewind that reaches into what the filler wrote restarts the hole.
 	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
-		return f.rewindHoles(ctx, s, 1005, false)
+		return f.rewindHoles(ctx, s, 1005, time.Time{})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -880,17 +880,17 @@ func TestFillFoldsOnceAcrossARewind(t *testing.T) {
 		t.Fatalf("a refilled range must not be folded twice: %d -> %d", before, got)
 	}
 	// When the rewind deleted the additive buckets themselves, everything
-	// the hole folded into them went with them and the watermark resets.
+	// the hole folded into them went with them and the watermark no longer covers those blocks.
 	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error {
 		if err := f.saveHoles(ctx, s, []hole{{From: 1001, To: 1149, Next: 1021, Folded: 1021}}); err != nil {
 			return err
 		}
-		return f.rewindHoles(ctx, s, 1005, true)
+		return f.rewindHoles(ctx, s, 1005, baseTime.Add(2*time.Hour))
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Folded != 0 {
-		t.Fatalf("deleted buckets clear the watermark: %+v", holes)
+	if holes := holesOf(t, store); len(holes) != 1 || holes[0].Folded != 1021 || holes[0].State == nil || holes[0].State.CountedFrom != baseTime.Add(2*time.Hour).Unix() {
+		t.Fatalf("deleted buckets limit the watermark to what survives: %+v", holes)
 	}
 }
 
@@ -1748,7 +1748,7 @@ func TestFillRewindKeepsIncompleteHistory(t *testing.T) {
 	if h := holesOf(t, store); len(h) != 1 || h[0].State == nil || h[0].State.Unbuilt == 0 {
 		t.Fatalf("the surviving window must have been refused by now: %+v", h)
 	}
-	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.rewindHoles(ctx, s, 1005, false) }); err != nil {
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.rewindHoles(ctx, s, 1005, time.Time{}) }); err != nil {
 		t.Fatal(err)
 	}
 	if h := holesOf(t, store); h[0].Next != 0 || h[0].Folded == 0 {
@@ -1763,4 +1763,59 @@ func TestFillRewindKeepsIncompleteHistory(t *testing.T) {
 		t.Fatalf("the surviving bucket is left as it was: %+v", b)
 	}
 	hasSeries(t, scrapeRegistry(t, reg), `gascurve_collector_holes_filled_total{chain_id="4663",network="robinhood"} 0`)
+}
+
+// A deletion of every bucket older than a time takes the contributions older than it and leaves the
+// rest. One batch holding rows on both sides of that time, all below the fold watermark: the older
+// rows are folded again, the newer ones are not.
+func TestFillRefoldsOnlyWhatTheDeletionTook(t *testing.T) {
+	ctx := context.Background()
+	rpc := newFakeRPC(1000)
+	store := dbtest.New()
+	f := newTestFollower(t, rpc, store)
+	if err := f.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	boundary := baseTime
+	if err := store.SetState(ctx, 4663, db.StatePruneFrontier, baseTime.Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	counted := db.Bucket{ChainID: 4663, Resolution: db.Resolution1m, BucketStart: boundary, Blocks: 2, LastBlock: 503}
+	if err := store.FoldBuckets(ctx, []db.Bucket{counted}); err != nil {
+		t.Fatal(err)
+	}
+	rows := []db.Block{
+		{ChainID: 4663, Number: 500, TS: boundary.Add(-2 * time.Second), GasUsed: 1},
+		{ChainID: 4663, Number: 501, TS: boundary.Add(-time.Second), GasUsed: 1},
+		{ChainID: 4663, Number: 502, TS: boundary, GasUsed: 1},
+		{ChainID: 4663, Number: 503, TS: boundary.Add(time.Second), GasUsed: 1},
+	}
+	h := hole{From: 500, To: 503, Next: 504, Folded: 504, SuccessorAt: boundary.Add(time.Minute).Format(time.RFC3339)}
+	if keepProgressBelow(&h, boundary) != true || h.Next != 0 || h.Folded != 504 || h.State.CountedFrom != boundary.Unix() {
+		t.Fatalf("the restart keeps the watermark and limits it: %+v", h)
+	}
+	h.Next = 504
+	if err := store.WithChainTx(ctx, 4663, func(s db.Store) error { return f.saveHoles(ctx, s, []hole{h}) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.commitFill(ctx, 0, h, uint64(boundary.Unix()-10), rows, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if b := minuteBucket(t, store, boundary); b == nil || b.Blocks != 2 {
+		t.Fatalf("the rows at or after the deletion are not counted again: %+v", b)
+	}
+	if b := minuteBucket(t, store, boundary.Add(-time.Minute)); b == nil || b.Blocks != 2 {
+		t.Fatalf("the rows before it are counted again: %+v", b)
+	}
+}
+
+func TestNormalizeKeepsProgressApartFromAnEarlierRange(t *testing.T) {
+	f := newTestFollower(t, newFakeRPC(1000), dbtest.New())
+	got := f.normalizeHoles([]hole{
+		{From: 100, To: 199},
+		{From: 200, To: 299, Next: 250, Folded: 250},
+	})
+	if len(got) != 2 || got[1].Folded != 250 || got[0].Folded != 0 {
+		t.Fatalf("a watermark must not cover blocks of an earlier range that never folded: %+v", got)
+	}
 }
