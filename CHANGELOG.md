@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.2](https://github.com/tirante-dev/gascurve/compare/v1.6.1...v1.6.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **collector:** keep aged holes recoverable and never certify a hole with unwritten windows ([#178](https://github.com/tirante-dev/gascurve/issues/178)) ([f9f17cf](https://github.com/tirante-dev/gascurve/commit/f9f17cf54638348158c792509c251e18fb21425b))
+
+
+### Dependencies
+
+* bump the actions-minor-patch group across 1 directory with 4 updates ([#182](https://github.com/tirante-dev/gascurve/issues/182)) ([0963afd](https://github.com/tirante-dev/gascurve/commit/0963afd0711dbc3761cead4e05988ce499f094aa))
+
 ## [1.6.1](https://github.com/tirante-dev/gascurve/compare/v1.6.0...v1.6.1) (2026-11-12)
 
 
