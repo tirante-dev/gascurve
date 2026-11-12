@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.3](https://github.com/tirante-dev/gascurve/compare/v1.6.2...v1.6.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* **ci:** publish images without QEMU emulation ([#186](https://github.com/tirante-dev/gascurve/issues/186)) ([5e7bc24](https://github.com/tirante-dev/gascurve/commit/5e7bc24cd68f800474da257cd80c8a7184f5b157))
+
 ## [1.6.2](https://github.com/tirante-dev/gascurve/compare/v1.6.1...v1.6.2) (2026-11-12)
 
 
