@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.4](https://github.com/tirante-dev/gascurve/compare/v1.6.3...v1.6.4) (2026-11-16)
+
+
+### Dependencies
+
+* bump golang.org/x/crypto from 0.58.0 to 0.59.0 in the go-minor-patch group ([#189](https://github.com/tirante-dev/gascurve/issues/189)) ([92d41a3](https://github.com/tirante-dev/gascurve/commit/92d41a3792f3e8bbabc1d9efacad50fbf21bc8d8))
+* bump peter-evans/create-pull-request from 8.1.2 to 8.1.3 in the actions-minor-patch group ([#193](https://github.com/tirante-dev/gascurve/issues/193)) ([d00115b](https://github.com/tirante-dev/gascurve/commit/d00115bf7f03fc355ebaeef3f8425f3fcd1294d9))
+
 ## [1.6.3](https://github.com/tirante-dev/gascurve/compare/v1.6.2...v1.6.3) (2026-11-12)
 
 
