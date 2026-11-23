@@ -3,13 +3,13 @@
 # Base images are pinned by digest; Dependabot (docker ecosystem) bumps them.
 
 # deps: install from the lockfile
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS deps
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS deps
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
 # builder: Next.js standalone output
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS builder
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS builder
 WORKDIR /app
 ARG VERSION=0.0.0
 ARG NEXT_PUBLIC_SITE_URL=https://gascurve.com
@@ -34,10 +34,10 @@ ARG TARGETARCH
 RUN if [ "$TARGETARCH" != "$BUILDARCH" ]; then rm -rf .next/standalone/node_modules/@img; fi
 
 # node-base: the target-platform node image, only ever read by COPY
-FROM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS node-base
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS node-base
 
 # rootfs: assembled on the build platform so the target platform needs no emulation
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS rootfs
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS rootfs
 COPY --from=node-base / /rootfs
 # Drop the bundled npm, corepack and yarn: the standalone server only needs
 # node, and npm's own dependency tree is where the rest of the image's CVEs
